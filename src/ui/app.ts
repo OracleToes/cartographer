@@ -102,18 +102,19 @@ interface TuiState {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): SidebarCounts {
+function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, contextTokens: number = 0): SidebarCounts {
   const marks = staleMarks(brainState);
-  const stale: Partial<Record<BookKind, number>> = {};
+  const stale: Partial<Record<"atlas" | "ledger", number>> = {};
   for (const mark of marks) {
     if (mark.kind === "atlas") {
       stale.atlas = (stale.atlas ?? 0) + 1;
     }
   }
   return {
+    chat: brainState.chat.length,
+    contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
-    chat: brainState.chat.length,
     stale,
     staleTotal: marks.length,
   };
@@ -281,8 +282,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
-    sidebar.setCounts(countSidebar(brainState));
-    sidebar.setActiveBook(state.view === "context" ? "context" : state.view);
+    const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
+    sidebar.setCounts(countSidebar(brainState, contextTokens));
+    sidebar.setActiveBook(state.view);
     tui.requestRender();
   };
 
@@ -368,7 +370,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.view = view;
     headerState.view = view;
     footer.invalidate();
-    sidebar.setActiveBook(view === "context" ? "context" : view);
+    sidebar.setActiveBook(view);
 
     const brainState = await brain.read();
     const marks = staleMarks(brainState);

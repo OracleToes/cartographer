@@ -3,7 +3,8 @@
  * and progress through problems.
  *
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,
- * esc to return to Chat). Pinned items are visible directly inside the book.
+ * h/l or left/right to switch between list and detail, esc to return to Chat).
+ * Pinned items are visible directly inside the book.
  */
 import {
   matchesKey,
@@ -16,15 +17,17 @@ import {
 
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, LedgerEntry } from "../domain/records.js";
-import { tokens } from "./tokens.js";
+import { padLine, tokens } from "./tokens.js";
 
 export class LedgerView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
 
+  private focusedPane: "list" | "detail" = "list";
   private brain: CartoBrain | undefined;
   private entries: LedgerEntry[] = [];
   private selectedIndex = 0;
+  private scrollOffset = 0;
   private filterText = "";
   private filtering = false;
   private detailExpanded = true;
@@ -34,11 +37,12 @@ export class LedgerView implements Component, Focusable {
     this.brain = brain;
     this.entries = [...brain.ledger].sort((a, b) => a.createdAt - b.createdAt);
     this.pinnedHandles.clear();
-    const allPins = [...brain.userPins, ...brain.carryPins];
+    const allPins = [...(brain.userPins ?? []), ...(brain.carryPins ?? [])];
     for (const pin of allPins) {
+      if (!pin?.item) continue;
       for (const entry of brain.ledger) {
         const handle = handleOf(brain.handles, "ledger", entry.id);
-        if (pin.item.includes(entry.id) || (handle && pin.item.includes(handle))) {
+        if (pin.item.includes(String(entry.id)) || (handle && pin.item.includes(handle))) {
           if (handle) this.pinnedHandles.add(handle);
         }
       }
@@ -71,35 +75,76 @@ export class LedgerView implements Component, Focusable {
       return;
     }
 
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-      this.onBack?.();
-      return;
-    }
-    if (data === "/") {
-      this.filtering = true;
-      this.filterText = "";
-      return;
-    }
-    const filtered = this.getFilteredEntries();
-    if (matchesKey(data, "j") || matchesKey(data, "down")) {
-      this.selectedIndex = Math.min(filtered.length - 1, this.selectedIndex + 1);
-      return;
-    }
-    if (matchesKey(data, "k") || matchesKey(data, "up")) {
-      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-      return;
-    }
-    if (matchesKey(data, "g")) {
-      this.selectedIndex = 0;
-      return;
-    }
-    if (data === "G") {
-      this.selectedIndex = Math.max(0, filtered.length - 1);
-      return;
-    }
-    if (matchesKey(data, "enter") || matchesKey(data, "space")) {
-      this.detailExpanded = !this.detailExpanded;
-      return;
+    if (this.focusedPane === "list") {
+      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+        this.onBack?.();
+        return;
+      }
+      if (data === "/") {
+        this.filtering = true;
+        this.filterText = "";
+        return;
+      }
+      if (matchesKey(data, "l") || matchesKey(data, "right") || matchesKey(data, "enter")) {
+        this.focusedPane = "detail";
+        this.scrollOffset = 0;
+        return;
+      }
+      const filtered = this.getFilteredEntries();
+      if (matchesKey(data, "j") || matchesKey(data, "down")) {
+        this.selectedIndex = Math.min(filtered.length - 1, this.selectedIndex + 1);
+        this.scrollOffset = 0;
+        return;
+      }
+      if (matchesKey(data, "k") || matchesKey(data, "up")) {
+        this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+        this.scrollOffset = 0;
+        return;
+      }
+      if (matchesKey(data, "g")) {
+        this.selectedIndex = 0;
+        this.scrollOffset = 0;
+        return;
+      }
+      if (data === "G") {
+        this.selectedIndex = Math.max(0, filtered.length - 1);
+        this.scrollOffset = 0;
+        return;
+      }
+      if (matchesKey(data, "space")) {
+        this.detailExpanded = !this.detailExpanded;
+        return;
+      }
+    } else {
+      // Detail pane focused
+      if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
+        this.focusedPane = "list";
+        return;
+      }
+      if (matchesKey(data, "j") || matchesKey(data, "down")) {
+        this.scrollOffset += 1;
+        return;
+      }
+      if (matchesKey(data, "k") || matchesKey(data, "up")) {
+        this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+        return;
+      }
+      if (matchesKey(data, "d") || matchesKey(data, "pageDown")) {
+        this.scrollOffset += 10;
+        return;
+      }
+      if (matchesKey(data, "u") || matchesKey(data, "pageUp")) {
+        this.scrollOffset = Math.max(0, this.scrollOffset - 10);
+        return;
+      }
+      if (matchesKey(data, "g")) {
+        this.scrollOffset = 0;
+        return;
+      }
+      if (data === "G") {
+        this.scrollOffset = 9999;
+        return;
+      }
     }
   }
 
@@ -121,8 +166,8 @@ export class LedgerView implements Component, Focusable {
     });
   }
 
-  private renderDetail(entry: LedgerEntry, handle: string, width: number): string[] {
-    const lines: string[] = [];
+  private renderDetail(entry: LedgerEntry, handle: string, width: number, maxLines: number = 28): string[] {
+    const rawLines: string[] = [];
     const isPinned = this.pinnedHandles.has(handle);
     const isoDate = new Date(entry.updatedAt).toISOString();
 
@@ -130,24 +175,25 @@ export class LedgerView implements Component, Focusable {
     const badges: string[] = [];
     if (isPinned) badges.push(tokens.pinBadge("pin"));
     badges.push(tokens.muted(isoDate));
+    if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
 
-    lines.push(tokens.cardHeaderBg(` ${titlePrefix} ${badges.join(" ")}`.padEnd(width)));
-    lines.push(tokens.cardBg(" ".repeat(width)));
+    rawLines.push(tokens.cardHeaderBg(padLine(` ${titlePrefix} ${badges.join(" ")}`, width)));
+    rawLines.push(tokens.cardBg(" ".repeat(width)));
 
     // Body text
-    lines.push(tokens.cardBg(` ${tokens.bold(tokens.muted("Content:"))}`.padEnd(width)));
+    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted("Content:"))}`, width)));
     const textLines = wrapTextWithAnsi(entry.text, Math.max(1, width - 4));
     for (const tl of textLines) {
-      lines.push(tokens.cardBg(`   ${tl}`.padEnd(width)));
+      rawLines.push(tokens.cardBg(padLine(`   ${tl}`, width)));
     }
-    lines.push(tokens.cardBg(" ".repeat(width)));
+    rawLines.push(tokens.cardBg(" ".repeat(width)));
 
     // Answer / Outcome
     if (entry.answer !== null) {
-      lines.push(tokens.cardBg(` ${tokens.bold(tokens.muted("Answer / Outcome:"))}`.padEnd(width)));
+      rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted("Answer / Outcome:"))}`, width)));
       const answerLines = wrapTextWithAnsi(entry.answer.text, Math.max(1, width - 4));
       for (const al of answerLines) {
-        lines.push(tokens.cardBg(`   ${tokens.agent(al)}`.padEnd(width)));
+        rawLines.push(tokens.cardBg(padLine(`   ${tokens.agent(al)}`, width)));
       }
       if (entry.answer.evidenceIds.length > 0) {
         let evidenceHandles = "";
@@ -159,12 +205,21 @@ export class LedgerView implements Component, Focusable {
             })
             .join(", ");
         }
-        lines.push(tokens.cardBg(`   ${tokens.muted(`Evidence handles: ${evidenceHandles}`)}`.padEnd(width)));
+        rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted(`Evidence handles: ${evidenceHandles}`)}`, width)));
       }
-      lines.push(tokens.cardBg(" ".repeat(width)));
+      rawLines.push(tokens.cardBg(" ".repeat(width)));
     }
 
-    return lines;
+    if (this.scrollOffset > Math.max(0, rawLines.length - maxLines)) {
+      this.scrollOffset = Math.max(0, rawLines.length - maxLines);
+    }
+    const visibleChunk = rawLines.slice(this.scrollOffset, this.scrollOffset + maxLines);
+    if (rawLines.length > maxLines) {
+      const remaining = rawLines.length - (this.scrollOffset + visibleChunk.length);
+      const scrollInfo = ` ⋯ ${this.scrollOffset > 0 ? `▲ ${this.scrollOffset} above ` : ""}${remaining > 0 ? `▼ ${remaining} more lines ` : ""}· j/k to scroll`;
+      visibleChunk.push(tokens.cardBg(padLine(tokens.muted(scrollInfo), width)));
+    }
+    return visibleChunk;
   }
 
   render(width: number): string[] {
@@ -175,10 +230,10 @@ export class LedgerView implements Component, Focusable {
     const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
     const openCount = this.entries.filter((e) => e.status === "open").length;
     const headerLeft = ` ${tokens.bold(tokens.accent("LEDGER"))} ${tokens.muted("·")} ${filtered.length} entries (${openCount} open) ${tokens.warn(filterInfo)}`;
-    const headerRight = `${tokens.muted("esc to chat ")}`;
+    const headerRight = `${tokens.muted("h/l switch panes · esc chat ")}`;
     const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
-    lines.push(tokens.panel((headerLeft + " ".repeat(pad) + headerRight).padEnd(width)));
-    lines.push("");
+    lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
+    lines.push(padLine("", width));
 
     if (filtered.length === 0) {
       lines.push(`  ${tokens.muted("(The Ledger is empty. Call the ledger tool to track goals, notes, and questions.)")}`);
@@ -189,7 +244,7 @@ export class LedgerView implements Component, Focusable {
     if (!selectedEntry) return lines;
     const selectedHandle = (this.brain && selectedEntry ? handleOf(this.brain.handles, "ledger", selectedEntry.id) : undefined) ?? "L?";
 
-    // Two-Pane split if wide enough
+    // Two-Pane split
     if (width >= 72) {
       const listWidth = Math.min(38, Math.floor(width * 0.42));
       const detailWidth = Math.max(30, width - listWidth - 2);
@@ -211,7 +266,9 @@ export class LedgerView implements Component, Focusable {
         const preview = truncateToWidth(entry.text.replace(/\s+/g, " "), previewSpace, "…");
 
         const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${kindStr} ${preview} ${badgeStr}`;
-        const paddedRow = isSelected ? tokens.selectedBg(rowText.padEnd(listWidth)) : tokens.activeRowBg(rowText.padEnd(listWidth));
+        const paddedRow = isSelected
+          ? (this.focusedPane === "list" ? tokens.selectedBg(padLine(rowText, listWidth)) : tokens.activeRowBg(padLine(rowText, listWidth)))
+          : tokens.sidebarBg(padLine(rowText, listWidth));
         listLines.push(paddedRow);
       });
 
@@ -219,8 +276,8 @@ export class LedgerView implements Component, Focusable {
       const rowCount = Math.max(listLines.length, detailLines.length);
 
       for (let r = 0; r < rowCount; r++) {
-        const left = listLines[r] ?? " ".repeat(listWidth);
-        const right = detailLines[r] ?? " ".repeat(detailWidth);
+        const left = listLines[r] ?? tokens.sidebarBg(" ".repeat(listWidth));
+        const right = detailLines[r] ?? tokens.cardBg(" ".repeat(detailWidth));
         lines.push(`${left}  ${right}`);
       }
     } else {
@@ -234,10 +291,10 @@ export class LedgerView implements Component, Focusable {
         const pinStr = isPinned ? tokens.pinBadge("pin") : "";
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
         const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} [${entry.kind}] ${entry.text} ${statusStr} ${pinStr}`;
-        lines.push(isSelected ? tokens.selectedBg(rowText.padEnd(width)) : rowText);
+        lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);
 
         if (isSelected && this.detailExpanded) {
-          lines.push(...this.renderDetail(entry, handle, width));
+          lines.push(...this.renderDetail(entry, handle, width, 16));
         }
       });
     }

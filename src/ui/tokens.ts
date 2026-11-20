@@ -10,6 +10,8 @@ import {
   getTerminalColorMode,
   parseColor,
   styleText,
+  truncateToWidth,
+  visibleWidth,
   type TerminalColorMode,
   type TextStyle,
 } from "@earendil-works/pi-tui";
@@ -35,6 +37,13 @@ const badge = (fgHex: string, bgHex: string) => {
   const bg = parseColor(bgHex);
   return (text: string): string => styleText(` ${text} `, { fg, bg, bold: true }, mode());
 };
+
+export { visibleWidth, truncateToWidth };
+export function padLine(str: string, width: number): string {
+  const w = visibleWidth(str);
+  if (w >= width) return truncateToWidth(str, width);
+  return str + " ".repeat(width - w);
+}
 
 export const tokens = {
   /** Person-facing accent: keys, the `you` prefix. */
