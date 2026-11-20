@@ -434,107 +434,186 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
   };
 
-  const rebuildTranscript = async () => {
+  /**
+   * Rebuild the landed view from the sources of truth: the context's entries
+   * (person lines land exactly where they were placed), the Brain's agent
+   * chat records, the sealed prefix from the last collapse, and the status
+   * log. Cheap enough to run after every settle and on a 1.5s timer; it
+   * skips the re-render entirely when nothing moved.
+   */
+  const rebuildTranscript = async (): Promise<void> => {
     if (state.rebuilding) return;
     state.rebuilding = true;
     try {
+      const brainState = await brain.read();
       const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
-      const landed: TranscriptEntry[] = [];
-      const pendingByText = new Map<string, number>();
-      for (const item of state.pending) {
-        pendingByText.set(item.text, (pendingByText.get(item.text) ?? 0) + 1);
+
+      // The context's entries are the frame: monotonic numeric ids, in the
+      // order the model sees them. Person lines key off their own entry.
+      const frame: Array<{ id: number; t: number }> = [];
+      for (const entry of entries) {
+        const id = typeof entry.id === "number" ? entry.id : 0;
+        const message = messageOf(entry);
+        frame.push({ id, t: message === undefined ? 0 : timestampOf(message) });
       }
-      const consumePending = (text: string): boolean => {
-        const count = pendingByText.get(text) ?? 0;
-        if (count <= 0) return false;
-        if (count === 1) pendingByText.delete(text);
-        else pendingByText.set(text, count - 1);
-        const index = state.pending.findIndex((item) => item.text === text);
-        if (index >= 0) state.pending.splice(index, 1);
-        return true;
+      /** Largest frame id at or before `t` — where a non-entry event sits in the frame's order. */
+      const anchorAt = (t: number): number => {
+        let anchor = 0;
+        for (const slot of frame) {
+          if (slot.t <= t) anchor = Math.max(anchor, slot.id);
+        }
+        return anchor;
       };
 
-      const brainState = await brain.read();
-      const agentChatById = new Map<string, string>();
-      for (const record of brainState.chat) {
-        if (record.author === "agent" && !state.sealedAgentIds.has(record.id)) {
-          agentChatById.set(record.id, record.text);
-        }
-      }
-
+      const visibleMessages: BlockMessageLike[] = [];
       for (const entry of entries) {
         const message = messageOf(entry);
         if (message === undefined) continue;
-        const role = message.role;
-        const textContent = typeof message.content === "string" ? message.content : undefined;
-        if (role === "user") {
-          if (textContent === undefined) continue;
-          if (isMarkerMessage(message as BlockMessageLike)) continue;
-          consumePending(textContent);
-          landed.push({ kind: "person", text: textContent });
-        } else if (role === "assistant") {
-          const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
-          for (let index = 0; index < content.length; index += 1) {
-            const part = content[index];
-            if (!isRecord(part)) continue;
-            const id = `ctx-${entry.id ?? index}-${index}`;
-            if (part.type === "thinking" && typeof part.thinking === "string") {
-              if (part.thinking.length > 0) landed.push({ kind: "reasoning", id, text: part.thinking });
-            } else if (part.type === "text" && typeof part.text === "string") {
-              if (part.text.length > 0) landed.push({ kind: "output", id, text: part.text });
-            } else if (part.type === "toolCall" && typeof part.name === "string") {
-              const name = part.name;
-              const args = prettyArgs(part.arguments);
-              landed.push({ kind: "tool", id, name, args });
+        visibleMessages.push(message as unknown as BlockMessageLike);
+      }
+
+      const person: Array<{ key: number; entry: TranscriptEntry }> = [];
+      const landedTexts: Array<{ text: string; t: number }> = [];
+      const toolErrors = new Map<string, boolean>();
+      const toolOutputs = new Map<string, string>();
+      const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
+      for (const entry of entries) {
+        const id = typeof entry.id === "number" ? entry.id : 0;
+        const message = messageOf(entry);
+        if (message === undefined) continue;
+        const role = typeof message.role === "string" ? message.role : "";
+        if (role === "user" && typeof message.content === "string") {
+          const text = message.content;
+          if (text.trim() === STATE_BLOCK_MARKER || text.trim().length === 0) continue;
+          const t = timestampOf(message);
+          person.push({ key: id, entry: { kind: "person", text } });
+          landedTexts.push({ text, t });
+        } else if (role === "assistant" && Array.isArray(message.content)) {
+          const parts = (message.content as unknown[]).filter(isRecord);
+          const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
+          if (parts.length > 0) assistantParts.push({ entryId: id, parts, ...(stopReason === undefined ? {} : { stopReason }) });
+        } else if (role === "toolResult" && isRecord(message)) {
+          const callId = (message as Record<string, unknown>).toolCallId;
+          if (typeof callId === "string") {
+            if ((message as Record<string, unknown>).isError === true) toolErrors.set(callId, true);
+            let out = "";
+            if (Array.isArray(message.content)) {
+              for (const p of message.content) {
+                if (isRecord(p) && typeof p.text === "string") out += p.text;
+              }
+            } else if (typeof message.content === "string") {
+              out = message.content;
             }
-          }
-          if (typeof message.stopReason === "string" && message.stopReason.length > 0) {
-            const tone = ["length", "error", "aborted"].includes(message.stopReason) ? "warn" : undefined;
-            landed.push({ kind: "status", text: `stopped: ${message.stopReason}`, ...(tone ? { tone } : {}) });
-          }
-        } else if (role === "toolResult") {
-          const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
-          for (let index = 0; index < content.length; index += 1) {
-            const part = content[index];
-            if (!isRecord(part)) continue;
-            const toolText = typeof part.text === "string" ? part.text : "";
-            const isError = part.isError === true;
-            if (toolText.startsWith("carto: ")) {
-              landed.push({ kind: "agent", text: toolText.slice(7) });
-            } else if (isError) {
-              const id = `ctx-${entry.id ?? index}-err-${index}`;
-              landed.push({ kind: "tool", id, name: "tool", args: "", output: toolText, failed: true });
-            }
+            if (out.length > 0) toolOutputs.set(callId, out);
           }
         }
       }
 
-      for (const [id, text] of agentChatById.entries()) {
-        if (!landed.some((entry) => entry.kind === "agent" && entry.text === text)) {
-          landed.push({ kind: "agent", text });
-          state.sealedAgentIds.add(id);
+      // The working, as cards: reasoning, plain model text, and tool calls, in
+      // the order the model produced them. Landed cards default folded.
+      const cards: Array<{ key: number; entry: TranscriptEntry }> = [];
+      // The landed stop reason of each assistant turn — one quiet line per
+      // turn, warn-toned when the turn was cut short (length) or failed.
+      // Always present, so a truncated generation is glanceable.
+      const stops: Array<{ key: number; entry: TranscriptEntry }> = [];
+      for (const { entryId, parts, stopReason } of assistantParts) {
+        if (stopReason !== undefined) {
+          const warn = stopReason === "length" || stopReason === "error" || stopReason === "aborted";
+          stops.push({
+            key: entryId + (parts.length + 1) * 0.0001,
+            entry: { kind: "status", text: `stopped: ${stopReason}`, ...(warn ? { tone: "warn" as const } : {}) },
+          });
         }
+        parts.forEach((part, partIndex) => {
+          const key = entryId + (partIndex + 1) * 0.0001;
+          if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
+            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking } });
+          } else if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
+            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
+          } else if (part.type === "toolCall" && typeof part.name === "string") {
+            const callId = typeof part.id === "string" ? part.id : undefined;
+            const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
+            cards.push({
+              key,
+              entry: {
+                kind: "tool",
+                id: `ctx-${entryId}-${partIndex}`,
+                name: part.name,
+                args: prettyArgs(part.arguments),
+                ...(output !== undefined ? { output } : {}),
+                ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
+              },
+            });
+          }
+        });
       }
 
-      const allEntries = [...state.sealed, ...landed, ...state.statusLog.map((item) => item.entry)];
-      transcript.setEntries(
-        allEntries,
-        state.pending.map((item) => ({ text: item.text, mode: item.mode })),
-      );
+      const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
+      for (const record of brainState.chat) {
+        if (record.author !== "agent") continue;
+        if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
+        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text } });
+      }
 
-      const visible = entries.map((entry) => messageOf(entry)).filter((m): m is BlockMessageLike => m !== undefined);
-      const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visible);
-      barState.parts = {
-        system: systemTokens,
-        transcript: transcriptTokens,
-        toolWork: toolWorkTokens,
-      };
+      // Clear pending items whose placement we can now see: same text, an
+      // entry placed at or after the submit. Best effort, matches oldest first.
+      if (state.pending.length > 0) {
+        const remaining: PendingItem[] = [];
+        const pool = [...landedTexts];
+        for (const item of state.pending) {
+          const index = pool.findIndex((landed) => landed.text === item.text && landed.t >= item.at - 5_000);
+          if (index !== -1) {
+            pool.splice(index, 1);
+          } else {
+            remaining.push(item);
+          }
+        }
+        state.pending = remaining;
+      }
+
+      // Status lines key off their own insertion timestamp.
+      const statusMerged: Array<{ key: number; entry: TranscriptEntry }> = state.statusLog.map((item) => ({
+        key: anchorAt(item.t) + 0.25,
+        entry: item.entry,
+      }));
+
+      // Token estimates: split context messages into system, transcript,
+      // toolWork — strictly matching the same estimates the state block reports,
+      // split the same way. Cheap next to the Brain read above.
+      const blockMessages = visibleMessages.filter((message) => !isMarkerMessage(message));
+      const parts = splitContextMessages(blockMessages);
+      barState.parts = { system: parts.systemTokens, transcript: parts.transcriptTokens, toolWork: parts.toolWorkTokens };
+
+      const sig = [
+        state.sealed.length,
+        person.map((item) => item.key).join(","),
+        cards.map((item) => item.key).join(","),
+        stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
+        String(agent.length),
+        state.sealedAgentIds.size,
+        state.statusLog.length,
+        state.pending.map((item) => item.text).join("\u0001"),
+        String(Math.round(parts.systemTokens)),
+        String(Math.round(parts.transcriptTokens)),
+        String(Math.round(parts.toolWorkTokens)),
+        String(state.session.state.lastReportedInput ?? ""),
+        String(state.session.state.contextWindow),
+      ].join("|");
+      if (sig !== state.sig) {
+        state.sig = sig;
+        const live = [...person, ...cards, ...stops, ...agent, ...statusMerged];
+        live.sort((left, right) => left.key - right.key);
+        // Sealed history is an immutable prefix; the live segment follows in the frame's order.
+        transcript.setEntries(
+          [...state.sealed, ...live.map((item) => item.entry)],
+          state.pending.map((item) => ({ text: item.text, mode: item.mode })),
+        );
+        tui.requestRender();
+      }
 
       if (state.view === "context") {
         await syncContextView(brainState);
       }
-
-      tui.requestRender();
     } finally {
       state.rebuilding = false;
     }
