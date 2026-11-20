@@ -342,10 +342,13 @@ const projectRoot = () => {
   return root;
 };
 
-test("--help exits 0 and names the config file and the placeholder nature", () => {
+test("--help exits 0 and names the config file and the workspace TUI", () => {
+  // The line driver is no longer "the interface"; help must say plainly what
+  // boots by default and how to force the driver.
   const help = runCli(["--help"]);
   assert.match(help, /~\/\.carto\/config\.json/);
-  assert.match(help, /placeholder/i);
+  assert.match(help, /workspace TUI/);
+  assert.match(help, /--headless/);
   assert.match(help, /--model llama-swap\/ByteShape/);
 });
 
