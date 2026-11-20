@@ -160,6 +160,20 @@ The person does not use git. Do not ask them which commit `base` is; there is no
 answer they can give. The reliable solution is the rule above: fetch, keep `HEAD`
 and `origin` together, and push small and often so a reset costs nothing.
 
+**If the files and the documents disagree — smell it, do not fix it.** Reading
+the specification, the documents, and the code as source of truth, you will
+find things that do not sit right: stale rules, silent contradictions, wrong
+names, machinery that belongs to a dead era. The pattern to follow:
+
+- Do not edit a source-of-truth document to match what you found.
+- Do not silently "fix" the code against it, either.
+- Note it, one line each: what it is, where it is, why it smells.
+- Bring the list to the person at the end of the stage, in the reply — never
+  drip them out mid-stage, and never smuggle a fix in behind them.
+
+The source of truth is theirs to change. Finding a smell authorizes a note,
+not an edit.
+
 ## 5. Tests
 
 Tests exist to catch breaks. They are not evidence of intent and not a

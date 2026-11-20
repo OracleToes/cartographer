@@ -1,10 +1,10 @@
 /**
- * carto — placeholder entry point (MINI.md §8 is the person's to mark).
+ * carto — the entry point.
  *
- * This build has no screen. The supported invocation is the headless driver:
- * a line-based loop on stdin/stdout where the only words the person sees are
- * the agent's `chat` tool calls. Placeholder slash commands: /help, /collapse,
- * /quit. The configuration below is real; the interface is not.
+ * On a TTY, carto boots the workspace TUI (MINI.md §8 as re-scoped: modes,
+ * sidebar, footer, the person's Input). Off a TTY — piped stdin, CI — it runs
+ * the line driver instead, where the only words the person sees are the
+ * agent's `chat` tool calls. `--headless` forces the line driver.
  */
 
 import { parseArgs } from "node:util";
@@ -14,15 +14,16 @@ import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
 import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
 import { configuredModels } from "./runtime/llama-swap-model.js";
 import { runHeadless } from "./runtime/headless.js";
+import { runTui } from "./ui/app.js";
 
 const STATUS = [
-  "carto is being rebuilt from its specification (MINI.md).",
-  "This build has no screen yet; the line-based stdin driver below is a placeholder, not the designed interface.",
+  "carto boots the workspace TUI on a terminal; --headless runs the line driver.",
+  "The Context surgery view and the Brain views land in their own slices.",
 ].join("\n");
 
 function usage(): string {
   return [
-    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--root <dir>]",
+    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--root <dir>] [--headless]",
     "",
     "Reads its global configuration from ~/.carto/config.json (override the directory",
     "with CARTO_HOME). The llama-swap endpoint in that file is where your llama.cpp",
@@ -38,14 +39,18 @@ function usage(): string {
     "                              e.g. http://localhost:8888/v1.",
     "  --context-window <n>        Ceiling on the active context window (integer ≥ 1024).",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
+    "  --headless                  Run the line driver instead of the TUI.",
     "  -h, --help                  Show this help.",
     "",
     "Quick start (ByteShape, port 8888, 75k window):",
     "  carto --model llama-swap/ByteShape --endpoint http://localhost:8888/v1 --context-window 75000",
     "",
-    "Then type lines; Carto works, and its words to you come through the chat tool only.",
-    "  /collapse   collapse the context now (the Brain rebuilds it)",
-    "  /quit       end the session",
+    "With a terminal attached, carto boots the workspace; the agent's words reach you through the chat tool only.",
+    "  ctrl+x      stop the run now · shift+tab cycles the send mode (steer / after run / now)",
+    "  ctrl+o      jump mode · ctrl+p command palette · ctrl+h sidebar · ctrl+c quit",
+    "  /collapse   (headless) collapse the context now (the Brain rebuilds it)",
+    "  /quit       (headless) end the session",
+    "  --headless  force the line driver even on a terminal",
     "",
     STATUS,
   ].join("\n");
@@ -59,6 +64,7 @@ const parsed = parseArgs({
     endpoint: { type: "string" },
     "context-window": { type: "string" },
     root: { type: "string" },
+    headless: { type: "boolean" },
   },
   allowPositionals: false,
 });
@@ -96,16 +102,25 @@ try {
   const models = configuredModels(config, model);
   const refreshCapacity = config.llamaSwapEndpoint === undefined ? undefined : true;
 
-  const code = await runHeadless({
-    root,
-    brain,
-    models,
-    model,
-    input: process.stdin,
-    output: process.stdout,
-    error: process.stderr,
-    ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
-  });
+  const stdinIsTty = (process.stdin as { isTTY?: boolean }).isTTY === true;
+  const code = values.headless === true || !stdinIsTty
+    ? await runHeadless({
+        root,
+        brain,
+        models,
+        model,
+        input: process.stdin,
+        output: process.stdout,
+        error: process.stderr,
+        ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
+      })
+    : await runTui({
+        root,
+        brain,
+        models,
+        model,
+        ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
+      });
   await brain.close();
   process.exitCode = code;
 } catch (error) {
