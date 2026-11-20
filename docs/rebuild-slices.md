@@ -530,3 +530,52 @@ Also landed with R5b:
 Not done: R5c+ — the Brain views, the Context surgery view (read-only,
 then edits), and prefill measurement only if the server ever sends
 `prompt_progress`.
+
+### Addendum — the limits audit, 2026-11-20 (this branch)
+
+The person asked why the model made three reasoning turns in a row and
+ordered a full audit for arbitrary limits ("you inserting these arbitrary
+limits, ESPECIALLY without asking me first is the kind of thing the
+AGENTS.md forbids… including all tools and such"). Findings:
+
+- **max_tokens: 4,096** (the llama-swap provider's baseline and catalog
+  models) — an arbitrary cap, inserted without the person's word, on a
+  model that thinks inside the same budget. Removed: the model's maxTokens
+  is now the active window; pi clamps per request to the room left in the
+  context (`clampMaxTokensToContext`). No artificial cap exists; the
+  person's server `-n`/`--reasoning-budget` flags, if any, are theirs.
+  This is the root of the three-reasoning-turns observation together with
+  the unconditional `onYield` marker continuation — the model was cut
+  mid-thought at 4,096, re-prompted by the bare marker (replaced on the
+  wire by a fresh state block), and cut again; `live.run.turns` resets on
+  every continuation, so nothing bounded the loop.
+- **maxTurns: 16** (live session) — an arbitrary work-loop budget, unasked.
+  Removed: pi's designed default is unlimited; a run ends on no-tool-call,
+  `sleep`, interrupt, or collapse.
+- **Model-visible schema budgets, all unasked, all removed:** Text
+  maxLength 24,000 (the spec strikes "model-visible length limits on Brain
+  entries", §13), HandleRef 8, atlas title 240, path 4,096 (five uses),
+  digest 128, evidence maxItems 32/12, ledger evidence maxItems 32, pin
+  item 500 / reason 1,000, tree depth maximum 12 (minimum 0 kept),
+  collapse reason 1,000, edit oldText/newText 100,000 — plus the matching
+  runtime rejection `MAX_EDIT_CHARS` and its tool-description sentence.
+  The real guard in edit is the unique-occurrence rule; the real wall in
+  inspect/edit/shell is root confinement with symlink rejection; the real
+  check on evidence is the digest. None of those count characters.
+- **Kept, spec'd or ratified:** inspect's bounded range (400 lines,
+  24,000-char excerpt) — MINI.md §10a says "a bounded text range"; the
+  numbers are ours, flagged for the person to mark. The advertised-capacity
+  ceiling behaviour, the one-collapse archive retention (§4), the
+  no-`.brain` line, pi's bash designed tail (ratified "C"), pi's own
+  compaction declined (ours is collapse), and the LIVE_TAIL 8 display
+  bound (the person's own display semantics).
+- **Noted, not changed:** the `onYield` continuation is the spec's own
+  mechanism (§6.2 — after a text-only reply the run continues with the
+  marker). It fires unconditionally, including on a `length`-stopped
+  reply, which can only occur now if the person's server caps generation.
+  Whether `length` should end the run instead of continuing is the
+  person's call; the question was raised once and not answered, so it is
+  dropped unless they raise it.
+- Estimate glyphs (`▤`), the state block's omission-free rendering, the
+  token bar's segment estimates: unchanged — they are labelled estimates,
+  never enforced bounds.
