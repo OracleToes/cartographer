@@ -26,6 +26,7 @@ export class BrainError extends Error {}
 
 export type BrainWrite =
   | { kind: "chat.record"; record: ChatRecord }
+  | { kind: "evidence.refresh"; marks: Array<{ record: "atlas" | "user-pin" | "carry-pin"; id: RecordId; index: number | null; freshness: "fresh" | "stale" }> }
   | { kind: "chat.update"; id: RecordId; text: string; updatedAt: number }
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
@@ -42,6 +43,41 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
+    case "evidence.refresh": {
+      // Written only at a rebuild (MINI.md §28: digest drift is marked stale
+      // at rebuild). Blocks nothing, deletes nothing, and never renumbers
+      // handles.
+      let next = brain;
+      for (const mark of write.marks) {
+        if (mark.record === "atlas") {
+          const node = next.atlas.find((candidate) => candidate.id === mark.id);
+          if (node === undefined) throw new BrainError("An evidence mark names an Atlas node that does not exist.");
+          if (mark.index === null || node.evidence[mark.index] === undefined) {
+            throw new BrainError("An evidence mark names evidence that does not exist.");
+          }
+          const evidence = node.evidence.map((ref, index) =>
+            index === mark.index ? { ...ref, freshness: mark.freshness } : ref,
+          );
+          next = {
+            ...next,
+            atlas: next.atlas.map((candidate) => (candidate.id === mark.id ? { ...candidate, evidence } : candidate)),
+          };
+          continue;
+        }
+        if (mark.index !== null) throw new BrainError("A pin's evidence is its single source; index must be null.");
+        const target = mark.record === "user-pin" ? next.userPins : next.carryPins;
+        const pin = target.find((candidate) => candidate.id === mark.id);
+        if (pin === undefined) throw new BrainError("An evidence mark names a pin that does not exist.");
+        const refreshed = { ...pin, source: { ...pin.source, freshness: mark.freshness } };
+        if (mark.record === "user-pin") {
+          next = { ...next, userPins: next.userPins.map((candidate) => (candidate.id === mark.id ? refreshed : candidate)) };
+        } else {
+          next = { ...next, carryPins: next.carryPins.map((candidate) => (candidate.id === mark.id ? refreshed : candidate)) };
+        }
+      }
+      return next;
+    }
+
     case "chat.record":
       return { ...brain, chat: [...brain.chat, write.record] };
 
