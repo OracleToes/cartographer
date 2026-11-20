@@ -13,8 +13,12 @@
  *   <carto-state>
  *   context: 12,410 / 32,768 tokens (last reported 9,841 + tool work since +2,569)
  *   space: system+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980 · pins ~120 · wakes ~40
- *   pending: A3 · atlas upsert · C7 · chat record
- *   stale: A5 (evidence changed) · P2 (source changed)
+ *   pending:
+ *     A3 · atlas upsert
+ *     C7 · chat record
+ *   stale:
+ *     A5 (evidence changed)
+ *     P2 (source changed)
  *   wakes: W1 [time] 1780000000000 (armed) — check the build
  *   tree: /abs/path (depth 2)
  *     ./
@@ -24,7 +28,6 @@
  * Every item that names a record names it by handle. Empty sections say
  * `none` rather than lying by omission, and nothing is omitted.
  */
-import { handleOf } from "./handles.js";
 import type { WakeEntry } from "./records.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
@@ -80,10 +83,9 @@ export function renderStateBlock(input: StateBlockInput): string {
   const pending =
     input.pending.length === 0
       ? "pending: none"
-      : `pending: ${input.pending
-          .map((write) => `${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${write.kind} ${write.action}`)
-          .join(" · ")}`;
-  const stale = input.stale.length === 0 ? "stale: none" : `stale: ${input.stale.join(" · ")}`;
+      : ["pending:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${write.kind} ${write.action}`)].join("\n");
+  const stale =
+    input.stale.length === 0 ? "stale: none" : ["stale:", ...input.stale.map((item) => `  ${item}`)].join("\n");
   const wakeLines =
     input.wakes.length === 0
       ? "wakes: none"
