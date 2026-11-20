@@ -167,3 +167,37 @@ deleted. The graph is the agent's garden — a flood of unconnected nodes,
 islands, and edges naming vanished nodes are the agent's to tend. The
 tool boundary still resolves handles and errors on unknown ones (§6);
 renderers must tolerate dangling edges.
+
+## R2 landed, 2026-11-20 (`b2c5a44`, `d901f13`)
+
+The frozen projection and the collapse ceremony exist and are tested.
+
+- **Projection** (`domain/projection.ts`): structure, handles, state; no
+  transcript copy, no Chat text; no context budget and no omission list —
+  none was ever confirmed; every durable ID line carries an ISO 8601 UTC
+  timestamp; dangling edges render as `(gone)`. Empty Brain renders
+  `(the Brain is empty)`.
+- **Freshness at rebuild** (`domain/freshness.ts`, `runtime/digest.ts`):
+  digest drift on file-backed evidence marks stale; nothing blocks,
+  nothing deletes; `context` sources verify by hand; paths resolve inside
+  the root or not at all. Between collapses nothing is re-checked.
+- **Snapshots** (`runtime/projection-files.ts`): one `.projection.md` +
+  `.projection.json` per generation, written atomically, sealed `0o444`
+  with the store at collapse, deleted at purge; a crash reopens identical
+  bytes.
+- **Collapse** (`runtime/collapse.ts`): freshness marks → frozen snapshot
+  for the new generation → seal the old store read-only → one collapse of
+  grace on the previous archive → exports **then** delete → Brain
+  `wal_checkpoint(TRUNCATE)` + `VACUUM`. Open-time reconciliation: a head
+  generation missing its snapshot is deleted (the Brain builds the next
+  one); anything beyond live + one archive is purged the same way; the
+  live store is unsealed if a crash sealed it.
+- **Known seam, not filled:** the pinned-to-archive export. Nothing can
+  be pinned to the archive until the recovery tooling defines the marker
+  shape; the code path already exports before deleting (test-spied), and
+  filling it invents an unconfirmed format. Open question for the person
+  below.
+
+Not done: R3 (tools, live session, state block), R4 (config, llama-swap,
+driver). The collapse exists but nothing triggers it yet; the live session
+wires the trigger in R3.

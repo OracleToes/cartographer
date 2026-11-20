@@ -80,6 +80,16 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: from-scratch rebuild, 2026-11-20
+
+- `src/` and `test/` were deleted in full and rebuilt from `MINI.md` (the
+  person's order: delete it all; re-doing slice 1 was fine; asking beats
+  assuming). Suite shrank from 58 to 15 and regrew to 29 as R1 and R2
+  landed. Gaps as of this stage: no integration coverage of a real
+  pi-durable store driving the collapse; no tests yet for the tools, the
+  state block, or the live session — those are R3 and R4 and will bring
+  their own.
+
 ### Stage: UI teardown, 2026-11-16
 
 - The UI was torn out whole: `src/ui/`, the `src/runtime/ui.ts` app shell, the
