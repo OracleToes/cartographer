@@ -1,8 +1,9 @@
 # AGENTS.md
 
 This file tells an agent how to work in this repository. It is written for the
-agent, not for the person: read it before touching a file, and follow it over any
-habit you brought with you.
+agent, not for the person: **you must read this file at the start of every single turn**,
+before reading other files or touching any code, and follow it over any habit you
+brought with you.
 
 The person is `OracleToes`. They own this project. When their word and this file
 disagree, their word wins and this file is wrong until it is fixed.
@@ -153,6 +154,7 @@ warning, and the person cannot see anything that is not pushed. A push
 mid-stage is expected and claims nothing; only the end-of-stage sequence
 submits. Before you touch a file:
 
+- **Read `AGENTS.md` first at the start of every single turn.**
 - `git fetch` and check whether `origin` has moved ahead.
 - If the workspace has reset, your local commits may be gone while `origin`
   still holds them. Replay your work onto `origin`, push, and say in the same
@@ -289,12 +291,11 @@ the base commit while the working tree kept everything as untracked files.
 The remote tip is the source of truth. Expect it, and repair it when found:
 
 - Treat the local branch as possibly stale. At the START of every turn —
-  before any edit, build, or test, not only when git misbehaves —
-  `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
-  `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
-  on the base; it happened once and cost one misplaced commit.
-- After any compaction or workspace reset, read `AGENTS.md` and `MINI.md`
-  before taking any action or touching any file.
+  before any edit, build, or test, not only when git misbehaves:
+  - **Read `AGENTS.md` first.** This is mandatory on every single turn.
+  - `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
+    `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
+    on the base; it happened once and cost one misplaced commit.
 - If the branch pointer trails the remote tip, move it forward with
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a
