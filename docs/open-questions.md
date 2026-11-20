@@ -134,8 +134,9 @@ signal to collapse. If the agent ignores it, nothing stops it growing. *Needs:*
 whether "the agent should collapse" is the whole enforcement, or whether there is
 a fallback.
 
-**Q7.1 — What fields?** Confirmed contents: staleness, context state, and a
-space breakdown by Brain part and tool calls. *Needs:* the actual field list.
+**Q7.1 — Resolved.** The six confirmed contents: context state, space by
+Brain part, pending changes, stale items, wakes, and the project tree. See
+`docs/intent.md` §21.
 
 **Q7.2 — What is the structured ID scheme?** "Items given structured IDs" is
 unwritten. *Needs:* a scheme, and whether it is the same handle system as the
@@ -168,8 +169,11 @@ What is known and should not be lost:
 
 ## §7c. The system prompt draft
 
-`docs/prompt-draft.md` is a first draft. It is a proposal, not intent, and the
-person has not reviewed it.
+The person chose minimal-first for the prompt: the tools, what they do and how
+to use them, then iterate. `docs/prompt-draft.md` is reference material under
+that direction, not the starting point. See `docs/intent.md` §22.
+
+What follows is the draft's own design notes, kept for iteration.
 
 Open in it:
 - **Q7c.1 — Is the pronoun split right in practice?** "We" for the work, "I" for

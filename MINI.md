@@ -216,16 +216,23 @@ agent reads. It is the agent's own dashboard about its brain and the project.
 
 It tells the agent:
 
-- what is stale in the Brain;
-- what has changed in the Brain since the projection was built, so the agent is
-  not reading a map it has already superseded;
-- the state of the context, including how full it is;
-- what is taking up space, broken down by Brain part — Ledger, Atlas, Chat — and
-  by tool calls, separately from the stable parts such as the system and tool
-  prompts.
+- the state of the context — how full it is (last reported provider usage,
+  plus what the tool calls have added since);
+- what is taking up space, broken down by Brain part — Ledger, Atlas, Chat,
+  pins and wakes — separately from tool work and from the stable system and
+  tool prompts;
+- pending changes — one line per Brain write since the projection was built,
+  named by handle: the signal to collapse;
+- what is stale — Atlas evidence or pins whose source changed since the
+  projection was built, named by handle;
+- wakes — what is armed and its target time;
+- the project tree — anchored at a directory, to a depth, showing files,
+  directories, sizes, and which files an Atlas node links to.
 
 It is the part of the context expected to change often. Its items carry
 structured IDs.
+
+> Confirmed by the person.
 
 ### The project tree
 

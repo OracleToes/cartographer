@@ -1,3 +1,6 @@
+> Superseded direction: the prompt starts minimal-first. See
+> `docs/intent.md` §22. This draft is reference material, not the plan.
+
 # Carto — the system prompt
 
 Draft. Not yet in the binary. This is the instruction the agent wakes up with:

@@ -337,3 +337,28 @@ with the generation's store at collapse.
 `onYield` can only append a user message and prompt sections can only patch the
 leading system message — so the block cannot itself start a turn, and the
 continuation rides a marker while the block is injected per request.
+
+
+## 21. The state block contents
+
+**Decision.** The block holds: the state of the context (fullness from the last
+reported provider usage, plus what tool calls have added since); space taken up,
+broken down by Brain part — Ledger, Atlas, Chat, pins, wakes — separately from
+tool work and from the stable system and tool prompts; one line per pending
+Brain write since the projection was rebuilt, named by handle; what is stale,
+named by handle; wakes armed and their target times; and the project tree,
+anchored at a directory to a depth, with Atlas-linked files marked. Nothing
+instructive.
+
+**Established by.** The person approved this list when shown it, in full.
+
+## 22. The prompt starts minimal
+
+**Decision.** The system prompt starts minimalistic: the tools, what they do,
+and how to use them, plus what no tool can say — then it is iterated on. The
+tools are scoped and unique; they carry the voice. The elaborate draft in
+`docs/prompt-draft.md` is reference material, not the starting point.
+
+**Established by.** The person directed it: "i say we try for minimalistic at
+first, just, here are your tools, here's what they do and how to use them. and
+then we iterate on that."
