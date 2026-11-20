@@ -454,3 +454,16 @@ deletes the sealed store. Unpinned material leaves with the file. The Brain
 grows only by what is explicitly kept.
 
 **Established by.** Blessed by the person: 'Blessed.'
+
+
+## 30. Recovery restores the original type; the agent cannot address the archive
+
+**Decision.** A recovered record returns as its original type (Atlas to Atlas,
+Ledger to Ledger, Chat to Chat), and evidence that no longer verifies is
+marked stale — the state block's stale line informs the agent. The agent has
+no tool, command, or signal for the archive; giving it one breaks the
+boundary that the archive exists.
+
+**Established by.** The person confirmed both halves directly: "yes, restore the
+original type, let the state block inform the agent of stale data" and "no it
+doesn't even know the archive exists, giving it a tool breaks intent."

@@ -148,8 +148,11 @@ archive.
 
 **The agent does not know the archive exists.** Recovery is a person action.
 
-> Confirmed by the person. Open: whether recovery restores the record to its
-> original type or to a neutral form. See `docs/open-questions.md` §4.
+Recovered records return to their original type, named by handle. Evidence
+that no longer verifies is marked stale — the state block's stale line carries
+it. The agent has no way to address the archive, by design.
+
+> Confirmed by the person.
 
 ### 4.2 Deleted text is really gone
 

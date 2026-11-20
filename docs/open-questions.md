@@ -82,16 +82,15 @@ enters it, so it cannot balloon. One sealed generation exists at a time.
 
 See `docs/intent.md` §29.
 
-## §4. Recover
+## §4. Recover — resolved
 
-**Q4.1 — What does recovery restore?** A recovered record must return to some
-type. Options: its original type, a neutral "recovered note" type the agent then
-files, or a conversation item. *Needs:* which.
+**Q4.1 — Resolved.** Recovery restores the record to its original type; stale
+evidence is marked stale and surfaces through the state block's stale line.
 
-**Q4.2 — Can the agent ask for a recovery?** The agent does not know the archive
-exists, so it cannot. But it can notice something missing and ask the person. Does
-it get a way to say "I think something was lost"? *Needs:* whether that is a tool,
-a Ledger question, or nothing.
+**Q4.2 — Resolved.** The agent gets nothing. It does not know the archive
+exists and has no way to address it.
+
+See `docs/intent.md` §30 and `MINI.md` §4.1.
 
 ## §5. Collapse signalling
 
