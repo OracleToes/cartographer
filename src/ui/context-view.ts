@@ -73,13 +73,20 @@ export interface ContextPartItem {
 export class ContextView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  onDelete?: (partId: string, itemId: string | number, now: boolean) => void;
+  onCollapse?: () => void;
 
   private focusedPane: "rail" | "content" = "rail";
   private selectedPartIndex = 0;
   private scrollOffset = 0;
   private selectedToolIndex = 0;
+  private selectedMessageIndex = 0;
+  private selectedWorkIndex = 0;
+  private nowArmed = false;
+  private itemExpanded = new Map<string, boolean>();
   private toolExpanded = new Map<string, boolean>();
   private toolRanges: Array<{ name: string; start: number; end: number }> = [];
+  private itemRanges: Array<{ id: string | number; start: number; end: number }> = [];
   private showRaw = false;
   private parts: ContextPartItem[] = [];
   private totalTokens = 0;
@@ -192,6 +199,38 @@ export class ContextView implements Component, Focusable {
         this.focusedPane = "rail";
         return;
       }
+      if (matchesKey(data, "!") || data === "!") {
+        this.nowArmed = !this.nowArmed;
+        return;
+      }
+      if (matchesKey(data, "c")) {
+        this.onCollapse?.();
+        return;
+      }
+      if (matchesKey(data, "d")) {
+        const selectedPart = this.parts[this.selectedPartIndex];
+        if (selectedPart?.id === "transcript" && this.data) {
+          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
+          if (msg) this.onDelete?.("transcript", msg.id, this.nowArmed);
+          this.nowArmed = false;
+          return;
+        }
+        if (selectedPart?.id === "tool-work" && this.data) {
+          const work = this.data.toolWorkItems[this.selectedWorkIndex];
+          if (work) this.onDelete?.("tool-work", work.id, this.nowArmed);
+          this.nowArmed = false;
+          return;
+        }
+        if (selectedPart?.id === "tools" && this.data) {
+          const tool = this.data.tools[this.selectedToolIndex];
+          if (tool) this.onDelete?.("tools", tool.name, this.nowArmed);
+          this.nowArmed = false;
+          return;
+        }
+        this.scrollOffset += 10;
+        return;
+      }
+
       const selectedPart = this.parts[this.selectedPartIndex];
       if (selectedPart?.id === "tools" && !this.showRaw && this.data) {
         if (matchesKey(data, "j") || matchesKey(data, "down")) {
@@ -211,6 +250,45 @@ export class ContextView implements Component, Focusable {
           return;
         }
       }
+      if (selectedPart?.id === "transcript" && !this.showRaw && this.data) {
+        if (matchesKey(data, "j") || matchesKey(data, "down")) {
+          this.selectedMessageIndex = Math.min(this.data.transcriptMessages.length - 1, this.selectedMessageIndex + 1);
+          return;
+        }
+        if (matchesKey(data, "k") || matchesKey(data, "up")) {
+          this.selectedMessageIndex = Math.max(0, this.selectedMessageIndex - 1);
+          return;
+        }
+        if (matchesKey(data, "enter") || matchesKey(data, "space")) {
+          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
+          if (msg) {
+            const idKey = String(msg.id);
+            const isOpen = this.itemExpanded.get(idKey) ?? true;
+            this.itemExpanded.set(idKey, !isOpen);
+          }
+          return;
+        }
+      }
+      if (selectedPart?.id === "tool-work" && !this.showRaw && this.data) {
+        if (matchesKey(data, "j") || matchesKey(data, "down")) {
+          this.selectedWorkIndex = Math.min(this.data.toolWorkItems.length - 1, this.selectedWorkIndex + 1);
+          return;
+        }
+        if (matchesKey(data, "k") || matchesKey(data, "up")) {
+          this.selectedWorkIndex = Math.max(0, this.selectedWorkIndex - 1);
+          return;
+        }
+        if (matchesKey(data, "enter") || matchesKey(data, "space")) {
+          const work = this.data.toolWorkItems[this.selectedWorkIndex];
+          if (work) {
+            const idKey = String(work.id);
+            const isOpen = this.itemExpanded.get(idKey) ?? true;
+            this.itemExpanded.set(idKey, !isOpen);
+          }
+          return;
+        }
+      }
+
       // Line scrolling
       if (matchesKey(data, "j") || matchesKey(data, "down")) {
         this.scrollOffset += 1;
@@ -220,7 +298,7 @@ export class ContextView implements Component, Focusable {
         this.scrollOffset = Math.max(0, this.scrollOffset - 1);
         return;
       }
-      if (matchesKey(data, "d") || matchesKey(data, "pageDown")) {
+      if (matchesKey(data, "pageDown")) {
         this.scrollOffset += 10;
         return;
       }
@@ -319,6 +397,7 @@ export class ContextView implements Component, Focusable {
 
   private renderTranscriptFormatted(messages: ContextDialogueMessage[], width: number): string[] {
     const lines: string[] = [];
+    this.itemRanges = [];
     const title = ` Dialogue Transcript (${messages.length} messages):`;
     lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
     lines.push(tokens.cardBg(" ".repeat(width)));
@@ -329,22 +408,39 @@ export class ContextView implements Component, Focusable {
       return lines;
     }
 
-    for (const msg of messages) {
+    messages.forEach((msg, idx) => {
+      const start = lines.length;
+      const isSelected = this.focusedPane === "content" && idx === this.selectedMessageIndex;
+      const idKey = String(msg.id);
+      const isOpen = this.itemExpanded.get(idKey) ?? true;
+      const foldGlyph = isOpen ? "▾" : "▸";
       const isUser = msg.role === "user";
       const who = isUser ? tokens.accent("you") : tokens.agent("carto");
       const ts = msg.timestamp ? ` · ${new Date(msg.timestamp).toISOString()}` : "";
-      lines.push(tokens.cardBg(padLine(`   ${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)}`, width)));
-      const bodyLines = wrapTextWithAnsi(msg.text, Math.max(1, width - 6));
-      for (const bl of bodyLines) {
-        lines.push(tokens.cardBg(padLine(`     ${bl}`, width)));
+      const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
+
+      const headerText = `${prefix}${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)} ${tokens.muted(foldGlyph)}`;
+      lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
+
+      if (isOpen) {
+        const bodyLines = wrapTextWithAnsi(msg.text, Math.max(1, width - 8));
+        for (const bl of bodyLines) {
+          lines.push(tokens.cardBg(padLine(`       ${bl}`, width)));
+        }
+      } else {
+        const preview = truncateToWidth(msg.text.replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
+        lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
       }
       lines.push(tokens.cardBg(" ".repeat(width)));
-    }
+      const end = lines.length;
+      this.itemRanges.push({ id: msg.id, start, end });
+    });
     return lines;
   }
 
   private renderToolWorkFormatted(items: ContextWorkItem[], width: number): string[] {
     const lines: string[] = [];
+    this.itemRanges = [];
     const title = ` Tool Work & Reasoning (${items.length} items):`;
     lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
     lines.push(tokens.cardBg(" ".repeat(width)));
@@ -355,36 +451,64 @@ export class ContextView implements Component, Focusable {
       return lines;
     }
 
-    for (const item of items) {
+    items.forEach((item, idx) => {
+      const start = lines.length;
+      const isSelected = this.focusedPane === "content" && idx === this.selectedWorkIndex;
+      const idKey = String(item.id);
+      const isOpen = this.itemExpanded.get(idKey) ?? true;
+      const foldGlyph = isOpen ? "▾" : "▸";
+      const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
+
       if (item.kind === "reasoning") {
-        lines.push(tokens.cardBg(padLine(`   ${tokens.bold(tokens.reasoning("▎ think"))} ${tokens.muted(`[#${item.id}]`)}`, width)));
-        const textLines = wrapTextWithAnsi(item.text ?? "", Math.max(1, width - 6));
-        for (const tl of textLines) {
-          lines.push(tokens.cardBg(padLine(`     ${tokens.reasoning(tl)}`, width)));
+        const headerText = `${prefix}${tokens.bold(tokens.reasoning("▎ think"))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
+        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
+        if (isOpen) {
+          const textLines = wrapTextWithAnsi(item.text ?? "", Math.max(1, width - 8));
+          for (const tl of textLines) {
+            lines.push(tokens.cardBg(padLine(`       ${tokens.reasoning(tl)}`, width)));
+          }
+        } else {
+          const preview = truncateToWidth((item.text ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
+          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
         }
       } else if (item.kind === "toolCall") {
-        lines.push(tokens.cardBg(padLine(`   ${tokens.bold(tokens.tool(`▎ call: ${item.name}`))} ${tokens.muted(`[#${item.id}]`)}`, width)));
-        const argLines = (item.args ?? "").split("\n");
-        for (const al of argLines) {
-          lines.push(tokens.cardBg(padLine(`     ${tokens.muted(al)}`, width)));
+        const headerText = `${prefix}${tokens.bold(tokens.tool(`▎ call: ${item.name}`))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
+        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
+        if (isOpen) {
+          const argLines = (item.args ?? "").split("\n");
+          for (const al of argLines) {
+            lines.push(tokens.cardBg(padLine(`       ${tokens.muted(al)}`, width)));
+          }
+        } else {
+          const preview = truncateToWidth((item.args ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
+          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
         }
       } else if (item.kind === "toolResult") {
-        lines.push(tokens.cardBg(padLine(`   ${tokens.bold(tokens.muted(`▎ result`))} ${tokens.muted(`[#${item.id}]`)}`, width)));
-        const outLines = wrapTextWithAnsi(item.output ?? "", Math.max(1, width - 6));
-        for (const ol of outLines) {
-          lines.push(tokens.cardBg(padLine(`     ${tokens.output(ol)}`, width)));
+        const headerText = `${prefix}${tokens.bold(tokens.muted(`▎ result`))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
+        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
+        if (isOpen) {
+          const outLines = wrapTextWithAnsi(item.output ?? "", Math.max(1, width - 8));
+          for (const ol of outLines) {
+            lines.push(tokens.cardBg(padLine(`       ${tokens.output(ol)}`, width)));
+          }
+        } else {
+          const preview = truncateToWidth((item.output ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
+          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
         }
       }
       lines.push(tokens.cardBg(" ".repeat(width)));
-    }
+      const end = lines.length;
+      this.itemRanges.push({ id: item.id, start, end });
+    });
     return lines;
   }
 
   private renderRightPane(part: ContextPartItem, width: number, maxLines: number): string[] {
     const lines: string[] = [];
     const modeBadge = this.showRaw ? tokens.warn("[RAW BYTES]") : tokens.accent("[FORMATTED]");
+    const nowBadge = this.nowArmed ? ` ${tokens.danger("[NOW ARMED]")}` : "";
     const focusTag = this.focusedPane === "content" ? tokens.bold(tokens.accent(" [FOCUSED]")) : "";
-    const headerText = ` ${tokens.bold(tokens.accent(part.name))} ${tokens.muted(`· ~${part.tokens.toLocaleString("en-US")} tokens`)}  ${modeBadge}${focusTag}`;
+    const headerText = ` ${tokens.bold(tokens.accent(part.name))} ${tokens.muted(`· ~${part.tokens.toLocaleString("en-US")} tokens`)}  ${modeBadge}${nowBadge}${focusTag}`;
     lines.push(tokens.cardHeaderBg(padLine(headerText, width)));
     lines.push(tokens.cardBg(" ".repeat(width)));
 

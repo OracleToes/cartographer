@@ -101,8 +101,12 @@ export class FooterView implements Component {
       );
     } else if (this.state.view === "context") {
       segments.push(
-        key("j/k", "part"),
-        key("tab", "toggle raw"),
+        key("j/k", "nav"),
+        key("h/l", "pane"),
+        key("tab", "raw"),
+        key("d", "delete"),
+        key("!", "now"),
+        key("c", "collapse"),
         key("esc", "chat"),
         key("^o", "jump"),
         key("^p", "palette"),

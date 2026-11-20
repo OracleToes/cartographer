@@ -245,6 +245,30 @@ test("ContextView navigation, tool folding, and mouse interactions", () => {
     ctrl: false,
   });
   assert.ok(wheelRes?.handled);
+
+  // Test Surgery callbacks: onDelete, onCollapse, and ! now modifier
+  let deletedItem = null;
+  let collapsed = false;
+  view.onDelete = (partId, itemId, now) => {
+    deletedItem = { partId, itemId, now };
+  };
+  view.onCollapse = () => {
+    collapsed = true;
+  };
+
+  // Move to transcript and delete with ! (now)
+  view.handleInput("h"); // back to rail
+  // selectedPartIndex is at transcript (3)
+  view.handleInput("l"); // focus content pane
+  view.handleInput("!"); // arm now
+  view.handleInput("d"); // delete message
+  assert.ok(deletedItem);
+  assert.equal(deletedItem.partId, "transcript");
+  assert.equal(deletedItem.now, true);
+
+  // Trigger collapse
+  view.handleInput("c");
+  assert.equal(collapsed, true);
 });
 
 test("AtlasView two-pane navigation, mouse interaction, and detail scrolling", () => {

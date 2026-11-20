@@ -265,6 +265,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   await refreshSidebar();
 
+  const pushStatus = (text: string) => {
+    state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
+  };
+
   const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
     const productTools = createTools({
       root: options.root,
@@ -368,6 +372,26 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   atlasView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
+  contextView.onCollapse = () => void runCollapse("context surgery");
+  contextView.onDelete = async (partId, itemId, now) => {
+    if (partId === "transcript") {
+      const brainState = await brain.read();
+      const chatRecord = brainState.chat.find((r) => r.id === itemId || String(r.id) === String(itemId));
+      if (chatRecord) {
+        await brain.apply({ kind: "delete", target: "chat", id: chatRecord.id }, Date.now());
+        pushStatus(`deleted chat record #${chatRecord.id}`);
+      }
+    }
+    if (now) {
+      await runCollapse("context surgery (now)");
+    } else {
+      await rebuildTranscript();
+      const brainState = await brain.read();
+      await syncContextView(brainState);
+      await refreshSidebar();
+    }
+    tui.requestRender();
+  };
 
   tui.setLayoutRoot(
     new HStack([
@@ -434,10 +458,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.liveWatch = undefined;
     await closeLiveSession(state.session);
     resolveRun?.(code);
-  };
-
-  const pushStatus = (text: string) => {
-    state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
   };
 
   /**
