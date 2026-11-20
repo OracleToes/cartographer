@@ -1,19 +1,20 @@
 {
-  "name": "cartographer",
+  "name": "carto",
   "version": "0.1.0",
   "private": true,
-  "description": "A durable agent that keeps a project-local brain and works through atomic tasks.",
   "type": "module",
+  "description": "Carto: a durable project memory and terminal agent.",
   "engines": {
     "node": ">=22.19.0"
   },
   "bin": {
-    "carto": "bin/carto"
+    "carto": "./bin/carto.mjs"
   },
   "scripts": {
-    "test": "node test/all.mjs",
-    "test:unit": "node test/unit.mjs",
-    "test:ported": "node test/run.mjs"
+    "build": "rm -rf dist && tsc --project tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "start": "npm run build && node bin/carto.mjs",
+    "install:home": "npm run build && node scripts/install-home.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "1.5.2",
@@ -21,5 +22,9 @@
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.9.3"
   }
 }

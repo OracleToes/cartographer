@@ -1,4 +1,5 @@
 node_modules/
-config.json
+dist/
+coverage/
 .brain/
-.atlas/
+*.tsbuildinfo
