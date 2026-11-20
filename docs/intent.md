@@ -607,8 +607,9 @@ person takes on the context: that action applies to the model's view
 immediately, every other queued change stays queued. Now is not an
 apply-all, not a rebuild shortcut, and not collapse — `/collapse` is the
 spec's separate call and is not mixed into Now. There is no confirmation
-or prefill warning in the UI; the cost is documented in the README, and
-taking Now is the acknowledgment. Reorder follows the same rule as every
+or prefill warning in the UI; taking Now is the acknowledgment.
+(The README this entry once pointed at was created unasked and deleted at
+the person's direction; the cost remains undocumented by choice — see §45.) Reorder follows the same rule as every
 other action: applied at collapse, or immediately with Now armed — there
 is no per-reorder prefill penalty by default.
 
@@ -644,12 +645,78 @@ carried into the build.
 
 **Established by.** The person, one line: "modes, as you proposed."
 
-## 45. Now's cost is documented in the README; no in-UI warning
+## 45. No prefill warning about Now — ever; the acknowledgment is the action
 
-**Decision.** Now carries no confirmation or warning dialog. Its cost —
-a rebuilt payload and the prefill it forces — is documented in the README
-(`README.md`, the rebuild removed the old one). The README is the
-acknowledgement mechanism.
+**Decision.** Now carries no confirmation or warning dialog. The earlier
+statement "it is documented in the README" referenced a document that does
+not exist on this branch; a README was created unasked in response and
+deleted at the person's direction on 2026-11-20. The standing rule is:
+no in-UI warning, and the workspace does not grow documents to justify
+an action the person took knowingly. The person takes Now by choice;
+that choice is the acknowledgment.
 
 **Established by.** The person, directly: "there is no prefill warning
-about Now, it is documented in the README."
+about Now, it is documented in the README" — and, on discovering the
+unasked-for README: "delete that. i didn't need or want it. and quit
+making and doing stuff i didn't ask for."
+
+## 46. How the person's words are to be heard: question, assumption, statement, request
+
+**Decision.** Four kinds of utterance, exhaustive:
+
+1. **Question** — a request for information, nothing else, ever. A question is
+   never a request to create or change anything. Asked *why*, the answer is an
+   explanation, not work.
+2. **Assumption** — something the person asserts that may be wrong. It may be
+   verified; the person learns from being told plainly that they are wrong.
+   Verification never licenses changing something they did not ask to change.
+3. **Statement** — something said to put it in the shared context. It asks for
+   nothing and wants no acknowledgement of intent.
+4. **Request / Task** — the remainder. Only this, or a §8 decision request,
+   licenses work.
+
+**Established by.** The person, directly, after the README was created unasked:
+asks for a definition of the difference between the four, and confirms the
+exhaustiveness of the split. Recorded verbatim in meaning; see `AGENTS.md` §3
+(QUESTION, ASSUMPTION, STATEMENT, REQUEST) and §8.
+
+## 47. Interrupt stops the run NOW
+
+**Decision.** Interrupt (`ctrl+x`) stops the run immediately — not at a Pi
+Durable boundary, not "politely." This was the person's stated intent in the
+main branch, the previous MINI build, and this build. While the stream is
+interrupted, the input box remains usable: messages can be sent as steering
+(without breaking the stream) or as follow-ups (queued for after the run), or
+submitted immediately — which breaks the stream. The selection mechanism on the
+input line was delegated to the agent ("your choice, don't ask me about it"):
+`shift+tab` cycles the armed send mode — steer → after run → now — shown in
+the footer; `enter` sends in the armed mode. This supersedes MINI.md §9's
+"stops the run at a Pi Durable boundary"; MINI.md is never edited, so the
+supersession lives here and in `docs/open-questions.md` §10.
+
+**Established by.** The person, directly: "Interrupt means interrupt, it
+doesn't mean politely ask for a moment when the agent is done doing what it's
+doing. this is not an ambiguous definition in any sense of the english
+language. while the stream is interrupted, the user can type in their input
+box, send steering, or followups without breaking the stream, but they can
+also submit their message Immediately and break the stream."
+
+## 48. Keybindings are vim-first
+
+**Decision.** Where vim motions and keybinds apply, they are used instead of
+Posting's. Where vim does not cover it, Posting's keys apply. Where neither
+covers it, the agent decides the binding, and the person gives feedback.
+Jump mode (Posting) is retained as designed — vim has no equivalent.
+
+**Established by.** The person, directly: "i want vim motions and keybinds
+where applicable, instead of postings. if vim motions doesn't cover it,
+posting makes sense, and if not then, you will decide the keybind for it and
+i will give feedback."
+
+## 49. The sidebar is visible on boot; the boot view is Chat
+
+**Decision.** The workspace boots with the sidebar (the Brain index) visible,
+toggleable with `ctrl+h`, and with Chat as the main view.
+
+**Established by.** The person, answering the two open marks: "1. A" and
+"2. A".

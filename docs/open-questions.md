@@ -227,12 +227,21 @@ decision):* the bar ships with the live segment unverified; the exact numbers
 and are the truthful floor. The bar must never present an invented figure as
 measured — the live segment is estimate-glyphed until measurement exists.
 
-## §10. Turn control — resolved
+## §10. Turn control — resolved; interrupt superseded 2026-11-20
 
 Interrupt (stop at a boundary), Steer (queued at the next boundary, arrives in
 the transcript), Follow-up (queued after the run). Pause, edit-draft, and
 resume removed with the approval-era draft; Cancel = interrupt + drop the
 queue. Confirmed by the person. See `docs/intent.md` §33.
+
+*Superseded 2026-11-20:* the person corrected the interrupt semantics
+directly — Interrupt stops the run NOW, not "at a Pi Durable boundary"; that
+was their stated intent in the main branch, the previous build, and this
+build ("Interrupt means interrupt"). While a stream is interrupted, the
+input box remains usable: steering and follow-ups can be sent without
+breaking the stream, or submitted immediately, which breaks it. MINI.md §9
+keeps its wording (MINI.md is never edited); the supersession is recorded in
+`docs/intent.md` §47.
 
 ## §11. Wake and sleep
 

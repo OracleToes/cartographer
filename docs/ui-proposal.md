@@ -122,6 +122,8 @@ was not derived from a real request or the active window.)*
   person prefers literal tabs (MINI.md §8's three), the same body renders
   behind them; it is a mark, not a fork. The *sidebar index* is the Brain's
   tables of contents — counts and stale badges; click/jump to open.
+- **The sidebar is visible on boot** (marked 2026-11-20); `ctrl+h` hides
+  and summons it. **The boot view is Chat.**
 - **The bar sits above the footer**, always visible, on every view.
 - **The header is one row** and never pushes content; generation is shown
   because it is the crash-recovery handle.
@@ -174,9 +176,8 @@ one-shot modifier on the *next* action you take on the context — it applies
 exactly that action immediately and leaves everything else queued. It is not
 an apply-all, it is not a rebuild shortcut, and it is not collapse: `/collapse`
 is the spec's separate call and stays separate. No confirmation or warning is
-shown for Now; the cost — a rebuilt payload and the prefill it forces — is
-documented in the README. Mine is to arm it per action; the cost document is
-the acknowledgement.
+shown for Now, and no document is grown to justify it — taking the action
+is the acknowledgment.
 
 | Action | Keys (proposed) | What actually happens |
 | --- | --- | --- |
@@ -200,7 +201,7 @@ the acknowledgement.
 - **Now** is a modifier on the next action, not a separate apply-all:
   armed for one action, consumed by it, everything else still queued. It
   forces the payload rebuild for that action and the prefill that follows;
-  the cost is documented in the README, not warned about in the UI. If you
+  there is no warning in the UI and no document is grown to justify it. If you
   had twelve changes queued and Now-deleted one, the other eleven stay
   queued — anything else would be furious-making, and it is not what Now
   is.
@@ -266,21 +267,47 @@ llama.cpp remains unverified — if the real server never sends it, the bar
 says "reading" nowhere and that is fine. The denominator is the active
 context window (min(ceiling, advertised)), never the model's maximum.
 
-## 8. Keys (proposed; the person's to set)
+## 8. Keys
 
-Footer shows only what works where you are. Globals:
+Footer shows only what works where you are. Keybinding policy, marked
+2026-11-20: **vim motions and keybinds wherever applicable, instead of
+Posting's**. Where vim does not cover it, Posting's keys apply; where
+neither covers it, I decide the binding and the person gives feedback.
+Jump mode stays — vim has no equivalent, and its labels remain
+QWERTY-adjacent.
+
+Globals:
 
 | Key | Action |
 | --- | --- |
+| `ctrl+x` | **Interrupt: the run stops NOW.** Not "at the next boundary" (see turn control below). `ctrl+c` remains quit. |
 | `ctrl+o` | jump mode (labels everywhere) |
 | `ctrl+p` | command palette |
-| `ctrl+x` | interrupt the run (turn control §9) |
-| `ctrl+c` | quit |
-| type | steer the run (a person line is a steer at the next boundary — needs the person's confirmation of the binding) |
+| `ctrl+h` | hide/summon the sidebar |
+| `shift+tab` | cycle the input line's send mode — **steer → after run → now** — shown in the footer while armed |
+| `enter` | send in the armed mode (selection mechanism delegated by the person: "your choice, don't ask me about it") |
 
-View switches via jump keys: `a` atlas · `l` ledger · `t` transcript/chat ·
-`x` context · plus digits for the sidebar. Follow-up (queued after the run)
-gets no default key yet — the person marks it or it gets one in the palette.
+**Turn control** (supersedes MINI.md §9's "at a Pi Durable boundary" —
+MINI.md is never edited; the supersession is recorded in
+`docs/intent.md` §47):
+
+- **Interrupt** (`ctrl+x`) stops the run **now**.
+- The input box is never modal: it stays usable during interrupt and
+  during a live stream.
+- **Steer** — a message that does not break the stream; the agent just
+  sees it arrive in the transcript.
+- **Follow-up ("after run")** — queued for after the run ends.
+- **Now (send mode)** — submitted immediately; **breaks the stream**. The
+  message-carrying sibling of `ctrl+x`.
+
+**Editing surfaces:** lists and the surgery rail navigate with vim motions —
+`j`/`k` rows, `gg`/`G` ends, `/` filter, `n`/`N` next/prev match, `enter`
+to activate, `esc` (or `q`) back. The text input stays pi-tui's `Editor`
+(pi's own line editing); vim-modal editing inside the input box is not
+proposed.
+
+View switches via jump keys: `a` atlas · `l` ledger · `t` chat · `x`
+context · `p` pins · `w` wakes.
 
 ## 9. Build order (each stage ends in your hands to boot)
 
@@ -300,18 +327,28 @@ Everything pi-tui provides is used, not reimplemented; everything hand-rolled
 is listed in §3 and is small; the `1.4k tok/s`-style invented status numbers
 do not come back.
 
-## 10. Person's marks and open questions
+## 10. Person's marks
 
-**Marked:** token bar → **A**. Layout → **modes**, as proposed. Posting
-philosophy/structure → confirmed. Now → a one-shot modifier on the next
-action, no warning, collapse stays separate, cost documented in the
-README. Person-created records → authentic and indistinguishable, every
-Brain type. Reorder → same as every action (collapse, or Now). R4 testing
-→ yours, at your pace, never raised again.
+All resolved 2026-11-20:
 
-**Open (asked in full in the 2026-11-20 conversation):** sidebar at boot;
-boot default view; the interrupt key; how the input line sends steer
-versus follow-up.
+- Token bar → **A**.
+- Layout → **modes**, not tabs.
+- Posting philosophy/structure → confirmed; **vim motions and keybinds
+  where applicable, Posting where vim doesn't cover, agent-decided where
+  neither does** (feedback welcome at any time).
+- Sidebar → **visible on boot** (`ctrl+h` toggles).
+- Boot default view → **Chat**.
+- Interrupt → **stops the run NOW**, `ctrl+x`.
+- Send-mode selection on the input line → **agent's choice** (shift+tab
+  cycles steer / after run / now; enter sends in the armed mode; the
+  input box is never modal).
+- Now → one-shot modifier on the next action; no warning; not collapse.
+- Person-created records → authentic and indistinguishable, any Brain
+  type.
+- Reorder → collapse-or-Now like every action.
+- R4/any-slice testing → the person's own pace; never raised again.
+
+No open questions remain for R5.
 
 ## 11. Confirmed since the plan was written (not open)
 
@@ -331,6 +368,15 @@ versus follow-up.
   recorded 2026-11-20.
 - **The layout is modes, not tabs** — MINI.md §8's three-tab frame is not
   carried into R5. Confirmed 2026-11-20.
+- **Sidebar visible on boot; boot default view is Chat.** Marked
+  2026-11-20.
+- **Keybinds are vim-first**, Posting second, agent-decided third.
+  Marked 2026-11-20.
+- **Interrupt stops the run NOW** — not at a Pi Durable boundary; the
+  input box stays usable during interrupt and during a live stream; a
+  message can be steered or follow-up'd without breaking the stream, or
+  submitted immediately, which breaks it. Supersedes MINI.md §9's
+  boundary wording (MINI.md is never edited). Marked 2026-11-20.
 
 - **Wakes are the sleep tool's wake**: the agent calls `sleep` — with no time,
   until you wake it; with a timer, it wakes when the timer fires. Nothing

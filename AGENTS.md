@@ -83,6 +83,25 @@ did, and never raise it again.
 what it means *in the context of the problem at hand*, and do not substitute
 your own bar. They named `usable` as an example.
 
+**QUESTION** — a request for information, nothing else. A question is never a
+request to create, change, fix, or build anything. If the person asks why you
+are doing something a certain way, they expect an answer — not work done on the
+assumption they wanted it fixed.
+
+**ASSUMPTION** — something the person asserts that might be wrong. If it is
+wrong, verify it against the code, the documents, or the dependencies, and tell
+them plainly; that is how they learn. Verifying is not permission to change
+anything — a wrong assumption of theirs still only earns an answer.
+
+**STATEMENT** — something said so it is in the shared context. A statement
+asks for no change, no action, and no acknowledgement. The person does not
+need to say "and don't do anything about it."
+
+**REQUEST / TASK** — what is left over once the other three are excluded. It
+is asking for work to be done. If the person says it, do the work, or ask
+for a decision per §8 — never act on a question, an assumption, or a
+statement as if it were a request.
+
 **SENSIBLE** — proportional. Grow the glossary when a correction or a real
 question produces a term, not in batches and not for completeness.
 
@@ -215,6 +234,8 @@ answer.
 
 When you ask, ask for a decision, not for permission. State the options and your
 recommendation, and say what you will do if the question goes unanswered twice.
+And check the §3 kinds before asking: if the person's words are a question, an
+assumption, or a statement, the response is an answer — not work.
 
 ## 9. Do not
 
