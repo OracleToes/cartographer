@@ -635,3 +635,17 @@ AGENTS.md forbids… including all tools and such"). Findings:
   "no pin" (the server's advertised window, or unknown, is used). Garbage is
   still rejected at parse time; the magnitude of the person's number is
   theirs.
+
+### Addendum — read bounds, second pass (2026-11-20, person's word)
+
+- **startLine alone reads to EOF** (person's word): each bound is
+  independently open — omit both for the whole file, startLine only to end
+  of file, endLine only from line 1 (the symmetric case — if the person
+  meant only the startLine case to exist, say so and endLine-only errors
+  again), both for a range. startLine past EOF errors explicitly. The tool
+  description states the four cases exactly; tests cover them.
+- **Full audit pass, same day:** no schema-visible arbitrary limits remain
+  in `src/` (sweep: numeric literals, slice/clamp/truncate, subprocess
+  timeouts, config validation). Findings needing a person's ruling or a
+  decision are listed in the session reply this date — nothing from the
+  audit is fixed silently.
