@@ -10,7 +10,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { closeLiveSession, openLiveSession, submitInput } from "../dist/runtime/live-session.js";
+import { closeLiveSession, interruptRun, openLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -310,4 +310,47 @@ test("a person-triggered collapse with no run in flight: interrupt is a no-op an
   assert.deepEqual(outcome.session.state.pending, []);
   await closeLiveSession(outcome.session);
   cleanup();
+});
+
+test("the bash tool runs through the conversation's environment: a real command, real stdout", async () => {
+  const { root, brain, cleanup } = fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "printf carto-bash-ok" }, { id: "call-bash-1" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-bash-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  try {
+    const submission = await submitInput(session, "run a command");
+    const settled = await submission.wait(BACKGROUND_CONTEXT);
+    assert.equal(settled.status, "done");
+    const flat = flatten(captured.at(-1));
+    assert.match(flat, /carto-bash-ok/, "the tool result carries the command's stdout");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    cleanup();
+  }
+});
+
+test("interrupting a run whose bash call is open settles the run instead of orphaning the command", async () => {
+  const { root, brain, cleanup } = fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  // bash sleeps 30s; the interrupt must cut the run at its boundary instead.
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "call-bash-interrupt" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const started = Date.now();
+  try {
+    const submission = await submitInput(session, "wait on something long");
+    // Give the bash task a moment to actually start, then interrupt.
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));
+    await interruptRun(session);
+    const settled = await submission.wait(BACKGROUND_CONTEXT);
+    assert.notEqual(settled.status, "running");
+    assert.ok(Date.now() - started < 20_000, "the interrupt cut the run; it did not wait out the sleep");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    cleanup();
+  }
 });

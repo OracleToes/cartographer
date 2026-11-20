@@ -12,7 +12,6 @@ import { parseArgs } from "node:util";
 import { openBrain } from "./runtime/brain-store.js";
 import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
 import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
-import { discoverAdvertisedCapacity } from "./runtime/capacity.js";
 import { configuredModels } from "./runtime/llama-swap-model.js";
 import { runHeadless } from "./runtime/headless.js";
 
@@ -94,14 +93,8 @@ try {
     process.stderr.write(`carto: wrote ${configPath} (model ${config.model})\n`);
   }
 
-  const advertised = config.llamaSwapEndpoint === undefined
-    ? undefined
-    : await discoverAdvertisedCapacity(config.llamaSwapEndpoint, model.modelId);
-  const models = configuredModels(config, model, advertised);
-  const ceiling = config.contextWindow ?? 32_768;
-  const capacity = config.llamaSwapEndpoint === undefined
-    ? undefined
-    : { endpoint: config.llamaSwapEndpoint, configured: ceiling, modelId: model.modelId };
+  const models = configuredModels(config, model);
+  const refreshCapacity = config.llamaSwapEndpoint === undefined ? undefined : true;
 
   const code = await runHeadless({
     root,
@@ -111,7 +104,7 @@ try {
     input: process.stdin,
     output: process.stdout,
     error: process.stderr,
-    ...(capacity === undefined ? {} : { capacity }),
+    ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
   });
   brain.close();
   process.exitCode = code;

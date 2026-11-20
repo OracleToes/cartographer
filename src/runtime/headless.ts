@@ -24,7 +24,6 @@ import type { Readable, Writable } from "node:stream";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 
-import { activeContextWindow, discoverAdvertisedCapacity } from "./capacity.js";
 import {
   closeLiveSession,
   collapseLiveSession,
@@ -38,8 +37,14 @@ export interface HeadlessOptions extends LiveSessionOptions {
   input: Readable;
   output: Writable;
   error?: Writable;
-  /** Pre-flight discovery and post-run refresh; omit to run with the configured ceiling only. `fetchImpl` exists for the tests. */
-  capacity?: { endpoint: string; configured: number; modelId: string; fetchImpl?: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json(): Promise<unknown> }> };
+  /**
+   * When true, Pi's provider-catalog refresh runs before the session opens
+   * and after every settled run (llama-swap advertises a model's capacity
+   * only once it has loaded). The active window then follows the provider's
+   * catalog, which the llama-swap provider caps at the configured ceiling.
+   * Refresh failures are silent by design — the ceiling stands.
+   */
+  refreshCapacity?: boolean;
 }
 
 const HELP = [
@@ -63,12 +68,19 @@ function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<string>): 
   return lines;
 }
 
-async function applyCapacityRefresh(session: LiveSession, capacity: NonNullable<HeadlessOptions["capacity"]>, output: Writable): Promise<void> {
-  const advertised = await discoverAdvertisedCapacity(capacity.endpoint, capacity.modelId, capacity.fetchImpl);
-  if (advertised === undefined) return;
-  const next = activeContextWindow(capacity.configured, advertised.capacity);
-  if (next === session.state.contextWindow) return;
-  writeLine(output, `context limit ${session.state.contextWindow.toLocaleString()} → ${next.toLocaleString()} (advertised as ${advertised.source} = ${advertised.capacity.toLocaleString()})`);
+/** Exported for the tests. The provider's catalog is the single source of the active window; the llama-swap provider caps it at the configured ceiling. */
+export async function applyCapacityRefresh(
+  session: LiveSession,
+  refresh: () => Promise<void>,
+  models: LiveSessionOptions["models"],
+  providerId: string,
+  modelId: string,
+  output: Writable,
+): Promise<void> {
+  await refresh();
+  const next = models.getModel(providerId, modelId)?.contextWindow;
+  if (next === undefined || next === session.state.contextWindow) return;
+  writeLine(output, `context limit ${session.state.contextWindow.toLocaleString()} → ${next.toLocaleString()} (advertised by the server)`);
   session.state.contextWindow = next;
 }
 
@@ -82,15 +94,12 @@ async function runCollapse(session: LiveSession, options: HeadlessOptions, outpu
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
+  const refresh = async () => {
+    // Silent on failure: an unreachable server leaves the ceiling standing.
+    await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
+  };
+  if (options.refreshCapacity === true) await refresh();
   let session = await openLiveSession(options);
-  if (options.capacity !== undefined) {
-    const advertised = await discoverAdvertisedCapacity(options.capacity.endpoint, options.capacity.modelId, options.capacity.fetchImpl);
-    const next = activeContextWindow(options.capacity.configured, advertised?.capacity);
-    if (next !== session.state.contextWindow) {
-      writeLine(output, `context limit ${session.state.contextWindow.toLocaleString()} → ${next.toLocaleString()} (advertised as ${advertised?.source} = ${advertised?.capacity.toLocaleString()})`);
-      session.state.contextWindow = next;
-    }
-  }
   const seenChat = new Set<string>(options.brain.read().chat.filter((record) => record.author === "agent").map((record) => record.id));
 
   writeLine(output, `carto · headless · ${options.model.provider}/${options.model.modelId} · project ${options.root}`);
@@ -135,8 +144,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       if (reason !== null) {
         session = await runCollapse(session, options, output, reason);
       }
-      if (options.capacity !== undefined) {
-        await applyCapacityRefresh(session, options.capacity, output);
+      if (options.refreshCapacity === true) {
+        await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
       }
     }
   } finally {

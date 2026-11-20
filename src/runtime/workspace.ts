@@ -8,7 +8,6 @@
  * above is what the agentic tools enforce.
  */
 import { createHash } from "node:crypto";
-import { exec } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, writeFile, rename, chmod } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -148,46 +147,5 @@ export async function applyAtomicEdit(root: string, path: string, oldText: strin
   await chmod(temp, 0o644).catch(() => undefined);
   await rename(temp, real);
   return { path, outcome: "edited", bytes: Buffer.byteLength(updated) };
-}
-
-export interface ShellResult {
-  exitCode: number | null;
-  output: string;
-  timedOut: boolean;
-}
-
-export const MAX_SHELL_OUTPUT_CHARS = 30_000;
-export const MAX_SHELL_TIMEOUT_MS = 600_000;
-
-/**
- * Run a command inside the project (cwd pinned to the root). A non-zero exit
- * is reported, not thrown — it is information, not a tool failure. Timeouts
- * kill the child and are a tool failure. Output is the tail, capped.
- */
-export function runShell(root: string, command: string, timeoutMs: number): Promise<ShellResult> {
-  const bound = Math.min(Math.max(1_000, timeoutMs), MAX_SHELL_TIMEOUT_MS);
-  return new Promise((resolvePromise) => {
-    exec(
-      command,
-      { cwd: realpathSync(root), timeout: bound, killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        const combined = `${stdout}${stderr.length > 0 ? `\n[stderr]\n${stderr}` : ""}`;
-        const output =
-          combined.length > MAX_SHELL_OUTPUT_CHARS
-            ? `[...earlier output truncated]\n${combined.slice(-MAX_SHELL_OUTPUT_CHARS)}`
-            : combined;
-        if (error === null) {
-          resolvePromise({ exitCode: 0, output, timedOut: false });
-          return;
-        }
-        if (error.killed === true) {
-          resolvePromise({ exitCode: null, output: `${output}\n[timed out after ${bound} ms; the command was killed]`, timedOut: true });
-          return;
-        }
-        const code = typeof error.code === "number" ? error.code : null;
-        resolvePromise({ exitCode: code, output: `${output}\n[exit ${code ?? "unknown"}]`, timedOut: false });
-      },
-    );
-  });
 }
 

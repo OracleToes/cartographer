@@ -87,9 +87,15 @@ records coverage and gaps, not a score.
   assuming). Suite shrank from 58 to 15 and regrew to 29 as R1 and R2
   landed, then to 34 with the state block, 40 with the project tree, and
   50 with R3's tools and live session, 69 with R4's config, capacity,
-  provider, driver, and CLI coverage, and 70 with the interactive-terminal
-  fix (readline in terminal mode on a TTY; a non-terminal stdin with no
-  lines announces itself instead of exiting silently).
+  provider, driver, and CLI coverage, 70 with the interactive-terminal
+  fix, and 74 with the dependency-first pass: the built-in bash tool's
+  round trip through the environment, interrupt-settles-a-run whose bash
+  call is open, pi-ai's catalog refresh over a real local socket
+  (cold → advertised), and the deterministic applyCapacityRefresh unit.
+  Note: an earlier version of the refresh test relied on outbound
+  connection-refusal timing and hung the suite; it was replaced with
+  deterministic tests. A person's rig should still run the real boot
+  once — that path is only mocked here.
 - As of R4 (2026-11-20): config load/save/override semantics; capacity
   discovery against injected fakes (field order, strict id match,
   never-throws, ceiling-can-only-lower); the llama-swap provider's registry

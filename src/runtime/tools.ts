@@ -15,7 +15,7 @@ import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { sha256File } from "./digest.js";
-import { applyAtomicEdit, readBoundedRange, resolveProjectPath, runShell, WorkspaceError, MAX_RANGE_LINES } from "./workspace.js";
+import { applyAtomicEdit, readBoundedRange, resolveProjectPath, WorkspaceError, MAX_RANGE_LINES } from "./workspace.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -280,22 +280,6 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args) => {
         const result = await applyAtomicEdit(root, args.path, args.oldText, args.newText);
         return textOutput(result.outcome === "created" ? `Created ${result.path} (${result.bytes} bytes).` : `Edited ${result.path} (${result.bytes} bytes).`);
-      },
-    }),
-
-    defineTool({
-      name: "shell",
-      description:
-        "Run a command inside the project root. Output is the tail, capped. A non-zero exit code is information, not a failure. Timeouts kill the command.",
-      parameters: obj({
-        command: str({ minLength: 1, maxLength: 4000 }),
-        timeout: opt(int({ minimum: 1000, maximum: 600_000 })),
-      }),
-      replay: "unsafe",
-      execute: async (args) => {
-        const result = await runShell(root, args.command, args.timeout ?? 120_000);
-        if (result.timedOut) return errorOutput(`Command timed out.\n${result.output}`);
-        return textOutput(`${result.exitCode === null ? "[exit unknown]" : `[exit ${result.exitCode}]`}\n${result.output}`);
       },
     }),
 

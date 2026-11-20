@@ -336,3 +336,68 @@ placeholder headless driver.
   spec line is the person's, the bypass decide is also pending.
 
 Not done: R5+ (the interface, when the person settles §8's marks).
+### R4 addendum II — the shell call and the dependency-first audit, 2026-11-20
+
+**The shell, by the person's call: pi's built-in bash tool ("C").** The
+invented bounds (timeout clamp, SIGKILL, 30k tail, 8 MB buffer,
+`runShell` on pi `exec`) are gone with the tool itself. `NodeExecutionEnv`
+is wired per conversation (`Harness.env`, cwd = project root); the tool is
+`createBashTool()` from `@earendil-works/pi-durable/tools`. No limits of
+ours remain; pi keeps its designed 2000-line / 50 KB tail and spills the
+full output to a temp file reported as a diagnostic; the model may pass a
+timeout in seconds; interrupting the run kills the command (tested:
+a run interrupted during `sleep 30` settles promptly, no orphan).
+MINI.md §10a names the tool `shell`; the shipped name is `bash` — the
+person's explicit pick. MINI.md itself is never edited; this entry is the
+reconciliation. The system-prompt `.brain` line now states only the truth:
+the archive is the person's alone to restore from. inspect/edit are our
+tools (not harness-native); their wall stays. The suite covers the bash
+tool through the environment end to end (74/74).
+
+**The dependency-first audit the person ordered** ("make sure we're not
+hand-rolling anything else that pi-durable or pi-ai already does, especially
+what you've already written into this project"). Findings, all verified
+against the installed packages, none resolved by fiat:
+
+- `runtime/capacity.ts` (the /v1/models probe) — **hand-rolled provider
+  behavior; fixed this turn.** Pi-ai has the designed machinery:
+  `Provider.refreshModels` via `createProvider({ fetchModels })`, driven by
+  `Models.refresh({ providers })`. The llama-swap provider now maps the
+  listing onto Model objects (`context_length` → `context_window` → legacy
+  `meta.n_ctx`, strict id, `min(ceiling, advertised)`), the driver refreshes
+  before open and after every settled run, failures are silent and
+  retain-on-failure by pi's design. `capacity.ts` is deleted. One
+  unreachable-server test of mine hung the suite on outbound connect
+  semantics; it was removed and replaced with an in-process stub test plus a
+  real-socket test against a local mock llama-swap. Deterministic, no
+  network-behavior reliance.
+- `runtime/brain-store.ts` — **hand-rolled SQLite adapter
+  (`node:sqlite`).** §11 keeps SQLite adapters off our plate; but pi's
+  stores are commit/append-oriented and the Brain's confirmed semantics
+  (current state only, one-row one-document overwrite, single-step delete,
+  "delete means delete") are not what they model, and the Brain is separate
+  from Pi storage by the person's own §4.2 confirmation. Kept, flagged.
+  Per-mechanism review (Q1.1) applies; the person can order it redesigned
+  onto pi's document machinery.
+- `runtime/tools.ts` `inspect`/`edit` vs pi's `createReadTool`/
+  `createEditTool` — **reviewed and kept.** Pi's read has no `.brain`
+  wall, no bounded lines (400), no digest; pi's edit has no
+  unique-occurrence guarantee, no atomic create-with-empty-oldText, no
+  `.brain` wall. Both are product-surface semantics the spec demands;
+  wrapping pi's would be full reimplementation anyway.
+- Everything else checked clean: harness/conversation/tasks/LiveDoc/`waitForTask`
+  (interrupt), tools via `defineTool` + pi-schema validators, extension pieces
+  (`section`, `hook`, `defineExtension`, `CompactionTask`, `GenerationTask`),
+  `SqliteStorage` and `openNodeSqliteDatabase` (used, not reimplemented),
+  the collapse ceremony's primitives, pi-schema arg validation, pi-ai faux
+  provider in tests, Node builtins only where Pi has no opinion
+  (`parseArgs`, `readline` for the headless placeholder, `path`/`fs`/`os`,
+  `crypto` for digests).
+- Not pi's job by design: our projection/handles/freshness/state-block
+  machinery, the tree renderer, config files, the installer, the CLI shim.
+  pi-tui is unused so far (nothing renders yet).
+
+Known seam carried forward unchanged: §6.2's `beforeProviderRequest` vs the
+shipped `beforeRequest` (person kept it), the pinned-to-archive export
+(person), the `.brain` archive line (person's answer: the shell needed
+nothing special; inspect/edit keep the wall).

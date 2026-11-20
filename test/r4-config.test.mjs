@@ -17,9 +17,10 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
-import { discoverAdvertisedCapacity, activeContextWindow } from "../dist/runtime/capacity.js";
-import { configuredModels, modelsForConfig, DEFAULT_CONTEXT_WINDOW } from "../dist/runtime/llama-swap-model.js";
-import { runHeadless } from "../dist/runtime/headless.js";
+import { advertisedCapacityOf, catalogModel, activeContextWindow, configuredModels, modelsForConfig, DEFAULT_CONTEXT_WINDOW } from "../dist/runtime/llama-swap-model.js";
+import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
+import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
+import { createServer } from "node:http";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "carto-r4-"));
 const FIXED_NOW = () => 1_700_000_000_000;
@@ -111,20 +112,24 @@ test("a corrupt config names its path and the parse failure", async () => {
 
 // ---------- advertised capacity ----------
 
-test("discovery reads context_length, then context_window, then legacy meta.n_ctx", async () => {
+test("capacity advertisement is read from context_length, then context_window, then legacy meta.n_ctx", () => {
   const base = { id: "ByteShape" };
-  assert.deepEqual(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch({ data: [{ ...base, context_length: 131_072 }] })), { capacity: 131_072, source: "context_length" });
-  assert.deepEqual(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch({ data: [{ ...base, context_window: 98_304 }] })), { capacity: 98_304, source: "context_window" });
-  assert.deepEqual(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch({ data: [{ ...base, meta: { n_ctx: 65_536 } }] })), { capacity: 65_536, source: "meta.n_ctx" });
-  assert.equal(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch({ data: [base] })), undefined);
+  assert.deepEqual(advertisedCapacityOf({ ...base, context_length: 131_072 }), { capacity: 131_072, source: "context_length" });
+  assert.deepEqual(advertisedCapacityOf({ ...base, context_window: 98_304 }), { capacity: 98_304, source: "context_window" });
+  assert.deepEqual(advertisedCapacityOf({ ...base, meta: { n_ctx: 65_536 } }), { capacity: 65_536, source: "meta.n_ctx" });
+  assert.equal(advertisedCapacityOf(base), undefined);
+  assert.equal(advertisedCapacityOf("junk"), undefined);
 });
 
-test("discovery never throws: HTTP errors, garbage, and unknown ids all yield undefined", async () => {
-  assert.equal(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch({}, { ok: false })), undefined);
-  assert.equal(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", fakeFetch("not json shaped at all")), undefined);
-  assert.equal(await discoverAdvertisedCapacity("http://x/v1", "OtherModel", fakeFetch({ data: [{ id: "ByteShape", context_length: 1 }] })), undefined);
-  const boom = async () => { throw new Error("connection refused"); };
-  assert.equal(await discoverAdvertisedCapacity("http://x/v1", "ByteShape", boom), undefined);
+test("a listing entry maps to a Model with min(ceiling, advertised); no id means no entry", () => {
+  const capped = catalogModel({ id: "ByteShape", context_length: 131_072 }, 75_000, "http://x/v1");
+  assert.equal(capped.contextWindow, 75_000, "advertised above the ceiling stays capped");
+  const lowered = catalogModel({ id: "ByteShape", context_length: 65_536 }, 75_000, "http://x/v1");
+  assert.equal(lowered.contextWindow, 65_536, "advertised below the ceiling lowers the window");
+  const silent = catalogModel({ id: "ByteShape" }, 75_000, "http://x/v1");
+  assert.equal(silent.contextWindow, 75_000, "no advertisement keeps the ceiling");
+  assert.equal(catalogModel({ context_length: 65_536 }, 75_000, "http://x/v1"), undefined);
+  assert.equal(catalogModel({ id: "  " }, 75_000, "http://x/v1"), undefined);
 });
 
 test("the ceiling never rises: advertised capacity can only lower the active window", () => {
@@ -143,18 +148,43 @@ test("only llama-swap is wired; anything else fails plainly", () => {
   assert.throws(() => modelsForConfig({ version: 1, model: "llama-swap/x" }, { provider: "llama-swap", modelId: "x" }), /llamaSwapEndpoint/);
 });
 
-test("the registry serves the model with the ceiling until the server advertises one", () => {
+test("the registry serves the ceiling until the server advertises one, via pi's refresh", async () => {
   const models = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" });
-  const model = models.getModel("llama-swap", "ByteShape");
-  assert.equal(model.contextWindow, 75_000);
-  assert.equal(model.baseUrl, "http://localhost:8888/v1");
-  assert.equal(model.api, "openai-completions");
+  const baseline = models.getModel("llama-swap", "ByteShape");
+  assert.equal(baseline.contextWindow, 75_000);
+  assert.equal(baseline.baseUrl, "http://localhost:8888/v1");
+  assert.equal(baseline.api, "openai-completions");
 
-  const offered = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { capacity: 65_536, source: "context_length" });
-  assert.equal(offered.getModel("llama-swap", "ByteShape").contextWindow, 65_536);
+  // Before the model loads: the listing carries no capacity, the ceiling stands.
+  const cold = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape" }] }) });
+  await cold.refresh({ providers: ["llama-swap"] });
+  assert.equal(cold.getModel("llama-swap", "ByteShape").contextWindow, 75_000);
+
+  // Once loaded: advertised capacity wins, capped at the ceiling.
+  const warm = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape", context_length: 131_072 }] }) });
+  await warm.refresh({ providers: ["llama-swap"] });
+  assert.equal(warm.getModel("llama-swap", "ByteShape").contextWindow, 75_000);
+  const honest = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape", meta: { n_ctx: 65_536 } }] }) });
+  await honest.refresh({ providers: ["llama-swap"] });
+  assert.equal(honest.getModel("llama-swap", "ByteShape").contextWindow, 65_536);
 
   const missingWindow = configuredModels({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "http://localhost:8888/v1" }, { provider: "llama-swap", modelId: "x" });
   assert.equal(missingWindow.getModel("llama-swap", "x").contextWindow, DEFAULT_CONTEXT_WINDOW);
+});
+
+test("a failed refresh retains the previous catalog (pi's retain-on-failure)", async () => {
+  let calls = 0;
+  const stateful = async () => {
+    calls += 1;
+    if (calls === 1) return { ok: true, json: async () => ({ data: [{ id: "ByteShape", context_length: 65_536 }] }) };
+    return { ok: false, status: 503, json: async () => ({}) };
+  };
+  const models = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: stateful });
+  await models.refresh({ providers: ["llama-swap"] });
+  assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536);
+  const second = await models.refresh({ providers: ["llama-swap"] });
+  assert.equal(second.errors.size, 1, "the failure lands in the error map, visibly");
+  assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "the previous catalog stands");
 });
 
 // ---------- the headless driver (faux provider, scripted) ----------
@@ -241,31 +271,56 @@ test("/collapse runs the ceremony on the spot and reports it; /quit ends before 
   }
 });
 
-test("capacity discovery lowers the active window once the server advertises one", async () => {
+test("applyCapacityRefresh follows the provider catalog: lowers the window, prints one line, idempotent", async () => {
   const { root, brain, cleanup } = headlessFixture();
-  const { faux, models, ref } = fauxFor(75_000);
-  faux.setResponses([
-    (context) => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-cap" })], { stopReason: "toolUse" }),
-  ]);
-  const advertisedModels = { data: [{ id: "faux-model", context_length: 65_536 }] };
-  const capture = { contextWindowAtOpen: 75_000 };
-  void capture;
+  const { faux, models, ref } = fauxFor(100_000);
+  const session = await openLiveSession({ root, brain, models, model: ref, now: FIXED_NOW });
+  assert.equal(session.state.contextWindow, 100_000);
   const out = captureStream();
   try {
-    const code = await runHeadless({
-      root,
-      brain,
-      models,
-      model: ref,
-      input: inputFrom(["go", "/quit"]),
-      output: out.stream,
-      now: FIXED_NOW,
-      capacity: { endpoint: "http://localhost:8888/v1", configured: 75_000, modelId: "faux-model", fetchImpl: fakeFetch(advertisedModels) },
-    });
-    assert.equal(code, 0);
-    assert.match(out.text(), /context limit 75,000 → 65,536 \(advertised as context_length = 65,536\)/);
+    let catalog = { contextWindow: 100_000 };
+    const stubModels = {
+      refresh: async () => undefined,
+      getModel: () => catalog,
+    };
+    const refresh = async () => { catalog = { contextWindow: 65_536 }; };
+    await applyCapacityRefresh(session, refresh, stubModels, "faux-test", "faux-model", out.stream);
+    assert.equal(session.state.contextWindow, 65_536);
+    assert.match(out.text(), /context limit 100,000 → 65,536 \(advertised by the server\)/);
+    await applyCapacityRefresh(session, async () => undefined, stubModels, "faux-test", "faux-model", out.stream);
+    assert.equal(out.text().match(/context limit/g).length, 1, "no repeat line while nothing changes");
   } finally {
+    await closeLiveSession(session);
     cleanup();
+  }
+});
+
+test("pi's catalog refresh over a real HTTP socket lowers the model's advertised window", async () => {
+  // A deterministic stand-in for llama-swap: answers /v1/models with the
+  // capacity once the model "has loaded" (second call), mirroring llama-swap.
+  let calls = 0;
+  const server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      calls += 1;
+      const listing = calls >= 2 ? { data: [{ id: "ByteShape", context_length: 65_536 }] } : { data: [{ id: "ByteShape" }] };
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(listing));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const { port } = server.address();
+  try {
+    const swapConfigLocal = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1`, contextWindow: 75_000 };
+    const models = configuredModels(swapConfigLocal, { provider: "llama-swap", modelId: "ByteShape" });
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 75_000, "cold: ceiling");
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "after load: advertised");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
   }
 });
 

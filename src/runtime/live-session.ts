@@ -15,6 +15,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import {
   createRegistry,
   Harness,
@@ -117,7 +118,15 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         now,
       }),
     );
-    harness = await Harness.open(storage, { models: options.models, registry, now, ...(options.onReport === undefined ? {} : { onReport: options.onReport }) }, BACKGROUND_CONTEXT);
+    harness = await Harness.open(storage, {
+      models: options.models,
+      registry,
+      now,
+      // The environment the built-in bash runs through: one per conversation,
+      // cwd at the project root. No policy of ours is attached to it.
+      env: () => new NodeExecutionEnv({ cwd: root }),
+      ...(options.onReport === undefined ? {} : { onReport: options.onReport }),
+    }, BACKGROUND_CONTEXT);
     const agent = {
       model: modelRef,
       instructions: CARTO_INSTRUCTIONS,

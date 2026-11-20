@@ -12,6 +12,7 @@
 import { readFile } from "node:fs/promises";
 
 import { CompactionTask, GenerationTask, defineExtension, hook, section } from "@earendil-works/pi-durable";
+import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
 
 import { handleOf } from "../domain/handles.js";
@@ -36,7 +37,7 @@ export const CARTO_INSTRUCTIONS = [
   "Keep the Brain: Atlas for source-backed claims, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words, pins to keep something close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
   "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale evidence, armed wakes, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
-  "`.brain` is not yours: no tool reads, lists, or writes it.",
+  "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
 ].join("\n");
 
 export interface LiveSessionState extends ToolSession {
@@ -171,6 +172,13 @@ export function createCartoExtension(options: CartoExtensionOptions) {
         onYield: () => ({ continue: STATE_BLOCK_MARKER }),
       }),
     ],
-    tools: createTools({ root: options.root, brain: options.brain, session: options.session }),
+    tools: [
+      ...createTools({ root: options.root, brain: options.brain, session: options.session }),
+      // §10a's "shell", per the person's call: pi-durable's built-in bash —
+      // runs through the env (wired in live-session), abort kills the
+      // command; pi keeps the 2000-line / 50 KB tail and spills the rest to
+      // a temp file reported in a diagnostic. No limits of ours are added.
+      createBashTool(),
+    ],
   });
 }
