@@ -611,7 +611,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           `# carto session dump — ${new Date().toISOString()}`,
           `project: ${options.root}`,
           `generation: ${state.session.generation}`,
-          `model: ${modelLabel} · window ${state.session.contextWindow.toLocaleString("en-US")}`,
+          `model: ${modelLabel} · ${state.session.contextWindow > 0 ? `window ${state.session.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
           `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
           `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length} · pins ${brainState.userPins.length + brainState.carryPins.length} · wakes ${brainState.wakes.length}`,
           "",

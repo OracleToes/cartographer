@@ -17,7 +17,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
-import { advertisedCapacityOf, catalogModel, activeContextWindow, configuredModels, modelsForConfig, DEFAULT_CONTEXT_WINDOW } from "../dist/runtime/llama-swap-model.js";
+import { advertisedCapacityOf, catalogModel, resolveContextWindow, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
 import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
@@ -121,22 +121,30 @@ test("capacity advertisement is read from context_length, then context_window, t
   assert.equal(advertisedCapacityOf("junk"), undefined);
 });
 
-test("a listing entry maps to a Model with min(ceiling, advertised); no id means no entry", () => {
-  const capped = catalogModel({ id: "ByteShape", context_length: 131_072 }, 75_000, "http://x/v1");
-  assert.equal(capped.contextWindow, 75_000, "advertised above the ceiling stays capped");
-  const lowered = catalogModel({ id: "ByteShape", context_length: 65_536 }, 75_000, "http://x/v1");
-  assert.equal(lowered.contextWindow, 65_536, "advertised below the ceiling lowers the window");
-  const silent = catalogModel({ id: "ByteShape" }, 75_000, "http://x/v1");
-  assert.equal(silent.contextWindow, 75_000, "no advertisement keeps the ceiling");
+test("a listing entry maps to a Model: the configured pin wins, then the advertised window, else unknown", () => {
+  const pinnedHigh = catalogModel({ id: "ByteShape", context_length: 131_072 }, 75_000, "http://x/v1");
+  assert.equal(pinnedHigh.contextWindow, 75_000, "the pin wins over an advertised window below it");
+  assert.equal(pinnedHigh.maxTokens, 75_000);
+  const pinnedLow = catalogModel({ id: "ByteShape", context_length: 65_536 }, 131_072, "http://x/v1");
+  assert.equal(pinnedLow.contextWindow, 131_072, "the pin can raise the server above its advertised window");
+  const silentPin = catalogModel({ id: "ByteShape" }, 75_000, "http://x/v1");
+  assert.equal(silentPin.contextWindow, 75_000, "the pin serves a silent server");
+  const advertised = catalogModel({ id: "ByteShape", context_length: 65_536 }, undefined, "http://x/v1");
+  assert.deepEqual([advertised.contextWindow, advertised.maxTokens], [65_536, 65_536], "no pin: the server's advertised window is the truth");
+  const unknown = catalogModel({ id: "ByteShape" }, undefined, "http://x/v1");
+  assert.deepEqual([unknown.contextWindow, unknown.maxTokens], [0, UNKNOWN_MAX_TOKENS], "no pin and no advertisement: the window is unknown and generation is uncapped");
   assert.equal(catalogModel({ context_length: 65_536 }, 75_000, "http://x/v1"), undefined);
   assert.equal(catalogModel({ id: "  " }, 75_000, "http://x/v1"), undefined);
 });
 
-test("the ceiling never rises: advertised capacity can only lower the active window", () => {
-  assert.equal(activeContextWindow(75_000, undefined), 75_000);
-  assert.equal(activeContextWindow(75_000, 65_536), 65_536);
-  assert.equal(activeContextWindow(75_000, 131_072), 75_000);
-  assert.equal(activeContextWindow(75_000, 0), 75_000);
+test("the pin always wins — advertised capacity neither caps nor lowers it; unknown when both are absent", () => {
+  assert.equal(resolveContextWindow(75_000, undefined), 75_000);
+  assert.equal(resolveContextWindow(75_000, 65_536), 75_000);
+  assert.equal(resolveContextWindow(75_000, 131_072), 75_000);
+  assert.equal(resolveContextWindow(75_000, 0), 75_000);
+  assert.equal(resolveContextWindow(undefined, 65_536), 65_536);
+  assert.equal(resolveContextWindow(undefined, undefined), 0);
+  assert.equal(resolveContextWindow(undefined, 0), 0);
 });
 
 // ---------- the llama-swap provider ----------
@@ -148,28 +156,33 @@ test("only llama-swap is wired; anything else fails plainly", () => {
   assert.throws(() => modelsForConfig({ version: 1, model: "llama-swap/x" }, { provider: "llama-swap", modelId: "x" }), /llamaSwapEndpoint/);
 });
 
-test("the registry serves the ceiling until the server advertises one, via pi's refresh", async () => {
+const swapConfigNoPin = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1" };
+
+test("the registry serves the pin when set, else the advertised window, else unknown — via pi's refresh", async () => {
   const models = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" });
   const baseline = models.getModel("llama-swap", "ByteShape");
   assert.equal(baseline.contextWindow, 75_000);
   assert.equal(baseline.baseUrl, "http://localhost:8888/v1");
   assert.equal(baseline.api, "openai-completions");
 
-  // Before the model loads: the listing carries no capacity, the ceiling stands.
+  // A pin serves cold and warm alike: the server's advertisement never overrides it.
   const cold = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape" }] }) });
   await cold.refresh({ providers: ["llama-swap"] });
   assert.equal(cold.getModel("llama-swap", "ByteShape").contextWindow, 75_000);
-
-  // Once loaded: advertised capacity wins, capped at the ceiling.
   const warm = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape", context_length: 131_072 }] }) });
   await warm.refresh({ providers: ["llama-swap"] });
-  assert.equal(warm.getModel("llama-swap", "ByteShape").contextWindow, 75_000);
-  const honest = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape", meta: { n_ctx: 65_536 } }] }) });
+  assert.equal(warm.getModel("llama-swap", "ByteShape").contextWindow, 75_000, "the pin wins over the server's advertisement, both directions");
+
+  // No pin: the advertised window arrives with the load and is used.
+  const honest = configuredModels(swapConfigNoPin, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: fakeFetch({ data: [{ id: "ByteShape", meta: { n_ctx: 65_536 } }] }) });
+  const silentBefore = honest.getModel("llama-swap", "ByteShape");
+  assert.equal(silentBefore.contextWindow, 0, "before any advertisement the window is unknown");
+  assert.equal(silentBefore.maxTokens, UNKNOWN_MAX_TOKENS, "unknown window means an uncapped max_tokens");
   await honest.refresh({ providers: ["llama-swap"] });
   assert.equal(honest.getModel("llama-swap", "ByteShape").contextWindow, 65_536);
 
   const missingWindow = configuredModels({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "http://localhost:8888/v1" }, { provider: "llama-swap", modelId: "x" });
-  assert.equal(missingWindow.getModel("llama-swap", "x").contextWindow, DEFAULT_CONTEXT_WINDOW);
+  assert.equal(missingWindow.getModel("llama-swap", "x").contextWindow, 0, "no pin, no advertisement: unknown, never invented");
 });
 
 test("a failed refresh retains the previous catalog (pi's retain-on-failure)", async () => {
@@ -179,7 +192,7 @@ test("a failed refresh retains the previous catalog (pi's retain-on-failure)", a
     if (calls === 1) return { ok: true, json: async () => ({ data: [{ id: "ByteShape", context_length: 65_536 }] }) };
     return { ok: false, status: 503, json: async () => ({}) };
   };
-  const models = configuredModels(swapConfig, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: stateful });
+  const models = configuredModels(swapConfigNoPin, { provider: "llama-swap", modelId: "ByteShape" }, { fetchImpl: stateful });
   await models.refresh({ providers: ["llama-swap"] });
   assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536);
   const second = await models.refresh({ providers: ["llama-swap"] });
@@ -285,9 +298,9 @@ test("applyCapacityRefresh follows the provider catalog: lowers the window, prin
     const refresh = async () => { catalog = { contextWindow: 65_536 }; };
     await applyCapacityRefresh(session, refresh, stubModels, "faux-test", "faux-model", out.stream);
     assert.equal(session.state.contextWindow, 65_536);
-    assert.match(out.text(), /context limit 100,000 → 65,536 \(advertised by the server\)/);
+    assert.match(out.text(), /context window 100,000 → 65,536 \(advertised by the server\)/);
     await applyCapacityRefresh(session, async () => undefined, stubModels, "faux-test", "faux-model", out.stream);
-    assert.equal(out.text().match(/context limit/g).length, 1, "no repeat line while nothing changes");
+    assert.equal(out.text().match(/context window/g).length, 1, "no repeat line while nothing changes");
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -312,10 +325,10 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
   await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
   const { port } = server.address();
   try {
-    const swapConfigLocal = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1`, contextWindow: 75_000 };
+    const swapConfigLocal = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` };
     const models = configuredModels(swapConfigLocal, { provider: "llama-swap", modelId: "ByteShape" });
     await models.refresh({ providers: ["llama-swap"] });
-    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 75_000, "cold: ceiling");
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 0, "cold: the window is unknown");
     await models.refresh({ providers: ["llama-swap"] });
     assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "after load: advertised");
   } finally {

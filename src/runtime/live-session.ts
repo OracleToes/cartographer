@@ -68,8 +68,6 @@ export interface LiveSession {
   takeCollapseRequest(): string | null;
 }
 
-const FALLBACK_CONTEXT_WINDOW = 32_768;
-
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
   const root = resolve(options.root);
   const now = () => options.now?.() ?? Date.now();
@@ -94,7 +92,10 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const storage = await SqliteStorage.open(database, { prefix: "live_" });
 
   const modelRef = options.model;
-  const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+  // 0 = the window is unknown (silent server, no --context-window): pi
+  // unclamps generation, and the UI renders "window unknown" until the
+  // server advertises one (the driver re-discovers after every settled run).
+  const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
     contextWindow,
     pending: [],

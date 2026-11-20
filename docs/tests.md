@@ -130,7 +130,7 @@ records coverage and gaps, not a score.
   once — that path is only mocked here.
 - As of R4 (2026-11-20): config load/save/override semantics; capacity
   discovery against injected fakes (field order, strict id match,
-  never-throws, ceiling-can-only-lower); the llama-swap provider's registry
+  never-throws, pin-wins semantics); the llama-swap provider's registry
   output; the headless driver end to end against the faux provider
   (chat-only person output, the no-chat parenthetical, /collapse, exit at
   stdin EOF); the capacity refresh lowering the live window after a turn;

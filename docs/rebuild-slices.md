@@ -591,3 +591,33 @@ AGENTS.md forbids… including all tools and such"). Findings:
 - Estimate glyphs (`▤`), the state block's omission-free rendering, the
   token bar's segment estimates: unchanged — they are labelled estimates,
   never enforced bounds.
+
+### Addendum — ceiling removal, tool rename, shell kept (2026-11-20, person's word)
+
+- **The artificial ceiling is gone.** Until this addendum, the active window
+  was `min(configured ceiling, advertised)` with a 32,768 uninformed default —
+  Carto's invention, not the server's truth, and not the person's. The person
+  ruled: the configured `--context-window` **always wins** (a hard override,
+  even above advertised capacity); with no pin, the server's advertised
+  capacity is the truth; with neither, the window is **0 — unknown**, and the
+  UI renders "window unknown" (the token bar draws an empty hatched bar with
+  `<used> tokens · window unknown`, the state block's fullness line carries
+  `(window unknown)`, the header and `/copy-session` say so) — never a
+  made-up number. pi treats `contextWindow <= 0` as unclamped; the declared
+  `maxTokens` becomes int32-max (`UNKNOWN_MAX_TOKENS`), which llama.cpp
+  honours as "until done or context exhausted". MINI.md §8 already specified
+  the server's real window as the bar's denominator; the code now obeys it.
+  `--context-window` survives by the person's explicit choice, as the
+  always-wins pin (integer ≥ 1024 — that sanity floor is Carto's, flagged
+  here, not removed unasked).
+- **`inspect` is now `read`** (person's word, 2026-11-20): named for an
+  assumption never confirmed. All references follow — tool name,
+  instructions, descriptions, tests, living docs, MINI.md §10a ("bounded"
+  dropped there with the limits audit; the tool reads any line range).
+- **Pi's built-in bash is the shell, kept** (person's call): pi's ~2000-line /
+  50 KB tail and spill-to-temp diagnostic stay as they are; no Carto wrapper
+  is built. Anyone reading this addendum later should not re-propose it
+  without the person raising it.
+- **Config floor flagged:** `contextWindow` in `~/.carto/config.json` still
+  requires an integer ≥ 1024 (`parseContextWindow`) — an arbitrary sanity
+  floor on the person's explicit number; the person decides whether it goes.

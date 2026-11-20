@@ -34,7 +34,8 @@ export class HeaderView implements Component {
   }
 
   render(width: number): string[] {
-    const window = this.state.session.state.contextWindow.toLocaleString("en-US");
+    const stateWindow = this.state.session.state.contextWindow;
+    const window = stateWindow > 0 ? stateWindow.toLocaleString("en-US") : "window unknown";
     const right = tokens.muted(`${this.state.modelLabel} · ${window}`);
     const rightWidth = visibleWidth(`${this.state.modelLabel} · ${window}`);
     const left = truncateToWidth(

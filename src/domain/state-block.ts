@@ -45,6 +45,7 @@ export interface PendingWrite {
 }
 
 export interface StateBlockInput {
+  /** The server's advertised window or the person's pin; 0 = unknown, never a made-up number. */
   contextWindow: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
@@ -73,9 +74,13 @@ const thousands = (value: number): string => Math.round(value).toLocaleString("e
 export function renderStateBlock(input: StateBlockInput): string {
   const reported = input.lastReportedInput;
   const fullness =
-    reported === undefined
-      ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens (not yet reported by the provider)`
-      : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)})`;
+    input.contextWindow <= 0
+      ? reported === undefined
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} tokens (window unknown)`
+        : `context: ~${thousands(reported + input.toolWorkSince)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)}; window unknown)`
+      : reported === undefined
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens (not yet reported by the provider)`
+        : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)})`;
   const space =
     `space: system+tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
