@@ -137,9 +137,10 @@ fullness number are the pressure. See `docs/intent.md` §27.
 Brain part, pending changes, stale items, wakes, and the project tree. See
 `docs/intent.md` §21.
 
-**Q7.2 — What is the structured ID scheme?** "Items given structured IDs" is
-unwritten. *Needs:* a scheme, and whether it is the same handle system as the
-Brain or separate.
+**Q7.2 — Resolved 2026-11-16.** The state block's items reuse the Brain's
+generation-local handles; no separate scheme. The pending list is ephemeral
+(starts empty after a crash), and the frozen projection persists as a
+per-generation snapshot file under `.brain/context/`. See `docs/intent.md` §34.
 
 **Q7.3 — Resolved by confirmation.** It is present on every request; that is
 what “appended to every request” means in §6.3 of MINI.md. Always present,

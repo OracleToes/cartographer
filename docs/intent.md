@@ -500,3 +500,20 @@ the agent's output already lives in Chat and the Ledger. Cancel is interrupt
 plus dropping the queue.
 
 **Established by.** The person confirmed: "confirmed."
+
+## 34. The state block's details, confirmed
+
+**Decision.** The state block's items reuse the Brain's generation-local
+handles; there is no separate ID scheme. The pending list — one line per
+pending Brain write since the projection was rebuilt, named by handle — is
+ephemeral: it lives in session memory and starts empty after a crash, like
+activity itself. The frozen projection persists as a per-generation snapshot
+file under `.brain/context/`, written once when the generation is created,
+immutable until the generation is purged; a crash reopens the identical
+bytes. Slice two carries the full set of §21 contents, including the project
+tree, rendered at the project root at a small fixed depth until slice three's
+`tree` tool exists.
+
+**Established by.** The person, answering the four questions asked before
+slice two began: "reuse the Brain handles", "ephemeral is fine", "per-generation
+snapshot file", "everything in the continuation-loop slice".
