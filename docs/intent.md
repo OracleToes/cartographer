@@ -467,3 +467,15 @@ boundary that the archive exists.
 **Established by.** The person confirmed both halves directly: "yes, restore the
 original type, let the state block inform the agent of stale data" and "no it
 doesn't even know the archive exists, giving it a tool breaks intent."
+
+
+## 31. Collapse signalling
+
+**Decision.** The system prompt carries one line: the person may collapse the
+context at any time, and a collapse rebuilds the agent's context from the
+Brain. A standing fact, not mutable state; consequence, not threat. A
+person-triggered collapse gets no boundary and no warning; afterwards the
+person sees a plain report of what collapsed, not a confirmation.
+
+**Established by.** The person confirmed both halves directly: "5.1 yes agreed"
+and "5.2 yes confirmed."

@@ -198,9 +198,15 @@ own, because it does not want to forget. Knowing the person can collapse at any
 time is meant to keep the agent's representation of its intent, progress, and
 understanding current in the Brain.
 
-> Confirmed by the person. Open: whether the agent gets an explicit "collapse is
-> available" signal or a firm warning before a person-triggered collapse. See
-> `docs/open-questions.md` §5.
+The system prompt carries one line: the person may collapse the context at any
+time, and a collapse rebuilds the agent's context from the Brain. A standing
+fact, not mutable state; stated as consequence, not as threat.
+
+A person-triggered collapse gets no boundary and no warning. Afterwards the
+person sees a plain report — collapsed, previous generation archived — not a
+confirmation beforehand.
+
+> Confirmed by the person.
 
 Collapse does not delete Brain records. Only a delete can.
 

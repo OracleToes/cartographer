@@ -92,17 +92,16 @@ exists and has no way to address it.
 
 See `docs/intent.md` §30 and `MINI.md` §4.1.
 
-## §5. Collapse signalling
+## §5. Collapse signalling — resolved
 
-**Q5.1 — Does the agent know a collapse can happen at any time?** The person
-hopes it will keep its Brain current if it knows. That requires the agent to be
-told, in the state block or the instructions. *Needs:* whether it is told, and
-how bluntly.
+**Q5.1 — Resolved.** The agent is told, in one system-prompt line, that the
+person may collapse at any time and that collapse rebuilds its context from
+the Brain. Consequence, not threat.
 
-**Q5.2 — Warning before a person-triggered collapse?** The old spec had a
-confirmation. Removing it means a person can collapse mid-work. *Needs:* whether
-the agent needs a boundary to finish first, and whether the person should see what
-will be lost.
+**Q5.2 — Resolved.** No boundary, no warning. Afterwards the person sees a
+plain report, not a confirmation.
+
+See `docs/intent.md` §31.
 
 ## §6. Projection order and timestamps — resolved by the freeze
 
