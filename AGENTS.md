@@ -122,18 +122,18 @@ kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
 
-A **stage** is one unit of work, ending in a submission push. While the
-stage is in progress — reading, deciding, editing — run nothing: **no
-`npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** The build
-and the tests happen once, at the very end, when you are ready to submit the
-code. They are the submission, not a way to check your work as you go. If you
-do not know whether something will compile, read the code; do not ask the
-compiler.
+A **stage** is one complete unit of work that ends when you are ready to tell the
+person it is done. While the stage is in progress — reading, deciding, editing — run
+nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** Tests
+are not a sanity check, an iterative aid, or a way to help you write code.
 
-Pushes are not only at the end. Commit and push as you go, half-finished if
-that is where you are — a push mid-stage is how work survives a workspace
-reset, and it implies no verification of any kind: no build, no tests, no
-gate. The submission sequence, when the work is ready, is fixed:
+The build and the tests happen strictly once, at the very end of the stage, right
+before you stop to tell the person the work is done.
+
+Pushes are not only at the end. Commit and push as you go mid-stage if needed — a
+push mid-stage is how work survives a workspace reset, and it implies no verification:
+no build, no tests, no gate. The submission sequence, when you have finished all edits
+and are ready to report done, is fixed:
 
 1. **Make every edit you expect the stage to need.** Read the code first.
    Make surgical edits to existing files; never overwrite or rewrite entire
@@ -141,13 +141,14 @@ gate. The submission sequence, when the work is ready, is fixed:
 2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
    build is the gate: it is what lets you say you are confident.
 3. **Commit and push.** Before you run a single test.
-4. **Run the tests.** `npm test`, run-only budget: 10 seconds.
+4. **Run the tests.** `npm test`, run-only budget: 10 seconds. Tests exist to reveal
+   breaks in the code before you report done, not as a progress check.
 5. **If a test fails, fix it, build, push again, then test again.**
 
-Never run tests — and never run a build — in the middle of a stage, or before
-the work is ready to submit. Reading the code is how you know what will work;
-the build and tests are how you prove it at the end. Never end a turn with an
-unpushed commit or a dirty tree.
+Never run tests — and never run a build — in the middle of a stage, or as a
+check on your progress while working. Reading the code is how you know what will
+work; the build and tests are how you prove it at the very end when you are about to
+tell the person it is done. Never end a turn with an unpushed commit or a dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
 warning, and the person cannot see anything that is not pushed. A push
