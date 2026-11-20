@@ -59,22 +59,32 @@ export interface ReadRange {
 
 /**
  * Read a file, or a line range of it, with the whole file's digest for
- * evidence. Omit both range arguments to read the whole file; pass both to
- * read a range. One without the other is an error, never a guess.
+ * evidence. Each bound is independently open: omit both for the whole file,
+ * pass startLine only to read from that line to the end of the file, pass
+ * endLine only to read from line 1 through that line, pass both for a
+ * range. A startLine past the end of the file is an error, never an empty
+ * read pretending to be an answer.
  */
 export async function readRange(root: string, path: string, startLine?: number, endLine?: number): Promise<ReadRange> {
-  if ((startLine === undefined) !== (endLine === undefined)) {
-    throw new WorkspaceError("pass both startLine and endLine, or neither to read the whole file");
+  if (startLine !== undefined && !Number.isInteger(startLine) || endLine !== undefined && !Number.isInteger(endLine)) {
+    throw new WorkspaceError(`range must be whole lines; got ${String(startLine)}-${String(endLine)}`);
   }
-  if (startLine !== undefined && endLine !== undefined) {
-    if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
-      throw new WorkspaceError(`range must be whole lines with 1 <= start <= end; got ${startLine}-${endLine}`);
-    }
+  if (startLine !== undefined && startLine < 1) {
+    throw new WorkspaceError(`startLine must be 1 or more; got ${startLine}`);
+  }
+  if (endLine !== undefined && endLine < 1) {
+    throw new WorkspaceError(`endLine must be 1 or more; got ${endLine}`);
+  }
+  if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+    throw new WorkspaceError(`range must be whole lines with 1 <= start <= end; got ${startLine}-${endLine}`);
   }
   const real = resolveProjectPath(root, path);
   const bytes = await readFile(real);
   const digest = createHash("sha256").update(bytes).digest("hex");
   const lines = bytes.toString("utf8").split("\n");
+  if (startLine !== undefined && startLine > lines.length) {
+    throw new WorkspaceError(`startLine ${startLine} is past the end of the file (${lines.length} lines)`);
+  }
   const from = startLine ?? 1;
   const to = endLine ?? lines.length;
   const slice = lines.slice(from - 1, to);

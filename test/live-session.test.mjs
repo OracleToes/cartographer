@@ -183,7 +183,7 @@ test("read reports the digest and range an evidence claim cites", async () => {
   await cleanup();
 });
 
-test("read with no range reads the whole file; one bound alone is an error", async () => {
+test("read bounds are independently open: whole file, from a line, through a line", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
@@ -193,7 +193,13 @@ test("read with no range reads the whole file; one bound alone is an error", asy
   assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
   assert.match(output, /export const answer = 42;/);
   assert.match(output, /digest: [0-9a-f]{64}/);
-  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 1 }, api, {}), /pass both/);
+  const fromStart = await byName.read.execute({ path: "src/verify-me.ts", startLine: 2 }, api, {});
+  const fromStartOut = fromStart.output.map((part) => part.text).join("");
+  assert.match(fromStartOut, /src\/verify-me\.ts:2-2 \(of 2 lines\)/);
+  const throughEnd = await byName.read.execute({ path: "src/verify-me.ts", endLine: 1 }, api, {});
+  const throughEndOut = throughEnd.output.map((part) => part.text).join("");
+  assert.match(throughEndOut, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
+  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 99 }, api, {}), /past the end/);
   await cleanup();
 });
 
