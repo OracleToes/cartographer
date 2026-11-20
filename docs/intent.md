@@ -321,3 +321,19 @@ ID line — both fall out of the freeze rather than needing their own decisions.
 **Established by.** The person confirmed the frozen projection directly when
 asked, after it was pointed out that an unfrozen projection costs a prefix
 invalidation per Brain write and empties the pending list of meaning.
+
+
+## 20. The state block is injected; the transcript holds markers
+
+**Decision.** The state block is not persisted as a message. On every request
+`beforeProviderRequest` removes any state-block marker from the payload and
+appends the freshly rendered block as a trailing user-role message. After a
+text-only reply, `onYield` continues the run with a byte-sized marker user
+message, which the injection then replaces. The model always sees exactly one
+current block at the tail; the Pi store accumulates only markers, and they die
+with the generation's store at collapse.
+
+**Established by.** The person approved this derived shape when told that
+`onYield` can only append a user message and prompt sections can only patch the
+leading system message — so the block cannot itself start a turn, and the
+continuation rides a marker while the block is injected per request.

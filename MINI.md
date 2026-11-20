@@ -267,6 +267,15 @@ the context ends in a user message or a tool result. A section in the system
 prompt cannot start a turn, and a later system message cannot either. This is a
 property of Pi Durable, not a design choice.
 
+**The mechanism.** After a text-only reply, `onYield` continues the run with a
+byte-sized marker user message. On every request, `beforeProviderRequest`
+strips any marker from the payload and appends a freshly rendered state block as
+a trailing user-role message. The model sees exactly one current block at the
+tail; the store keeps only markers; markers die with the generation's store at
+collapse. Blocks never accumulate in the payload.
+
+> Confirmed by the person.
+
 **The block is identified by shape, not by announcement.** It uses the same
 delimiters every time, and the system prompt describes the shape once. Nothing in
 the message says "this is not the person's text": the model recognises the form.

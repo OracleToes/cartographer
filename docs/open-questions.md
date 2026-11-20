@@ -117,22 +117,12 @@ record moves between collapses. See `docs/intent.md` §19.
 
 ## §7. The state block
 
-**Q7.0 — How is the block removed after the request?** Settled that the block is
-appended to every request and is not kept. Open: the mechanism.
-
-`beforeProviderRequest` replaces the provider body for that request only, so the
-block could be injected there and never touch the transcript — but that hook
-cannot *start* a run, and a run needs a context ending in a user message or tool
-result. `onYield` can start one but appends a persisted message.
-
-Possible shapes:
-- persistent user message, trimmed from the payload on later requests by
-  `beforeProviderRequest`, so the store keeps it and the model never sees two;
-- a persisted message carrying a marker, excluded when the next request is built;
-- something else, if Pi has a way to append an entry that is not part of the
-  context.
-
-*Needs:* a decision on the mechanism before the context layer is built.
+**Q7.0 — Resolved.** The block is injected per request and never persisted.
+`onYield` continues a text-only reply with a byte-sized marker user message;
+`beforeProviderRequest` strips markers from every payload and appends the
+freshly rendered block at the tail. The model sees exactly one current block;
+the store keeps only markers until the generation ends. Approved by the person.
+See `docs/intent.md` §20.
 
 ### The block's schema
 
@@ -151,9 +141,9 @@ space breakdown by Brain part and tool calls. *Needs:* the actual field list.
 unwritten. *Needs:* a scheme, and whether it is the same handle system as the
 Brain or separate.
 
-**Q7.3 — Does the state block cost context?** It is at the end, so it is cheap to
-change. But it is still tokens on every request. *Needs:* whether it is always
-present or only when something is stale.
+**Q7.3 — Resolved by confirmation.** It is present on every request; that is
+what “appended to every request” means in §6.3 of MINI.md. Always present,
+including when nothing is stale.
 
 ## §7b. Prompt editing in the TUI
 
