@@ -479,3 +479,24 @@ person sees a plain report of what collapsed, not a confirmation.
 
 **Established by.** The person confirmed both halves directly: "5.1 yes agreed"
 and "5.2 yes confirmed."
+
+
+## 32. The agent collapses through a dedicated `collapse` tool
+
+**Decision.** The agent can trigger collapse through a dedicated, scoped
+`collapse` tool. The person triggers collapse from the workspace. Cancelled
+or not, no approval is involved in either path.
+
+**Established by.** The person agreed when asked how the agent triggers
+collapse, against the alternative of dropping the agent's trigger.
+
+## 33. Turn control keeps three verbs
+
+**Decision.** Three delivery modes survive: Interrupt (the person stops the
+run at a Pi Durable boundary), Steer (a message queued at the next boundary;
+the agent just sees it arrive), Follow-up (a message queued for after the
+run). Pause, edit-draft, and resume are removed with the approval-era draft —
+the agent's output already lives in Chat and the Ledger. Cancel is interrupt
+plus dropping the queue.
+
+**Established by.** The person confirmed: "confirmed."

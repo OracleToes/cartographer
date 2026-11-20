@@ -222,14 +222,12 @@ server actually reports progress, and in what shape.
 after a request but no live progress during one. *Needs:* whether a bar without
 live progress is acceptable, or whether progress must come from somewhere else.
 
-## §10. Turn control
+## §10. Turn control — resolved
 
-**Q10.1 — Does any of it survive the gate removal?** Pause, edit-draft, resume,
-cancel, Interruption, Steer, Follow-up were written for a product with an approval
-mindset. *Needs:* which are still wanted.
-
-**Q10.2 — What does the agent do with a steer?** It queues at a Pi Durable
-boundary. *Needs:* confirmation, and whether the agent is told a steer is waiting.
+Interrupt (stop at a boundary), Steer (queued at the next boundary, arrives in
+the transcript), Follow-up (queued after the run). Pause, edit-draft, and
+resume removed with the approval-era draft; Cancel = interrupt + drop the
+queue. Confirmed by the person. See `docs/intent.md` §33.
 
 ## §11. Wake and sleep
 

@@ -401,15 +401,19 @@ different glyph and colour before the first measured request.
 
 ## 9. Turn control
 
-Interruption, Steer, and Follow-up are delivery modes: interrupt now, queue at
-the next safe boundary, or queue after the run. The person can pause, edit the
-paused draft, resume, cancel, or start work while idle.
+Three delivery modes survive:
 
-Pause aborts at a Pi Durable boundary and continues in a fresh request; a
-provider stream cannot be frozen and resumed.
+- **Interrupt** — the person stops the run at a Pi Durable boundary.
+- **Steer** — a message queued at the next Pi Durable boundary; the agent sees
+  it arrive in the transcript.
+- **Follow-up** — a message queued for after the run.
 
-> Confirmed in the old spec and not contradicted. Open: whether all of it is
-> still wanted after the gate removal. See `docs/open-questions.md` §10.
+Pause, edit-draft, and resume are gone; what the agent had said or proposed
+already lives in Chat and the Ledger. Cancel is interrupt plus dropping what
+was queued. A provider stream cannot be frozen and resumed; a stop takes
+effect at a boundary.
+
+> Confirmed by the person.
 
 ## 10. Wake and sleep
 
@@ -437,10 +441,13 @@ description can say.
 - **tree** — set the project tree's anchor and depth in the state block and
   return the rendered tree; the agent's explicit statement of what it is
   attending to.
+- **collapse** — end the context here and rebuild from the Brain. Rare; the
+  escape hatch to a fresh context.
 - **sleep** — end the run; there is nothing left to do.
 
-> Confirmed by the person, with the dedicated `tree` tool agreed in discussion.
-> Wake is the only deferred tool; sleep's timer defers the wake need for now.
+> Confirmed by the person, with the dedicated `tree` and `collapse` tools
+> agreed in discussion. Wake is the only deferred tool; sleep's timer defers
+> the wake need for now.
 
 ## 11. Use Pi, do not duplicate Pi
 
