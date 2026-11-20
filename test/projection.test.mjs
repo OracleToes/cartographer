@@ -58,13 +58,14 @@ test("pins and wakes render their own lines with handles and ISO stamps", () => 
   assert.match(projection.text, /W1 \[time\] 1780000000000 \(armed\) — check the build — 2026-11-16T04:01:00.000Z/);
 });
 
-test("the total is the sum of the parts and nothing is omitted", () => {
+test("the projection omits nothing: all 50 ledger entries render in the frozen text", () => {
   let brain = emptyBrain();
   for (let index = 0; index < 50; index += 1) {
-    brain = applyWrite(brain, { kind: "ledger.upsert", entry: { id: `l${index}`, kind: "note", text: `note ${index} ${"x".repeat(80)}`, status: "open", answer: null, createdAt: at(`2026-11-16T04:${String(index).padStart(2, "0")}:00.000Z`), updatedAt: at(`2026-11-16T04:${String(index).padStart(2, "0")}:00.000Z`) } }, at("2026-11-16T04:00:00.000Z"));
+    const minute = String(index).padStart(2, "0");
+    brain = applyWrite(brain, { kind: "ledger.upsert", entry: { id: `l${index}`, kind: "note", text: `note ${index} ${"x".repeat(80)}`, status: "open", answer: null, createdAt: at(`2026-11-16T04:${minute}:00.000Z`), updatedAt: at(`2026-11-16T04:${minute}:00.000Z`) } }, at("2026-11-16T04:00:00.000Z"));
   }
-  const projection = projectContext(brain);
-  assert.equal(projection.parts.length, 1);
-  assert.equal(projection.total, projection.parts.reduce((sum, part) => sum + part.tokens, 0));
-  assert.equal(projection.sizes.ledger, projection.parts[0].tokens);
+  const { text: frozen } = projectContext(brain);
+  for (let index = 0; index < 50; index += 1) {
+    assert.ok(frozen.includes(`note ${index} `), `entry ${index} must render; no omission list exists`);
+  }
 });

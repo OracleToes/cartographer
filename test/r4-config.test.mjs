@@ -258,8 +258,7 @@ test("a turn with no chat tool call reports (no chat message), never model prose
 
 test("/collapse runs the ceremony on the spot and reports it; /quit ends before later lines", async () => {
   const { root, brain, cleanup } = await headlessFixture();
-  const { faux, models, ref } = fauxFor();
-  void faux;
+  const { models, ref } = fauxFor();
   const out = captureStream();
   try {
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["/collapse", "/quit"]), output: out.stream, now: FIXED_NOW });
@@ -327,8 +326,7 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
 // ---------- the CLI, end to end without a server ----------
 
 const cliEnv = (home) => ({ ...process.env, CARTO_HOME: home });
-const runCli = (args, { home, cwd, input } = {}) => {
-  const resolvedCwd = cwd ?? tempDir();
+const runCli = (args, { home, input } = {}) => {
   const child = execFileSync(process.execPath, ["bin/carto.mjs", ...args], {
     cwd: join(process.cwd()),
     env: cliEnv(home ?? tempDir()),

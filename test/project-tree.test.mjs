@@ -107,12 +107,10 @@ test("a symlinked directory renders as a leaf and is never followed", () => {
   const root = makeProject();
   try {
     const brain = emptyBrain();
-    const linked = new Map();
     const block = projectTreeBlock(root, root, 3, brain);
     const linkLine = block.lines.find((line) => line.includes("linked-dir"));
     assert.ok(!linkLine.endsWith("/"));
     assert.ok(!block.lines.some((line) => line.includes("records.ts") && line.startsWith("  linked-dir")));
-    assert.equal(linked.size, 0);
     const scanned = scanTree(root, root);
     const symlink = scanned.children.find((child) => child.name === "linked-dir");
     assert.equal(symlink.directory, false);

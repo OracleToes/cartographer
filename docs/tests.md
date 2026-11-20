@@ -80,6 +80,32 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: test-suite audit (the campaign brief), 2026-11-20
+
+- The suite was read end to end against its production code; every retained
+  test names the break it catches. Deleted what did not earn its place,
+  consolidated what covered the same break twice, and strengthened weak
+  assertions in place rather than padding the count.
+- Removed: the `contradicts`-edges storage test (duplicate of the
+  storage-as-written guard — the same break through a second door; the
+  no-cascade law stays covered by the deletion test); a tautological
+  `total`/`sizes` assertion pair in the projection test (it re-derived the
+  implementation definition; replaced with a nothing-is-omitted guard —
+  all 50 ledger entries render in the frozen text); a dead `linked`
+  fixture map and its no-op assertion in the project-tree symlink test; a
+  duplicated `.brain` rejection in the live-session inspect test (the
+  shared wall is guarded by "the boundary holds").
+- Strengthened in place: `splitContextMessages` now asserts exclusive
+  bucket attribution (an empty bucket reports zero, not a share of the
+  rest) instead of "everything > 0".
+- Housekeeping: the misleading "delete removes edges" title corrected to
+  state the law (no cascade; edges stay as written); the CLI test helper's
+  vestigial `cwd` parameter and dead variable removed; an unused
+  `void faux` dropped.
+- Suite 74 → 73. Boundaries preserved: SQLite (brain-store), the faux
+  pi-ai provider, one real loopback HTTP socket for the catalog refresh,
+  the spawned CLI end to end. Nothing was added to keep the count up.
+
 ### Stage: from-scratch rebuild, 2026-11-20
 
 - `src/` and `test/` were deleted in full and rebuilt from `MINI.md` (the

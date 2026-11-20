@@ -72,6 +72,13 @@ test("splitContextMessages attributes system, tool work and transcript additivel
   assert.ok(systemTokens > 0);
   assert.ok(toolWorkTokens > 0);
   assert.ok(transcriptTokens > 0);
+  // Attribution is exclusive: a bucket with nothing in it reports zero, not a share of the rest.
+  const userOnly = splitContextMessages([{ role: "user", content: "hello" }]);
+  assert.deepEqual([userOnly.systemTokens, userOnly.toolWorkTokens], [0, 0]);
+  assert.ok(userOnly.transcriptTokens > 0);
+  const toolOnly = splitContextMessages([{ role: "toolResult", toolCallId: "t", toolName: "x", content: [{ type: "text", text: "result" }], isError: false }]);
+  assert.deepEqual([toolOnly.systemTokens, toolOnly.transcriptTokens], [0, 0]);
+  assert.ok(toolOnly.toolWorkTokens > 0);
 });
 
 test("appendStateBlock strips markers and leaves the block last", () => {

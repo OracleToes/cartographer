@@ -43,14 +43,7 @@ test("atlas.upsert stores edges as written; unconnected nodes float freely", () 
   assert.equal(floating.atlas[1].edges.length, 0);
 });
 
-test("contradicts edges resolve symmetric by convention, not by schema", () => {
-  let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "claim one", at(1)) }, at(1));
-  brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "claim two", at(2), [{ kind: "contradicts", target: "a1" }]) }, at(2));
-  assert.equal(brain.atlas[1].edges[0].kind, "contradicts");
-  assert.equal(brain.atlas[1].edges[0].target, "a1");
-});
-
-test("pins in both layers; delete removes edges to the deleted node", () => {
+test("edges survive deletion as written (no cascade); pins live in both layers", () => {
   let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "c", at(1)) }, at(1));
   brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), [{ kind: "depends-on", target: "a1" }]) }, at(2));
   brain = applyWrite(brain, { kind: "delete", target: "atlas", id: "a1" }, at(3));

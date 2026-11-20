@@ -171,12 +171,11 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await cleanup();
 });
 
-test("inspect reports .brain access as an explicit failure", async () => {
+test("inspect reports the digest and range an evidence claim cites", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-y", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  await assert.rejects(byName.inspect.execute({ path: ".brain/brain.sqlite", startLine: 1, endLine: 1 }, api, {}), /\.brain/);
   const range = await byName.inspect.execute({ path: "src/verify-me.ts", startLine: 1, endLine: 1 }, api, {});
   const output = range.output.map((part) => part.text).join("");
   assert.match(output, /digest: [0-9a-f]{64}/);
