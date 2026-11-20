@@ -1,131 +1,95 @@
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+/**
+ * The Brain store (MINI.md §2, §4.2).
+ *
+ * One document per project, current state only — the Brain has no audit
+ * trail of old values. Reads return a fresh value; `apply` runs inside a
+ * single transaction and cannot leave a half-written Brain behind. Deletion
+ * is a single step.
+ *
+ * `history: "latest"` is honoured by construction: one row, one document,
+ * overwritten in place. Carto asks SQLite for secure-delete, a WAL
+ * checkpoint with truncation, and `VACUUM` on demand — best-effort local
+ * cleanup, not a guarantee against wear levelling or backups (§4.2).
+ */
+import { DatabaseSync } from "node:sqlite";
+import { reconcileHandles } from "../domain/handles.js";
+import { applyWrite, type BrainWrite } from "../domain/brain.js";
+import { emptyBrain, type CartoBrain } from "../domain/records.js";
 
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { JsonValue } from "@earendil-works/chord/json";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineDoc, Harness } from "@earendil-works/pi-durable";
-import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-
-import { createEmptyBrain } from "../domain/brain.js";
-import { decide, type Decision, type CartoCommand } from "../domain/commands.js";
-import type { CartoBrain } from "../domain/types.js";
-
-type StoredBrain = Record<string, JsonValue>;
-
-const BrainDocument = defineDoc<StoredBrain>({
-  kind: "carto.brain",
-  version: 1,
-  scope: "conversation",
-  history: "latest",
-  fork: "initial",
-  initial: () => createEmptyBrain() as unknown as StoredBrain,
-  checkpointWhen: () => true,
-});
-
-/** One committed Brain write, as a signal source for the state block. */
-export interface BrainWrite {
-  /** The command that was applied. */
-  command: CartoCommand;
-  /** The Brain before the command, as a plain snapshot. */
-  before: CartoBrain;
-  /** The Brain after the command, as a plain snapshot. */
-  after: CartoBrain;
+export interface BrainStore {
+  /** The current Brain, handles reconciled. Never undefined. */
+  read(): CartoBrain;
+  /** Apply one write inside one transaction; returns the next Brain. */
+  apply(write: BrainWrite, now: number): CartoBrain;
+  /** Secure-delete the old pages: WAL checkpoint and VACUUM. */
+  compact(): void;
+  close(): void;
 }
 
-export class BrainStore {
-  private constructor(
-    private readonly harness: Harness,
-    private readonly root: Awaited<ReturnType<Harness["root"]>>,
-    private readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>,
-    private listener: ((write: BrainWrite) => void) | undefined = undefined,
-  ) {}
+export function openBrain(databasePath: string): BrainStore {
+  const database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA secure_delete = ON");
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("PRAGMA busy_timeout = 5000");
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS brain_document (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)",
+  );
 
-  static async open(path: string): Promise<BrainStore> {
-    await mkdir(dirname(path), { recursive: true });
-    const database = await openNodeSqliteDatabase(path);
-    let harness: Harness | undefined;
-    try {
-      await database.exec("PRAGMA secure_delete = ON");
-      const storage = await SqliteStorage.open(database, { prefix: "carto_" });
-      harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
-      const root = await harness.root(BACKGROUND_CONTEXT);
-      const store = new BrainStore(harness, root, database);
-      await store.ensureDocument();
-      return store;
-    } catch (error) {
-      if (harness === undefined) await database.close();
-      else await harness.close(BACKGROUND_CONTEXT);
-      throw error;
+  const readRow = (): string | undefined => {
+    const row = database.prepare("SELECT document FROM brain_document WHERE id = 1").get() as
+      | { document: string }
+      | undefined;
+    return row?.document;
+  };
+
+  const decode = (document: string): CartoBrain => {
+    // A corrupt Brain throws. It must never silently read as an empty Brain —
+    // that would overwrite the person's memory with nothing.
+    const parsed = JSON.parse(document) as CartoBrain;
+    if (parsed === null || typeof parsed !== "object" || parsed.version !== 1) {
+      throw new Error(`The Brain at ${databasePath} is not a Carto Brain document.`);
     }
-  }
-
-  async read(): Promise<CartoBrain> {
-    const brain = await this.harness.snapshot(BrainDocument, this.root.id, BACKGROUND_CONTEXT);
-    return copyBrain(brain ?? createEmptyBrain());
-  }
-
-  async apply(command: CartoCommand): Promise<Decision> {
-    let result: Decision | undefined;
-    let before: CartoBrain | undefined;
-    await this.root.commit(async (transaction) => {
-      const document = await transaction.doc(BrainDocument, this.root.id);
-      before = copyBrain(document);
-      result = decide(before, command);
-      Object.assign(document, result.brain as unknown as StoredBrain);
-    }, BACKGROUND_CONTEXT);
-    if (result === undefined || before === undefined) throw new Error("Carto Brain command did not produce a result.");
-    const decision = result as Decision;
-    const prior = before as CartoBrain;
-    try {
-      this.listener?.({ command, before: prior, after: decision.brain });
-    } catch {
-      // A metrics signal must never turn a committed write into an error.
+    for (const key of ["chat", "ledger", "atlas", "userPins", "carryPins", "wakes"] as const) {
+      if (!Array.isArray(parsed[key])) {
+        throw new Error(`The Brain at ${databasePath} is missing its ${key} records.`);
+      }
     }
-    return decision;
-  }
+    return reconcileHandles(parsed);
+  };
 
-  /**
-   * Observe every committed write. The listener is a signal tap for the
-   * state block's pending list; it never sees a failed command, and its
-   * errors are deliberately swallowed — a metrics signal must never turn a
-   * committed Brain write into an error.
-   */
-  setListener(listener: ((write: BrainWrite) => void) | undefined): void {
-    this.listener = listener;
-  }
+  const read = (): CartoBrain => {
+    const document = readRow();
+    return document === undefined ? emptyBrain() : decode(document);
+  };
 
-  async vacuum(): Promise<void> {
-    await this.database.exec("PRAGMA secure_delete = ON");
-    await this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    await this.database.exec("VACUUM");
-    await this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  }
+  const write = database.prepare(
+    "INSERT INTO brain_document (id, document) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document",
+  );
 
-  async close(): Promise<void> {
-    await this.harness.close(BACKGROUND_CONTEXT);
-  }
+  return {
+    read,
 
-  private async ensureDocument(): Promise<void> {
-    await this.root.commit(async (transaction) => {
-      await transaction.doc(BrainDocument, this.root.id);
-    }, BACKGROUND_CONTEXT);
-  }
-}
+    apply(writeToApply, now) {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const current = read();
+        const next = applyWrite(current, writeToApply, now);
+        write.run(JSON.stringify(next));
+        database.exec("COMMIT");
+        return next;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
 
-function copyBrain(value: unknown): CartoBrain {
-  const brain = JSON.parse(JSON.stringify(value)) as CartoBrain;
-  // Version-one Carto records did not have editable Chat timestamps. Upgrade
-  // this in memory; the next normal Brain write persists the compatible form.
-  brain.chat = brain.chat.map((record) => ({
-    ...record,
-    updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : record.createdAt,
-  }));
-  // Version-one Carto records did not store a handle table. Start an empty one;
-  // the first decision fills it without a duplicate commit.
-  if (brain.handles === undefined || !Array.isArray(brain.handles.entries)) {
-    brain.handles = { counters: {}, entries: [] };
-  }
-  return brain;
+    compact() {
+      database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      database.exec("VACUUM");
+    },
+
+    close() {
+      database.close();
+    },
+  };
 }

@@ -105,3 +105,57 @@ standing rule).
   remain an agent derivation, flagged in `MINI.md` and veto-able by the
   person at any time.
 - Prompt iteration is ongoing by design (§22): minimal first, then tuned.
+
+## The clean-slate rebuild, decided 2026-11-20
+
+The person's order, in their words:
+
+> "delete it all, if that means you have to re-do slice 1, then fine. you
+> should have cleaned up the project instead of building on top of it, and
+> then we wouldn't be dealing with this mess - or better yet, ask me what to
+> do instead of assuming i wanted to preserve anything about the old version."
+
+And, answering the scope question this turn:
+
+> Scope: **everything in `src/` and `test/`, no exceptions** — including
+> slice two (state block, tree) and the headless driver.
+> llama-swap: **rewrite it fresh; "look at how the main branch does it for a
+> decent solution"** — main documents keyless llama.cpp behind llama-swap,
+> an OpenAI-compatible `/v1` endpoint, and per-model capacity advertised as
+> `context_length` / `context_window` / legacy `meta.n_ctx`, discoverable only
+> after the first routed request.
+> legacy-import: **delete outright** — no rewrite.
+
+The rule for the rebuild: nothing in the tree may predate the person's
+confirmations or be inherited from the Mini/screen era. Everything is derived
+from `MINI.md`, this file, and `docs/intent.md`. `MINI.md` is never edited by
+the agent; amendments are the person's.
+
+### Slices
+
+- **R1 — the Brain.** Explicit records (Atlas with typed optional edges,
+  Ledger with goals/notes/questions/instructions/progress, Chat, pins in both
+  layers, wakes), single-step delete, generation-local handles, the Brain
+  store (one document per project, `history: "latest"`, secure-delete, WAL,
+  VACUUM on demand), `.brain` out of the agent's reach.
+- **R2 — the projection and the collapse.** Frozen projection persisted per
+  generation, stale-by-digest marking, person-triggered or agent-triggered
+  collapse, fresh generation, the old store sealed read-only as the archive,
+  one collapse of grace, purge that exports pinned-to-archive records first
+  and only then deletes the store, Brain VACUUM.
+- **R3 — the live session and the tools.** Pi Durable harness, the product
+  tools (`chat`, `atlas`, `ledger`, `pin`, `inspect`, `edit`, `shell`,
+  `tree`, `collapse`, `sleep`), the state block of `MINI.md` §6.1 injected
+  per request as a trailing user-role message (`onYield` marker, stripped on
+  every payload), collapse signalling per §5/§6.2.
+- **R4 — config, llama-swap, the headless driver.** Global config,
+  keyless llama-swap provider rewritten fresh (informed by main's documented
+  approach), `--help`, and a placeholder headless stdin driver explicitly not
+  the designed interface (§8 is the person's to mark).
+
+Wakes: the Brain holds the records; the wake *tool* is the one deferred tool
+(§10a), and the time/path wake runtime bounds are open (`docs/open-questions.md`
+§11), so no wake runtime is rebuilt until the person settles them.
+
+Not rebuilt and not deleted: `MINI.md`, `AGENTS.md`, `docs/`, `bin/`
+(launcher), `package.json`/`tsconfig.json` (build scaffolding), `LICENSE`.
