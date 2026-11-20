@@ -362,3 +362,31 @@ tools are scoped and unique; they carry the voice. The elaborate draft in
 **Established by.** The person directed it: "i say we try for minimalistic at
 first, just, here are your tools, here's what they do and how to use them. and
 then we iterate on that."
+
+
+## 23. Attention is a consequence of minimality, not a metric
+
+**Decision.** Carto has no attention score, heat counter, or decay system. A
+model is steered by everything in its context, and Carto's context is
+deliberately pruned, so every remaining item steers harder. Focus is what
+happens when the Brain is well maintained. The staleness instruments are
+evidence freshness, the pending list, and the state block's stale lines. Raw
+signals at rebuild (age, in-degree, freshness) may be shown as information;
+they are never reduced to a score and never delete anything by themselves.
+
+**Established by.** "to a model, everything in its context is steering,
+especially with a harness such as carto, where its context is deliberately
+pruned ... the focus of it is a consequence because the context is so minimal.
+the agent stays informed and focused because it keeps its brain well
+maintained."
+
+## 24. The Atlas is the map layer over the tree
+
+**Decision.** The Atlas serves two purposes: it lends the project tree its
+leaves — marking files and directories the agent understands rather than a
+bare listing — and it maps meaningful structure, connecting what the agent
+understands into a graph. The tree is the scaffold; the Atlas is the
+understanding hung on it.
+
+**Established by.** "so the atlas serves the dual purpose of giving the tree
+leaves ... and of mapping out meaningful structure."

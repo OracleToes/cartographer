@@ -30,7 +30,15 @@ holds the agent's map of the project and its own state, standing in for memory.
 The Brain holds:
 
 - **Atlas** — source-backed claims about the project, with checked evidence.
-  Atlas represents the project's current state as the agent understands it.
+  Atlas is the map layer over the project tree: it marks the files the agent
+  understands and connects what it understands into a graph. Attention is a
+  consequence of the minimal context, not a score the system computes — the
+  agent stays focused because it keeps its Brain maintained.
+
+  > Confirmed by the person: "the atlas serves the dual purpose of giving the
+  > tree leaves, and of mapping out meaningful structure. the focus of it is a
+  > consequence because the context is so minimal."
+
 - **Ledger** — goals, notes, questions, instructions, and progress through a
   particular problem.
 - **Chat** — deliberate Person Chat and Agent Chat records.
