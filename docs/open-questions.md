@@ -28,14 +28,6 @@ The person may have decided these; this file cannot show that they did.
 
 ## B. Open
 
-**B1 — Which llama.cpp endpoints and fields carry the context bar's figures.**
-`SPEC.md` §8 fixes the source as the server: capacity from `-c`, the count from
-the last request, tokens per second for generation and prompt reading, fill, and
-prefill-versus-generating. The endpoints and field names are not fixed, and
-neither is what the bar shows while the server is unreachable.
-*Would land in:* §8.
-*To close:* the reads, and the degraded state.
-
 **B2 — Whether the old generation store is deleted at collapse or held for the
 grace period.**
 `SPEC.md` §3.4 says a collapse builds a new store and the previous one is

@@ -607,6 +607,17 @@ characters-per-token constant: it is re-learned from the server's replies — th
 size of a request against the prompt tokens the server reports for it — as a
 moving average, clamped so one odd reply cannot swing it.
 
+**When the server is not there**, the bar changes but does not disappear:
+
+- **On a new start with no measurement yet**, the whole bar is empty. Nothing has
+  been measured and there is nothing to draw.
+- **When a server that was reporting stops** — a lost connection, or the server
+  dying — the last known values stay where they are, greyed. The person can still
+  see where the context stood, and the grey says it is no longer live.
+
+The endpoints and field names the figures are read from are the runtime's, not the
+spec's (§12). What the spec fixes is what the bar knows and where it comes from.
+
 The glyphs and the exact colours are the build's to choose. What the spec fixes is
 what the bar represents: capacity across the bottom, three quantities, three
 colours, and an estimate that announces itself.
