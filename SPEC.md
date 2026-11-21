@@ -500,14 +500,6 @@ Neither the spec nor the runtime supplies a size limit to enforce in its place.
 
 ## 8. Workspace
 
-Carto uses the Pi TUI alternate screen and renders **modes** — **Chat**,
-**Context**, and **Brain** — reachable by key and palette. There is no permanent
-palette, settings screen, or drawer.
-
-**The frame** is a fixed header, a scrolling body, and a fixed footer, with one
-row and one cell of padding so the chrome never touches the terminal edge. The
-header is never pushed off screen. The bottom bar takes the whole bottom row.
-
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Functions, schemas, and records are collapsible; a leaf is never
 folded. Each tool gets one collapsible entry in its own sub-tree. Schema-shaped
