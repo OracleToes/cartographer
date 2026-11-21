@@ -30,10 +30,12 @@ holds the agent's map of the project and its own state, standing in for memory.
 The Brain holds:
 
 - **Atlas** — source-backed claims about the project, with checked evidence.
-  Atlas is the map layer over the project tree: it marks the files the agent
-  understands and connects what it understands into a graph. Attention is a
-  consequence of the minimal context, not a score the system computes — the
-  agent stays focused because it keeps its Brain maintained.
+  Atlas is the map layer over the project tree: it connects what the agent
+  understands into a graph. A file is not connected to the atlas unless the agent
+  links a node to it — files are not implicitly nodes; the tree anchors where
+  the map lives, not what is in it. Attention is a consequence of the minimal
+  context, not a score the system computes — the agent stays focused because it
+  keeps its Brain maintained.
 
   > Confirmed by the person: "the atlas serves the dual purpose of giving the
   > tree leaves, and of mapping out meaningful structure. the focus of it is a
@@ -262,8 +264,9 @@ uncollapsed brain entries → regular ephemera → state block.
 The head — everything through pinned ephemera — is the stable prefix, ordered
 by type so the server's cached prefix stays warm across collapses and collapse
 does not cost prefill. Brain entries clustered by type sit near the head; the
-state block is always at the tail. What "uncollapsed brain entries" and
-"pinned files" mean and where pinned ephemeral content lives are open — see
+state block is always at the tail. Everything in this layout carries a short
+reference ID (see below) — what "uncollapsed brain entries" and "pinned files"
+mean and where pinned ephemeral content lives are still open — see
 `docs/open-questions.md` §15.
 
 **The projection carries structure, not a second copy of the dialogue.** A Person
@@ -273,12 +276,17 @@ through the projection.
 
 > Confirmed by the person, choosing tool result over projection.
 
-**Short handles.** The agent and the person refer to records by short,
-type-prefixed, generation-local handles such as `L1`, `C10`, `A1`, `P1`, `H1`,
-`W1`. A handle is stable within one live generation and is rebuilt at collapse.
-The agent never sees a database key, a Pi entry ID, or a generation file name. A
-tool parameter that names a record takes a handle; an unknown handle is an
-explicit error.
+**Short handles.** Everything the agent sees in the context carries a short,
+type-prefixed, generation-local reference ID — files, tool calls, entries, and
+anything else the prefill carries; there is no other scheme, and no tool
+parameter accepts a raw key. A handle is stable within one live generation and
+is rebuilt at collapse. The agent never sees a database key, a Pi entry ID, or a
+generation file name. A tool parameter that names an item takes a handle; an
+unknown handle is an explicit error. The confirmed Brain-record handles are
+`L1` (Ledger), `C10` (Chat), and `A1` (Atlas); the prefill layout's other
+positions — pinned files, pinned ephemera, regular ephemera, uncollapsed brain
+entries — carry short reference IDs too. What the kind prefixes are, and how
+ephemeral items are named, are open — see `docs/open-questions.md` §15.
 
 **The projection is frozen between collapses.** It is rebuilt only at collapse;
 it is never patched between collapses. A Brain write between collapses appears as
@@ -319,8 +327,8 @@ It tells the agent:
 - the project tree — anchored at a directory, to a depth, showing files,
   directories, sizes, and which files an Atlas node links to.
 
-It is the part of the context expected to change often. Its items carry
-structured IDs. An evidence file whose digest has changed since the claim was
+It is the part of the context expected to change often. Its items carry the
+same short reference IDs everything else carries. An evidence file whose digest has changed since the claim was
 written is marked stale at rebuild — a gentle signal to update the Brain,
 never a block on anything.
 

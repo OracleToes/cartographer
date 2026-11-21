@@ -434,6 +434,10 @@ bare listing — and it maps meaningful structure, connecting what the agent
 understands into a graph. The tree is the scaffold; the Atlas is the
 understanding hung on it.
 
+> Amended 2026-11-21 by the person: a file is not connected to the atlas unless
+> the agent links a node to it — files are not implicitly nodes. The tree
+> anchors where the map lives, not what is in it.
+
 **Established by.** "so the atlas serves the dual purpose of giving the tree
 leaves ... and of mapping out meaningful structure."
 
@@ -557,8 +561,10 @@ plus dropping the queue.
 
 ## 34. The state block's details, confirmed
 
-**Decision.** The state block's items reuse the Brain's generation-local
-handles; there is no separate ID scheme. The pending list — one line per
+**Decision.** The state block's items reuse the generation-local handles; there
+is no separate ID scheme — and, per §51, everything the agent sees in the
+context carries the same kind of short reference ID, so the state block reuses
+the one scheme everything uses. The pending list — one line per
 pending Brain write since the projection was rebuilt, named by handle — is
 ephemeral: it lives in session memory and starts empty after a crash, like
 activity itself. The frozen projection persists as a per-generation snapshot
@@ -842,3 +848,23 @@ archive at every collapse, unless pinned... Pinned items in the archive remain
 in the archive unless they're unpinned or restored to the context. items in the
 archive that have not been pinned are deleted for good... yes, entries on the
 archive layer can be restored. only the user knows the archive layer exists."
+
+## 51. Everything in the context carries a short reference ID
+
+**Decision, 2026-11-21 (the person, directly).** Everything the agent sees in
+the context — files, tool calls, entries, and everything else the prefill
+carries — carries a short, type-prefixed, generation-local reference ID. There
+is no other scheme; no tool parameter accepts a raw key; the agent never sees a
+database key, a Pi entry ID, or a generation file name. A handle is stable
+within one live generation and is rebuilt at collapse. A tool parameter that
+names an item takes a handle; an unknown handle is an explicit error.
+
+The confirmed Brain-record handles are L/A/C (Ledger, Atlas, Chat). What the
+kind prefixes are for files, tool calls, and the prefill layout's other
+positions — pinned files, pinned ephemera, regular ephemera, uncollapsed brain
+entries — is open (docs/open-questions.md §15), but the obligation to name
+everything is settled.
+
+**Established by.** The person, directly (2026-11-21): "YES EVERYTHING GETS A
+SHORT REFERENCE ID — a file is not connected to the atlas unless the agent
+links a node to it."

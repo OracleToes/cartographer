@@ -340,20 +340,25 @@ permanently deletes an entry without archiving it; restore is user-only and the
 agent never knows the archive exists. MINI.md §4, §4.1, §4.2, §5, §6 record the
 confirmed shape.
 
-**Q15.2 — Deletion timing — RESOLVED 2026-11-21.** Unpinned archive items are
-deleted for good after one collapse of grace ("we are utilizing that
+Resolved this session (2026-11-21): **reference IDs** — everything the agent
+sees in the context carries a short, type-prefixed, generation-local
+reference ID (docs/intent.md §51); and **deletion timing** — unpinned archive
+items are deleted for good after one collapse of grace ("we are utilizing that
 consequence to have a one-collapse grace period for files that get swept
-automatically and brain entries marked for archive"). Held for one collapse;
-pinned archive items remain in the archive until unpinned or restored.
+automatically and brain entries marked for archive"). Pinned archive items
+remain in the archive until unpinned or restored. The kind prefixes — what a
+file is called vs. a tool call vs. an ephemeral item — remain open under Q15.1.
 
 Still open (PROPOSED, not confirmed — the person has not ruled on these):
 
 **Q15.1 — What are "pinned files" and "pinned ephemera"?** Both are confirmed
-positions in the prefill (the person's worked-through layout). What is not
-confirmed: what a pinned file is (evidence? command output? transcript entry?),
-what a pinned ephemeral item is, and where pinned ephemeral content lives after
-collapse (lifted into the frozen head, or kept somewhere else — nothing exists
-today). Pins on brain records are unchanged.
+positions in the prefill, and everything the agent sees in the context is
+addressable by handle (docs/intent.md §51). What is not confirmed: what a
+pinned file is (evidence? command output? transcript entry?), what a pinned
+ephemeral item is, what the kind prefixes are (files vs. tool calls vs.
+ephemera), and where pinned ephemeral content lives after collapse (lifted into
+the frozen head, or kept somewhere else — nothing exists today). Pins on brain
+records are unchanged.
 
 **Q15.3 — Archive-marked brain entry semantics.** Does marking a brain entry
 for archive remove it from the Brain (the record leaves the Brain's sticky
