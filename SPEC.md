@@ -452,6 +452,10 @@ The agent's tools are scoped, unique, and permissive. A tool's own description i
 the authority on what it does; the system prompt carries only what no single
 description can say.
 
+The prompt is short as a consequence of that rule, not as a target. There is no
+word count to hit and none to stay under: a prompt that carries only what nothing
+else can say is short because so little qualifies.
+
 **A tool names its target by handle** (§5.4). That is the addressing scheme every
 tool shares, and it is why every item in the context carries one. A file may also
 be named by path: `read` and `edit` prefer the handle and fall back to the path,

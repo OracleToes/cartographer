@@ -62,13 +62,6 @@ prose, not the rule.
 *Would land in:* §12.
 *To close:* whether that reads as one voice.
 
-**A8 — Prompt length.**
-The draft was roughly 900 words. `SPEC.md` says the prompt carries only what no
-tool description can say, and gives no size.
-*Would land in:* §12.
-*To close:* whether the length is right, or whether length is not a spec
-question at all.
-
 **A9 — Whether prompting is enough to produce small edits.**
 `SPEC.md` §7 states atomic edits as an intention and says nothing enforces it.
 Whether the prompt actually changes behaviour is unknown to the person.
