@@ -278,24 +278,31 @@ for Chat and never becomes a Chat record.
 
 ### 5.4 Handles
 
-Everything the agent sees in the context carries a short, type-prefixed,
-generation-local handle: Brain records, tool calls, reasoning, tool results,
-`bash` output, ephemera, and files. There is no exception and no other naming
-scheme.
+Everything the agent sees carries a short, type-prefixed, generation-local
+handle. Everything, without exception: the system prompt, the tool schemas, each
+Brain record, each Chat record, each tool call, each piece of reasoning, each tool
+result, each `bash` result, each file in the project, each ephemeral item, and the
+state block itself. There is no item in the context that has no handle.
 
-Handles exist because every tool names its target by one. A tool that changes
-something names it by handle; a tool that acts on a pinned item names it by
-handle; an agent that wants to pin a tool call, a piece of its own reasoning, or
-a file does so by handle. An item without a handle would be an item the agent
-could see and could not act on.
+Handles are what the tools address. A tool names its target by handle; an agent
+that wants to pin a tool call, a piece of its own reasoning, or a file does so by
+handle. The handles are also why the context can be talked about at all: a handle
+is how one item refers to another.
+
+**Files are handled by the tree.** The project tree gives a handle to every file
+and directory it shows. A file's handle comes from the tree, not from a separate
+inventory, so a file the tree does not show has no handle — which is why the tree
+is rendered for a whole project and not only for what the agent happens to
+mention.
 
 - Handles are stable within a live generation and are rebuilt at collapse.
 - The agent never sees a database key or a storage-level identifier.
 - A tool parameter that names an item takes a handle. An unknown handle is an
   explicit error.
-- **Paths are the one alternative.** `read`, `edit`, and `create` resolve a path,
-  because a path is what those tools are about. Everything else in the context
-  is reachable only by handle.
+- **A path is a fallback, not an alternative.** `read` and `edit` take a handle
+  first and a file path second, and `create` takes a path because the file does
+  not exist yet and has no handle to give. A resolved path is the same file its
+  handle names.
 
 Every durable ID line carries an ISO 8601 UTC timestamp, so the agent can see
 when something changed.
@@ -307,18 +314,26 @@ when something changed.
 | `A` | Atlas node |
 | `L` | Ledger entry |
 | `C` | Chat record |
-| `T` | tree anchor |
-| `P` | pin, named by the handle of the entry it marks |
-| `X` | pinned ephemera |
+| `T` | the project tree |
+| `F` | a file |
+| `D` | a directory |
+| `H` | the system prompt |
+| `Y` | a tool's definition and schema |
+| `B` | the state block |
+| `P` | a pin, named by the handle of the entry it marks |
+| `X` | an ephemeral item, pinned or not |
 | `R` | the result of a tool call |
 | `S` | the result of `bash` |
-| `F` | a file pinned into the head |
-| `E` | a brain entry written since the last collapse, seen in the body |
+| `E` | a Brain entry written since the last collapse, seen in the body |
 | `U` | the person's message |
 
-`S` is a subdivision of `R`, not an exception to it: a `bash` result is a tool
-result, and the shell deserves its own letter because it is quoted and discussed
-far more than it is cited.
+A file has one handle and one letter whether the tree is rendering it, a pinned
+copy is sitting in the head, or a tool is being pointed at it. Pinning a file does
+not give it a second name.
+
+`S` is a subdivision of `R`: a `bash` result is a tool result, and the shell
+deserves its own letter because it is quoted and discussed far more than it is
+cited.
 
 ### 5.5 Read results and staleness
 
@@ -421,10 +436,10 @@ The agent's tools are scoped, unique, and permissive. A tool's own description i
 the authority on what it does; the system prompt carries only what no single
 description can say.
 
-**A tool names its target by handle** (§5.4). That is the only addressing scheme
-the tools share, and it is why every item in the context carries one. The single
-exception is a path: `read`, `edit`, and `create` resolve a file path, and a path
-is accepted wherever a file is the subject.
+**A tool names its target by handle** (§5.4). That is the addressing scheme every
+tool shares, and it is why every item in the context carries one. A file may also
+be named by path: `read` and `edit` prefer the handle and fall back to the path,
+and `create` takes a path because the file it makes has no handle yet.
 
 | Tool | Does |
 | --- | --- |
@@ -432,9 +447,9 @@ is accepted wherever a file is the subject.
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
-| `read` | Reads a file, from a start line, for a number of lines, inside the project root. |
-| `edit` | Applies ordered text replacements to an existing file. Never creates, never replaces a file whole. |
-| `create` | Writes a new file. Refuses a path that already exists. |
+| `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
+| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. |
+| `create` | Writes a new file, at a path. Refuses a path that already exists. |
 | `bash` | Runs a command inside the project. |
 | `tree` | Sets the project tree's anchor. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
@@ -444,11 +459,13 @@ is accepted wherever a file is the subject.
 their descriptions and scopes them to the project root; it does not write a file
 or command layer beside them.
 
-- **`read`** takes a path and optional `offset` and `limit`.
-- **`edit`** takes a path and a list of `oldText`/`newText` replacements, each
-  matched against the original file, not against the result of the one before.
-  The package applies them all or nothing and refuses a file that does not
-  exist. Editing an existing file is the only thing it does.
+- **`read`** takes a file's handle, or its path, and optional `offset` and
+  `limit`.
+- **`edit`** takes a file's handle, or its path, and a list of `oldText`/`newText`
+  replacements, each matched against the original file, not against the result of
+  the one before. The package applies them all or nothing and refuses a file that
+  does not exist. Editing an existing file is the only thing it does. Carto adds
+  the handle: it resolves the handle to the path before the package sees it.
 - **`bash`** runs a command through the project's environment. The name is the
   package's, and it is what an agent that has used a coding tool before already
   knows.
@@ -482,6 +499,14 @@ Because it is an intention, it is checked by reading the work, not by the tools.
 Neither the spec nor the runtime supplies a size limit to enforce in its place.
 
 ## 8. Workspace
+
+Carto uses the Pi TUI alternate screen and renders **modes** — **Chat**,
+**Context**, and **Brain** — reachable by key and palette. There is no permanent
+palette, settings screen, or drawer.
+
+**The frame** is a fixed header, a scrolling body, and a fixed footer, with one
+row and one cell of padding so the chrome never touches the terminal edge. The
+header is never pushed off screen. The bottom bar takes the whole bottom row.
 
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Functions, schemas, and records are collapsible; a leaf is never
@@ -614,8 +639,7 @@ terminal editor, or a transcript compactor.
 
 ## 13. Open
 
-1. What a pinned file is, and how a file carries a pin. `F` names it in §5.4 and
-   nothing yet defines it.
+1. What a pinned file is, and how a file carries a pin.
 2. Which llama.cpp endpoints and fields carry the token bar's figures, and what
    the bar shows while the server is unreachable.
 
