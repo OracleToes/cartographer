@@ -91,6 +91,23 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — config, capacity, headless, CLI, 2026-11-21
+
+- Read `runtime/config.ts`, `runtime/llama-swap-model.ts`, `runtime/headless.ts`,
+  and `src/cli.ts` before their tests. No unearned tests found; nothing
+  removed.
+- Coverage confirmed: model-ref parsing; config validation, creation,
+  in-memory override, and corrupt-file error; advertisement field precedence;
+  the pin-wins truth table including the zero sentinel; the listing-to-model
+  mapping; the registry refresh (pin cold and warm, silent server,
+  retain-on-failure) over both an injected fetch and a real loopback socket;
+  the headless driver's chat-only output, no-chat parenthetical, /collapse, and
+  the non-terminal announcement; the capacity refresh's lower-and-report and
+  idempotence; and the CLI end to end (--help, missing config, creation then
+  boot, unsupported provider).
+- Suite 97 → 97. Boundaries preserved: the real loopback HTTP socket and the
+  spawned CLI.
+
 ### Stage: tests audit (campaign) — live session and tools, 2026-11-21
 
 - Read `runtime/live-session.ts`, `runtime/tools.ts`, and `runtime/workspace.ts`
