@@ -41,7 +41,7 @@ test("Sidebar renders chat, context, atlas, and ledger with tokens and counts", 
   assert.ok(rendered.includes("context"));
   assert.ok(rendered.includes("atlas"));
   assert.ok(rendered.includes("ledger"));
-  assert.ok(rendered.includes("1.3k") || rendered.includes("1.2k") || rendered.includes("1250") || rendered.includes("1k"));
+  assert.match(rendered, /~1k/, "the context token count renders deterministically as ~Math.round(tokens/1000)k");
 
   // Check that every line has the exact requested visible width
   for (const line of lines) {
@@ -176,8 +176,13 @@ test("ContextView navigation, tool folding, and mouse interactions", () => {
         parameters: { type: "object" },
       },
     ],
-    transcriptMessages: [{ role: "user", content: "Hello cartographer" }],
-    toolWorkItems: [{ toolCallId: "call_1", toolName: "read", args: { path: "src/index.ts" }, result: "const x = 1;" }],
+    transcriptMessages: [
+      { id: "t-1", role: "user", text: "Hello cartographer" },
+      { id: "t-2", role: "assistant [chat]", text: "ping" },
+    ],
+    toolWorkItems: [
+      { id: "w-1", kind: "toolCall", name: "read", args: "path: src/index.ts" },
+    ],
     stateBlockText: "=== STATE BLOCK ===",
   });
 
@@ -264,6 +269,7 @@ test("ContextView navigation, tool folding, and mouse interactions", () => {
   view.handleInput("d"); // delete message
   assert.ok(deletedItem);
   assert.equal(deletedItem.partId, "transcript");
+  assert.equal(deletedItem.itemId, "t-1", "the delete targets the selected transcript message, not a phantom");
   assert.equal(deletedItem.now, true);
 
   // Trigger collapse

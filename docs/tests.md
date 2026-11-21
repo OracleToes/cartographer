@@ -12,32 +12,36 @@ reset workspace, and nothing pushed is lost. A mid-stage push implies no
 verification of any kind.
 
 **Tests run once, at the very end of the stage**, when you are ready to tell
-the person the work is done. Every edit you expect the stage to need is made;
-`tsc` and `npm run build` exit zero; you commit, push, and only then run the
-suite. If a test fails, fix it, build, push again, and test again. Never
-between edits, never mid-stage, never as a check on progress.
+the person the work is done. Every edit you expect the stage to need is made,
+and then you run `npm test` — the build is only the first step inside that one
+command. Never between edits, never mid-stage, never as a check on progress.
 
 This is not ceremony. A test run during a stage turns you into a machine that
 watches a progress bar and calls it confidence. The build is the gate that lets
 you say you are done; the tests are what catch you being wrong about that.
+One example of the ban is worth repeating: a build, one-off test, or probe
+during a stage is the same mistake as a test during a stage — the budget is
+the end of the stage, and nothing else in the middle is allowed to consume it.
 
 ## Commands and budget
 
 | Command | When | Budget |
 | --- | --- | --- |
-| `npx tsc --noEmit` | At the end of the stage, before the push | Fast |
-| `npm run build` | At the end of the stage, before the push | Fast |
-| `node --test test/*.test.mjs` | At the very end, after the push, before you report done | **10 seconds, hard** |
+| `npm test` (build + suite) | At the end of the stage, once, after every edit is made | the suite must finish in **10 seconds, total** |
 
-The 10 second budget is the test run alone. The build is not inside it. `npm
-test` is `build && node --test`, so the gate runs twice when you use it; that is
-acceptable, but the measured number in a status line is the run.
+`npm test` is `npm run build && node test/guard.mjs`. The build is the first
+step inside it. Nothing else in this file — or anywhere else — runs builds,
+tsc, or tests: a build, one-off test, or probe mid-turn is the same mistake as
+a test mid-stage and is banned outright.
 
-Longer than 10 seconds means something is wrong with the test, not with the
-budget. Real waits are the usual cause: a test that sleeps to let a watcher
-fire, or that polls until a durable task settles. A wait is allowed when it
-crosses a boundary that genuinely lives outside the test, and only with a
-comment on that test saying which boundary and why it cannot be injected.
+The budget is the **whole suite**, not a per-test allowance. The guard aborts
+the run at 10 seconds and tells the agent it is taking too long — that abort
+is a failure, not a pass. The suite overrunning the budget means something is
+wrong with the test, not with the budget. The usual cause: a test that sleeps
+to let a watcher fire, or a test that polls until a durable task settles. The
+fix is to improve the slow test or drop the worst offender — and to re-run —
+never to add a per-test exemption, never to shorten or raise the budget by
+hand.
 
 ## What a test must earn
 
@@ -59,6 +63,8 @@ Removing these is a deliverable. Report it as one.
 A probe is a scoped check for something you are not yet sure works: a PTY
 transcript, a script against a fake server, a one-off in `/tmp`. Run it at the
 end of the stage, after the push, when you need it, and do not commit it.
+A probe is forbidden at any other time — mid-turn, mid-stage, mid-slice, or as
+a progress check.
 
 A probe cannot replace a test, cannot be counted as one, and cannot be used to
 dodge the budget. If a probe proves something worth keeping, the next stage
@@ -84,6 +90,27 @@ one per test.
 
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
+
+### Stage: tests-doc reconciliation + audit, 2026-11-21
+
+- `docs/tests.md` was stale against the corrected rule — the commands/budget
+  table still said `tsc` then `build` before the push, and a "test that needs
+  longer" exemption survived beside the budget. Rewritten: the build is only
+  the first step inside `npm test` (which runs the whole suite under the
+  `test/guard.mjs` abort at 10 seconds); no one-off tests, no probes outside
+  the end-of-stage sequence; the budget is the whole suite, with no per-test
+  allowance.
+- Audited the suite against the doc. Every retained test earns its place; no
+  unearned tests found. Two assertions strengthened in place, not padded:
+  - The ContextView fixture was stale (it fed `{ role, content }` messages
+    and a tool-work shape the view never read); the fixture now renders the
+    real shape, and the delete flow now asserts it targets the selected
+    transcript message (t-1), not a phantom.
+  - The sidebar test's 4-way OR over token-count encodings was tightened to
+    the deterministic render (~1k) — the guard is the width loop, not the OR.
+- Guard left behind: the real loopback HTTP socket, the faux provider, and the
+  one CLI-end-to-end per area; the 99-test suite runs well under the 10s
+  budget (measured ~5.3s on the final green run).
 
 ### Stage: test-suite audit (the campaign brief), 2026-11-20
 
