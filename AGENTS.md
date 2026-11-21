@@ -114,8 +114,8 @@ not an expectation, it is a probe.
 **STAGE / SLICE** — one unit of work that ends in a push. Same thing, either
 name. See §4.
 
-**BUILD** — `npm run build` plus `npx tsc --noEmit` exiting zero. A build is not
-a test.
+**BUILD** — `npm run build`, invoked only as the build step inside `npm test`. A
+build is not a test; a build never runs on its own, mid-stage or otherwise.
 
 **PROBE** — a throwaway check for something you were not sure worked. It is not
 kept, and it is not a substitute for a test. See §5.
@@ -124,11 +124,11 @@ kept, and it is not a substitute for a test. See §5.
 
 A **stage** is one complete unit of work that ends when you are ready to tell the
 person it is done. While the stage is in progress — reading, deciding, editing — run
-nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** Tests
-are not a sanity check, an iterative aid, or a way to help you write code.
-
-The build and the tests happen strictly once, at the very end of the stage, right
-before you stop to tell the person the work is done.
+nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no one-off test,
+no probe.** Tests and builds are not sanity checks, not iterative aids, not ways to
+help you write code. The build is only ever the first step inside `npm test`; it is
+never run on its own. The build and the tests happen strictly once, at the very end
+of the stage, right before you stop to tell the person the work is done.
 
 Pushes are not only at the end. Commit and push as you go mid-stage if needed — a
 push mid-stage is how work survives a workspace reset, and it implies no verification:
@@ -138,17 +138,24 @@ and are ready to report done, is fixed:
 1. **Make every edit you expect the stage to need.** Read the code first.
    Make surgical edits to existing files; never overwrite or rewrite entire
    files without the person's express permission.
-2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
-   build is the gate: it is what lets you say you are confident.
-3. **Commit and push.** Before you run a single test.
-4. **Run the tests.** `npm test`, run-only budget: 10 seconds. Tests exist to reveal
-   breaks in the code before you report done, not as a progress check.
-5. **If a test fails, fix it, build, push again, then test again.**
+2. **Run `npm test` — the only command the stage holds.** It builds the project,
+   then runs the whole suite. That run must finish in **10 seconds, in total**.
+   The suite aborts at 10 seconds and tells you it is taking too long — a suite
+   that exceeds 10 seconds is a failure, not a pass, and the fix is to improve
+   the slow test or drop the worst offender, then re-run — never to shorten
+   the budget, never to run a partial suite, never to add a per-test exemption.
+   One-off tests and probes are forbidden at any point before this run.
+3. **Commit and push.** Once the suite is green.
+4. **Report.** The build happens inside `npm test`, so a green `npm test` is both
+   the gate and the proof. Never report done on an unverified tree.
+5. **If a test fails or the suite overruns the budget, fix it, re-run `npm test`,
+   and repeat.** Never report done on a failing or unmeasured run.
 
-Never run tests — and never run a build — in the middle of a stage, or as a
-check on your progress while working. Reading the code is how you know what will
-work; the build and tests are how you prove it at the very end when you are about to
-tell the person it is done. Never end a turn with an unpushed commit or a dirty tree.
+Never run the build, `tsc`, a test, a one-off test, or a probe in the middle of a
+stage, or as a check on your progress while working. Reading the code is how you
+know what will work; the build and tests, run together inside `npm test` at the
+very end, are how you prove it. Never end a turn with an unpushed commit or a
+dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
 warning, and the person cannot see anything that is not pushed. A push
@@ -184,23 +191,26 @@ not an edit.
 Tests exist to catch breaks. They are not evidence of intent and not a
 substitute for reading the code.
 
-- The only test command is `npm test`. It runs at the very end of the stage,
-  after the submission push, and only once the work is ready to submit —
-  not mid-stage, not as a check on progress.
-- **The test run must finish in 10 seconds.** Not the build, not the whole
-  command: the run.
-- A test that needs longer must earn it, in a comment on that test, saying what
-  real boundary it crosses. If a test cannot fit and cannot be made to fit, drop
-  it and record what guard is gone.
+- **The only test command is `npm test`.** It builds the project and runs the
+  whole suite. It runs once, at the end of the stage, after every edit is made.
+  One-off tests, partial runs, and probes are forbidden mid-turn, mid-stage, and
+  mid-slice. The agent never runs `node --test`, `npm run build`, `tsc`, or any
+  other build/test command by hand.
+- **The suite must finish in 10 seconds, in total.** Not per test: the whole
+  run. A suite that exceeds 10 seconds is aborted by the guard and reported as
+  taking too long — that is a failure, not a pass. The fix is to improve the
+  slow test or drop the worst offender, then re-run `npm test` with the change
+  in place. Never shorten the budget, never add a per-test exemption, never
+  raise the budget because a test overshot it.
 - Remove what does not earn its cost: obsolete cases, implementation mirroring,
   duplicate coverage, unused fixtures. Deleting is a deliverable, not a loss.
   See `docs/tests.md` for the full policy.
 - Do not chase a number. Do not add tests to keep a count up. Do not delete the
   only guard for a real break to make a failure disappear.
-- **A probe is allowed** when you genuinely need to check that something works
-  before you rely on it. Run probes at the end of the stage, after the push,
-  not in the middle of it, and do not keep them. A probe is not a test and cannot be used to
-  dodge the 10 second budget.
+- **A probe is allowed** when you genuinely need to check something before
+  you rely on it. Run probes only at the end of the stage, after the push, and
+  never keep them. A probe is not a test and cannot be used to dodge the budget.
+  A probe is not permitted mid-turn, mid-stage, or mid-slice.
 
 ## 6. Documents
 
@@ -261,8 +271,9 @@ assumption, or a statement, the response is an answer — not work.
 - Do not overwrite entire files without the person's express permission. Make surgical edits to specific sections; whole-file replacement risks wiping existing functionality, comments, and structure.
 - Do not record your inference as intent.
 - Do not present a plan, a glossary, or a definition as agreed before it is.
-- Do not run tests during a stage, or run a test suite that cannot fit the run
-  budget without saying so.
+- Do not run the build, `tsc`, the suite, a one-off test, a probe, or any check
+  while a stage is in progress — mid-turn, mid-stage, mid-slice. The only test
+  command in the workflow is `npm test`, run once at the end of the stage.
 - Do not use a probe to replace a test, or a test to replace reading the code.
 - Do not claim a link the person gave under a name they did not give.
 - Do not build what `@earendil-works/pi-tui`, `pi-durable`, or `pi-ai` already
@@ -301,7 +312,8 @@ The remote tip is the source of truth. Expect it, and repair it when found:
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a
   tree you have not checked.
-- If `node_modules`/`dist` are missing, `npm ci` then `npm run build`.
+- If `node_modules`/`dist` are missing, `npm ci`. The build is not run before the
+  stage submits — it is the build step inside `npm test`.
 - The person owns pulls: do not fetch-and-merge to "get ahead"; the fetches
   in the two points above are for staleness detection and pointer repair, not
   for changing content.
