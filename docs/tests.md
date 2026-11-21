@@ -91,6 +91,22 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — project tree and ignore rules, 2026-11-21
+
+- Read `runtime/project-tree.ts` and `runtime/gitignore.ts` before their tests.
+- Removed: the third aggregate-arithmetic test in the ignore-rules file. It
+  re-asserted, with a second fixture, that an ignored directory contributes no
+  bytes while the `.gitignore` itself counts — the first test in that file
+  already guards both and also asserts the render. Same break, second door.
+- Every retained test names its break: render order and honest aggregates;
+  depth bounds; Atlas handle marks with relative and absolute attachment
+  paths; attachment escape rejection; anchor errors; symlink-as-leaf;
+  `.brain`/`.git` hidden from the listing and the aggregate; anchors into them
+  rejected; and the gitignore semantics — anchored rules, basename-at-depth,
+  negation, last-rule-wins, nested files, `.git/info/exclude`, directory-only
+  rules, double-star, and the pruned-directory re-include limit.
+- Suite 99 → 98. Boundary preserved: real temporary directories.
+
 ### Stage: tests audit (campaign) — collapse, freshness, projection, state block, 2026-11-21
 
 - Read `domain/projection.ts`, `domain/state-block.ts`, `domain/freshness.ts`,

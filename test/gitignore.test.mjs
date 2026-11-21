@@ -172,14 +172,3 @@ test("a directory ignored above the anchor is pruned even though it is never lis
     assert.equal(tree.size, 512, "the basename rule prunes node_modules at any depth");
   });
 });
-
-test("the aggregate excludes ignored bytes but keeps everything else honest", () => {
-  withProject((root) => {
-    write(root, "keep.ts", 512);
-    write(root, "tmp/x.bin", 4096);
-    write(root, "tmp/y.bin", 4096);
-    writeFileSync(join(root, ".gitignore"), "tmp/\n");
-  }, (root) => {
-    assert.equal(scanTree(root, root).size, 512 + Buffer.byteLength("tmp/\n"), "the .gitignore itself counts; tmp/ does not");
-  });
-});
