@@ -26,21 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A4 — Showing a diff without applying it.**
-The approval queue is gone. Whether the agent may *show* a proposed change
-before making it was never answered.
-*Would land in:* §7.
-*To close:* whether visibility-before-edit exists as a tool, a render, or
-nothing.
-
-**A5 — What counts as destructive.**
-Overwrite, delete, and large patches are the obvious cases. Append, and creating
-a file, are not obvious. `SPEC.md` §7 settles overwrite by never offering it and
-settles delete by leaving it to `bash`, but has no definition of "destructive"
-to apply to the capability gate.
-*Would land in:* §6.
-*To close:* a definition, or a decision that the gate never needs one.
-
 **A6 — The token bar's glyphs and colour roles.**
 `▤` for an estimate, `▰` for a measured figure, `┊` for the budget mark, and the
 muted/accent/warning roles were locked in an earlier build. `SPEC.md` §8 keeps

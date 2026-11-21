@@ -284,6 +284,7 @@ dashboard about its Brain and the project, and it reports:
   read results whose file changed since the read, named by handle (§5.5).
 - **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
+- **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
 
 A long pending list is the signal to collapse.
 
@@ -415,25 +416,36 @@ Atomic here is an intention (§7). Nothing refuses a large change, and nothing
 counts lines. What keeps changes small is the prompt and the agent's willingness
 to stop.
 
-### 6.1 Read only mode
+### 6.1 Read only mode and edit mode
 
-A toggle in the workspace puts Carto in **read only** mode, and turns it off
-again. The person sets it; nothing else does.
+Carto is always in one of two modes. A toggle in the workspace switches between
+them. The person sets it; nothing else does.
 
-In read only mode:
+- **Edit mode** is the default. The harness enforces nothing, and the agent edits
+  as it works.
+- **Read only mode** means the agent makes no destructive change to the project.
+  The harness enforces this at `create` and `edit`, and nowhere else.
 
-- **`create` and `edit` are not offered.** They are absent from the tool set
-  rather than refused when called, so the agent never forms a call it cannot
-  make.
-- **`bash` is still offered, and still trusted.** The mode is not a sandbox. The
-  shell can write, replace, and delete files, and the person knows it. Read only
-  mode removes the tools whose only purpose is to change the project; it does not
-  remove the agent's hands.
-- **The prompt says so.** It tells the agent that it is in read only mode and
-  that the person is relying on it not to use the shell to work around that.
+**The tools stay offered in both modes.** Withholding them would mean
+re-defining the schema between collapses, and the head is frozen (§5.1, §5.6):
+the schema changing is a head byte changing, which forces the whole prefill to be
+paid again. So `create` and `edit` remain in the tool set, and in read only mode
+they return an error telling the agent not to make edits or any other destructive
+change while the mode is on.
 
-There is no propose, approve, or apply queue, in read only mode or out of it. A
-proposal is not a capability, and the gate is on the capability.
+**The mode is stated in the state block**, as `[READ ONLY MODE]` or
+`[EDIT MODE]`. The state block is the tail, which is rebuilt every request
+anyway, so the mode costs nothing to report and nothing is broken by it changing.
+The system prompt defines what the two modes mean, once, because no tool
+description can say what the mode is rather than what one tool does.
+
+**`bash` is still offered in read only mode, and still trusted.** The mode is not
+a sandbox. The shell can write, replace, and delete files, and the person knows
+it and relies on the agent not to use it that way. Read only mode takes away the
+agent's stated intent to change the project, not its hands.
+
+There is no propose, approve, or apply queue, in either mode. A proposal is not a
+capability, and the gate is on the capability.
 
 The gate is on what each tool is *for*, never on whether a particular change
 looks destructive. There is no definition of a destructive change to test
@@ -487,8 +499,8 @@ and `create` takes a path because the file it makes has no handle yet.
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
-| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Absent in read only mode. |
-| `create` | Writes a new file, at a path. Refuses a path that already exists. Absent in read only mode. |
+| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
+| `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
 | `tree` | Sets the project tree's anchor. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
