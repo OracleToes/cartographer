@@ -43,7 +43,7 @@ mistaken for the spec:
   ▤ marks anything with an estimate in it, and a pure-provider reading
   carries no marker), space by Brain part separately from tool work and
   stable system and tool prompts, one line per pending Brain write named by
-  handle, what is stale named by handle, and the project tree at the project root, depth 2, Atlas-linked
+  handle, what is stale named by handle, and the project tree at the project root, depth 2, Atlas-attached
   files marked — a derivation until slice 3's `tree` tool owns the anchor.
 - Space estimates: an assistant message carrying a tool call counts as tool
   work, as does every tool-result message; the remainder is transcript.
@@ -236,7 +236,7 @@ The live session and the tools exist and are wired end to end.
   context fullness (last provider report + tool work since), space by Brain
   part, one line per pending write named by handle (ephemeral, cleared at
   collapse), stale evidence named by handle, the tree anchored
-  where the agent's attention is with Atlas-linked files marked.
+  where the agent's attention is with Atlas-attached files marked.
 - **Fixed in passing:** the collapse ceremony now creates the new generation's
   store (empty, valid) at snapshot time — without it an open-time reconcile
   would treat the frozen-but-storeless generation as a crash remainder and
@@ -490,7 +490,7 @@ Sweep results, everything not previously recorded:
   over bytes it already holds in memory (same format, one-liner,
   intentional — avoids a second read). MINI.md's digests are product
   semantics pi has no opinion on.
-- **project-tree vs pi — kept.** An Atlas-linked, display-bounded
+- **project-tree vs pi — kept.** An Atlas-attached, display-bounded
   renderer for the state block (spec §6.1). pi-tui is interactive
   rendering; nothing pi ships renders a prompt-tail tree.
 - **`config.ts` — stale comment fixed** ("see capacity.ts"; the file was

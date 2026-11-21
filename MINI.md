@@ -29,13 +29,15 @@ holds the agent's map of the project and its own state, standing in for memory.
 
 The Brain holds:
 
-- **Atlas** — source-backed claims about the project, with checked evidence.
-  Atlas is the map layer over the project tree: it connects what the agent
-  understands into a graph. A file is not connected to the atlas unless the agent
-  links a node to it — files are not implicitly nodes; the tree anchors where
-  the map lives, not what is in it. Attention is a consequence of the minimal
-  context, not a score the system computes — the agent stays focused because it
-  keeps its Brain maintained.
+- **Atlas** — nodes that store what the agent understands about the project:
+  a name and a text entry. A node may be linked to other nodes; it may also be
+  attached to any other reference in Carto. No typed edges, no source requirement,
+  no evidence. Atlas is the map layer over the project tree: it connects what
+  the agent understands into a graph. A file is not connected to the atlas
+  unless the agent attaches a node to it — files are not implicitly nodes; the
+  tree anchors where the map lives, not what is in it. Attention is a
+  consequence of the minimal context, not a score the system computes — the
+  agent stays focused because it keeps its Brain maintained.
 
   > Confirmed by the person: "the atlas serves the dual purpose of giving the
   > tree leaves, and of mapping out meaningful structure. the focus of it is a
@@ -62,20 +64,12 @@ The Brain is the only durable storage. Nothing else in Carto is durable.
 
 ### 2.1 The Atlas graph
 
-Nodes are source-backed claims with evidence. Edges between nodes are optional
-and typed; nothing requires a node to connect to another node. A node, or a
-sub-graph of nodes, may float unconnected from the rest of the Atlas and from
-the project tree. The tools are permissive and easy to use, by intent — the
-graph's usefulness comes from the agent tending it, not from validation.
-
-Edge types (directed, except `contradicts` which is symmetric):
-
-- **`replaces`** — this node supersedes that one. The decay instrument: a dead
-  claim that says so.
-- **`depends-on`** — this claim rests on that one. The verification path: walk
-  down what a claim stands on.
-- **`contradicts`** — the two cannot both hold. Resolve or explicitly hedge;
-  never act on both.
+Nodes are nodes — a name and a text entry. A node may be linked to other
+nodes, or attached to any other reference in Carto; there are no typed edges,
+and nothing requires a node to connect to anything. A node, or a sub-graph of
+nodes, may float unconnected from the rest of the Atlas and from the project
+tree. The tools are permissive and easy to use, by intent — the graph's
+usefulness comes from the agent tending it, not from validation.
 
 > Confirmed by the person.
 
@@ -182,9 +176,9 @@ archive.
 
 **The agent does not know the archive exists.** Recovery is a person action.
 
-Recovered records return to their original type, named by handle. Evidence
-that no longer verifies is marked stale — the state block's stale line carries
-it. The agent has no way to address the archive, by design.
+Recovered records return to their original type, named by handle. An
+attachment that no longer verifies is marked stale — the state block's stale
+line carries it. The agent has no way to address the archive, by design.
 
 > Confirmed by the person.
 
@@ -321,24 +315,25 @@ It tells the agent:
   separately from tool work and from the stable system and tool prompts;
 - pending changes — one line per Brain write since the projection was built,
   named by handle: the signal to collapse;
-- new and stale entries — new Brain records and Atlas evidence whose source
-  changed since the projection was built, named by handle: the signal to keep
-  the Brain current;
+- new and stale entries — new Brain records, and Atlas entries whose
+  attachment changed since the projection was built, named by handle: the
+  signal to keep the Brain current;
 - the project tree — anchored at a directory, to a depth, showing files,
-  directories, sizes, and which files an Atlas node links to.
+  directories, sizes, and which files an Atlas node attaches to.
 
 It is the part of the context expected to change often. Its items carry the
-same short reference IDs everything else carries. An evidence file whose digest has changed since the claim was
-written is marked stale at rebuild — a gentle signal to update the Brain,
-never a block on anything.
+same short reference IDs everything else carries. An Atlas entry attached to a file whose contents changed since the entry was
+written is marked stale — a gentle signal to update the Brain, never a block on
+anything.
 
 > Confirmed by the person.
 
 ### The project tree
 
 The block carries the project tree to a depth, anchored at a directory. It shows
-files, directories, and their sizes, and marks which files an Atlas node links
-to, so the tree is a map of what the agent understands rather than a listing.
+files, directories, and their sizes, and marks which files an Atlas node
+attaches to, so the tree is a map of what the agent understands rather than a
+listing.
 
 The person is willing to pay its cost on large projects.
 
@@ -523,8 +518,9 @@ authority on what a tool does; the system prompt carries only what no single
 description can say.
 
 - **chat** — declare something person-facing. Plain model text is not Chat; it, the reasoning, and the tool calls render as foldable cards — visible, dimmer, and their own hues, but never Chat.
-- **atlas** — create or update one source-backed claim node, with optional
-  typed edges to other nodes.
+- **atlas** — create or update one Atlas node: a name and a text entry,
+  optionally linked to other nodes, optionally attached to any other reference
+  in Carto.
 - **ledger** — the agent's working book: goals, notes, questions, instructions,
   progress.
 - **pin** — pin or remove one Brain record (atlas, ledger, chat). A pin means "keep it here".

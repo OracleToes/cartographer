@@ -88,8 +88,9 @@ See `docs/intent.md` §29.
 
 ## §4. Recover — resolved
 
-**Q4.1 — Resolved.** Recovery restores the record to its original type; stale
-evidence is marked stale and surfaces through the state block's stale line.
+**Q4.1 — Resolved.** Recovery restores the record to its original type; a stale
+attachment surfaces through the state block's stale line. (Amended 2026-11-21:
+the evidence clause is removed — the person's corrections.)
 
 **Q4.2 — Resolved.** The agent gets nothing. It does not know the archive
 exists and has no way to address it.

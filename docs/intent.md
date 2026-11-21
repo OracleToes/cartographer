@@ -387,9 +387,10 @@ continuation rides a marker while the block is injected per request.
 reported provider usage, plus what tool calls have added since); space taken up,
 broken down by Brain part — Ledger, Atlas, Chat — separately from tool work and
 from the stable system and tool prompts; one line per pending Brain write since
-the projection was rebuilt, named by handle; what is stale, named by handle;
-and the project tree, anchored at a directory to a depth, with Atlas-linked
-files marked. Nothing instructive.
+the projection was rebuilt, named by handle; what is stale, named by handle
+(Atlas entries whose named attachment changed); and the project tree,
+anchored at a directory to a depth, with Atlas-attached files marked.
+Nothing instructive.
 
 > Amended 2026-11-20 by the person: wakes are scrapped (the armed-wakes line is
 > gone) and pins are markers on book entries, not a Brain part — the space
@@ -416,7 +417,7 @@ then we iterate on that."
 model is steered by everything in its context, and Carto's context is
 deliberately pruned, so every remaining item steers harder. Focus is what
 happens when the Brain is well maintained. The staleness instruments are
-evidence freshness, the pending list, and the state block's stale lines. Raw
+the pending list and the state block's stale lines. Raw
 signals at rebuild (age, in-degree, freshness) may be shown as information;
 they are never reduced to a score and never delete anything by themselves.
 
@@ -428,34 +429,33 @@ maintained."
 
 ## 24. The Atlas is the map layer over the tree
 
-**Decision.** The Atlas serves two purposes: it lends the project tree its
-leaves — marking files and directories the agent understands rather than a
-bare listing — and it maps meaningful structure, connecting what the agent
-understands into a graph. The tree is the scaffold; the Atlas is the
-understanding hung on it.
-
-> Amended 2026-11-21 by the person: a file is not connected to the atlas unless
-> the agent links a node to it — files are not implicitly nodes. The tree
-> anchors where the map lives, not what is in it.
+**Decision, 2026-11-21.** The Atlas is the map of what the agent understands:
+nodes — a name and a text entry — optionally linked to other nodes, optionally
+attached to any other reference in Carto. No typed edges, no source
+requirement, no evidence. A file is not a node; a file joins the map when the
+agent attaches a node to it. The tree anchors where the map lives, not what is
+in it.
 
 **Established by.** "so the atlas serves the dual purpose of giving the tree
-leaves ... and of mapping out meaningful structure."
+leaves ... and of mapping out meaningful structure." (Re-scoped 2026-11-21 by
+the person: the file-centric framing was wrong; atlas nodes are not
+file-based — they are a name and an entry to store text, linkable to nodes,
+attachable to any other reference in Carto.)
 
 
-## 25. Atlas edges are optional and typed
+## 25. Atlas edges — removed 2026-11-21
 
-**Decision.** Atlas nodes may link to other Atlas nodes with one of three edge
-types: `replaces` (this supersedes that), `depends-on` (this rests on that), and
-`contradicts` (symmetric; the two cannot both hold). No node is required to be
-connected to anything. Nodes and sub-graphs may float unconnected to the rest of
-the Atlas and to the tree. The Atlas and the other tools are permissive and
-easy to use; the graph's value comes from the agent tending it, not from
-structural validation.
+**Decision.** The typed-edge system — `replaces` / `depends-on` / `contradicts`
+— is removed. Atlas nodes carry a name and a text entry; they may be linked to
+other nodes, or attached to any other reference in Carto. No edge types exist.
+No node is required to be connected to anything. Nodes and sub-graphs may float
+unconnected to the rest of the Atlas and to the tree. The Atlas and the other
+tools are permissive and easy to use; the graph's value comes from the agent
+tending it, not from structural validation.
 
-**Established by.** The person agreed to the small typed edge set and directed:
-"we should not require a node to be connected to another node, so an edge is not
-always required, we want the atlas (and the other tools) to be permissive and
-easy to use, so a node or cluster can exist unconnected."
+> **Removed 2026-11-21 by the person.** The typed-edge and source-backed
+> language was the agent's hallucination; the person did not ask for either.
+> "so are edges, i did not ask for either of those."
 
 
 ## 26. The tree anchor is a dedicated `tree` tool
@@ -487,12 +487,16 @@ keep the brain in between and during."
 
 ## 28. Digest drift is a gentle signal
 
-**Decision.** An Atlas claim whose evidence file's digest has changed since the
-claim was written is marked stale at rebuild. It gently informs the agent to
-update its Brain; it blocks nothing and deletes nothing.
+**Decision, 2026-11-21.** If an Atlas node attaches to an entry and that entry
+is a file, and that file changes, the Atlas node is marked stale in the state
+block — a gentle signal to update its Brain, blocking nothing and deleting
+nothing. On collapse, the Atlas entry itself is marked stale — stored as a
+marker on the entry, like a pin — as stale.
 
 **Established by.** "i think so? it gebtly informs the agent to update its
-brain."
+brain." (Re-scoped 2026-11-21 by the person: the file-digest framing was
+hallucinated; the stale mark is written back to the entry at collapse, not
+re-computed from digests.)
 
 
 ## 29. The archive is the sealed previous generation's store
@@ -517,10 +521,11 @@ grows only by what is explicitly kept.
 ## 30. Recovery restores the original type; the agent cannot address the archive
 
 **Decision.** A recovered record returns as its original type (Atlas to Atlas,
-Ledger to Ledger, Chat to Chat), and evidence that no longer verifies is
-marked stale — the state block's stale line informs the agent. The agent has
-no tool, command, or signal for the archive; giving it one breaks the
-boundary that the archive exists.
+Ledger to Ledger, Chat to Chat). The agent has no tool, command, or signal for
+the archive; giving it one breaks the boundary that the archive exists.
+
+> **Amended 2026-11-21 by the person.** The evidence clause is removed — none of
+> it was the person's intent. Stale marking lives in §28.
 
 **Established by.** The person confirmed both halves directly: "yes, restore the
 original type, let the state block inform the agent of stale data" and "no it
