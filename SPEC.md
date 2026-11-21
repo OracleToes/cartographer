@@ -366,27 +366,45 @@ description can say.
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
-| `read` | Reads a line range inside the project root. |
-| `edit` | Applies one atomic edit to a path inside the project. |
+| `read` | Reads a file, from a start line, for a number of lines, inside the project root. |
+| `edit` | Applies ordered text replacements to an existing file. Never creates, never replaces a file whole. |
+| `create` | Writes a new file. Refuses a path that already exists. |
 | `shell` | Runs a command inside the project. |
 | `tree` | Sets the project tree's anchor and depth, and returns the rendered tree. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
 | `sleep` | Ends the run. |
 
-`read`, `edit`, and `shell` are supplied by the durable package. Carto supplies
-their descriptions and scopes them to the project root; it does not write its own
-file or shell layer beside them.
+`read`, `edit`, and `shell` are taken from the durable package. Carto supplies
+their descriptions and scopes them to the project root; it does not write a file
+or shell layer beside them.
 
-That has two consequences Carto inherits rather than chooses:
+- **`read`** takes a path and optional `offset` and `limit`.
+- **`edit`** takes a path and a list of `oldText`/`newText` replacements, each
+  matched against the original file, not against the result of the one before.
+  The package applies them all or nothing and refuses a file that does not
+  exist. Editing an existing file is the only thing it does.
+- **`shell`** runs a command through the project's environment.
 
-- **`read` and `edit` take a path, not a line range and not a single hunk.**
-  `read` takes `path` with optional `offset` and `limit`. `edit` takes a path and
-  a list of `oldText`/`newText` replacements, matched against the original file
-  and applied all or nothing.
-- **`edit` may create a file and may replace a whole file.** A replace is a
-  single atomic edit to the package, which is why "atomic" in this document means
-  one edit call that either lands entirely or not at all, never one part of a
-  file. Atomicity is a property of the call, not a limit on what it touches.
+**Creation is separate from editing.** `create` writes a file that must not
+exist and refuses a path that already does. The package's own `write` tool
+creates *or* overwrites, and overwriting is the capability Carto does not offer.
+A whole-file replacement is a rewrite, not a step toward a goal, and it discards
+text the agent never read. Because `create` refuses an existing path, editing
+again means `edit`, whose replacements must match the file exactly — so a file's
+old contents have to pass through the agent's context before they can be
+replaced.
+
+**Replacement is not the same as deletion.** `edit` is what refuses to replace a
+file whole; nothing stops the agent from deleting one. `shell` runs commands,
+including whatever removes files. So a file can be deleted and recreated, and its
+previous contents then exist only in git.
+
+The filesystem rule is therefore about what the tools are *for* — creation is one
+call, the narrowing of a file is another — not a boundary the filesystem
+enforces against `shell`.
+
+"Atomic" throughout this document means one tool call that lands entirely or not
+at all. It is a property of the call, not a limit on how much a call may change.
 
 ## 8. Workspace
 
@@ -473,27 +491,7 @@ terminal editor, or a transcript compactor.
 2. What a pinned file is, and how a file carries a pin.
 3. How ephemeral entries are named. The Brain prefixes are fixed; the prefix and
    scheme for files, tool calls, and ephemera are not.
-4. Whether the provider may hold content the context no longer shows (§13.1).
-   This one is not cosmetic: if it holds, a collapse is not the only thing that
-   decides what the model can still see.
 
-### 13.1 Server-held continuation
-
-A provider may keep a conversation on its own side, so that a request continues
-an earlier one instead of resending it. When that happens, content the client
-has stopped sending is not necessarily content the model can no longer see.
-
-This collides with the same rule as anything else that hides text (§3.4), and it
-is not solved here:
-
-- The decision to continue is made per request, by the provider layer, and no
-  setting exposed to Carto overrides it.
-- It is keyed to the conversation's provider identity. A new generation does not
-  reliably get a new one.
-- The provider drops an old thread after a short idle period, and rejects a
-  continuation it cannot match, falling back to a full request. So the behaviour
-  is timing-dependent, not deterministic.
-
-Until this is settled, Carto does not claim that a swept entry is invisible to
-the model. It claims what it has built: the entry is out of the context, and out
-of Carto's storage once the collapse is done.
+The model is always given the whole context. Carto does not rely on a provider
+keeping conversation state on its own side, and no swept text is presumed to be
+retained there.
