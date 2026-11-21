@@ -91,6 +91,118 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — workspace views, 2026-11-21
+
+- Read `ui/tokens.ts`, `ui/sidebar.ts`, `ui/transcript.ts`, `ui/context-view.ts`,
+  `ui/atlas-view.ts`, and `ui/ledger-view.ts` before their tests. No unearned
+  tests found; nothing removed.
+- Coverage confirmed: the pad/width invariant with and without ANSI; the
+  sidebar's counts, deterministic token figure, and mouse selection; transcript
+  card folding and the live header; the context view's rail/content
+  navigation, tool folding, the delete flow targeting the selected transcript
+  message with the Now modifier, and collapse; the atlas and ledger two-pane
+  navigation, detail scrolling, and wheel; progressive tool-argument
+  formatting; the pin toggle on ledger and atlas; and the agent block's pin
+  badge and click-to-toggle.
+- The atlas and ledger two-pane tests are near-identical in shape but guard
+  two separate render implementations; each is the only width guard for its
+  view, so both stand.
+- Suite 97 → 97. Known gap, unchanged: nothing drives the composed TUI
+  (`ui/app.ts` and the chrome, token bar, palette, jump, clipboard, and dump
+  modules) — the views are tested, the composition is not.
+
+### Stage: tests audit (campaign) — config, capacity, headless, CLI, 2026-11-21
+
+- Read `runtime/config.ts`, `runtime/llama-swap-model.ts`, `runtime/headless.ts`,
+  and `src/cli.ts` before their tests. No unearned tests found; nothing
+  removed.
+- Coverage confirmed: model-ref parsing; config validation, creation,
+  in-memory override, and corrupt-file error; advertisement field precedence;
+  the pin-wins truth table including the zero sentinel; the listing-to-model
+  mapping; the registry refresh (pin cold and warm, silent server,
+  retain-on-failure) over both an injected fetch and a real loopback socket;
+  the headless driver's chat-only output, no-chat parenthetical, /collapse, and
+  the non-terminal announcement; the capacity refresh's lower-and-report and
+  idempotence; and the CLI end to end (--help, missing config, creation then
+  boot, unsupported provider).
+- Suite 97 → 97. Boundaries preserved: the real loopback HTTP socket and the
+  spawned CLI.
+
+### Stage: tests audit (campaign) — live session and tools, 2026-11-21
+
+- Read `runtime/live-session.ts`, `runtime/tools.ts`, and `runtime/workspace.ts`
+  (for the boundary) before their tests.
+- Removed: the standalone read-output test. The bounds test already asserts the
+  same `path:start-end (of N lines)` format for whole-file, from-line, and
+  through-line reads, and already asserts the excerpt carries the file text.
+  The removed test's only unique assertion was that the output does not
+  contain "digest" — a negative against a framing the specification dropped,
+  guarding no current behaviour.
+- Every retained test names its break: a full turn's Brain write, pending
+  line, and trailing marker-free block; the continuation marker; read feeding
+  an Atlas attachment; the tree tool moving the anchor; the `.brain`/escape
+  boundary; open read bounds and past-the-end rejection; unknown handles as
+  explicit errors; agent- and person-triggered collapse, including drift
+  riding the rebuild; the bash round trip; and interrupt settling a run with
+  an open bash call.
+- Known risk, untouched: the interrupt test sleeps 1.5s to let the bash task
+  start, under a 20s ceiling — the suite's main wait. It is the only guard for
+  its break and no deterministic replacement is obvious, so it stands.
+- Suite 98 → 97. Boundaries preserved: the faux provider, real temporary
+  files, and the real bash round trip.
+
+### Stage: tests audit (campaign) — project tree and ignore rules, 2026-11-21
+
+- Read `runtime/project-tree.ts` and `runtime/gitignore.ts` before their tests.
+- Removed: the third aggregate-arithmetic test in the ignore-rules file. It
+  re-asserted, with a second fixture, that an ignored directory contributes no
+  bytes while the `.gitignore` itself counts — the first test in that file
+  already guards both and also asserts the render. Same break, second door.
+- Every retained test names its break: render order and honest aggregates;
+  depth bounds; Atlas handle marks with relative and absolute attachment
+  paths; attachment escape rejection; anchor errors; symlink-as-leaf;
+  `.brain`/`.git` hidden from the listing and the aggregate; anchors into them
+  rejected; and the gitignore semantics — anchored rules, basename-at-depth,
+  negation, last-rule-wins, nested files, `.git/info/exclude`, directory-only
+  rules, double-star, and the pruned-directory re-include limit.
+- Suite 99 → 98. Boundary preserved: real temporary directories.
+
+### Stage: tests audit (campaign) — collapse, freshness, projection, state block, 2026-11-21
+
+- Read `domain/projection.ts`, `domain/state-block.ts`, `domain/freshness.ts`,
+  `domain/estimate.ts`, `runtime/collapse.ts`, and `runtime/projection-files.ts`
+  before their tests. No unearned tests found; nothing removed.
+- Coverage confirmed: newest-first discovery; a crashed head purged; one
+  sealed archive with older remainders purged; seal → new generation → purge
+  after the exports seam; the byte-stable frozen snapshot; drift by mtime
+  (newer stale, older fresh, missing stale) with non-file attachments unchecked
+  and handles surviving a refresh; the projection's handles, timestamps, no
+  raw ids, no chat text, `(gone)` links, ledger answers, inline pins, and the
+  nothing-omitted guard; the block's contents and delimiters, its `none` and
+  unknown-window forms, marker stripping, exclusive token buckets, and the
+  trailing append.
+- Suite 99 → 99. Boundaries preserved: real temporary files and a real SQLite
+  Brain store.
+
+### Stage: tests audit (campaign) — Brain writes, storage, handles, 2026-11-21
+
+- Read `domain/brain.ts`, `domain/records.ts`, `domain/handles.ts`, and
+  `runtime/brain-store.ts` before their tests. Every retained test names its
+  break: append, update, and upsert semantics; links stored as written; no
+  cascade on delete; pin and stale as markers that clear by key removal;
+  single-step delete with explicit unknown-id errors; handle assignment and
+  reconcile; and the real-SQLite round trip, delete persistence, and
+  corrupt-document rejection.
+- Removed: the `ledger.upsert` test's closing assertion that a fixture-built
+  entry has the kind it was built with — a tautology about the test's own
+  literal, guarding no production behaviour. The test is retitled to what it
+  actually guards.
+- Strengthened in place: the compact test now asserts the Brain still reads
+  after secure-delete and VACUUM, so it fails if compaction loses the document,
+  not only if it throws.
+- Suite 99 → 99 (one assertion removed, one strengthened). Boundary preserved:
+  the real SQLite file.
+
 ### Stage: tests-doc reconciliation + audit, 2026-11-21
 
 - `docs/tests.md` was stale against the corrected rule — the commands/budget
