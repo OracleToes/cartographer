@@ -42,5 +42,3 @@ human-readable, and the core of the project matters more than an editor for the
 prompt.
 *Would land in:* §8.
 *To close:* revisiting the deferral.
-
----
