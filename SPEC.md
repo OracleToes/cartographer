@@ -18,6 +18,16 @@ Carto has three defining properties:
    disposable; the Brain is the memory.
 3. **Scoped tasking.** The agent works in small, atomic steps.
 
+**Carto places no limit on the agent that the person has not defined.** There is
+no turn limit, no maximum length on a name or an entry, no read limit on a file,
+and no defensive gate that exists because a limit seemed prudent. A limit the
+person has not asked for is a limit that slows the agent down and teaches it to
+work around the tool instead of using it.
+
+Where a bound is part of how a tool works, it is said so in that tool's own
+description and nowhere else. This rule governs every place a limit could be
+added later: it is not there unless the person put it there.
+
 Carto is built on the `pi` packages and adds only what they do not provide
 (§12).
 
@@ -81,8 +91,8 @@ Deleting a Brain record is one step and has no undo. A deleted record is not
 archived and does not become an archive entry. Marking a record for archive is a
 different action, and the two are never confused (§3.3).
 
-No schema length limit is placed on a Brain entry. The prompt asks the agent to
-size its own entries; the runtime enforces no character budget and exposes none.
+The prompt asks the agent to size its own entries. Under §1 there is no schema
+length limit to size them against.
 
 ## 3. Context
 

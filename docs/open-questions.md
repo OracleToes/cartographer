@@ -26,19 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A1 — Novelty is allowed but not required.**
-A previous agent recorded: novelty is a description, not a requirement;
-conventional is fine when it works. Never restated to the person.
-*Would land in:* §1.
-*To close:* yes or no.
-
-**A2 — `MAX_TURNS` and the run bound.**
-Recorded as needing an answer; whether it may surface to the model was never
-settled. `SPEC.md` does not mention a turn limit at all, so the question is
-wider than it was: is there a bound on a run, and if so is it visible?
-*Would land in:* §9 or §11.
-*To close:* whether a bound exists, what it is, and whether the agent is told.
-
 **A3 — The fallback capability mode.**
 The person described "instructed not to edit, edit tool disabled, shell
 trusted". `SPEC.md` §6 states the gate — either `edit` is offered or it is not —
