@@ -22,20 +22,13 @@ integration is a separate decision.
 
 ## Open
 
-**1 — Whether archive-marked records stay in the Brain.**
-`SPEC.md` §4.1 says a Brain record marked for archive is swept into the archive
-at collapse. It does not say whether the record leaves the Brain, or stays there
-carrying a mark while only its live-context presence goes.
-*Would land in:* §4.1.
-*To close:* which of the two the Brain does.
-
-**2 — Palette keys.**
+**1 — Palette keys.**
 Bindings exist; the spec names none. Low stakes, and it is a build decision
 unless the keys are meant to be fixed.
 *Would land in:* §8, if at all.
 *To close:* whether the spec names keys.
 
-**3 — Edit-prompting in the TUI.**
+**2 — Edit-prompting in the TUI.**
 Deferred, not open. Recorded here so the deferral itself is not lost. The
 person's reason: prompt text benefits from programmatic insertion that is not
 human-readable, and the core of the project matters more than an editor for the

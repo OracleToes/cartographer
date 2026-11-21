@@ -115,8 +115,8 @@ kept.
 An ephemeral item survives only if it is pinned on the live context layer.
 Everything else is swept to the archive at collapse.
 
-Brain records are not ephemeral. They stay in the Brain until they are deleted
-or marked for archive.
+Brain records are not ephemeral. They stay in the Brain until they are deleted,
+or until they are marked for archive and a collapse moves them out (§4.1).
 
 ### 3.2 Pins
 
@@ -146,9 +146,10 @@ everything a collapse sweeps, and nothing else.
   for good at the following collapse.
 - A pinned item in the archive remains until it is unpinned or restored.
 
-Restoring puts an entry back into the live context as its original type. It does
-not also pin; a pin is a separate action either party can take. A restored
-attachment that no longer resolves is marked stale.
+Restoring puts an entry back where it came from, as its original type: a Brain
+record returns to the Brain and so to the head, and an ephemeral item returns to
+the live context. It does not also pin; a pin is a separate action either party
+can take. A restored attachment that no longer resolves is marked stale.
 
 Restoring is a person action, and the person's alone. The agent does not know
 the archive exists. Anything swept is, to the agent, gone forever: it has no
@@ -204,9 +205,9 @@ A collapse:
    archive into the archive;
 3. deletes every Brain record marked for delete, and every unpinned archive item
    past its grace period;
-4. places all Brain records into the new context's head (§5.1), in order,
-   clustered by type, and returns every entry marked for restore to its place in
-   the context;
+4. places every record the Brain holds into the new context's head (§5.1), in
+   order, clustered by type, and returns every entry marked for restore to its
+   place in the context;
 5. places pinned ephemera and pinned files into the head, after Chat.
 
 Brain records not marked for archive are never moved. No Brain record is deleted
@@ -242,6 +243,17 @@ the person may withdraw a mark the agent placed.
 A deletion happens for real only at a collapse. Applying a delete now removes
 the entry from the context, but the store it was committed to still holds it
 (§3.4), so the text is gone from the model's view before it is gone from disk.
+
+**Archiving a Brain record moves it out of the Brain.** The record is not
+duplicated and does not stay behind carrying a mark: it is a Brain record while
+it is in the Brain and an archived record while it is in the archive. The Brain
+holds no archived state, and a record kind has no field to hold one. When it is
+restored it is a Brain record again, of its original type.
+
+That is what makes the archive a destination rather than a flag. It also keeps
+the Brain's promise intact: everything in it is live, and a live context can be
+rebuilt from the Brain alone (§2) without any of it being hidden from the rebuild
+by a mark.
 
 ## 5. The prefill
 
