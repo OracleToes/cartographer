@@ -144,6 +144,18 @@ audit trail of earlier values.
 This covers both kinds of removal: a sweep at collapse is a real deletion of the
 previous context, and a delete is a real deletion of a Brain record.
 
+The live context is built on a store that is append-only: an entry, once
+committed, cannot be removed from it. A collapse therefore builds a new context
+in a new store, with only what survives the collapse in it. The previous store
+is deleted as a whole, so everything it held is gone rather than hidden. This is
+what makes a real deletion possible at all; it is not an optimisation.
+
+The head is written first in the new store, in its fixed order, byte for byte as
+it stood before. Keeping it identical is what lets the provider's cached prefix
+survive a collapse, so a collapse pays for the body and the tail and never for
+the head again. Anything that would change a head byte between generations must
+be paid for at the collapse instead.
+
 ## 4. Collapse
 
 Collapse is the gardening operation. It is the only thing that rebuilds the
@@ -154,9 +166,11 @@ A collapse:
 1. ends the live context;
 2. sweeps every unpinned ephemeral item and every Brain record marked for
    archive into the archive;
-3. deletes every unpinned archive item past its grace period;
+3. deletes every Brain record marked for delete, and every unpinned archive item
+   past its grace period;
 4. places all Brain records into the new context's head (§5.1), in order,
-   clustered by type;
+   clustered by type, and returns every entry marked for restore to its place in
+   the context;
 5. places pinned ephemera and pinned files into the head, after Chat.
 
 Brain records not marked for archive are never moved. No Brain record is deleted
@@ -168,6 +182,27 @@ at any time, and a collapse rebuilds the agent's context from the Brain.
 The agent is expected to trigger a collapse rarely, because it does not want to
 forget. The person may collapse without warning, and afterwards sees a plain
 report rather than a confirmation request.
+
+### 4.1 Archive, restore, and delete are marks
+
+Archive, restore, and delete are three separate actions, and each is a mark by
+default. Marking applies the action at the next collapse, and the mark can be
+changed or withdrawn until then.
+
+- **Marked for archive** leaves the entry in the context for now. It is not in
+  the head, not pinned, and it does not stay. The next collapse sweeps it.
+- **Marked for delete** leaves the entry visible for now and removes it at the
+  next collapse.
+- **Marked for restore**, for an entry in the archive, leaves it in the archive
+  for now and returns it to the context at the next collapse.
+
+Each action can also be **applied now**. Applying an action now changes the
+context immediately, which forces a rebuild at that point: the prefill runs
+again from the changed entry through the tail. The head is untouched, so
+applying an action now costs the body and the tail, never the head.
+
+Marks are visible in the state block. A mark also carries its author, and only
+the person may withdraw a mark the agent placed.
 
 ## 5. The prefill
 
