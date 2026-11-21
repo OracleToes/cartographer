@@ -150,17 +150,20 @@ deletion primitive (it cuts a context with a reset and keeps every entry); Carto
 builds the archive itself. The archive lives under `.brain/`, is readable and
 restorable by the person only, and is never referenced by the Brain or the
 agent. Pinned items in the archive remain in the archive unless unpinned or
-restored to the context. Items in the archive that are not pinned are deleted
-for good. The archive is never the source of truth; the Brain is. A crash during
+restored to the context. Items in the archive that are not pinned — swept
+ephemeral files and brain entries marked for archive — are deleted for good
+after one collapse of grace. The archive is never the source of truth; the Brain is. A crash during
 collapse cannot lose Brain state, because the Brain does not reference the
 archive.
 
 ### 4.1 Pin and recover are different
 
 - **Pin** means "keep it here." A pin is a marker on an entry — a Brain record
-  (atlas, ledger, chat), and, per the re-scope, pinned files and pinned ephemera
-  are a proposed addition (open — see `docs/open-questions.md` §15). Never a
-  separate record, and carries no reason, no source, no other bookkeeping. An
+  (atlas, ledger, chat) — plus the two layout concepts the re-scope added:
+  pinned files and pinned ephemera, which are confirmed positions in the
+  prefill (open — what a pinned file is, and where pinned ephemeral content
+  lives, — see `docs/open-questions.md` §15). Never a separate record, and
+  carries no reason, no source, no other bookkeeping. An
   item pinned on the context layer never falls to the archive layer. An item
   pinned on the archive layer never gets deleted; it remains in the archive
   until unpinned or restored to the context. Pins render inline on the entry
@@ -224,8 +227,8 @@ Collapse is the gardening operation. It ends the current live context, sweeps
 what it is told to sweep — every unpinned ephemeral item and every Brain record
 marked for archive — to the archive, and writes a new context from the Brain.
 Nothing else is deleted at collapse: unpinned items in the archive are deleted
-for good at the appropriate time, pinned items remain in the archive, and Brain
-records not marked for archive are never moved.
+for good after one collapse of grace, pinned items remain in the archive, and
+Brain records not marked for archive are never moved.
 
 **Collapse needs no approval.** Either the person or the agent can trigger it.
 
@@ -249,11 +252,19 @@ Collapse does not delete Brain records. Only a delete can.
 ## 6. The projection
 
 The agent sees a projection built from the Brain plus its live context. The
-projection is the stable head of the prefill: system prompt, tool schemas, Brain
-entries clustered by type (atlas, ledger, chat), pinned content, then the
-transient live tail, with the state block at the tail. The head is meant to be
-stable across collapses, so the server's cached prefix stays warm and collapse
-does not cost prefill.
+projection is the stable head of the prefill. The prefill window, in order —
+the person's worked-through layout, verbatim:
+
+system prompt → tool definition/schema → atlas entries → ledger entries →
+chat entries → pinned files → pinned ephemera → regular ephemera →
+uncollapsed brain entries → regular ephemera → state block.
+
+The head — everything through pinned ephemera — is the stable prefix, ordered
+by type so the server's cached prefix stays warm across collapses and collapse
+does not cost prefill. Brain entries clustered by type sit near the head; the
+state block is always at the tail. What "uncollapsed brain entries" and
+"pinned files" mean and where pinned ephemeral content lives are open — see
+`docs/open-questions.md` §15.
 
 **The projection carries structure, not a second copy of the dialogue.** A Person
 message is already in the transcript; its text is not repeated in the projection.

@@ -805,20 +805,28 @@ The confirmed shape of the archive model:
 - Ephemeral content (tool calls, reasoning, non-chat text output, read calls)
   sweeps automatically into the archive at collapse, unless pinned.
 - Pinned items in the archive remain in the archive until unpinned or restored
-  to the context. Items in the archive that are not pinned are deleted for good.
-- Pinned content is ordered near the head of the prefill so it is stable across
-  collapses and does not cost prefill; Brain entries are clustered by type near
-  the head; the state block stays at the tail.
+  to the context. Items in the archive that are not pinned — swept ephemeral
+  files and brain entries marked for archive — are deleted for good after one
+  collapse of grace.
+- The prefill window, in order — the person's worked-through layout: system
+  prompt → tool definition/schema → atlas entries → ledger entries → chat
+  entries → pinned files → pinned ephemera → regular ephemera → uncollapsed
+  brain entries → regular ephemera → state block. Brain entries are clustered
+  by type near the head; pinned content sits near the head so the prefix stays
+  stable across collapses and collapse does not cost prefill; new/stale entries
+  are listed in the state block; the state block is always at the tail.
 - A separate delete button permanently deletes an entry without going to the
   archive (it costs a prefill — the tail is cut — which is acceptable).
 - Entries on the archive layer can be restored. Only the user knows the archive
   layer exists; only the user can do anything with it.
 
 The unresolved seams are recorded in `docs/open-questions.md` §15 (proposed, not
-confirmed): what can be pinned (pinned files vs. pinned ephemera — and where
-pinned ephemeral content lives after collapse), deletion timing of unpinned
-archive items, archive-marked brain entry semantics, the frozen head's structure,
-the recovery UI, and the per-generation-store choice.
+confirmed): what pinned files and pinned ephemera are (and where pinned
+ephemeral content lives after collapse), archive-marked brain entry semantics,
+the frozen head's structure (whether the projection grows to the full head, and
+what "uncollapsed brain entries" means), the recovery UI, and the
+per-generation-store lifecycle. (Deletion timing is confirmed — one collapse of
+grace — and is not open.)
 
 **Established by.** The person, across the conversation this session: "i think
 we might need to change how the archive works fundamentally... the archive is

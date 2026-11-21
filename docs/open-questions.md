@@ -334,21 +334,26 @@ requires no archive and provides no deletion primitive); Brain entries never
 archive on their own but may be marked for archive by user or agent; unpinned
 ephemeral content sweeps into the archive automatically at collapse; pinned
 archive items remain in the archive until unpinned or restored; unpinned
-archive items are deleted for good; pinned content is ordered near the head of
-the prefill for stability; a delete button permanently deletes an entry without
-archiving it; restore is user-only and the agent never knows the archive
-exists. MINI.md §4, §4.1, §4.2, §5, §6 record the confirmed shape.
+archive items are deleted for good after one collapse of grace; pinned content
+is ordered near the head of the prefill for stability; a delete button
+permanently deletes an entry without archiving it; restore is user-only and the
+agent never knows the archive exists. MINI.md §4, §4.1, §4.2, §5, §6 record the
+confirmed shape.
+
+**Q15.2 — Deletion timing — RESOLVED 2026-11-21.** Unpinned archive items are
+deleted for good after one collapse of grace ("we are utilizing that
+consequence to have a one-collapse grace period for files that get swept
+automatically and brain entries marked for archive"). Held for one collapse;
+pinned archive items remain in the archive until unpinned or restored.
 
 Still open (PROPOSED, not confirmed — the person has not ruled on these):
 
-**Q15.1 — What can be pinned, and where does pinned ephemeral content live?**
-The layout has "pinned files" and "pinned ephemera" as separate lines plus the
-brain records that are already pinned. Confirm what a pinned file is, and where
-pinned ephemeral content lives after collapse (lifted into the frozen head, or
-kept somewhere else — nothing exists today).
-
-**Q15.2 — Deletion timing.** When exactly are unpinned archive items deleted
-for good? One collapse of grace (the current model) or immediately?
+**Q15.1 — What are "pinned files" and "pinned ephemera"?** Both are confirmed
+positions in the prefill (the person's worked-through layout). What is not
+confirmed: what a pinned file is (evidence? command output? transcript entry?),
+what a pinned ephemeral item is, and where pinned ephemeral content lives after
+collapse (lifted into the frozen head, or kept somewhere else — nothing exists
+today). Pins on brain records are unchanged.
 
 **Q15.3 — Archive-marked brain entry semantics.** Does marking a brain entry
 for archive remove it from the Brain (the record leaves the Brain's sticky
@@ -356,17 +361,25 @@ set, the archive holds it for later restore), or is the record kept in the Brain
 while its live context is cut? Does the Brain carry an `archived` mark on the
 record, restored by the recovery path?
 
-**Q15.4 — Frozen head structure.** Is the frozen projection extended to the
-full head (atlas, ledger, chat, pinned content), or does the head come from a
-new assembly? Today the frozen projection renders atlas and ledger only (chat
-is never projected, intent §11).
+**Q15.4 — Frozen head structure.** The confirmed layout puts atlas entries,
+ledger entries, chat entries, pinned files, and pinned ephemera in the head.
+Today the frozen projection renders atlas and ledger only, and chat is never
+projected (intent §11). Is the frozen projection extended to the full head
+(atlas, ledger, chat, pinned content) — with chat possibly superseding §11's
+"chat never reaches the projection" — or does the head come from a new
+assembly?
 
-**Q15.5 — Recovery UI.** Recovery is a person-only surface. Is it built now,
-and does it keep the archive visible as a list the user can restore from?
+**Q15.5 — Recovery UI.** Recovery is confirmed to exist and is person-only
+("entries on the archive layer can be restored. only the user knows the archive
+layer exists"). What is not confirmed: is the recovery UI built now, and does it
+keep the archive visible as a list the user can restore from?
 
-**Q15.6 — Per-generation store vs. fresh rebuild.** Keep the current
-per-generation pi-durable store (real deletion via whole-store unlink after
-sweep) or a single store with reset semantics?
+**Q15.6 — The old generation store's lifecycle.** The archive is item-by-item,
+not a sealed store, but the old generation store itself (transcript, frozen
+projection) still exists under pi-durable. When is it deleted — at collapse
+after the sweep, or held for one collapse of grace alongside the archived
+items? (And separately: is the per-generation store kept, or does Carto move to
+a single store with reset semantics?)
 
 
 ## How this was produced
