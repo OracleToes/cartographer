@@ -24,13 +24,12 @@ test("chat.update replaces text and stamps updatedAt; unknown id throws", () => 
   assert.throws(() => applyWrite(brain, { kind: "chat.update", id: "nope", text: "x", updatedAt: at(2) }, at(2)), BrainError);
 });
 
-test("ledger.upsert creates then replaces; instructions and progress are Ledger kinds", () => {
+test("ledger.upsert creates then replaces", () => {
   let brain = applyWrite(emptyBrain(), { kind: "ledger.upsert", entry: ledger("g1", "instruction", "keep the tests green", at(1)) }, at(1));
   assert.equal(brain.ledger[0].kind, "instruction");
   brain = applyWrite(brain, { kind: "ledger.upsert", entry: ledger("g1", "instruction", "keep the build green", at(2)) }, at(2));
   assert.equal(brain.ledger.length, 1);
   assert.equal(brain.ledger[0].text, "keep the build green");
-  assert.equal(ledger("p1", "progress", "made progress", at(3)).kind, "progress");
 });
 
 test("atlas.upsert stores links as written; unconnected nodes float freely", () => {

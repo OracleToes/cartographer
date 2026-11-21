@@ -63,12 +63,15 @@ test("a corrupt Brain document throws; it never reads as empty", async () => {
   }
 });
 
-test("compact runs secure-delete and VACUUM without error", async () => {
+test("compact runs secure-delete and VACUUM and loses nothing", async () => {
   const { path, cleanup } = tempBrain();
   try {
     const store = await openBrain(path);
-    await store.apply({ kind: "chat.record", record: chat("c1", "x", at(1)) }, at(1));
+    await store.apply({ kind: "chat.record", record: chat("c1", "remembered", at(1)) }, at(1));
     await store.compact();
+    const brain = await store.read();
+    assert.equal(brain.chat.length, 1);
+    assert.equal(brain.chat[0].text, "remembered");
     await store.close();
   } finally {
     cleanup();

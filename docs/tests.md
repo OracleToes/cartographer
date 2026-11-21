@@ -91,6 +91,25 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — Brain writes, storage, handles, 2026-11-21
+
+- Read `domain/brain.ts`, `domain/records.ts`, `domain/handles.ts`, and
+  `runtime/brain-store.ts` before their tests. Every retained test names its
+  break: append, update, and upsert semantics; links stored as written; no
+  cascade on delete; pin and stale as markers that clear by key removal;
+  single-step delete with explicit unknown-id errors; handle assignment and
+  reconcile; and the real-SQLite round trip, delete persistence, and
+  corrupt-document rejection.
+- Removed: the `ledger.upsert` test's closing assertion that a fixture-built
+  entry has the kind it was built with — a tautology about the test's own
+  literal, guarding no production behaviour. The test is retitled to what it
+  actually guards.
+- Strengthened in place: the compact test now asserts the Brain still reads
+  after secure-delete and VACUUM, so it fails if compaction loses the document,
+  not only if it throws.
+- Suite 99 → 99 (one assertion removed, one strengthened). Boundary preserved:
+  the real SQLite file.
+
 ### Stage: tests-doc reconciliation + audit, 2026-11-21
 
 - `docs/tests.md` was stale against the corrected rule — the commands/budget
