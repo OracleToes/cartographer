@@ -308,6 +308,14 @@ The remote tip is the source of truth. Expect it, and repair it when found:
   - `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
     `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
     on the base; it happened once and cost one misplaced commit.
+  - **Tell the person when the session has compacted.** If the session
+    compacted before this turn started — a compacted summary is in front of
+    you, the notes in this session indicate it, or you are not sure what
+    earlier turns did — tell the user in your first reply: one line on what
+    the summary says, what the repo state actually holds, and what is left.
+    A silent compacted session is indistinguishable from work you did not
+    do, and the person deserves to know. Do not play dumb to protect your
+    rhythm; the compaction is visible to you.
 - If the branch pointer trails the remote tip, move it forward with
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a
