@@ -91,6 +91,29 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — live session and tools, 2026-11-21
+
+- Read `runtime/live-session.ts`, `runtime/tools.ts`, and `runtime/workspace.ts`
+  (for the boundary) before their tests.
+- Removed: the standalone read-output test. The bounds test already asserts the
+  same `path:start-end (of N lines)` format for whole-file, from-line, and
+  through-line reads, and already asserts the excerpt carries the file text.
+  The removed test's only unique assertion was that the output does not
+  contain "digest" — a negative against a framing the specification dropped,
+  guarding no current behaviour.
+- Every retained test names its break: a full turn's Brain write, pending
+  line, and trailing marker-free block; the continuation marker; read feeding
+  an Atlas attachment; the tree tool moving the anchor; the `.brain`/escape
+  boundary; open read bounds and past-the-end rejection; unknown handles as
+  explicit errors; agent- and person-triggered collapse, including drift
+  riding the rebuild; the bash round trip; and interrupt settling a run with
+  an open bash call.
+- Known risk, untouched: the interrupt test sleeps 1.5s to let the bash task
+  start, under a 20s ceiling — the suite's main wait. It is the only guard for
+  its break and no deterministic replacement is obvious, so it stands.
+- Suite 98 → 97. Boundaries preserved: the faux provider, real temporary
+  files, and the real bash round trip.
+
 ### Stage: tests audit (campaign) — project tree and ignore rules, 2026-11-21
 
 - Read `runtime/project-tree.ts` and `runtime/gitignore.ts` before their tests.

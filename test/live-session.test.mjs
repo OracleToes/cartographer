@@ -171,19 +171,6 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await cleanup();
 });
 
-test("read reports the path, range, total lines, and excerpt", async () => {
-  const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
-  const api = { callId: "call-y", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
-  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  const range = await byName.read.execute({ path: "src/verify-me.ts", startLine: 1, endLine: 1 }, api, {});
-  const output = range.output.map((part) => part.text).join("");
-  assert.match(output, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
-  assert.match(output, /export const answer = 42;/);
-  assert.doesNotMatch(output, /digest/);
-  await cleanup();
-});
-
 test("read bounds are independently open: whole file, from a line, through a line", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
