@@ -201,9 +201,8 @@ Archive, restore, and delete are three separate actions, and each is a mark by
 default. Marking applies the action at the next collapse, and the mark can be
 changed or withdrawn until then.
 
-- **Marked for archive** leaves the entry in the context until the next
-  collapse. It is not in the head and not pinned, and at the collapse it is
-  swept into the archive.
+- **Marked for archive** leaves the entry in the context for now. It is not in
+  the head, not pinned, and it does not stay. The next collapse sweeps it.
 - **Marked for delete** leaves the entry visible for now and removes it at the
   next collapse.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
