@@ -11,9 +11,10 @@ never falls to the archive layer, and an item pinned on the archive layer
 never gets deleted.
 
 > Amended 2026-11-21, by the person: a pin also records who placed it — the author,
-> "user" or "agent" — and nothing else. Brain records survive collapse by existing,
-> so a pin never falls to the archive layer; the archive-export seam is not built
-> today (the purge exports nothing, and no archive-layer pin exists).
+> "user" or "agent" — and nothing else. Under the 2026-11-21 re-scope (§50) the
+> archive is Carto's own database, swept item by item: a pinned archive item
+> stays in the archive until unpinned or restored, and no export-to-Brain seam
+> exists.
 
 What the person wants to be true. Each entry records the decision and the
 confirmation that established it. Nothing here is inferred. Nothing here is a
@@ -120,11 +121,12 @@ there or recovered is deleted at the next collapse.
 is there. **Recover** exists only for the archive and means "put it back in the
 Brain". Recover does not pin; a pin is a separate action.
 
-> Amended 2026-11-21, by the person: Brain records survive collapse by existing,
-> so there is no archive-layer pin today — the pinned-to-archive export seam
-> is dark, and the purge exports nothing. The person's pins ("user" author) and
-> the agent's pins ("agent" author) coexist; the person may remove either, the
-> agent only its own.
+> Amended 2026-11-21, by the person: Brain records survive collapse by existing;
+> the archive is Carto's own database (§50), swept item by item at collapse.
+> Pinned archive items stay in the archive until unpinned or restored; pinned
+> context items never fall to the archive. The person's pins ("user" author)
+> and the agent's pins ("agent" author) coexist; the person may remove either,
+> the agent only its own.
 
 **The agent does not know the archive exists.**
 
@@ -307,9 +309,13 @@ contradict.
 ## 17. Pi storage is one store per generation
 
 **Decision.** Pi storage is one store per generation. At collapse a fresh store
-is created for the new generation. The previous generation's material is kept as
-the archive for one collapse and deleted at the next collapse. Transcript text
-that a collapse deletes is removed rather than hidden.
+is created for the new generation. The previous generation's ephemeral material
+is swept to the archive (Carto's own database, not the sealed store — §50) and
+the old store is deleted whole once the archive no longer needs it. Transcript
+text that a collapse deletes is removed rather than hidden.
+
+> Amended 2026-11-21 by the person: the archive is Carto's own database, swept
+> item by item at collapse; the sealed-store mechanism is superseded. See §50.
 
 The Brain is separate from Pi storage and persists across generations. A live
 session can always be rebuilt from the Brain alone, after a crash as well as at
@@ -496,9 +502,10 @@ exports pinned-to-archive records into the Brain, flushes, and only then
 deletes the sealed store. Unpinned material leaves with the file. The Brain
 grows only by what is explicitly kept.
 
-> Amended 2026-11-21, by the person: this export does not exist today. Pins
-> attach to Brain records only (§4.1); the archive's purge exports nothing —
-> the seam is dark until the person resolves it.
+> **Superseded 2026-11-21 by the person.** The sealed-store archive is no longer
+> the archive's shape: the archive is Carto's own database, swept item by item
+> at collapse (pinned ephemera and archive-marked brain entries), deleted
+> whole-store at purge. See §50 for the re-scope.
 
 **Established by.** Blessed by the person: 'Blessed.'
 
@@ -780,3 +787,50 @@ toggleable with `ctrl+h`, and with Chat as the main view.
 
 **Established by.** The person, answering the two open marks: "1. A" and
 "2. A".
+
+## 50. The archive is Carto's own database, swept item by item
+
+**Decision, 2026-11-21 (re-scope).** The archive is not a sealed generation's
+store and is not required by pi-durable or its immutable storage — verified
+that pi-durable provides no deletion primitive (reset hides the context; entries
+stay in storage by construction) and no archive concept at all. Carto builds the
+archive itself, as its own database, under `.brain/`.
+
+The confirmed shape of the archive model:
+
+- Brain records never archive on their own; the person or the agent may mark a
+  Brain record for archive, and it sweeps to the archive on the next collapse
+  (marking is like a pin, backwards: it does not stay in context, it is also not
+  deleted).
+- Ephemeral content (tool calls, reasoning, non-chat text output, read calls)
+  sweeps automatically into the archive at collapse, unless pinned.
+- Pinned items in the archive remain in the archive until unpinned or restored
+  to the context. Items in the archive that are not pinned are deleted for good.
+- Pinned content is ordered near the head of the prefill so it is stable across
+  collapses and does not cost prefill; Brain entries are clustered by type near
+  the head; the state block stays at the tail.
+- A separate delete button permanently deletes an entry without going to the
+  archive (it costs a prefill — the tail is cut — which is acceptable).
+- Entries on the archive layer can be restored. Only the user knows the archive
+  layer exists; only the user can do anything with it.
+
+The unresolved seams are recorded in `docs/open-questions.md` §15 (proposed, not
+confirmed): what can be pinned (pinned files vs. pinned ephemera — and where
+pinned ephemeral content lives after collapse), deletion timing of unpinned
+archive items, archive-marked brain entry semantics, the frozen head's structure,
+the recovery UI, and the per-generation-store choice.
+
+**Established by.** The person, across the conversation this session: "i think
+we might need to change how the archive works fundamentally... the archive is
+a consequence of us using pi-durable and it having an immutable store. we
+have to use our own system so that we can really delete stuff from our
+context..." and the worked-through layout "system prompt / tool definition/schema
+/ atlas entries / ledger entries / chat entries / pinned files / pinned
+ephemera / regular ephemera / uncollapsed brain entries / regular ephemera /
+state block", with the new/top-of-file intent restatement "brain entries never
+archive on their own, but they can be marked by the user or agent for
+archival... all other ephemeral content... gets swept automatically into the
+archive at every collapse, unless pinned... Pinned items in the archive remain
+in the archive unless they're unpinned or restored to the context. items in the
+archive that have not been pinned are deleted for good... yes, entries on the
+archive layer can be restored. only the user knows the archive layer exists."

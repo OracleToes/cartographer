@@ -15,9 +15,9 @@ set as built: Atlas, Ledger, Chat, pins. Single-step delete, no pending state.
 (Amended 2026-11-20: pins are markers on book entries, not a record kind —
 see the R5 cleanup addendum.)
 Generation-local handles. The projection machinery, and person-triggered
-collapse: fresh generation, the prior store sealed read-only as the archive,
-the older archive purged after one collapse of grace. Config drops
-`collapseMode`. Suite ported and green.
+collapse: fresh generation, the previous generation's ephemeral material
+swept to the archive, the old store deleted whole once the archive no longer
+needs it. Config drops `collapseMode`. Suite ported and green.
 
 **Slice 2 — the continuation loop** (this commit). The state block and
 the per-request injection (§12, §12a, §12b, §19, §20, §21), full confirmed
@@ -87,10 +87,11 @@ person.
 
 ## Slice 4 — archive recovery, for the person
 
-Recovery opens the sealed archive read-only and copies chosen records back
-into the Brain, restoring original types; evidence that no longer verifies is
-marked stale. The agent gets no tool, command, or signal for any of this
-(§29, §30).
+Recovery opens the archive read-only and restores chosen entries back into the
+context, restoring original types; evidence that no longer verifies is marked
+stale. The archive is Carto's own database, swept item by item (re-scoped
+2026-11-21 — see docs/intent.md §50 and docs/open-questions.md §15). The agent
+gets no tool, command, or signal for any of this (§29, §30).
 
 ## Slice 5 — the UI pass
 
@@ -104,7 +105,9 @@ standing rule).
 - Q8.x — the appetite/"small atomic edits" enforcement question.
 - The archive mechanics (mtime discovery, one-collapse grace, chmod seal)
   remain an agent derivation, flagged in `MINI.md` and veto-able by the
-  person at any time.
+  person at any time. (Superseded 2026-11-21: the one-collapse-grace retention
+  and sealed-store sealing are replaced by Carto's own archive database — see
+  docs/intent.md §50 and docs/open-questions.md §15.)
 - Prompt iteration is ongoing by design (§22): minimal first, then tuned.
 
 ## The clean-slate rebuild, decided 2026-11-20
@@ -144,8 +147,11 @@ the agent; amendments are the person's.
 - **R2 — the projection and the collapse.** Frozen projection persisted per
   generation, stale-by-digest marking, person-triggered or agent-triggered
   collapse, fresh generation, the old store sealed read-only as the archive,
-  one collapse of grace, purge that exports pinned-to-archive records first
-  and only then deletes the store, Brain VACUUM.
+  one collapse of grace, purge that sweeps pinned-to-archive records first,
+  then deletes the store, Brain VACUUM.
+  (Superseded 2026-11-21: the archive is Carto's own database — see
+  docs/intent.md §50 and docs/open-questions.md §15; the export-to-Brain seam
+  no longer exists.)
 - **R3 — the live session and the tools.** Pi Durable harness, the product
   tools (`chat`, `atlas`, `ledger`, `pin`, `inspect`, `edit`, `shell`,
   `tree`, `collapse`, `sleep`), the state block of `MINI.md` §6.1 injected
@@ -196,6 +202,8 @@ The frozen projection and the collapse ceremony exist and are tested.
   shape; the code path already exports before deleting (test-spied), and
   filling it invents an unconfirmed format. Open question for the person
   below.
+  (Superseded 2026-11-21: the whole-store export is no longer the archive's
+  shape — see docs/open-questions.md §15.)
 
 Not done at the time of writing: R3 (tools, live session, state block), R4
 (config, llama-swap, driver). Both landed 2026-11-20 — see the R3 and R4
@@ -244,6 +252,8 @@ The live session and the tools exist and are wired end to end.
     the faux provider scripts set it, as real providers do.
 - **Known seam, still open:** the pinned-to-archive export (unchanged from R2);
   the marker shape for it is a question for the recovery tooling.
+  (Superseded 2026-11-21: superseded by the archive re-scope — see
+  docs/intent.md §50.)
 - **Owed to R5:** the person-facing transcript must hide marker messages
   (`isMarkerMessage` is exported for exactly this); the store legitimately
   contains them between collapses.
@@ -403,7 +413,9 @@ against the installed packages, none resolved by fiat:
 Known seam carried forward unchanged: §6.2's `beforeProviderRequest` vs the
 shipped `beforeRequest` (person kept it), the pinned-to-archive export
 (person), the `.brain` archive line (person's answer: the shell needed
-nothing special; inspect/edit keep the wall).
+nothing special; inspect/edit keep the wall). The pinned-to-archive export
+is superseded 2026-11-21 (docs/intent.md §50) — the archive is Carto's own
+database, item-by-item.
 
 ### R4 addendum III — brain-store rebuilt on pi's SQLite machinery, 2026-11-20
 
@@ -589,7 +601,9 @@ AGENTS.md forbids… including all tools and such"). Findings:
   range" — the person's doc, untouched; amendment flagged for their word.
   Whether the tool should be renamed (`read`?) is asked and unanswered.
 - **Kept:** the advertised-capacity ceiling behaviour (spec'd: the
-  ceiling only lowers), the one-collapse archive retention (§4), the
+  ceiling only lowers), the one-collapse archive retention (§4 — superseded
+  2026-11-21; the archive is Carto's own database, swept item by item — see
+  docs/intent.md §50), the
   no-`.brain` line, pi's bash designed tail (pi-durable's built-in; the
   person chose it as the shell; uncapping = owning a wrapper, their call),
   pi's own compaction declined (ours is collapse), and the LIVE_TAIL 8

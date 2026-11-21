@@ -119,9 +119,10 @@ memory.
 Most of what the agent works with is ephemeral: tool work, reasoning, read calls,
 and the model transcript. It is not kept.
 
-The agent keeps what it needs by pinning it — a marker on a Brain record — and
-by writing it into the Brain through Ledger, Atlas, and Chat. Everything else
-is expected to be lost.
+The agent keeps what it needs by pinning it — a marker on an entry — and by
+writing it into the Brain through Ledger, Atlas, and Chat. Ephemeral material it
+does not pin is swept automatically to the archive at collapse; Brain records are
+kept in the Brain unless the person or the agent marks them for archive.
 
 "Ephemeral daemon" means the context is disposable, not the Brain. The Brain is
 the durable property.
@@ -133,34 +134,46 @@ the durable property.
 There are two retentions, and they meet at the archive.
 
 **Brain records are sticky.** Atlas, Ledger, and Chat survive collapse by
-existing. Nothing moves them to the archive unless the agent deletes them.
+existing. They never archive on their own; the person or the agent may mark a
+Brain record for archive, and it then sweeps to the archive on the next collapse.
+(Marked for archive is like a pin, backwards: it does not stay in context, it
+also does not get deleted.)
 
-**Ephemeral material is disposable.** At collapse, the old live context becomes
-the archive. It is not the agent's decision and it is not stored as a second
-Brain tier.
+**Ephemeral material is disposable.** Tool calls, reasoning, read calls, and
+other non-chat model output are swept automatically into the archive at collapse,
+unless pinned. The archive is never the agent's decision — it is a consequence of
+collapse, not a place the agent chooses.
 
-**The archive is a one-collapse grace period on forgetting.** Everything in the
-archive that is not explicitly pinned there or recovered is deleted at the next
-collapse. The archive is never the source of truth; the Brain is. A crash during
+**The archive is Carto's own database.** It exists to satisfy collapse and
+permanent deletion — nothing else. pi-durable requires no archive and provides no
+deletion primitive (it cuts a context with a reset and keeps every entry); Carto
+builds the archive itself. The archive lives under `.brain/`, is readable and
+restorable by the person only, and is never referenced by the Brain or the
+agent. Pinned items in the archive remain in the archive unless unpinned or
+restored to the context. Items in the archive that are not pinned are deleted
+for good. The archive is never the source of truth; the Brain is. A crash during
 collapse cannot lose Brain state, because the Brain does not reference the
 archive.
 
 ### 4.1 Pin and recover are different
 
-- **Pin** means "keep it here." A pin is a marker on a book entry — any Brain
-  record (atlas, ledger, chat) — never a separate record, and carries no
-  reason, no source, no other bookkeeping. An item pinned on the context layer
-  never falls to the archive layer; an item pinned on the archive layer never
-  gets deleted — the purge exports it back into the Brain first, and only then
-  deletes the store. Each pin survives the purge it is attached to, until
-  removed. Pins render inline on the record they mark. A pin records who
-  placed it — the author, "user" or "agent" — and nothing else: the person may
-  place and remove any pin from any view (chat, ledger, atlas, context), the
-  agent may place its own pins and remove only its own pins; the agent may not
-  remove a pin the person placed. The state block lists every pinned record,
-  with its author, pre-collapse.
-- **Recover** exists only for the archive. It means "put it back in the Brain."
-  It does not also pin; a pin is a separate action that either party can take.
+- **Pin** means "keep it here." A pin is a marker on an entry — a Brain record
+  (atlas, ledger, chat), and, per the re-scope, pinned files and pinned ephemera
+  are a proposed addition (open — see `docs/open-questions.md` §15). Never a
+  separate record, and carries no reason, no source, no other bookkeeping. An
+  item pinned on the context layer never falls to the archive layer. An item
+  pinned on the archive layer never gets deleted; it remains in the archive
+  until unpinned or restored to the context. Pins render inline on the entry
+  they mark and are clustered near the head of the prefill so they stay stable
+  across collapses, without costing prefill. A pin records who placed it —
+  the author, "user" or "agent" — and nothing else: the person may place and
+  remove any pin from any view (chat, ledger, atlas, context), the agent may
+  place its own pins and remove only its own pins; the agent may not remove a
+  pin the person placed. The state block lists every pinned record, with its
+  author, pre-collapse.
+- **Recover** exists only for the archive. It means "put it back in the
+  context" — the entry returns as its original type. It does not also pin; a
+  pin is a separate action that either party can take.
 
 **The agent does not know the archive exists.** Recovery is a person action.
 
@@ -173,7 +186,10 @@ it. The agent has no way to address the archive, by design.
 ### 4.2 Deleted text is really gone
 
 Deleted material is deleted. A deleted Brain record does not become an archive
-entry, because the agent's deletion is a decision, not an accident.
+entry, because the agent's deletion is a decision, not an accident. Deleting an
+entry from context is a separate action from marking it for archive: delete
+permanently removes it, never archived, costing a prefill because the tail is
+cut; archival moves it to the archive for good or for later restore.
 
 Pi Durable is designed to retain history. Carto is an ephemeral daemon and does
 not keep that history for its own sake. The Brain document uses
@@ -181,9 +197,9 @@ not keep that history for its own sake. The Brain document uses
 value.
 
 Pi storage is one store per generation. Collapse creates a fresh store for the
-new generation. The previous generation's material is kept as the archive for
-one collapse, and deleted at the next collapse. Transcript text that a collapse
-deletes is removed rather than hidden.
+new generation and sweeps the previous generation's ephemeral material to the
+archive. The old generation's store is deleted once the archive no longer needs
+it. Transcript text that a collapse deletes is removed rather than hidden.
 
 The Brain is separate from Pi storage and persists across generations. A live
 session can always be rebuilt from the Brain alone, after a crash as well as at
@@ -195,17 +211,21 @@ restart where the storage engine allows it. This is best-effort local cleanup
 for the Brain file, not a guarantee against SSD wear levelling, backups, or
 snapshots.
 
-> Confirmed by the person: "i want deleted text really gone", and "a fresh
-> store per generation" when choosing between storage shapes, with the person's
-> expectation that a session can be rebuilt from the Brain store if something
-> happens. The archive is the sealed previous generation's Pi store; at the
-next collapse the purge first exports pinned archive records into the
-Brain, then deletes the store. See `docs/intent.md` §29.
+> Confirmed by the person: "i want deleted text really gone". The archive is
+> not a sealed generation's store and the purge does not export pinned items
+> into the Brain; the archive is Carto's own database, swept item by item at
+> collapse, and the person owns everything in it. The per-generation store is
+> deleted whole once the archive no longer needs it. See `docs/intent.md` §17
+> and §29, amended 2026-11-21.
 
 ## 5. Collapse
 
-Collapse is the gardening operation. It ends the current live context, writes a
-new one from the Brain, and moves the old one to the archive.
+Collapse is the gardening operation. It ends the current live context, sweeps
+what it is told to sweep — every unpinned ephemeral item and every Brain record
+marked for archive — to the archive, and writes a new context from the Brain.
+Nothing else is deleted at collapse: unpinned items in the archive are deleted
+for good at the appropriate time, pinned items remain in the archive, and Brain
+records not marked for archive are never moved.
 
 **Collapse needs no approval.** Either the person or the agent can trigger it.
 
@@ -228,7 +248,12 @@ Collapse does not delete Brain records. Only a delete can.
 
 ## 6. The projection
 
-The agent sees a projection built from the Brain plus its live context.
+The agent sees a projection built from the Brain plus its live context. The
+projection is the stable head of the prefill: system prompt, tool schemas, Brain
+entries clustered by type (atlas, ledger, chat), pinned content, then the
+transient live tail, with the state block at the tail. The head is meant to be
+stable across collapses, so the server's cached prefix stays warm and collapse
+does not cost prefill.
 
 **The projection carries structure, not a second copy of the dialogue.** A Person
 message is already in the transcript; its text is not repeated in the projection.
@@ -252,9 +277,11 @@ valid, and it is what makes the pending list meaningful.
 
 > Confirmed by the person.
 
-**Order is not a requirement.** After the freeze, nothing in the projection
-changes between collapses, and at a rebuild there is no cached prefix to
-invalidate. The emitted order is a convention, not a product decision.
+**Order is the stability requirement.** After the freeze, nothing in the head
+changes between collapses, and at a rebuild the prefix must stay identical
+enough to keep the server's cached prefix valid. The head is ordered by design —
+system prompt, tool schemas, Brain entries clustered by type, pinned content —
+rather than by the Brain row order; the emitted tails remain a convention.
 
 **Every durable ID line carries an ISO 8601 UTC timestamp**, so the agent can see
 when something changed. Between collapses the line is frozen, so the timestamp
@@ -275,8 +302,9 @@ It tells the agent:
   separately from tool work and from the stable system and tool prompts;
 - pending changes — one line per Brain write since the projection was built,
   named by handle: the signal to collapse;
-- what is stale — Atlas evidence whose source changed since the projection was
-  built, named by handle;
+- new and stale entries — new Brain records and Atlas evidence whose source
+  changed since the projection was built, named by handle: the signal to keep
+  the Brain current;
 - the project tree — anchored at a directory, to a depth, showing files,
   directories, sizes, and which files an Atlas node links to.
 
