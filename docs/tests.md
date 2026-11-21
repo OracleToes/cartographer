@@ -91,6 +91,26 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — workspace views, 2026-11-21
+
+- Read `ui/tokens.ts`, `ui/sidebar.ts`, `ui/transcript.ts`, `ui/context-view.ts`,
+  `ui/atlas-view.ts`, and `ui/ledger-view.ts` before their tests. No unearned
+  tests found; nothing removed.
+- Coverage confirmed: the pad/width invariant with and without ANSI; the
+  sidebar's counts, deterministic token figure, and mouse selection; transcript
+  card folding and the live header; the context view's rail/content
+  navigation, tool folding, the delete flow targeting the selected transcript
+  message with the Now modifier, and collapse; the atlas and ledger two-pane
+  navigation, detail scrolling, and wheel; progressive tool-argument
+  formatting; the pin toggle on ledger and atlas; and the agent block's pin
+  badge and click-to-toggle.
+- The atlas and ledger two-pane tests are near-identical in shape but guard
+  two separate render implementations; each is the only width guard for its
+  view, so both stand.
+- Suite 97 → 97. Known gap, unchanged: nothing drives the composed TUI
+  (`ui/app.ts` and the chrome, token bar, palette, jump, clipboard, and dump
+  modules) — the views are tested, the composition is not.
+
 ### Stage: tests audit (campaign) — config, capacity, headless, CLI, 2026-11-21
 
 - Read `runtime/config.ts`, `runtime/llama-swap-model.ts`, `runtime/headless.ts`,
