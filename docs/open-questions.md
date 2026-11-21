@@ -26,14 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A3 — The fallback capability mode.**
-The person described "instructed not to edit, edit tool disabled, shell
-trusted". `SPEC.md` §6 states the gate — either `edit` is offered or it is not —
-but not what that state is called or how it is entered.
-*Would land in:* §6.
-*To close:* a name, and whether the person sets it, the agent selects it, or
-both.
-
 **A4 — Showing a diff without applying it.**
 The approval queue is gone. Whether the agent may *show* a proposed change
 before making it was never answered.

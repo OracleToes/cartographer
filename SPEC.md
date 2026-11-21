@@ -282,7 +282,7 @@ dashboard about its Brain and the project, and it reports:
   by handle.
 - **New and stale entries** — Brain records written since the last collapse, and
   read results whose file changed since the read, named by handle (§5.5).
-- **The project tree** — as described in §6.2.
+- **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
 
 A long pending list is the signal to collapse.
@@ -415,12 +415,31 @@ Atomic here is an intention (§7). Nothing refuses a large change, and nothing
 counts lines. What keeps changes small is the prompt and the agent's willingness
 to stop.
 
-The edit gate is on the capability, not the change. Either the edit tool is
-offered or it is not. When it is not, the agent can still read, reason, and use
-`bash`, and it is instructed not to make edits. There is no propose, approve,
-or apply queue.
+### 6.1 Read only mode
 
-### 6.1 `.brain` is outside the agent
+A toggle in the workspace puts Carto in **read only** mode, and turns it off
+again. The person sets it; nothing else does.
+
+In read only mode:
+
+- **`create` and `edit` are not offered.** They are absent from the tool set
+  rather than refused when called, so the agent never forms a call it cannot
+  make.
+- **`bash` is still offered, and still trusted.** The mode is not a sandbox. The
+  shell can write, replace, and delete files, and the person knows it. Read only
+  mode removes the tools whose only purpose is to change the project; it does not
+  remove the agent's hands.
+- **The prompt says so.** It tells the agent that it is in read only mode and
+  that the person is relying on it not to use the shell to work around that.
+
+There is no propose, approve, or apply queue, in read only mode or out of it. A
+proposal is not a capability, and the gate is on the capability.
+
+The gate is on what each tool is *for*, never on whether a particular change
+looks destructive. There is no definition of a destructive change to test
+against, because nothing tests for one.
+
+### 6.2 `.brain` is outside the agent
 
 The agent does not read or write `.brain` directly. This scopes its capability;
 it is not a permission gate. Direct access would fill the agent's context with
@@ -429,7 +448,7 @@ duplicated or stale copies of its own state.
 `.brain` never renders. It is skipped in every listing, excluded from aggregated
 sizes, and rejected as a tree anchor at any depth.
 
-### 6.2 The project tree
+### 6.3 The project tree
 
 The state block carries the project tree, rendered in the block itself. It shows
 files, directories, and their sizes, and marks which files an Atlas node is
@@ -468,8 +487,8 @@ and `create` takes a path because the file it makes has no handle yet.
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
-| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. |
-| `create` | Writes a new file, at a path. Refuses a path that already exists. |
+| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Absent in read only mode. |
+| `create` | Writes a new file, at a path. Refuses a path that already exists. Absent in read only mode. |
 | `bash` | Runs a command inside the project. |
 | `tree` | Sets the project tree's anchor. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
