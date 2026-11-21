@@ -186,12 +186,11 @@ A collapse:
 Brain records not marked for archive are never moved. No Brain record is deleted
 by a collapse; only a delete deletes.
 
-The system prompt carries one standing line: the person may collapse the context
-at any time, and a collapse rebuilds the agent's context from the Brain.
+The system prompt carries one standing line: Context may collapse at any time, 
+and a collapse rebuilds the agent's context from the Brain.
 
-The agent is expected to trigger a collapse rarely, because it does not want to
-forget. The person may collapse without warning, and afterwards sees a plain
-report rather than a confirmation request.
+The agent is expected to keep its brain up-to-date, because it does not want to
+forget.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -408,14 +407,6 @@ at all. It is a property of the call, not a limit on how much a call may change.
 
 ## 8. Workspace
 
-Carto uses the Pi TUI alternate screen and renders **modes** — **Chat**,
-**Context**, and **Brain** — reachable by key and palette. There is no permanent
-palette, settings screen, or drawer.
-
-**The frame** is a fixed header, a scrolling body, and a fixed footer, with one
-row and one cell of padding so the chrome never touches the terminal edge. The
-header is never pushed off screen. The bottom bar takes the whole bottom row.
-
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Functions, schemas, and records are collapsible; a leaf is never
 folded. Each tool gets one collapsible entry in its own sub-tree. Schema-shaped
@@ -427,7 +418,7 @@ where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
 Chat, in their own hues, never mistaken for Chat. A card streams while the run is
 in flight inside a limited-height window, and folds to a one-line header at the
-boundary. A click folds or unfolds a card, `ctrl+e` toggles every card in view,
+boundary. A click folds or unfolds a card, a toggle toggles every card in view,
 and the wheel over an open card scrolls its window. Chat remains the only channel
 that addresses the person.
 
