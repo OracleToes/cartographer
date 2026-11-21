@@ -114,6 +114,9 @@ or the agent.
 The person may pin or unpin any entry. The agent may pin any entry and may unpin
 only its own pins; it may not remove a pin the person placed.
 
+A pin renders inline on the entry it marks. It is not a record of its own and
+takes no place in the prefill's order.
+
 The state block lists every pinned entry and its author.
 
 ### 3.3 The archive
@@ -254,15 +257,14 @@ listed by type. They appear where they actually are.
 The last thing in the prefill is the **state block**. It is the agent's
 dashboard about its Brain and the project, and it reports:
 
-- **Context fullness** — last reported provider usage, plus what tool calls have
-  added since.
+- **Context fullness** — the server's own count for the last request, plus what
+  tool calls have added since.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
 - **Pending changes** — one line per Brain write since the last collapse, named
   by handle.
 - **New and stale entries** — Brain records written since the last collapse, and
-  attached files whose contents changed since their node was written, named by
-  handle.
+  read results whose file changed since the read, named by handle (§5.5).
 - **The project tree** — as described in §6.2.
 - **Pinned entries** — every pinned entry, with its author.
 
@@ -284,12 +286,53 @@ accepts a raw key.
 - The agent never sees a database key or a storage-level identifier.
 - A tool parameter that names an item takes a handle. An unknown handle is an
   explicit error.
-- The prefixes are `A` (Atlas), `L` (Ledger), and `C` (Chat).
 
 Every durable ID line carries an ISO 8601 UTC timestamp, so the agent can see
 when something changed.
 
-### 5.5 Freeze
+**The prefixes.**
+
+| Prefix | Names |
+| --- | --- |
+| `A` | Atlas node |
+| `L` | Ledger entry |
+| `C` | Chat record |
+| `T` | tree anchor |
+| `P` | pin, named by the handle of the entry it marks |
+| `X` | pinned ephemera |
+| `R` | the result of a tool call |
+| `S` | the result of `bash` |
+| `F` | a file pinned into the head |
+| `E` | a brain entry written since the last collapse, seen in the body |
+| `U` | the person's message |
+
+`R` covers the result of every tool call, including `read`; `S` is the one
+exception, because a `bash` result is quoted and discussed far more often than it
+is cited, and the distinction earns its letter.
+
+Nothing in the table addresses an ephemeral item that is not pinned and not a
+tool result. Those are the things a collapse sweeps, and the agent is not meant
+to build references to them.
+
+### 5.5 Read results and staleness
+
+A `read` produces a tool result in the body, and that result carries a handle
+like any other.
+
+Pinning it pins the result, not the file. From then on the context holds the text
+the agent actually read, attributable and citable, rather than a live view of a
+path.
+
+**A pinned read result goes stale when its file changes.** The state block says
+so, by handle, from the moment the change is seen.
+
+**At collapse, a pinned read result is made true.** The file is read again, and
+the result becomes what the file now holds. This is what a pin means here: the
+agent keeps its view of that file from being silently out of date, and pays for
+it in a fresh read at every collapse rather than in a stale quotation.
+
+
+### 5.6 Freeze
 
 The prefill is built at collapse and is frozen until the next one. It is never
 patched in between.
@@ -309,7 +352,7 @@ edited in place. No entry already in the context is rewritten, masked, omitted,
 or replaced by an overlay. Anything that would have to change there is done at
 the next collapse or by an apply-now rebuild.
 
-### 5.6 The state block is the continuation
+### 5.7 The state block is the continuation
 
 There is no separate nudge and no "you are not done" message. A run ends when a
 reply carries no tool call. To continue the agent's work, the state block is
@@ -326,13 +369,18 @@ delivered as the next turn, and the agent reads the current state and acts.
 Carto inspects and edits paths that resolve inside the selected project root. A
 symlink that resolves outside the root is rejected.
 
-The agent's ideal edit is small, atomic, and scoped: one boilerplate creation, or
-one step toward the project goal. It does not need to remember how a change was
-made; it needs the report it wrote and the current state of the project.
+The agent's ideal edit is small, atomic, and scoped: one function, one value
+changed, one chunk removed, one small file added, or the minimum scaffolding that
+makes the next step possible. It does not need to remember how a change was made;
+it needs the report it wrote and the current state of the project.
+
+Atomic here is an intention (§7). Nothing refuses a large change, and nothing
+counts lines. What keeps changes small is the prompt and the agent's willingness
+to stop.
 
 The edit gate is on the capability, not the change. Either the edit tool is
 offered or it is not. When it is not, the agent can still read, reason, and use
-the shell, and it is instructed not to make edits. There is no propose, approve,
+`bash`, and it is instructed not to make edits. There is no propose, approve,
 or apply queue.
 
 ### 6.1 `.brain` is outside the agent
@@ -346,12 +394,17 @@ sizes, and rejected as a tree anchor at any depth.
 
 ### 6.2 The project tree
 
-The state block carries the project tree, anchored at a directory and shown to a
-depth. It shows files, directories, and their sizes, and marks which files an
-Atlas node is attached to, so the tree is a map of what the agent understands
-rather than a listing.
+The state block carries the project tree, rendered in the block itself. It shows
+files, directories, and their sizes, and marks which files an Atlas node is
+attached to, so the tree is a map of what the agent understands rather than a
+listing.
 
-The agent moves the anchor and the depth. The anchor stays inside the project.
+The tree is anchored at the project root by default. The `tree` tool changes the
+anchor and nothing else: it does not return the tree, because the tree is already
+in the state block, which every request carries. The agent sets where it is
+attending and sees the result on its next turn.
+
+The anchor stays inside the project.
 
 ## 7. Tools
 
@@ -368,21 +421,23 @@ description can say.
 | `read` | Reads a file, from a start line, for a number of lines, inside the project root. |
 | `edit` | Applies ordered text replacements to an existing file. Never creates, never replaces a file whole. |
 | `create` | Writes a new file. Refuses a path that already exists. |
-| `shell` | Runs a command inside the project. |
-| `tree` | Sets the project tree's anchor and depth, and returns the rendered tree. |
+| `bash` | Runs a command inside the project. |
+| `tree` | Sets the project tree's anchor. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
-| `sleep` | Ends the run. |
+| `sleep` | Waits: forever, or for a number of seconds. |
 
-`read`, `edit`, and `shell` are taken from the durable package. Carto supplies
+`read`, `edit`, and `bash` are taken from the durable package. Carto supplies
 their descriptions and scopes them to the project root; it does not write a file
-or shell layer beside them.
+or command layer beside them.
 
 - **`read`** takes a path and optional `offset` and `limit`.
 - **`edit`** takes a path and a list of `oldText`/`newText` replacements, each
   matched against the original file, not against the result of the one before.
   The package applies them all or nothing and refuses a file that does not
   exist. Editing an existing file is the only thing it does.
-- **`shell`** runs a command through the project's environment.
+- **`bash`** runs a command through the project's environment. The name is the
+  package's, and Carto keeps it rather than renaming it: an agent that has used a
+  coding tool before already knows what `bash` is.
 
 **Creation is separate from editing.** `create` writes a file that must not
 exist and refuses a path that already does. The package's own `write` tool
@@ -394,16 +449,23 @@ old contents have to pass through the agent's context before they can be
 replaced.
 
 **Replacement is not the same as deletion.** `edit` is what refuses to replace a
-file whole; nothing stops the agent from deleting one. `shell` runs commands,
+file whole; nothing stops the agent from deleting one. `bash` runs commands,
 including whatever removes files. So a file can be deleted and recreated, and its
 previous contents then exist only in git.
 
 The filesystem rule is therefore about what the tools are *for* — creation is one
 call, the narrowing of a file is another — not a boundary the filesystem
-enforces against `shell`.
+enforces against `bash`.
 
-"Atomic" throughout this document means one tool call that lands entirely or not
-at all. It is a property of the call, not a limit on how much a call may change.
+**Atomic is an intention, not a mechanism.** Nothing enforces it, and no tool
+refuses a change for being too large. It is what the agent is asked to aim at:
+one function, one value changed, one chunk removed, one small file added, or the
+smallest scaffolding that makes the next step possible. The prompt asks for it
+because a small change is one the agent can describe, verify, and undo, and a
+large one is not.
+
+Because it is an intention, it is checked by reading the work, not by the tools.
+Neither the spec nor the runtime supplies a size limit to enforce in its place.
 
 ## 8. Workspace
 
@@ -422,26 +484,78 @@ boundary. A click folds or unfolds a card, a toggle toggles every card in view,
 and the wheel over an open card scrolls its window. Chat remains the only channel
 that addresses the person.
 
-**The token bar is always visible.** It uses the server's real window as the
-denominator, marks the budget inside the bar, and shows an estimate in a different
-glyph and colour before the first measured request.
+**The token bar is always visible**, and its figures come from llama.cpp, not
+from a guess.
+
+- **The denominator is the server's own capacity.** The context window is the
+  total the server reports for its `-c` setting. Carto does not carve a reply
+  reserve out of it; the budget is marked *inside* the bar rather than shrinking
+  the bar.
+- **The numerator is the server's own count** for the last request, plus what the
+  tool calls have added since.
+- **The bar also reports what the server measures**: tokens per second for
+  generation and for prompt reading, how much of the window is filled, and
+  whether a prompt is still being read or generation has begun. Prefill is the
+  slow half of a long context, and showing it is the point of reading the server
+  rather than estimating.
+- **Before the first measured request** the bar shows an estimate in a different
+  glyph and colour, and says that it is one.
+
+The estimate is not a fixed characters-per-token constant. It is re-learned from
+the server's replies: the size of a request against the prompt tokens the server
+reports for it, as a moving average, clamped so one odd reply cannot swing it.
+
+`llama.cpp` is a local server with a small, stable HTTP surface. Everything above
+is read from it, and none of it is inferred from a provider's response headers.
 
 ## 9. Turn control
 
-- **Interrupt** stops the run now, as close to now as the run's abort check
-  allows, and not politely at a boundary.
-- **Steer** queues a message for the next durable boundary. The agent sees it
-  arrive in the transcript.
-- **Follow-up** queues a message for after the run.
-- **Cancel** is an interrupt plus dropping what was queued.
+The person's input box is live while the agent works. Typing never affects the
+run, and nothing is sent until the person sends it.
 
-There is no pause, no draft editing, and no resume.
+**Pause** stops the run where it is without breaking the stream of generation.
+The person types in the input box normally, unpauses, and the run continues
+unaffected. Nothing is committed or discarded by a pause, and the agent is not
+told it happened. A pause that is never released leaves the run stopped; it is
+not a cancel.
+
+**Send while paused** behaves as if the run had not been paused:
+
+- **Steer** sends the message to the run as a steer and the stream is not
+  broken. It is placed at the next tool boundary and joins the work in progress.
+- **Follow-up** sends the message as a follow-up. It arrives after the run
+  answers and starts the next run.
+- **Interrupt** breaks the stream and delivers the person's message immediately.
+
+An interrupt is the only one of the three that costs work, and what it costs is
+fixed:
+
+- A **Chat call that was mid-send is sent.** What the agent had already written
+  reaches the person. A half-written declaration is still a declaration.
+- **Every other tool call in flight is aborted.** Its result is written as
+  partially completed, and stays in the context so the agent can see what it had
+  done and what it had not. An aborted tool call is visible, not erased.
+- The person's message is read at once, and the run restarts from it.
+
+If the person unpauses while text is in the input box, nothing special happens.
+The run resumes, the stream continues, and the text stays where it is until it is
+sent.
+
+**Cancel** is an interrupt plus dropping what was queued.
 
 ## 10. Sleep
 
-The agent can sleep. A `sleep` ends the run, and the person is the only thing
-that re-engages the agent afterwards. Nothing on a timer reawakens it and nothing
-watches a path for it.
+The `sleep` tool makes the agent wait rather than end.
+
+- **`sleep` with no value** waits indefinitely. Only a message from the person
+  wakes the agent.
+- **`sleep` with a whole number above zero** waits that many seconds, then wakes
+  and resumes on the state block, as it would after any yield.
+- **A message from the person wakes the agent immediately**, whether it was
+  sleeping with a time or without one.
+
+A timed sleep and a person's message are both ways to resume, and whichever comes
+first wins. A sleep that has already expired is not a second wake.
 
 ## 11. Runtime shape
 
@@ -472,16 +586,19 @@ Carto is built on three `pi` packages and does not rebuild them:
   provider errors.
 
 Carto adds only the Brain and its records, the prefill and its handles, the
-product tools, and the workspace. It does not implement a provider layer, a
+product tools (including `create`, whose existence check the package's write tool
+does not offer), and the workspace. It does not implement a provider layer, a
 stream parser, a tool validator, a scheduler, a timer queue, a SQLite adapter, a
 terminal editor, or a transcript compactor.
 
 ## 13. Open
 
-1. The token bar's source of measurement.
-2. What a pinned file is, and how a file carries a pin.
-3. How ephemeral entries are named. The Brain prefixes are fixed; the prefix and
-   scheme for files, tool calls, and ephemera are not.
+1. What a pinned file is, and how a file carries a pin. `F` names it in §5.4 and
+   nothing yet defines it.
+2. Which llama.cpp endpoints and fields carry the token bar's figures, and what
+   happens when the server is unreachable. The old branch has working readings of
+   server capacity and prompt tokens; those are the reference, not the
+   specification.
 
 The model is always given the whole context. Carto does not rely on a provider
 keeping conversation state on its own side, and no swept text is presumed to be
