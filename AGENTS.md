@@ -1,3 +1,9 @@
+- **Read _ALL LINES_ of `AGENTS.md` first at the start of every single turn.**
+- `git fetch` and check whether `origin` has moved ahead.
+- If the workspace has reset, your local commits may be gone while `origin`
+  still holds them. Replay your work onto `origin`, push, and say in the same
+  reply that you did it.
+
 # AGENTS.md
 
 This file tells an agent how to work in this repository. It is written for the
@@ -118,12 +124,6 @@ build is not a test; a build never runs on its own, mid-stage or otherwise.
 kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
-
-- **Read `AGENTS.md` first at the start of every single turn.**
-- `git fetch` and check whether `origin` has moved ahead.
-- If the workspace has reset, your local commits may be gone while `origin`
-  still holds them. Replay your work onto `origin`, push, and say in the same
-  reply that you did it.
 
 A **stage** is one complete unit of work that ends when you are ready to tell the
 person it is done. While the stage is in progress — reading, deciding, editing — run
