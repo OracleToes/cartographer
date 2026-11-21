@@ -130,8 +130,11 @@ Restoring puts an entry back into the live context as its original type. It does
 not also pin; a pin is a separate action either party can take. A restored
 attachment that no longer resolves is marked stale.
 
-The agent has no way to address the archive, by design. Restoring is a person
-action.
+Restoring is a person action, and the person's alone. The agent does not know
+the archive exists. Anything swept is, to the agent, gone forever: it has no
+handle for it, no way to address it, and no belief that it is retrievable. The
+archive is invisible to the agent in every view, every listing, and every result
+it can reach.
 
 ### 3.4 Deleted text is really gone
 
