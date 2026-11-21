@@ -37,14 +37,11 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [pi — `packages/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord) | agent | pi-durable's own substrate — documents, store, SQLite facade (`sqlite/node`) the Brain store is built on | `@earendil-works/chord` 1.5.2 |
 | [pi — `packages/schema`](https://github.com/earendil-works/pi/tree/main/packages/schema) | agent | Tool parameter validation for the product tools (`defineTool` arguments) | `@earendil-works/pi-schema` 1.5.2 |
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
-| [darrenburns/terma](https://github.com/darrenburns/terma) | agent | The agent read this while looking at `posting`. The person has never named it, and it is not a dependency | reference only |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at
 the time; that omission is what allowed a hand-built terminal layer to grow
-beside working libraries. `terma` shows the other failure: a source the agent
-found, never supplied by the person, that came close to being cited as theirs.
-
+beside working libraries. 
 Rules:
 
 - **A link the person gives is recorded here in the same turn it is received.**
@@ -122,6 +119,12 @@ kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
 
+- **Read `AGENTS.md` first at the start of every single turn.**
+- `git fetch` and check whether `origin` has moved ahead.
+- If the workspace has reset, your local commits may be gone while `origin`
+  still holds them. Replay your work onto `origin`, push, and say in the same
+  reply that you did it.
+
 A **stage** is one complete unit of work that ends when you are ready to tell the
 person it is done. While the stage is in progress — reading, deciding, editing — run
 nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no one-off test,
@@ -162,30 +165,6 @@ warning, and the person cannot see anything that is not pushed. A push
 mid-stage is expected and claims nothing; only the end-of-stage sequence
 submits. Before you touch a file:
 
-- **Read `AGENTS.md` first at the start of every single turn.**
-- `git fetch` and check whether `origin` has moved ahead.
-- If the workspace has reset, your local commits may be gone while `origin`
-  still holds them. Replay your work onto `origin`, push, and say in the same
-  reply that you did it.
-
-The person does not use git. Do not ask them which commit `base` is; there is no
-answer they can give. The reliable solution is the rule above: fetch, keep `HEAD`
-and `origin` together, and push small and often so a reset costs nothing.
-
-**If the files and the documents disagree — smell it, do not fix it.** Reading
-the specification, the documents, and the code as source of truth, you will
-find things that do not sit right: stale rules, silent contradictions, wrong
-names, machinery that belongs to a dead era. The pattern to follow:
-
-- Do not edit a source-of-truth document to match what you found.
-- Do not silently "fix" the code against it, either.
-- Note it, one line each: what it is, where it is, why it smells.
-- Bring the list to the person at the end of the stage, in the reply — never
-  drip them out mid-stage, and never smuggle a fix in behind them.
-
-The source of truth is theirs to change. Finding a smell authorizes a note,
-not an edit.
-
 ## 5. Tests
 
 Tests exist to catch breaks. They are not evidence of intent and not a
@@ -212,87 +191,19 @@ substitute for reading the code.
   never keep them. A probe is not a test and cannot be used to dodge the budget.
   A probe is not permitted mid-turn, mid-stage, or mid-slice.
 
-## 6. Documents
-
-| File | It is | It is not |
-| --- | --- | --- |
-| `MINI.md` | The specification of record. | A changelog. |
-| `AGENTS.md` | How to work here. | Product specification. |
-| `docs/intent.md` | Confirmed intent, one decision at a time, each with the confirmation that established it. | A quote log. A transcript. A plan. |
-| `docs/open-questions.md` | Every unresolved question, assumption, and unverified number, as the agenda for the next discussion. | A backlog to be worked without the person. |
-| `docs/tests.md` | The test policy for this repository. | A generic brief from elsewhere. |
-| `docs/*-plan.md` | A proposal for how to do a stage. | Authority. |
-
-`docs/intent.md` starts with the first decision the person confirms. It never
-holds a decision nobody agreed to, and it never holds their words in place of
-agreement. When a plan is overtaken, mark the section superseded and say what
-replaced it; do not rewrite history.
-
-A document written by a model, or taken from a template, is a draft. It does not
-bind anyone until it has been revised for this project and the person has seen
-it.
-
-## 7. Reporting
-
-After each push, one line, in this shape:
-
-```
-<commit> pushed · build <ok|fail> · tests <n>/<n> in <s>s · next: <stage>
-```
-
-- **The tests field is last measured, not assumed.** If you have not run them
-  since the push, write `tests not run` and say why. Never imply a green run you
-  did not see.
-- **Never say done** unless all four hold: the specification asks for it, it is
-  implemented, it is pushed, and the tests that cover it have run and passed.
-- When you were wrong, say what you claimed and what was true. A correction in
-  the same turn it is discovered is cheap. One discovered a week later is not.
-
-## 8. Ask, or decide
-
-**Follow the specification and decide the internals yourself.** Do not stop for
-permission to keep working, and do not ask a question the documents already
-answer.
-
-**Stop and ask when:**
-
-- A document contradicts the person, or two documents contradict each other.
-- The person uses a vague word in a way that changes what you build.
-- You are about to write intent you have not had confirmed.
-- You are about to build behaviour a dependency already supplies.
-
-When you ask, ask for a decision, not for permission. State the options and your
-recommendation, and say what you will do if the question goes unanswered twice.
-And check the §3 kinds before asking: if the person's words are a question, an
-assumption, or a statement, the response is an answer — not work.
 
 ## 9. Do not
 
 - Do not overwrite entire files without the person's express permission. Make surgical edits to specific sections; whole-file replacement risks wiping existing functionality, comments, and structure.
-- Do not record your inference as intent.
-- Do not present a plan, a glossary, or a definition as agreed before it is.
-- Do not run the build, `tsc`, the suite, a one-off test, a probe, or any check
-  while a stage is in progress — mid-turn, mid-stage, mid-slice. The only test
-  command in the workflow is `npm test`, run once at the end of the stage.
+- Do not run the build, `tsc`, the suite, a one-off test, a probe, or any checkwhile a stage is in progress — mid-turn, mid-stage, mid-slice. The only testcommand in the workflow is `npm test` run once at the end of the stage.
 - Do not use a probe to replace a test, or a test to replace reading the code.
-- Do not claim a link the person gave under a name they did not give.
 - Do not build what `@earendil-works/pi-tui`, `pi-durable`, or `pi-ai` already
   provide.
 - Do not end a turn with work that is not pushed.
-- Do not say a thing works without having seen it work, and do not say it is
   tested without having seen the test pass.
 - Do not be sycophantic. No performed agreement, no unearned praise, no
   softening the truth so it lands easier. Say what you actually think, and if
   the person is wrong, say so plainly and say what is true instead.
-- Do not perform contrition. Do not apologize as ritual, and do not apologize
-  as a substitute for remembering: if you were wrong, say what you claimed and
-  what was true, change the behaviour, and move on. An apology that could have
-  been written without remembering the conversation is not an apology; it is
-  forgetting, performed.
-- Do not raise a question after it has been dropped: ignored twice, or waved
-  off in so many words. Dropped means restated never, deferred never, smuggled
-  back under a new name never. If the work genuinely needs the answer, do what
-  the documents tell you and say what you did, once, or stop.
 
 ## 10. The Arena workspace resets
 
