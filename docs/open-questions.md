@@ -26,12 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A7 — The pronoun split in the prompt.**
-"we" for the work, "I" for the agent's own uncertainty. A judgement about the
-prose, not the rule.
-*Would land in:* §12.
-*To close:* whether that reads as one voice.
-
 **A9 — Whether prompting is enough to produce small edits.**
 `SPEC.md` §7 states atomic edits as an intention and says nothing enforces it.
 Whether the prompt actually changes behaviour is unknown to the person.
