@@ -566,28 +566,36 @@ boundary. A click folds or unfolds a card, a toggle toggles every card in view,
 and the wheel over an open card scrolls its window. Chat remains the only channel
 that addresses the person.
 
-**The token bar is always visible**, and its figures come from llama.cpp, not
-from a guess.
+**The context bar spans the whole bottom of the application and is always
+visible.** Its width is the server's own context capacity: the total the server
+reports for its `-c` setting. Filling it is a picture of the context, not a
+gauge with a budget mark.
 
-- **The denominator is the server's own capacity.** The context window is the
-  total the server reports for its `-c` setting. The budget is marked *inside*
-  the bar.
-- **The numerator is the server's own count** for the last request, plus what the
-  tool calls have added since.
-- **The bar also reports what the server measures**: tokens per second for
-  generation and for prompt reading, how much of the window is filled, and
-  whether a prompt is still being read or generation has begun. Prefill is the
-  slow half of a long context, and showing it is the point of reading the server
-  rather than estimating.
-- **Before the first measured request** the bar shows an estimate in a different
-  glyph and colour, and says that it is one.
+It shows three quantities, each in its own colour:
 
-The estimate is not a fixed characters-per-token constant. It is re-learned from
-the server's replies: the size of a request against the prompt tokens the server
-reports for it, as a moving average, clamped so one odd reply cannot swing it.
+- **Fill** — how much of the context is occupied, as a solid colour.
+- **Prefilled** — during a prompt read, how much has been read so far.
+- **To prefill** — during a prompt read, how much is still to read.
 
-`llama.cpp` is a local server with a small, stable HTTP surface. Everything above
-is read from it, and none of it is inferred from a provider's response headers.
+The two prefill quantities are the point of the bar. Prefill is the slow half of
+a long context, and a bar that shows how far along the read is tells the person
+which part of the context is being paid for and how much of it is breaking when
+something invalidates the head.
+
+**The figures come from llama.cpp.** The server's count for the last request plus
+what the tool calls have added since; its tokens per second for generation and
+for prompt reading; and whether a prompt is still being read or generation has
+begun. None of it is inferred from a provider's response headers.
+
+**Before the first measured request** the bar shows an estimate in a different
+glyph and colour, and says that it is one. The estimate is not a fixed
+characters-per-token constant: it is re-learned from the server's replies — the
+size of a request against the prompt tokens the server reports for it — as a
+moving average, clamped so one odd reply cannot swing it.
+
+The glyphs and the exact colours are the build's to choose. What the spec fixes is
+what the bar represents: capacity across the bottom, three quantities, three
+colours, and an estimate that announces itself.
 
 ## 9. Turn control
 
@@ -682,7 +690,7 @@ terminal editor, or a transcript compactor.
 
 ## 13. Open
 
-1. Which llama.cpp endpoints and fields carry the token bar's figures, and what
+1. Which llama.cpp endpoints and fields carry the context bar's figures, and what
    the bar shows while the server is unreachable.
 
 The model is always given the whole context. Carto does not rely on a provider

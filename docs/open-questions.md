@@ -26,13 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A6 — The token bar's glyphs and colour roles.**
-`▤` for an estimate, `▰` for a measured figure, `┊` for the budget mark, and the
-muted/accent/warning roles were locked in an earlier build. `SPEC.md` §8 keeps
-the behaviour — estimate in a different glyph and colour — and names no glyph.
-*Would land in:* §8.
-*To close:* whether the old glyphs survive.
-
 **A7 — The pronoun split in the prompt.**
 "we" for the work, "I" for the agent's own uncertainty. A judgement about the
 prose, not the rule.
@@ -55,7 +48,7 @@ built now, is unsettled.
 
 ## B. Open
 
-**B1 — Which llama.cpp endpoints and fields carry the token bar's figures.**
+**B1 — Which llama.cpp endpoints and fields carry the context bar's figures.**
 `SPEC.md` §8 fixes the source as the server: capacity from `-c`, the count from
 the last request, tokens per second for generation and prompt reading, fill, and
 prefill-versus-generating. The endpoints and field names are not fixed, and
