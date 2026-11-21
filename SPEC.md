@@ -156,6 +156,16 @@ survive a collapse, so a collapse pays for the body and the tail and never for
 the head again. Anything that would change a head byte between generations must
 be paid for at the collapse instead.
 
+**Nothing outside a collapse removes text.** A deletion is not carried out in
+place, and no mechanism that hides an entry from the context is a substitute for
+one. Hiding leaves the bytes where they were, and this section would then be
+false. The only two ways text goes are a store deleted whole at a collapse, and a
+delete applied at a collapse.
+
+Inside a generation, text leaves the context by being swept into the archive,
+which is a move, not a deletion. It is deleted for good when the archive drops
+it.
+
 ## 4. Collapse
 
 Collapse is the gardening operation. It is the only thing that rebuilds the
@@ -203,6 +213,10 @@ applying an action now costs the body and the tail, never the head.
 
 Marks are visible in the state block. A mark also carries its author, and only
 the person may withdraw a mark the agent placed.
+
+A deletion happens for real only at a collapse. Applying a delete now removes
+the entry from the context, but the store it was committed to still holds it
+(§3.4), so the text is gone from the model's view before it is gone from disk.
 
 ## 5. The prefill
 
@@ -284,6 +298,18 @@ patched in between.
 A Brain write between collapses does not enter the head. It exists as the write
 tool's own result in the body, and as a pending line in the state block.
 
+The freeze binds the projection, and only the projection. Two exemptions:
+
+- **Applying an action now** (§4.1) rebuilds the prefill from the changed entry
+  through the tail. That is a rebuild, not a patch, and the head is untouched.
+- **The tail is always current.** The state block changes on every request by
+  design; that is not a break in the freeze.
+
+The prohibition that does hold without exception: the frozen region is never
+edited in place. No entry already in the context is rewritten, masked, omitted,
+or replaced by an overlay. Anything that would have to change there is done at
+the next collapse or by an apply-now rebuild.
+
 ### 5.6 The state block is the continuation
 
 There is no separate nudge and no "you are not done" message. A run ends when a
@@ -346,6 +372,21 @@ description can say.
 | `tree` | Sets the project tree's anchor and depth, and returns the rendered tree. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
 | `sleep` | Ends the run. |
+
+`read`, `edit`, and `shell` are supplied by the durable package. Carto supplies
+their descriptions and scopes them to the project root; it does not write its own
+file or shell layer beside them.
+
+That has two consequences Carto inherits rather than chooses:
+
+- **`read` and `edit` take a path, not a line range and not a single hunk.**
+  `read` takes `path` with optional `offset` and `limit`. `edit` takes a path and
+  a list of `oldText`/`newText` replacements, matched against the original file
+  and applied all or nothing.
+- **`edit` may create a file and may replace a whole file.** A replace is a
+  single atomic edit to the package, which is why "atomic" in this document means
+  one edit call that either lands entirely or not at all, never one part of a
+  file. Atomicity is a property of the call, not a limit on what it touches.
 
 ## 8. Workspace
 
@@ -432,3 +473,27 @@ terminal editor, or a transcript compactor.
 2. What a pinned file is, and how a file carries a pin.
 3. How ephemeral entries are named. The Brain prefixes are fixed; the prefix and
    scheme for files, tool calls, and ephemera are not.
+4. Whether the provider may hold content the context no longer shows (§13.1).
+   This one is not cosmetic: if it holds, a collapse is not the only thing that
+   decides what the model can still see.
+
+### 13.1 Server-held continuation
+
+A provider may keep a conversation on its own side, so that a request continues
+an earlier one instead of resending it. When that happens, content the client
+has stopped sending is not necessarily content the model can no longer see.
+
+This collides with the same rule as anything else that hides text (§3.4), and it
+is not solved here:
+
+- The decision to continue is made per request, by the provider layer, and no
+  setting exposed to Carto overrides it.
+- It is keyed to the conversation's provider identity. A new generation does not
+  reliably get a new one.
+- The provider drops an old thread after a short idle period, and rejects a
+  continuation it cannot match, falling back to a full request. So the behaviour
+  is timing-dependent, not deterministic.
+
+Until this is settled, Carto does not claim that a swept entry is invisible to
+the model. It claims what it has built: the entry is out of the context, and out
+of Carto's storage once the collapse is done.
