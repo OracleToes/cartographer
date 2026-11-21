@@ -49,7 +49,8 @@ Carto is built on the `pi` packages and adds only what they do not provide
 ## 2. The Brain
 
 The Brain is the persistent record. It survives restarts and collapses, and a
-live context can always be rebuilt from it alone.
+live context can always be rebuilt from it alone — after a crash as well as at a
+collapse, and a crash during a collapse cannot lose Brain state.
 
 It holds three kinds of record: **Atlas**, **Ledger**, and **Chat**.
 
@@ -422,6 +423,13 @@ path.
 **A pinned read result goes stale when its file changes.** The state block says
 so, by handle, from the moment the change is seen.
 
+**An Atlas node attached to a file goes stale the same way.** When a file under
+an attachment changes, the node is reported stale in the state block and is
+written back as stale at the next collapse, stored on the entry like a pin.
+Staleness is a gentle signal: it blocks nothing, deletes nothing, and asks for
+nothing. Its whole effect is that the agent is told its note about that file may
+no longer be true.
+
 **At collapse, a pinned read result is made true.** The file is read again, and
 the result becomes what the file now holds. This is what a pin means here: the
 agent keeps its view of that file from being silently out of date, and pays for
@@ -545,6 +553,17 @@ description can say.
 The prompt is short as a consequence of that rule, not as a target. There is no
 word count to hit and none to stay under: a prompt that carries only what nothing
 else can say is short because so little qualifies.
+
+**The system prompt teaches, it does not prohibit.** It is the first thing the
+agent reads and the thing it follows: how to read its environment, how to use its
+tools well, and what pattern of thinking to hold to. It guides the agent into the
+way of working rather than fencing off mistakes, because the context it sits over
+is short enough that guidance is not competing with noise.
+
+It is also where the things that cannot be enforced are said: the agent keeps
+small, atomic steps; it does not know when the world changes and trusts its map
+and what it kept; it declares to the person through `chat` and treats its plain
+text as its own reasoning.
 
 **A tool names its target by handle** (§5.4). That is the addressing scheme every
 tool shares, and it is why every item in the context carries one. A file may also
