@@ -22,7 +22,7 @@ From highest to lowest:
    document here, including this one. If a document contradicts them, the
    document is stale and the contradiction is a task.
 2. **`SPEC.md`.** The specification of record: what Carto is, what it keeps, and
-   what it must do. `MINI.md` is superseded.
+   what it must do.
 3. **`docs/intent.md`.** Confirmed intent only. See §6.
 4. **This file.** Process: how to work, how to test, what to record, and how to
    report.
