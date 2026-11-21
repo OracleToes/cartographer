@@ -725,11 +725,6 @@ does not offer), and the workspace. It does not implement a provider layer, a
 stream parser, a tool validator, a scheduler, a timer queue, a SQLite adapter, a
 terminal editor, or a transcript compactor.
 
-## 13. Open
-
-1. Which llama.cpp endpoints and fields carry the context bar's figures, and what
-   the bar shows while the server is unreachable.
-
 The model is always given the whole context. Carto does not rely on a provider
 keeping conversation state on its own side, and no swept text is presumed to be
 retained there.
