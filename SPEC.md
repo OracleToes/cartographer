@@ -201,8 +201,9 @@ Archive, restore, and delete are three separate actions, and each is a mark by
 default. Marking applies the action at the next collapse, and the mark can be
 changed or withdrawn until then.
 
-- **Marked for archive** leaves the entry in the context for now. It is not in
-  the head, not pinned, and it does not stay. The next collapse sweeps it.
+- **Marked for archive** leaves the entry in the context until the next
+  collapse. It is not in the head and not pinned, and at the collapse it is
+  swept into the archive.
 - **Marked for delete** leaves the entry visible for now and removes it at the
   next collapse.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
@@ -278,14 +279,23 @@ for Chat and never becomes a Chat record.
 ### 5.4 Handles
 
 Everything the agent sees in the context carries a short, type-prefixed,
-generation-local handle: files, tool calls, Brain records, and every other item
-the prefill carries. There is no other naming scheme, and no tool parameter
-accepts a raw key.
+generation-local handle: Brain records, tool calls, reasoning, tool results,
+`bash` output, ephemera, and files. There is no exception and no other naming
+scheme.
+
+Handles exist because every tool names its target by one. A tool that changes
+something names it by handle; a tool that acts on a pinned item names it by
+handle; an agent that wants to pin a tool call, a piece of its own reasoning, or
+a file does so by handle. An item without a handle would be an item the agent
+could see and could not act on.
 
 - Handles are stable within a live generation and are rebuilt at collapse.
 - The agent never sees a database key or a storage-level identifier.
 - A tool parameter that names an item takes a handle. An unknown handle is an
   explicit error.
+- **Paths are the one alternative.** `read`, `edit`, and `create` resolve a path,
+  because a path is what those tools are about. Everything else in the context
+  is reachable only by handle.
 
 Every durable ID line carries an ISO 8601 UTC timestamp, so the agent can see
 when something changed.
@@ -306,13 +316,9 @@ when something changed.
 | `E` | a brain entry written since the last collapse, seen in the body |
 | `U` | the person's message |
 
-`R` covers the result of every tool call, including `read`; `S` is the one
-exception, because a `bash` result is quoted and discussed far more often than it
-is cited, and the distinction earns its letter.
-
-Nothing in the table addresses an ephemeral item that is not pinned and not a
-tool result. Those are the things a collapse sweeps, and the agent is not meant
-to build references to them.
+`S` is a subdivision of `R`, not an exception to it: a `bash` result is a tool
+result, and the shell deserves its own letter because it is quoted and discussed
+far more than it is cited.
 
 ### 5.5 Read results and staleness
 
@@ -401,8 +407,11 @@ listing.
 
 The tree is anchored at the project root by default. The `tree` tool changes the
 anchor and nothing else: it does not return the tree, because the tree is already
-in the state block, which every request carries. The agent sets where it is
-attending and sees the result on its next turn.
+in the state block, which every request carries.
+
+**`tree` ends the turn immediately.** The state block renders as the next turn, so
+the agent sets where it is attending and sees the tree it just asked for at once,
+rather than reading a second rendering of it in a tool result.
 
 The anchor stays inside the project.
 
@@ -411,6 +420,11 @@ The anchor stays inside the project.
 The agent's tools are scoped, unique, and permissive. A tool's own description is
 the authority on what it does; the system prompt carries only what no single
 description can say.
+
+**A tool names its target by handle** (§5.4). That is the only addressing scheme
+the tools share, and it is why every item in the context carries one. The single
+exception is a path: `read`, `edit`, and `create` resolve a file path, and a path
+is accepted wherever a file is the subject.
 
 | Tool | Does |
 | --- | --- |
@@ -436,8 +450,8 @@ or command layer beside them.
   The package applies them all or nothing and refuses a file that does not
   exist. Editing an existing file is the only thing it does.
 - **`bash`** runs a command through the project's environment. The name is the
-  package's, and Carto keeps it rather than renaming it: an agent that has used a
-  coding tool before already knows what `bash` is.
+  package's, and it is what an agent that has used a coding tool before already
+  knows.
 
 **Creation is separate from editing.** `create` writes a file that must not
 exist and refuses a path that already does. The package's own `write` tool
@@ -488,8 +502,7 @@ that addresses the person.
 from a guess.
 
 - **The denominator is the server's own capacity.** The context window is the
-  total the server reports for its `-c` setting. Carto does not carve a reply
-  reserve out of it; the budget is marked *inside* the bar rather than shrinking
+  total the server reports for its `-c` setting. The budget is marked *inside*
   the bar.
 - **The numerator is the server's own count** for the last request, plus what the
   tool calls have added since.
@@ -545,17 +558,25 @@ sent.
 
 ## 10. Sleep
 
-The `sleep` tool makes the agent wait rather than end.
+`sleep` is a tool call that ends the current turn with nothing to say, and it is
+the only way the agent stops working.
 
-- **`sleep` with no value** waits indefinitely. Only a message from the person
-  wakes the agent.
-- **`sleep` with a whole number above zero** waits that many seconds, then wakes
-  and resumes on the state block, as it would after any yield.
-- **A message from the person wakes the agent immediately**, whether it was
-  sleeping with a time or without one.
+- **`sleep` with no argument** stops and stays stopped. The agent rests until the
+  person sends it a message.
+- **`sleep` with a whole number above zero** stops and rests for that many
+  seconds, then starts again on its own.
 
-A timed sleep and a person's message are both ways to resume, and whichever comes
-first wins. A sleep that has already expired is not a second wake.
+Resuming is always the same thing: the agent receives the state block as its next
+turn and acts on what it says. A timed sleep is not a different kind of event with
+different handling — the agent wakes by receiving the state block, exactly as it
+would after any turn that carried no tool call.
+
+A message from the person ends a rest early, whether the rest had a time or not,
+and starts the same way. A rest that is over is over: there is nothing left
+pending, and no second start.
+
+The wait is durable: the agent rests across a restart, and the time is an argument
+to the call.
 
 ## 11. Runtime shape
 
@@ -596,9 +617,7 @@ terminal editor, or a transcript compactor.
 1. What a pinned file is, and how a file carries a pin. `F` names it in §5.4 and
    nothing yet defines it.
 2. Which llama.cpp endpoints and fields carry the token bar's figures, and what
-   happens when the server is unreachable. The old branch has working readings of
-   server capacity and prompt tokens; those are the reference, not the
-   specification.
+   the bar shows while the server is unreachable.
 
 The model is always given the whole context. Carto does not rely on a provider
 keeping conversation state on its own side, and no swept text is presumed to be
