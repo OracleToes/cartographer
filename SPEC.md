@@ -18,11 +18,18 @@ Carto has three defining properties:
    disposable; the Brain is the memory.
 3. **Scoped tasking.** The agent works in small, atomic steps.
 
-**Carto places no limit on the agent that the person has not defined.** There is
-no turn limit, no maximum length on a name or an entry, no read limit on a file,
-and no defensive gate that exists because a limit seemed prudent. A limit the
-person has not asked for is a limit that slows the agent down and teaches it to
-work around the tool instead of using it.
+**Permissive first, and the prompt is trusted.** Carto places no limit on the
+agent that the person has not defined: no turn limit, no maximum length on a name
+or an entry, no read limit on a file, and no defensive gate that exists because a
+limit seemed prudent. A limit the person has not asked for slows the agent down
+and teaches it to work around the tool instead of using it.
+
+Where behaviour matters, the answer is the prompt, not a mechanism. The agent is
+told what to do and trusted to do it. Anything that could go wrong is corrected by
+saying so, not by building something that stops it.
+
+The one exception is a capability the person turns off deliberately (§6.1). That
+is not a limit on the agent; it is the person deciding what it has.
 
 Where a bound is part of how a tool works, it is said so in that tool's own
 description and nowhere else. This rule governs every place a limit could be
@@ -414,7 +421,8 @@ it needs the report it wrote and the current state of the project.
 
 Atomic here is an intention (§7). Nothing refuses a large change, and nothing
 counts lines. What keeps changes small is the prompt and the agent's willingness
-to stop.
+to stop. That is deliberate: a mechanism that refused large changes would be the
+prompt not being trusted (§1).
 
 ### 6.1 Read only mode and edit mode
 

@@ -26,13 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A9 — Whether prompting is enough to produce small edits.**
-`SPEC.md` §7 states atomic edits as an intention and says nothing enforces it.
-Whether the prompt actually changes behaviour is unknown to the person.
-*Would land in:* §7, as a caveat or not at all.
-*To close:* observation, not a decision. Not a spec question until something is
-observed.
-
 **A10 — The recovery UI.**
 Restore is the person's action and the agent cannot see the archive. Whether the
 archive is shown as a list the person can restore from, and whether that is
