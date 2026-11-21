@@ -26,13 +26,6 @@ separate decision.
 
 The person may have decided these; this file cannot show that they did.
 
-**A10 — The recovery UI.**
-Restore is the person's action and the agent cannot see the archive. Whether the
-archive is shown as a list the person can restore from, and whether that is
-built now, is unsettled.
-*Would land in:* §3.3.
-*To close:* whether the spec describes a view or only the capability.
-
 ## B. Open
 
 **B1 — Which llama.cpp endpoints and fields carry the context bar's figures.**
