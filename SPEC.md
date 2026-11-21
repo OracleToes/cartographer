@@ -238,6 +238,13 @@ Every position is stable. The head appears in this order on every request and
 does not change between collapses. Its composition changes only when the Brain
 changes, never because of new activity.
 
+**Pinned files and pinned ephemera stand for their source, not for a copy of a
+read.** A pinned file is the file at the moment of collapse: it is read again and
+placed in the head as the file now stands, so the head holds the file, not a
+quotation of it and not a stale snapshot. Pinned ephemera is held the same way,
+each item under its own handle. This is why the head stays byte-stable across a
+collapse while the files it carries change (§5.5).
+
 ### 5.2 Body
 
 Everything outside the head is the body, and the body has no ordering scheme. It
@@ -630,8 +637,7 @@ terminal editor, or a transcript compactor.
 
 ## 13. Open
 
-1. What a pinned file is, and how a file carries a pin.
-2. Which llama.cpp endpoints and fields carry the token bar's figures, and what
+1. Which llama.cpp endpoints and fields carry the token bar's figures, and what
    the bar shows while the server is unreachable.
 
 The model is always given the whole context. Carto does not rely on a provider
