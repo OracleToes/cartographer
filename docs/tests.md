@@ -75,7 +75,6 @@ the specification makes promises about. In Carto those are:
 | Brain | One current document per project, `history: "latest"`, latest state wins |
 | Context | The projection the person sees is the projection the model is sent |
 | Chat | Chat is never collapsed by default; a fold is manual and stays in context |
-| Wake | A durable wake stays armed until its condition is met, and fires once |
 
 Platform and integration boundaries are kept when they protect distinct
 behaviour: SQLite storage, a real HTTP stream, a real PTY. Keep one of each, not
@@ -138,7 +137,7 @@ records coverage and gaps, not a score.
   one-liner, config creation, headless boot and clean EOF exit, an
   unsupported provider failing before any request). Known limits: nothing
   here proves a real llama-swap server answers — the person verifies.
-  Still no test of a real provider, of wake tasks, or of a screen.
+  Still no test of a real provider or of a screen.
 - As of R3 (2026-11-20): the live session runs against a faux pi-ai provider,
   end to end — a full tool turn with the pending list asserted by handle;
   the `onYield` continuation with the marker asserted present in the store
@@ -149,9 +148,8 @@ records coverage and gaps, not a score.
   enters a tool round with stopReason `toolUse` — the faux scripts set it,
   and real providers do the same. The ten-second budget is still unaddressed;
   the live-session tests are fast (faux, no waits) but nothing measures them.
-- Still open: no test of a real provider, no integration coverage of wake
-  tasks (deferred by §10a), nothing about a screen. R4 (config, llama-swap,
-  the headless driver) brings its own.
+- Still open: no test of a real provider, nothing about a screen. R4
+  (config, llama-swap, the headless driver) brings its own.
 
 ### Stage: UI teardown, 2026-11-16
 
@@ -172,8 +170,8 @@ records coverage and gaps, not a score.
 - Deleted `docs/intent.md` (110 lines of unconfirmed inference) and rewrote this
   file for Carto.
 - Measured before the policy took effect: the full run was 26 seconds, against a
-  10 second budget. Four waits were responsible: a 1.25 second path-wake test, two
-  `eventually` loops with 4 second ceilings, and a 50 millisecond sleep in the
-  prefill monitor test.
+  10 second budget. Four waits were responsible: a 1.25 second path-wake test
+  (gone with the wakes teardown, 2026-11-20), two `eventually` loops with 4 second
+  ceilings, and a 50 millisecond sleep in the prefill monitor test.
 - Outstanding: none of the above are fixed yet. The next stage that touches those
   tests must bring the run under budget or record the guard it drops.

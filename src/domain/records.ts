@@ -32,6 +32,8 @@ export interface ChatRecord {
   id: RecordId;
   author: "user" | "agent";
   text: string;
+  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
+  pinned?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -51,6 +53,8 @@ export interface LedgerEntry {
   status: LedgerStatus;
   /** Null while open; set when a question is answered or an entry is closed with its outcome. */
   answer: LedgerAnswer | null;
+  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
+  pinned?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -73,38 +77,13 @@ export interface AtlasNode {
   claim: string;
   evidence: SourceRef[];
   edges: AtlasEdge[];
+  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
+  pinned?: boolean;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface UserPin {
-  id: RecordId;
-  item: string;
-  reason: string;
-  source: SourceRef;
-  createdAt: number;
-}
-
-export interface CarryPin {
-  id: RecordId;
-  item: string;
-  reason: string;
-  source: SourceRef;
-  createdAt: number;
-}
-
-export type WakeStatus = "armed" | "ready" | "consumed" | "cancelled";
-
-export interface WakeEntry {
-  id: RecordId;
-  kind: "time" | "path";
-  condition: string;
-  status: WakeStatus;
-  reason: string;
-  createdAt: number;
-}
-
-export type HandleKind = "ledger" | "chat" | "atlas" | "pin" | "wake";
+export type HandleKind = "ledger" | "chat" | "atlas";
 
 /**
  * One short, type-prefixed, generation-local public handle (MINI.md §6).
@@ -133,9 +112,6 @@ export interface CartoBrain {
   chat: ChatRecord[];
   ledger: LedgerEntry[];
   atlas: AtlasNode[];
-  userPins: UserPin[];
-  carryPins: CarryPin[];
-  wakes: WakeEntry[];
   handles: HandleTable;
 }
 
@@ -145,9 +121,6 @@ export function emptyBrain(): CartoBrain {
     chat: [],
     ledger: [],
     atlas: [],
-    userPins: [],
-    carryPins: [],
-    wakes: [],
     handles: { counters: {}, entries: [] },
   };
 }

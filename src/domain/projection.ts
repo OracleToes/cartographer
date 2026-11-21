@@ -16,7 +16,7 @@ import { handleOf } from "./handles.js";
 import { estimateTokens } from "./estimate.js";
 import type { CartoBrain, SourceRef } from "./records.js";
 
-export type ProjectionPartId = "atlas" | "ledger" | "pins" | "wakes";
+export type ProjectionPartId = "atlas" | "ledger";
 
 export interface ProjectionPart {
   id: ProjectionPartId;
@@ -73,7 +73,7 @@ export function projectContext(brain: CartoBrain): Projection {
   if (brain.atlas.length > 0) {
     atlas.push("Atlas");
     for (const node of brain.atlas) {
-      atlas.push(`${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}`);
+      atlas.push(`${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? " · [pinned]" : ""}`);
       atlas.push(`  ${node.claim}`);
       for (const ref of node.evidence) atlas.push(`  evidence: ${sourceLine(ref)}`);
       for (const edge of node.edges) {
@@ -87,7 +87,7 @@ export function projectContext(brain: CartoBrain): Projection {
     ledger.push("Ledger");
     for (const entry of brain.ledger) {
       ledger.push(
-        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}`,
+        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? " · [pinned]" : ""}`,
       );
       if (entry.answer !== null) {
         const evidence = entry.answer.evidenceIds.map((id) => resolveHandle(brain, id)).join(", ");
@@ -96,33 +96,12 @@ export function projectContext(brain: CartoBrain): Projection {
     }
   }
 
-  const pins: string[] = [];
-  if (brain.userPins.length + brain.carryPins.length > 0) {
-    pins.push("Pins");
-    for (const pin of brain.userPins) {
-      pins.push(`${partOf("pin", pin.id)} ${pin.item} — ${pin.reason} · ${sourceLine(pin.source)} — ${iso(pin.createdAt)}`);
-    }
-    for (const pin of brain.carryPins) {
-      pins.push(`${partOf("pin", pin.id)} ${pin.item} — ${pin.reason} · ${sourceLine(pin.source)} — ${iso(pin.createdAt)}`);
-    }
-  }
-
-  const wakes: string[] = [];
-  if (brain.wakes.length > 0) {
-    wakes.push("Wakes");
-    for (const wake of brain.wakes) {
-      wakes.push(`${partOf("wake", wake.id)} [${wake.kind}] ${wake.condition} (${wake.status}) — ${wake.reason} — ${iso(wake.createdAt)}`);
-    }
-  }
-
   const parts: ProjectionPart[] = [];
   if (atlas.length > 0) parts.push(makePart("atlas", "Atlas", atlas));
   if (ledger.length > 0) parts.push(makePart("ledger", "Ledger", ledger));
-  if (pins.length > 0) parts.push(makePart("pins", "Pins", pins));
-  if (wakes.length > 0) parts.push(makePart("wakes", "Wakes", wakes));
 
   const text = parts.length === 0 ? "(the Brain is empty)" : parts.map((part) => part.text).join("\n\n");
-  const sizes = { atlas: 0, ledger: 0, pins: 0, wakes: 0 };
+  const sizes = { atlas: 0, ledger: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
   return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes };
 }

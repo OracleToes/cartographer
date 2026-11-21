@@ -27,6 +27,11 @@ happened:**
   screen) are deleted. `docs/context-tree.md` stays: it quotes the person's
   own requirement verbatim. `MINI.md` is untouched; §8 remains the spec of
   record for whatever screen eventually gets built.
+
+**Amended 2026-11-20 by the person:** wakes are scrapped — the wake records,
+the wake tool, and the armed-wake line in the state block are gone; the
+projections and the state block no longer carry them. The surviving suite
+mentions wakes only here, as history of the teardown.
 - The suite went from 109 to 58 tests. The surviving suite covers the
   domain and runtime foundation (Brain, handles, collapse, projection,
   state block, wakes, legacy import, workspace, launcher).

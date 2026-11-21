@@ -331,13 +331,9 @@ test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", 
     status: "open",
     answer: null,
     evidence: [],
+    pinned: true,
     createdAt: Date.now(),
     updatedAt: Date.now(),
-  });
-  brain.userPins.push({
-    item: "!1",
-    reason: "important",
-    createdAt: Date.now(),
   });
   brain.handles.entries.push({ kind: "ledger", id: 1, handle: "!1", timestamp: Date.now() });
 

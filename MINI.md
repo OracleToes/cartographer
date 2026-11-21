@@ -42,15 +42,19 @@ The Brain holds:
 - **Ledger** — goals, notes, questions, instructions, and progress through a
   particular problem.
 - **Chat** — deliberate Person Chat and Agent Chat records.
-- **Pins** — the agent's and the person's pins, in both layers.
-- **Wakes** — the timers and path watches the agent has asked for.
 
 Deleting a Brain record is a single step with no undo state.
 
-> Confirmed by the person: the Brain holds Atlas, Ledger, Chat, pins, and
-> wakes. `handoff` is dropped — the Ledger is sufficient to rebuild a session.
+> Confirmed by the person: the Brain holds Atlas, Ledger, Chat.
+> `handoff` is dropped — the Ledger is sufficient to rebuild a session.
 > `context` and `activity` are not Brain records. Deletion is single-step. See
 > `docs/intent.md` §18.
+>
+> Amended 2026-11-20 by the person: wakes are scrapped — the timer and path
+> watches, the wake records, and the deferred wake tool are gone. The wake
+> history stands in `docs/intent.md` §37. Pins are markers on a book entry —
+> any Brain record (atlas, ledger, chat) — not a separate Pins book: a pin is
+> rendered inline on the entry it marks.
 
 The Brain is the only durable storage. Nothing else in Carto is durable.
 
@@ -115,8 +119,9 @@ memory.
 Most of what the agent works with is ephemeral: tool work, reasoning, read calls,
 and the model transcript. It is not kept.
 
-The agent keeps what it needs by pinning it and by writing it into the Brain
-through Ledger, Atlas, and Chat. Everything else is expected to be lost.
+The agent keeps what it needs by pinning it — a marker on a Brain record — and
+by writing it into the Brain through Ledger, Atlas, and Chat. Everything else
+is expected to be lost.
 
 "Ephemeral daemon" means the context is disposable, not the Brain. The Brain is
 the durable property.
@@ -142,9 +147,13 @@ archive.
 
 ### 4.1 Pin and recover are different
 
-- **Pin** means "keep it here." Applied in the Brain, it pins to the Brain.
-  Applied to the archive, it pins to the archive. Each pin survives the purge it
-  is attached to, until removed.
+- **Pin** means "keep it here." A pin is a marker on a book entry — any Brain
+  record (atlas, ledger, chat) — never a separate record, and carries no
+  reason, no source, no other bookkeeping. An item pinned on the context layer
+  never falls to the archive layer; an item pinned on the archive layer never
+  gets deleted — the purge exports it back into the Brain first, and only then
+  deletes the store. Each pin survives the purge it is attached to, until
+  removed. Pins render inline on the record they mark.
 - **Recover** exists only for the archive. It means "put it back in the Brain."
   It does not also pin; a pin is a separate action that either party can take.
 
@@ -185,7 +194,7 @@ snapshots.
 > store per generation" when choosing between storage shapes, with the person's
 > expectation that a session can be rebuilt from the Brain store if something
 > happens. The archive is the sealed previous generation's Pi store; at the
-next collapse the purge first exports pinned-to-archive records into the
+next collapse the purge first exports pinned archive records into the
 Brain, then deletes the store. See `docs/intent.md` §29.
 
 ## 5. Collapse
@@ -257,14 +266,12 @@ It tells the agent:
 
 - the state of the context — how full it is (last reported provider usage,
   plus what the tool calls have added since);
-- what is taking up space, broken down by Brain part — Ledger, Atlas, Chat,
-  pins and wakes — separately from tool work and from the stable system and
-  tool prompts;
+- what is taking up space, broken down by Brain part — Ledger, Atlas, Chat —
+  separately from tool work and from the stable system and tool prompts;
 - pending changes — one line per Brain write since the projection was built,
   named by handle: the signal to collapse;
-- what is stale — Atlas evidence or pins whose source changed since the
-  projection was built, named by handle;
-- wakes — what is armed and its target time;
+- what is stale — Atlas evidence whose source changed since the projection was
+  built, named by handle;
 - the project tree — anchored at a directory, to a depth, showing files,
   directories, sizes, and which files an Atlas node links to.
 
@@ -447,15 +454,15 @@ and not on the agent's convenience.
 > person on 2026-11-20 ("Interrupt means interrupt"). See `docs/intent.md`
 > §47 and `docs/open-questions.md` §10.
 
-## 10. Wake and sleep
+## 10. Sleep
 
-The agent can sleep. A `sleep` without a time option ends the run; the agent
-wakes when the person wakes it. A `sleep` with a timer ends the run; it
-wakes when the timer expires. No other wake machinery exists — no folder
-wake, no project-path wake.
+The agent can sleep. A `sleep` ends the run; the person is the only thing
+that re-engages the agent after a sleep — no timer wake, no path watch, no
+other machinery.
 
-> Confirmed by the person, 2026-11-20. See `docs/intent.md` §37 and
-> `docs/open-questions.md` §11.
+> Amended 2026-11-20 by the person: wakes are scrapped. The sleep-timer
+> wake and the wake records are gone; the person is the only wake. See
+> `docs/rebuild-slices.md`.
 
 ## 10a. The tool surface
 
@@ -468,7 +475,7 @@ description can say.
   typed edges to other nodes.
 - **ledger** — the agent's working book: goals, notes, questions, instructions,
   progress.
-- **pin** — pin or remove one Brain item. A pin means "keep it here".
+- **pin** — pin or remove one Brain record (atlas, ledger, chat). A pin means "keep it here".
 - **read** — read a line range inside the project root.
 - **edit** — apply one atomic edit to a path inside the project.
 - **shell** — run a command inside the project.
@@ -480,8 +487,7 @@ description can say.
 - **sleep** — end the run; there is nothing left to do.
 
 > Confirmed by the person, with the dedicated `tree` and `collapse` tools
-> agreed in discussion. Wake is the only deferred tool; sleep's timer defers
-> the wake need for now.
+> agreed in discussion.
 
 ## 11. Use Pi, do not duplicate Pi
 

@@ -33,7 +33,6 @@ export class AtlasView implements Component, Focusable {
   private filtering = false;
   private detailExpanded = true;
   private staleHandles = new Set<string>();
-  private pinnedHandles = new Set<string>();
 
   setData(brain: CartoBrain, staleList: Array<{ kind: string; label: string }>): void {
     this.brain = brain;
@@ -43,17 +42,6 @@ export class AtlasView implements Component, Focusable {
       if (mark.kind === "atlas") {
         const handle = mark.label.split(" ")[0];
         if (handle) this.staleHandles.add(handle);
-      }
-    }
-    this.pinnedHandles.clear();
-    const allPins = [...(brain.userPins ?? []), ...(brain.carryPins ?? [])];
-    for (const pin of allPins) {
-      if (!pin?.item) continue;
-      for (const node of brain.atlas) {
-        const handle = handleOf(brain.handles, "atlas", node.id);
-        if (pin.item.includes(String(node.id)) || (handle && pin.item.includes(handle))) {
-          if (handle) this.pinnedHandles.add(handle);
-        }
       }
     }
     if (this.selectedIndex >= this.nodes.length) {
@@ -209,7 +197,7 @@ export class AtlasView implements Component, Focusable {
 
   private renderDetail(node: AtlasNode, handle: string, width: number, maxLines: number = 28): string[] {
     const rawLines: string[] = [];
-    const isPinned = this.pinnedHandles.has(handle);
+    const isPinned = node.pinned === true;
     const isStale = this.staleHandles.has(handle);
     const isoDate = new Date(node.updatedAt).toISOString();
 
@@ -311,7 +299,7 @@ export class AtlasView implements Component, Focusable {
       filtered.forEach((node, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "atlas", node.id) : "") ?? `A${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = this.pinnedHandles.has(handle);
+        const isPinned = node.pinned === true;
         const isStale = this.staleHandles.has(handle);
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
@@ -342,7 +330,7 @@ export class AtlasView implements Component, Focusable {
       filtered.forEach((node, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "atlas", node.id) : "") ?? `A${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = this.pinnedHandles.has(handle);
+        const isPinned = node.pinned === true;
         const isStale = this.staleHandles.has(handle);
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";

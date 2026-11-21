@@ -43,7 +43,7 @@ test("atlas.upsert stores edges as written; unconnected nodes float freely", () 
   assert.equal(floating.atlas[1].edges.length, 0);
 });
 
-test("edges survive deletion as written (no cascade); pins live in both layers", () => {
+test("edges survive deletion as written (no cascade); a pin is a marker on the entry", () => {
   let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "c", at(1)) }, at(1));
   brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), [{ kind: "depends-on", target: "a1" }]) }, at(2));
   brain = applyWrite(brain, { kind: "delete", target: "atlas", id: "a1" }, at(3));
@@ -52,17 +52,17 @@ test("edges survive deletion as written (no cascade); pins live in both layers",
   assert.equal(brain.atlas[0].edges.length, 1);
   assert.equal(brain.atlas[0].edges[0].target, "a1");
 
-  brain = applyWrite(brain, { kind: "pin.add", layer: "user", pin: { id: "p1", item: "a2", reason: "keep", source: source(), createdAt: at(4) } }, at(4));
-  brain = applyWrite(brain, { kind: "pin.add", layer: "carry", pin: { id: "p2", item: "a2 claim", reason: "keep", source: source(), createdAt: at(5) } }, at(5));
-  assert.equal(handleOf(brain.handles, "pin", "p1"), "P1");
-  assert.equal(handleOf(brain.handles, "pin", "p2"), "P2");
-  brain = applyWrite(brain, { kind: "pin.remove", id: "p1" }, at(6));
-  assert.equal(brain.userPins.length, 0);
-  assert.equal(brain.carryPins.length, 1);
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: true }, at(4));
+  assert.equal(brain.atlas[0].pinned, true);
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: false }, at(5));
+  assert.equal(brain.atlas[0].pinned, false);
+  const withChat = applyWrite(emptyBrain(), { kind: "chat.record", record: chat("c1", "user", "hi", at(1)) }, at(1));
+  const chatPinned = applyWrite(withChat, { kind: "pin.set", target: "chat", id: "c1", pinned: true }, at(2));
+  assert.equal(chatPinned.chat[0].pinned, true);
 });
 
 test("deletion is single-step in every layer; unknown IDs throw", () => {
-  for (const target of ["chat", "ledger", "atlas", "user-pin", "carry-pin"]) {
+  for (const target of ["chat", "ledger", "atlas"]) {
     assert.throws(
       () => applyWrite(emptyBrain(), { kind: "delete", target, id: "ghost" }, at(1)),
       BrainError,
@@ -71,11 +71,3 @@ test("deletion is single-step in every layer; unknown IDs throw", () => {
   }
 });
 
-test("wake.arm and wake.setStatus; unknown id throws", () => {
-  let brain = applyWrite(emptyBrain(), { kind: "wake.arm", wake: { id: "w1", kind: "time", condition: "1780000000000", status: "armed", reason: "check the build", createdAt: at(1) } }, at(1));
-  assert.equal(brain.wakes[0].status, "armed");
-  assert.equal(handleOf(brain.handles, "wake", "w1"), "W1");
-  brain = applyWrite(brain, { kind: "wake.setStatus", id: "w1", status: "cancelled" }, at(2));
-  assert.equal(brain.wakes[0].status, "cancelled");
-  assert.throws(() => applyWrite(brain, { kind: "wake.setStatus", id: "ghost", status: "cancelled" }, at(2)), BrainError);
-});

@@ -64,7 +64,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     if (parsed === null || typeof parsed !== "object" || parsed.version !== 1) {
       throw new Error(`The Brain at ${databasePath} is not a Carto Brain document.`);
     }
-    for (const key of ["chat", "ledger", "atlas", "userPins", "carryPins", "wakes"] as const) {
+    for (const key of ["chat", "ledger", "atlas"] as const) {
       if (!Array.isArray(parsed[key])) {
         throw new Error(`The Brain at ${databasePath} is missing its ${key} records.`);
       }

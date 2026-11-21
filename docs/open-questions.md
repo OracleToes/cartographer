@@ -24,7 +24,10 @@ it works.
 
 Confirmed by the person, answering the four questions of this section:
 
-- The Brain holds Atlas, Ledger, Chat, pins, and wakes.
+- The Brain holds Atlas, Ledger, Chat — with pins as markers on those records
+  (2026-11-20, by the person: wakes are scrapped and a pin is a marker on a
+  book entry, not a record of its own; the record-set decision was re-scoped
+  and carries no reason, no source, no other bookkeeping).
 - Deletion is a single step: "delete means delete". No undo the person can
   see, no pending state.
 - `handoff` is dropped entirely. The Ledger plus the sticky records are
@@ -134,8 +137,9 @@ by the person. See `docs/intent.md` §19.
 the Brain is kept in between and during tasks; the growing list and the
 fullness number are the pressure. See `docs/intent.md` §27.
 
-**Q7.1 — Resolved.** The six confirmed contents: context state, space by
-Brain part, pending changes, stale items, wakes, and the project tree. See
+**Q7.1 — Resolved.** The contents: context state, space by Brain part,
+pending changes, stale items, and the project tree (wakes dropped 2026-11-20;
+pins are markers on book entries, not a Brain part). See
 `docs/intent.md` §21.
 
 **Q7.2 — Resolved 2026-11-16.** The state block's items reuse the Brain's
@@ -245,18 +249,16 @@ keeps its wording (MINI.md is never edited); the supersession is recorded in
 
 ## §11. Wake and sleep
 
-*Resolved 2026-11-20, by the person:* wakes are the `sleep` tool's wake. A
-`sleep` without a time option wakes when the person wakes it; a `sleep` with a
-timer wakes when the timer is up. No other wake machinery — no folder wake, no
-project path wake, nothing else. (MINI.md §10's "time or a project path" and
-the folder-wake bounds below are dropped with it.) See `docs/intent.md` §37.
+*Resolved 2026-11-20, by the person:* wakes are scrapped. The timer wake, the
+folder wake, the path wake, and the sleep-tool wake are all gone; nothing
+armed re-engages the agent but the person. See MINI.md §10 and
+`docs/rebuild-slices.md` (slice 3, R1).
 
 **Q11.1 — Are wakes still in scope for the first rebuild?** *Resolved
-2026-11-20:* the sleep-tool wake only, per above.
+2026-11-20:* no. Wakes are scrapped entirely; the sleep tool just ends the run.
 
-**Q11.2 — What are the bounds?** *Resolved 2026-11-20:* moot. The question
-concerned the folder wake's 10,000-entry limit; the folder wake is dropped.
-A timer wake's bound is the timer the agent sets; the runtime's problem.
+**Q11.2 — What are the bounds?** *Resolved 2026-11-20:* moot — there is no
+wake machinery left to bound.
 
 ## §12. The workspace, re-scoped by the person
 
@@ -274,8 +276,10 @@ questions below now resolve at the person's marks on that proposal.
 **Q12.1 — The three tabs.** Open — superseded by the re-scope. The proposal
 offers modes-not-tabs against literal tabs; the person's marks decide.
 
-**Q12.2 — Five-row disclosure.** Open. *Needs:* whether a fixed number is wanted, or
-"enough to read, expandable".
+**Q12.2 — Five-row disclosure.** *Resolved 2026-11-20:* the disclosure feature
+is already done — the views fold and expand as needed, no fixed row count
+exists. The question was bookkeeping, not an open design question; the
+person has marked it resolved.
 
 **Q12.3 — The footer hint set.** Open — the proposal replaces the enumerated hint set with a context-sensitive footer (Posting's idiom); what keys are guaranteed is one of the marks the person makes on the proposal.
 
@@ -284,8 +288,8 @@ offers modes-not-tabs against literal tabs; the person's marks decide.
 **Q13.1 — `collapseMode` configuration.** With no approval, the setting has no
 meaning. Removed from the rewrite. *Needs:* acknowledgement that it is gone.
 
-**Q13.2 — The `10,000-entry` folder wake limit.** Moot as of 2026-11-20: the
-folder wake is dropped with the sleep-tool-only resolution of §11.
+**Q13.2 — The `10,000-entry` folder wake limit.** Moot as of 2026-11-20:
+wakes are scrapped entirely; the folder wake is dropped with them.
 
 **Q13.3 — `1.4k tok/s`, `reading 64%`, `· 12s` in the status row.** These imply a
 live token-rate measurement. Unverified, same problem as §9.

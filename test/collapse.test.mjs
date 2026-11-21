@@ -107,7 +107,7 @@ test("collapse seals the live store, creates the new generation, and purges the 
     const newPaths = generationPaths(root, report.generation);
     assert.equal(existsSync(newPaths.markdown), true);
     const markdown = readFileSync(newPaths.markdown, "utf8");
-    assert.match(markdown, /Ledger|Atlas|Pins|Wakes|\(the Brain is empty\)/);
+    assert.match(markdown, /Ledger|Atlas|\(the Brain is empty\)/);
     await store.close();
   } finally {
     chmodSync(join(root, ".brain", "context", "gen-20261116T020000Z-live001.sqlite"), 0o644);

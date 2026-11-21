@@ -18,8 +18,9 @@ tabs and done" oversimplifies:
    surgically remove, reorder, edit, and add content into it. It is an accurate
    representation of everything the agent sees, in a structured, editable
    format. Not a report about the context; the context itself, laid open.
-3. **Read the books.** Atlas, Ledger, Chat, pins, wakes — structured views of
-   the Brain, by handle.
+3. **Read the books.** Atlas, Ledger, Chat — structured views of the Brain,
+   by handle. Pins are markers on those entries, shown inline on the entry —
+   not a separate book or view.
 
 The token/prefill bar is required, always visible. Everything else about the
 chrome — frame, tabs, palette, sidebar — is a proposal, and Posting is the
@@ -101,14 +102,14 @@ was not derived from a real request or the active window.)*
 
 ```
 ┌─ carto · simpledice · gen-20261120T1530Z-aa10 ──── ByteShape · 65,536 ─┐
-│ a Atlas · l Ledger · c Chat · p Pins · w Wakes │ 26 entries · 4 stale  │  ← one row, split: project+generation · model+window
+│ a Atlas · l Ledger · c Chat · x Context    │ 26 entries · 4 stale  │  ← one row, split: project+generation · model+window
 ├────────────────┬───────────────────────────────────────────────────────┤
 │ INDEX          │  THE MAIN AREA — one of:                              │
 │ ▸ Atlas    12  │   · Chat — the transcript; agent chat messages and    │
 │   Ledger    8  │     person input; the run's status, interruptible.    │
 │   Chat     42  │   · Context — the surgery view (§5)                   │
-│   Pins      3  │   · Brain — a record list + the record, folded        │
-│   Wakes     2  │     (§6)                                              │
+│                │   · Brain — a record list + the record, folded        │
+│                │     (§6)                                              │
 │                 │                                                       │
 ├────────────────┴───────────────────────────────────────────────────────┤
 │ ▤▤▤▤▤▤▤▤▤▤▤▤░░░░░░░░░░░░░░░░░░░░░  ~41,820 / 65,536 · 64% · ┊ 48k cap │  ← the token bar, always
@@ -182,11 +183,11 @@ is the acknowledgment.
 | Action | Keys (proposed) | What actually happens |
 | --- | --- | --- |
 | **Now** (modifier) | `!` (proposed) | Arms Now for exactly the next action on the context. Visible in the footer while armed; disarms after that one action. |
-| Delete a Brain-backed item (atlas node, ledger entry, chat line, pin, wake) | `!` + `d`, or `d` alone | The record is deleted — one step, no undo (delete means delete). Alone: applies at collapse. With Now: the payload is rebuilt from post-delete state now. |
+| Delete a Brain-backed item (atlas node, ledger entry, chat line) | `!` + `d`, or `d` alone | The record is deleted — one step, no undo (delete means delete). Alone: applies at collapse. With Now: the payload is rebuilt from post-delete state now. |
 | Remove an ephemeral item (tool work, reasoning) | `d` | Gone from the context rebuilt at the next collapse; with Now, gone now. |
 | Edit an item's text | `!` + `e`, or `e` | An edit to the underlying item, everywhere the record appears. Alone: model sees it after collapse; with Now: immediately. |
 | Reorder | `<` / `>` | Same rule as every action: applied at collapse, or now with Now armed. There is no prefill cost for reorders you don't Now. |
-| Insert content | `a` | You create an authentic record of any type the Brain knows — atlas, ledger, chat, pin, wake. Authentic and standard: identical to agent-created records, indistinguishable to the agent (it does not know you created, deleted, or moved anything). Alone: lands at collapse like every change; with Now: immediately. |
+| Insert content | `a` | You create an authentic record of any type the Brain knows — atlas, ledger, chat. Authentic and standard: identical to agent-created records, indistinguishable to the agent (it does not know you created, deleted, or moved anything). Alone: lands at collapse like every change; with Now: immediately. |
 | Collapse | `c` | The spec's collapse call (MINI.md §32). Its own ceremony; unrelated to Now. |
 
 - **How changes land:** the Brain is the books and is sticky by default —
@@ -225,20 +226,22 @@ sees the consequence in one place.
 
 - **Atlas** — nodes by handle, claim on the head row, evidence + edges folded;
   stale evidence highlighted (`A5 · stale`), matching the state block's stale
-  line and the projection's `[stale]` marks.
+  line and the projection's `[stale]` marks. A pin renders inline on the entry;
+  never a separate list, never a separate record.
 - **Ledger** — open questions/instructions first; answers folded under their
-  entries.
-- **Chat** — the agent's person-facing words, chronological.
-- **Pins** — user layer above carry layer; each pin shows source + freshness.
-- **Wakes** — armed wakes with their reason and, for time-wakes, the countdown
-  (the sleep-tool wake, §11 below).
+  entries. A pin renders inline on the entry.
+- **Chat** — the agent's person-facing words, chronological. A pin renders
+  inline on the entry.
 - Editable as of the corrected doctrine: an edit here is an edit to the
   record itself, everywhere. Delete is one step (no undo). You can create,
   edit, delete, and reorder records of every type the Brain knows —
-  atlas, ledger, chat, pin, wake — and a person-created record is
+  atlas, ledger, chat — and a person-created record is
   authentic and indistinguishable: the agent does not know you created,
   deleted, or moved anything. Which actions ship in which R5 stage is a
-  build-order question, not a doctrine one.
+  build-order question, not a doctrine one. Pins are markers on those
+  records, not records: pinning renders inline on the entry, and a pinned item
+  in context never gets archived and a pinned item in the archive never gets
+  deleted.
 
 ## 7. The token bar (required; redesigned prefill visual)
 
@@ -307,7 +310,7 @@ to activate, `esc` (or `q`) back. The text input stays pi-tui's `Editor`
 proposed.
 
 View switches via jump keys: `a` atlas · `l` ledger · `t` chat · `x`
-context · `p` pins · `w` wakes.
+context.
 
 ## 9. Build order (each stage ends in your hands to boot)
 
@@ -378,9 +381,9 @@ No open questions remain for R5.
   submitted immediately, which breaks it. Supersedes MINI.md §9's
   boundary wording (MINI.md is never edited). Marked 2026-11-20.
 
-- **Wakes are the sleep tool's wake**: the agent calls `sleep` — with no time,
-  until you wake it; with a timer, it wakes when the timer fires. Nothing
-  else. (Q11.1 resolved this turn.)
+- **Wakes are scrapped** (Marked 2026-11-20): the sleep-tool wake, the timer
+  wake, the folder wake, and the path wake are all gone. The agent sleeps and
+  ends its run; the person is the only thing that re-engages it.
 - **Small-atomic-edits is prompt-only**, stated explicitly by the person;
   no structural enforcement in the edit tool. (Q8.1 resolved.)
 - **The archive's `deletionMarks` are gone** — no extra legacy machinery

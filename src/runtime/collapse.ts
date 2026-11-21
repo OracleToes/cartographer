@@ -169,7 +169,6 @@ export function reconcileGenerations(root: string): { live: GenerationFiles | nu
 export async function refreshFreshness(root: string, brain: CartoBrain, apply: BrainStore["apply"], now: number): Promise<CartoBrain> {
   const paths = new Set<string>();
   for (const node of brain.atlas) for (const ref of node.evidence) if (ref.kind === "file") paths.add(ref.path);
-  for (const pin of [...brain.userPins, ...brain.carryPins]) if (pin.source.kind === "file") paths.add(pin.source.path);
   const digests = new Map<string, string | null>();
   for (const path of paths) {
     const real = resolveInsideRoot(root, path);

@@ -20,7 +20,7 @@ export function freshnessMarks(
   brain: CartoBrain,
   digestFor: (path: string) => string | null,
 ): BrainWrite {
-  const marks: Array<{ record: "atlas" | "user-pin" | "carry-pin"; id: string; index: number | null; freshness: "fresh" | "stale" }> = [];
+  const marks: Array<{ record: "atlas"; id: string; index: number | null; freshness: "fresh" | "stale" }> = [];
   const verify = (stored: string, current: string | null): "fresh" | "stale" =>
     current !== null && current === stored ? "fresh" : "stale";
 
@@ -29,14 +29,6 @@ export function freshnessMarks(
       if (ref.kind !== "file") return;
       marks.push({ record: "atlas", id: node.id, index, freshness: verify(ref.digest, digestFor(ref.path)) });
     });
-  }
-  for (const pin of brain.userPins) {
-    if (pin.source.kind !== "file") continue;
-    marks.push({ record: "user-pin", id: pin.id, index: null, freshness: verify(pin.source.digest, digestFor(pin.source.path)) });
-  }
-  for (const pin of brain.carryPins) {
-    if (pin.source.kind !== "file") continue;
-    marks.push({ record: "carry-pin", id: pin.id, index: null, freshness: verify(pin.source.digest, digestFor(pin.source.path)) });
   }
   return { kind: "evidence.refresh", marks };
 }

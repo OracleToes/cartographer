@@ -12,12 +12,8 @@
 import { reconcileHandles } from "./handles.js";
 import type {
   CartoBrain,
-  CarryPin,
   LedgerEntry,
   RecordId,
-  UserPin,
-  WakeEntry,
-  WakeStatus,
   AtlasNode,
   ChatRecord,
 } from "./records.js";
@@ -26,15 +22,12 @@ export class BrainError extends Error {}
 
 export type BrainWrite =
   | { kind: "chat.record"; record: ChatRecord }
-  | { kind: "evidence.refresh"; marks: Array<{ record: "atlas" | "user-pin" | "carry-pin"; id: RecordId; index: number | null; freshness: "fresh" | "stale" }> }
+  | { kind: "evidence.refresh"; marks: Array<{ record: "atlas"; id: RecordId; index: number | null; freshness: "fresh" | "stale" }> }
   | { kind: "chat.update"; id: RecordId; text: string; updatedAt: number }
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
-  | { kind: "pin.add"; layer: "user" | "carry"; pin: UserPin | CarryPin }
-  | { kind: "pin.remove"; id: RecordId }
-  | { kind: "wake.arm"; wake: WakeEntry }
-  | { kind: "wake.setStatus"; id: RecordId; status: WakeStatus }
-  | { kind: "delete"; target: "chat" | "ledger" | "atlas" | "user-pin" | "carry-pin"; id: RecordId };
+  | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: boolean }
+  | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   const next = doApplyWrite(brain, write, now);
@@ -49,31 +42,19 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       // handles.
       let next = brain;
       for (const mark of write.marks) {
-        if (mark.record === "atlas") {
-          const node = next.atlas.find((candidate) => candidate.id === mark.id);
-          if (node === undefined) throw new BrainError("An evidence mark names an Atlas node that does not exist.");
-          if (mark.index === null || node.evidence[mark.index] === undefined) {
-            throw new BrainError("An evidence mark names evidence that does not exist.");
-          }
-          const evidence = node.evidence.map((ref, index) =>
-            index === mark.index ? { ...ref, freshness: mark.freshness } : ref,
-          );
-          next = {
-            ...next,
-            atlas: next.atlas.map((candidate) => (candidate.id === mark.id ? { ...candidate, evidence } : candidate)),
-          };
-          continue;
+        if (mark.record !== "atlas") throw new BrainError("An evidence mark names a record that does not exist.");
+        const node = next.atlas.find((candidate) => candidate.id === mark.id);
+        if (node === undefined) throw new BrainError("An evidence mark names an Atlas node that does not exist.");
+        if (mark.index === null || node.evidence[mark.index] === undefined) {
+          throw new BrainError("An evidence mark names evidence that does not exist.");
         }
-        if (mark.index !== null) throw new BrainError("A pin's evidence is its single source; index must be null.");
-        const target = mark.record === "user-pin" ? next.userPins : next.carryPins;
-        const pin = target.find((candidate) => candidate.id === mark.id);
-        if (pin === undefined) throw new BrainError("An evidence mark names a pin that does not exist.");
-        const refreshed = { ...pin, source: { ...pin.source, freshness: mark.freshness } };
-        if (mark.record === "user-pin") {
-          next = { ...next, userPins: next.userPins.map((candidate) => (candidate.id === mark.id ? refreshed : candidate)) };
-        } else {
-          next = { ...next, carryPins: next.carryPins.map((candidate) => (candidate.id === mark.id ? refreshed : candidate)) };
-        }
+        const evidence = node.evidence.map((ref, index) =>
+          index === mark.index ? { ...ref, freshness: mark.freshness } : ref,
+        );
+        next = {
+          ...next,
+          atlas: next.atlas.map((candidate) => (candidate.id === mark.id ? { ...candidate, evidence } : candidate)),
+        };
       }
       return next;
     }
@@ -110,36 +91,10 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       return { ...brain, atlas };
     }
 
-    case "pin.add": {
-      // A pin means "keep it here" (MINI.md §4.1). No uniqueness is demanded;
-      // the graph is the agent's garden and permissive by intent (§2.3).
-      if (write.layer === "user") {
-        const pin = write.pin as UserPin;
-        return { ...brain, userPins: [...brain.userPins, pin] };
-      }
-      const pin = write.pin as CarryPin;
-      return { ...brain, carryPins: [...brain.carryPins, pin] };
-    }
-
-    case "pin.remove": {
-      const fromUser = brain.userPins.filter((pin) => pin.id !== write.id);
-      const fromCarry = brain.carryPins.filter((pin) => pin.id !== write.id);
-      if (fromUser.length === brain.userPins.length && fromCarry.length === brain.carryPins.length) {
-        throw new BrainError("No pin is named by that handle.");
-      }
-      return { ...brain, userPins: fromUser, carryPins: fromCarry };
-    }
-
-    case "wake.arm":
-      return { ...brain, wakes: [...brain.wakes, write.wake] };
-
-    case "wake.setStatus": {
-      const wake = brain.wakes.find((candidate) => candidate.id === write.id);
-      if (wake === undefined) throw new BrainError("No wake is named by that handle.");
-      const wakes = brain.wakes.map((candidate) =>
-        candidate.id === write.id ? { ...candidate, status: write.status } : candidate,
-      );
-      return { ...brain, wakes };
+    case "pin.set": {
+      // A pin means "keep it here" (MINI.md §4.1). A marker on the entry; no
+      // reason, no source, no bookkeeping.
+      return setPin(brain, write.target, write.id, write.pinned);
     }
 
     case "delete": {
@@ -164,17 +119,24 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
           // something it can see and repair, not something to hide.
           return { ...brain, atlas };
         }
-        case "user-pin": {
-          const userPins = brain.userPins.filter((pin) => pin.id !== write.id);
-          if (userPins.length === brain.userPins.length) throw new BrainError("No pin is named by that handle.");
-          return { ...brain, userPins };
-        }
-        case "carry-pin": {
-          const carryPins = brain.carryPins.filter((pin) => pin.id !== write.id);
-          if (carryPins.length === brain.carryPins.length) throw new BrainError("No pin is named by that handle.");
-          return { ...brain, carryPins };
-        }
       }
+    }
+  }
+}
+
+function setPin(brain: CartoBrain, target: "chat" | "ledger" | "atlas", id: RecordId, pinned: boolean): CartoBrain {
+  switch (target) {
+    case "chat": {
+      if (!brain.chat.some((record) => record.id === id)) throw new BrainError("No Chat record is named by that handle.");
+      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? { ...record, pinned } : record)) };
+    }
+    case "ledger": {
+      if (!brain.ledger.some((entry) => entry.id === id)) throw new BrainError("No Ledger record is named by that handle.");
+      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? { ...entry, pinned } : entry)) };
+    }
+    case "atlas": {
+      if (!brain.atlas.some((node) => node.id === id)) throw new BrainError("No Atlas node is named by that handle.");
+      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? { ...node, pinned } : node)) };
     }
   }
 }

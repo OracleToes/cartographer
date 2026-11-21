@@ -13,8 +13,9 @@
  * State is one explicit value; behaviour is functions over it (MINI.md §12).
  * Pi performs; Carto adds only the composition.
  */
+import { readFile } from "node:fs/promises";
 import { Writable } from "node:stream";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 
 import {
   Editor,
@@ -46,7 +47,7 @@ import {
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
 import { CARTO_INSTRUCTIONS, renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
-import { isMarkerMessage, splitContextMessages, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
+import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode, type ViewMode } from "./chrome.js";
@@ -282,7 +283,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       parameters: t.parameters,
     }));
 
+    // The frozen projection is the actual snapshot the model reads — the
+    // exact bytes, never a re-render of the live records. The extension
+    // falls back to a Brain render only when the file is missing.
+    const projectionText = await readFile(state.session.markdownPath, "utf8").catch(() => undefined);
+
     const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
+    // The payload the request would carry: the transcript, markers stripped,
+    // exactly as beforeRequest builds it. The view shows this, never a guess.
+    const messages = stripStateBlocks(
+      entries
+        .map(messageOf)
+        .filter((message): message is MessageLike => message !== undefined) as unknown as BlockMessageLike[],
+    );
     const transcriptMessages: ContextDialogueMessage[] = [];
     const toolWorkItems: ContextWorkItem[] = [];
 
@@ -331,13 +344,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
 
     const stateBlock = await renderLiveStateBlock(
-      { root: options.root, brain, session: state.session.state, markdownPath: join(options.root, ".brain/context", ".projection.md") },
-      [],
+      { root: options.root, brain, session: state.session.state, markdownPath: state.session.markdownPath },
+      messages,
     );
 
     contextView.setData({
       brain: brainState,
       systemPrompt: CARTO_INSTRUCTIONS,
+      // The frozen bytes the carto-context section renders; a missing file
+      // falls back to re-rendering the Brain, the same fallback pi itself
+      // uses — the view never fabricates a projection.
+      ...(projectionText === undefined ? {} : { projectionText }),
       tools: allTools,
       transcriptMessages,
       toolWorkItems,
@@ -774,7 +791,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           `generation: ${state.session.generation}`,
           `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
           `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
-          `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length} · pins ${brainState.userPins.length + brainState.carryPins.length} · wakes ${brainState.wakes.length}`,
+          `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
           "",
           "## transcript (what the person saw)",
           transcript.toPlainText(),

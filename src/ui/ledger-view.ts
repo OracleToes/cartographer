@@ -31,22 +31,10 @@ export class LedgerView implements Component, Focusable {
   private filterText = "";
   private filtering = false;
   private detailExpanded = true;
-  private pinnedHandles = new Set<string>();
 
   setData(brain: CartoBrain): void {
     this.brain = brain;
     this.entries = [...brain.ledger].sort((a, b) => a.createdAt - b.createdAt);
-    this.pinnedHandles.clear();
-    const allPins = [...(brain.userPins ?? []), ...(brain.carryPins ?? [])];
-    for (const pin of allPins) {
-      if (!pin?.item) continue;
-      for (const entry of brain.ledger) {
-        const handle = handleOf(brain.handles, "ledger", entry.id);
-        if (pin.item.includes(String(entry.id)) || (handle && pin.item.includes(handle))) {
-          if (handle) this.pinnedHandles.add(handle);
-        }
-      }
-    }
     if (this.selectedIndex >= this.entries.length) {
       this.selectedIndex = Math.max(0, this.entries.length - 1);
     }
@@ -201,7 +189,7 @@ export class LedgerView implements Component, Focusable {
 
   private renderDetail(entry: LedgerEntry, handle: string, width: number, maxLines: number = 28): string[] {
     const rawLines: string[] = [];
-    const isPinned = this.pinnedHandles.has(handle);
+    const isPinned = entry.pinned === true;
     const isoDate = new Date(entry.updatedAt).toISOString();
 
     const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.kindBadge(entry.kind)} ${entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status)}`;
@@ -286,7 +274,7 @@ export class LedgerView implements Component, Focusable {
       filtered.forEach((entry, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? `L${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = this.pinnedHandles.has(handle);
+        const isPinned = entry.pinned === true;
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const handleStr = `[${handle}]`.padEnd(6);
@@ -318,7 +306,7 @@ export class LedgerView implements Component, Focusable {
       filtered.forEach((entry, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? `L${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = this.pinnedHandles.has(handle);
+        const isPinned = entry.pinned === true;
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const pinStr = isPinned ? tokens.pinBadge("pin") : "";

@@ -203,49 +203,21 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        "Pin or remove one agent carry pin — “keep this close”. A file source needs exact inspected evidence; a context source keeps a selected current-context item. Pins belong to the layer you pin into: you cannot remove a pin the person set. Remove by handle.",
-      parameters: union([
-        obj({
-          action: lit("add"),
-          item: str({ minLength: 1 }),
-          reason: str({ minLength: 1 }),
-          source: union([
-            obj({
-              kind: lit("file"),
-              path: str({ minLength: 1 }),
-              startLine: int({ minimum: 1 }),
-              endLine: int({ minimum: 1 }),
-              digest: str({ minLength: 1 }),
-              excerpt: Text,
-            }),
-            obj({ kind: lit("context"), excerpt: Text }),
-          ]),
-        }),
-        obj({ action: lit("remove"), handle: HandleRef }),
-      ]),
+        "Pin or remove one Brain record — “keep it here”. A pin is a marker on the entry; no reason or source. Pinned records stay close at collapse. Unpin by handle.",
+      parameters: obj({
+        action: oneOf(["pin", "unpin"] as const),
+        handle: HandleRef,
+      }),
       replay: "safe",
       execute: async (args, api) => {
         const current = await brain.read();
-        if (args.action === "remove") {
-          const found = findByHandle(current.handles, normalizeHandle(args.handle));
-          if (found === undefined || found.kind !== "pin") {
-            throw new Error(`The handle ${normalizeHandle(args.handle)} does not name a pin.`);
-          }
-          if (current.userPins.some((pin) => pin.id === found.id)) {
-            throw new Error(`Pin ${normalizeHandle(args.handle)} belongs to the person. Only the person can remove it.`);
-          }
-          await brain.apply({ kind: "pin.remove", id: found.id }, api.now());
-          pendingWrite(session, { kind: "pin", action: "remove", id: found.id });
-          return textOutput(`Pin ${normalizeHandle(args.handle)} removed.`);
-        }
-        const source: SourceRef =
-          args.source.kind === "file"
-            ? await verifyFileEvidence(args.source)
-            : { kind: "context", contextId: session.generation, excerpt: args.source.excerpt, freshness: "fresh" };
-        const id = `carry:${api.callId}`;
-        const next = await brain.apply({ kind: "pin.add", layer: "carry", pin: { id, item: args.item, reason: args.reason, source, createdAt: api.now() } }, api.now());
-        pendingWrite(session, { kind: "pin", action: "add", id });
-        return textOutput(`Carry pin ${handleOf(next.handles, "pin", id) ?? "record"} saved.`);
+        const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "a Brain record");
+        const next = await brain.apply(
+          { kind: "pin.set", target: target.kind as "ledger" | "chat" | "atlas", id: target.id, pinned: args.action === "pin" },
+          api.now(),
+        );
+        pendingWrite(session, { kind: target.kind as "ledger" | "chat" | "atlas", action: args.action, id: target.id });
+        return textOutput(`${args.action === "pin" ? "Pinned" : "Unpinned"} ${normalizeHandle(args.handle)}.`);
       },
     }),
 
@@ -314,7 +286,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
 
     defineTool({
       name: "sleep",
-      description: "End the run. There is nothing left to do until the person or a wake says otherwise.",
+      description: "End the run. There is nothing left to do until the person says otherwise.",
       parameters: obj({}),
       replay: "safe",
       execute: async () => ({ output: [{ type: "text" as const, text: "Carto is asleep." }], control: { terminate: true } }),

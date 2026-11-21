@@ -1,5 +1,15 @@
 # Confirmed intent
 
+**Amended 2026-11-20 by the person:** wakes are scrapped — the timer wake, the
+folder wake, the path wake, and the sleep-tool wake are gone; nothing armed
+re-engages the agent but the person. The entries below record the decisions
+they were made as, with the amendments noted where they landed. Pins are
+also re-scoped the same day: a pin is a marker on a book entry (any Brain
+record — atlas, ledger, chat), not a separate Pins book; a pin carries no
+reason, no source, no other bookkeeping — an item pinned on the context layer
+never falls to the archive layer, and an item pinned on the archive layer
+never gets deleted.
+
 What the person wants to be true. Each entry records the decision and the
 confirmation that established it. Nothing here is inferred. Nothing here is a
 transcript of their words standing in for agreement.
@@ -82,6 +92,10 @@ tries to keep stuff in permanent archives, but this agent is an ephemeral daemon
 **Decision.** The Brain persists: Chat, Atlas, Ledger, pins, wakes, and the
 things kept about the project. Everything else is ephemeral — tool work,
 reasoning, read calls, the transcript.
+
+> Amended 2026-11-20, by the person: wakes are scrapped; pins are markers on
+> book entries, not a record type. The persisted set is Atlas, Ledger, Chat,
+> with pins riding the entries.
 
 The agent keeps what it needs by pinning and by writing to its books. It is
 expected to lose the rest.
@@ -244,6 +258,10 @@ a record.
 `sleep` takes a wake timer. It sleeps until that timer fires, indefinitely if
 there is no timer, or until the person wakes it.
 
+> Amended 2026-11-20 by the person: this decision is superseded — wakes are
+> scrapped. `sleep` ends the run; nothing armed re-engages the agent but
+> the person.
+
 **Established by.** The person's description of the long-running design and the
 observed main-branch behaviour.
 
@@ -300,9 +318,16 @@ two-step undo. `handoff` is dropped — the Ledger plus the sticky records are
 sufficient to rebuild a session. `context` is not a Brain record. `activity` is
 ephemeral; a restart does not recover what the agent was doing.
 
+> Amended 2026-11-20 by the person: wakes are scrapped and pins are markers
+> on book entries, not records — the record set is Atlas, Ledger, Chat, with
+> pins riding the entries. A pin carries no reason, no source: it is a marker
+> on the entry it marks.
+
 **Established by.** The person answered the four record-set questions directly:
 the proposed set ("chat, atlas, ledger, pins, wakes"), single-step delete
-("delete means delete"), handoff dropped entirely, activity ephemeral. The
+("delete means delete"), handoff dropped entirely, activity ephemeral.
+The wakes and pins halves of this set were re-scoped 2026-11-20 — see the
+amendment above. The
 deletion-mark item picked as part of the proposal is abolished by the
 single-step answer; derived and flagged in `docs/open-questions.md` §2.
 
@@ -343,12 +368,16 @@ continuation rides a marker while the block is injected per request.
 
 **Decision.** The block holds: the state of the context (fullness from the last
 reported provider usage, plus what tool calls have added since); space taken up,
-broken down by Brain part — Ledger, Atlas, Chat, pins, wakes — separately from
-tool work and from the stable system and tool prompts; one line per pending
-Brain write since the projection was rebuilt, named by handle; what is stale,
-named by handle; wakes armed and their target times; and the project tree,
-anchored at a directory to a depth, with Atlas-linked files marked. Nothing
-instructive.
+broken down by Brain part — Ledger, Atlas, Chat — separately from tool work and
+from the stable system and tool prompts; one line per pending Brain write since
+the projection was rebuilt, named by handle; what is stale, named by handle;
+and the project tree, anchored at a directory to a depth, with Atlas-linked
+files marked. Nothing instructive.
+
+> Amended 2026-11-20 by the person: wakes are scrapped (the armed-wakes line is
+> gone) and pins are markers on book entries, not a Brain part — the space
+> breakdown covers Atlas, Ledger, Chat, and renders [pinned] inline on the
+> entries they mark.
 
 **Established by.** The person approved this list when shown it, in full.
 
@@ -413,7 +442,10 @@ easy to use, so a node or cluster can exist unconnected."
 **Decision.** The project tree's anchor and depth are moved by a dedicated,
 scoped `tree` tool that returns the rendered tree — an explicit act of
 attention, not a side effect of reading. The tool surface is: chat, atlas,
-ledger, pin, inspect, edit, shell, tree, sleep. Wake is deferred.
+ledger, pin, inspect, edit, shell, tree, sleep.
+
+> Amended 2026-11-20 by the person: wakes are scrapped — the deferred wake
+> tool is dropped with everything else.
 
 **Established by.** The person chose "yes, dedicated tool" when asked to choose
 between a dedicated tool, `inspect` re-anchoring implicitly, and `shell`
@@ -540,6 +572,11 @@ stated this explicitly earlier too".
 
 ## 37. Wakes are the sleep tool's wake
 
+**Superseded 2026-11-20 by the person: wakes are scrapped.** The sleep-tool
+wake, the timer wake, the folder wake, and the path wake are all gone; the
+agent sleeps and ends its run; the person is the only thing that re-engages
+it. The decision as established:
+
 **Decision.** The only wake is the `sleep` tool's. A `sleep` without a time
 option wakes when the person wakes it; a `sleep` with a timer wakes when the
 timer is up. No other wake machinery is needed — no folder wake, no project
@@ -622,8 +659,12 @@ then all 12 changes also happened immediately, i would be furious."
 ## 43. Person-created records are authentic, indistinguishable, and of any type
 
 **Decision.** The person can create, edit, delete, and reorder records of
-every type the Brain knows — atlas, ledger, chat, pin, wake — from the
-workspace. What is created is authentic and standard: identical in every
+every type the Brain knows — atlas, ledger, chat — from the
+workspace.
+
+> Amended 2026-11-20 by the person: wakes are scrapped and pins are markers
+> on book entries, not records — the set is atlas, ledger, chat, with
+> pins riding the entries. What is created is authentic and standard: identical in every
 respect to an agent-created record. The agent does not know the
 difference, and does not know that the person created, deleted, or moved
 anything at all. This is previously stated intent, not a new decision; it

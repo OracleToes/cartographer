@@ -11,7 +11,9 @@ pushed, and the suite runs green after the push (`docs/tests.md`).
 ## Done
 
 **Slice 1 — the domain rebuild** (`888320c`, `e681d8d`). Explicit record
-set: Atlas, Ledger, Chat, pins, wakes. Single-step delete, no pending state.
+set as built: Atlas, Ledger, Chat, pins. Single-step delete, no pending state.
+(Amended 2026-11-20: pins are markers on book entries, not a record kind —
+see the R5 cleanup addendum.)
 Generation-local handles. The projection machinery, and person-triggered
 collapse: fresh generation, the prior store sealed read-only as the archive,
 the older archive purged after one collapse of grace. Config drops
@@ -41,8 +43,7 @@ mistaken for the spec:
   ▤ marks anything with an estimate in it, and a pure-provider reading
   carries no marker), space by Brain part separately from tool work and
   stable system and tool prompts, one line per pending Brain write named by
-  handle, what is stale named by handle, armed wakes and their target
-  times, and the project tree at the project root, depth 2, Atlas-linked
+  handle, what is stale named by handle, and the project tree at the project root, depth 2, Atlas-linked
   files marked — a derivation until slice 3's `tree` tool owns the anchor.
 - Space estimates: an assistant message carrying a tool call counts as tool
   work, as does every tool-result message; the remainder is transcript.
@@ -80,9 +81,9 @@ mistaken for the spec:
 ## Slice 3 — the agent's tool surface
 
 The dedicated `tree` tool (§26). The confirmed surface is chat, atlas,
-ledger, pin, inspect, edit, shell, tree, sleep; audit the built set against
-it (the agent currently has no `edit` and no `shell`). Wake exists but is
-deferred by §26; keep-or-defer is the person's call when the slice starts.
+ledger, pin, inspect, edit, shell, tree, sleep. Wakes are scrapped (2026-11-20,
+the person's word): nothing in the surface re-wakes the agent except the
+person.
 
 ## Slice 4 — archive recovery, for the person
 
@@ -133,9 +134,11 @@ the agent; amendments are the person's.
 
 ### Slices
 
-- **R1 — the Brain.** Explicit records (Atlas with typed optional edges,
-  Ledger with goals/notes/questions/instructions/progress, Chat, pins in both
-  layers, wakes), single-step delete, generation-local handles, the Brain
+- **R1 — the Brain.** Explicit records as built: Atlas with typed optional
+  edges, Ledger with goals/notes/questions/instructions/progress, Chat, pins.
+  (Amended 2026-11-20: pins are markers on any of these records, not a
+  separate record kind — see the R5 cleanup addendum.) Single-step delete,
+  generation-local handles, the Brain
   store (one document per project, `history: "latest"`, secure-delete, WAL,
   VACUUM on demand), `.brain` out of the agent's reach.
 - **R2 — the projection and the collapse.** Frozen projection persisted per
@@ -152,10 +155,6 @@ the agent; amendments are the person's.
   keyless llama-swap provider rewritten fresh (informed by main's documented
   approach), `--help`, and a placeholder headless stdin driver explicitly not
   the designed interface (§8 is the person's to mark).
-
-Wakes: the Brain holds the records; the wake *tool* is the one deferred tool
-(§10a), and the time/path wake runtime bounds are open (`docs/open-questions.md`
-§11), so no wake runtime is rebuilt until the person settles them.
 
 Not rebuilt and not deleted: `MINI.md`, `AGENTS.md`, `docs/`, `bin/`
 (launcher), `package.json`/`tsconfig.json` (build scaffolding), `LICENSE`.
@@ -207,11 +206,11 @@ The live session and the tools exist and are wired end to end.
 
 - **Tools** (`runtime/tools.ts`): `chat`, `atlas`, `ledger`, `pin`, `inspect`,
   `edit`, `shell`, `tree`, `collapse`, `sleep` — the confirmed §10a surface,
-  nothing more (`wake` stays the deferred tool). pi-schema validators;
+  nothing more; wakes are scrapped. pi-schema validators;
   handles are the only record references; unknown handles are explicit
   errors at the call site. Atlas evidence is verified against the file's
-  current digest. The agent removes carry pins only; the person's pins are
-  theirs. The boundary: every path resolves inside the project root, a
+  current digest. The pin tool pins or removes a marker on one Brain record
+  (atlas, ledger, chat) — no reason, no source, no bookkeeping. The boundary: every path resolves inside the project root, a
   symlink that escapes is rejected, `.brain` is untouchable by Carto tools.
 - **Live session** (`runtime/live-session.ts`, `runtime/carto-extension.ts`):
   Pi Durable harness, one store per generation under `.brain/context/`,
@@ -228,7 +227,7 @@ The live session and the tools exist and are wired end to end.
 - **The block** is rendered from the Brain and the session, never persisted:
   context fullness (last provider report + tool work since), space by Brain
   part, one line per pending write named by handle (ephemeral, cleared at
-  collapse), stale evidence named by handle, armed wakes, the tree anchored
+  collapse), stale evidence named by handle, the tree anchored
   where the agent's attention is with Atlas-linked files marked.
 - **Fixed in passing:** the collapse ceremony now creates the new generation's
   store (empty, valid) at snapshot time — without it an open-time reconcile
@@ -512,6 +511,18 @@ The estimates are the state block's own arithmetic (`splitContextMessages`,
 4 bytes/token), computed in the workspace rebuild — never persisted, never
 relabelled.
 
+R5c/R5d landed in the same tree (recorded here, not before):
+
+- **The Brain views** — Atlas and Ledger: two-pane, vim motions, folds,
+  pin badges inline on their entries. Read-only. Jump targets `a`/`l`;
+  sidebar counts for chat/atlas/ledger; no separate pins view — pins render
+  inline on the entries they mark (doctrine settled 2026-11-20; code
+  re-structure pending).
+- **The Context surgery view (read-only)** — the parts rail + content
+  panes, the formatted/raw toggle, delete-with-Now wired to the chat part.
+  It renders the frozen projection bytes and the state block exactly as
+  `beforeRequest` would send them — the actual payload, not a re-derivation.
+
 Also landed with R5b:
 - **One cell of padding on every edge** — the chrome never touches the
   terminal edge (the ui-proposal frame's first promise, applied).
@@ -527,8 +538,11 @@ Also landed with R5b:
   philosophy, pillar by pillar, with the rejections recorded (no modals, no
   backend ceremony, no chrome on the edge). MINI.md unchanged.
 
-Not done: R5c+ — the Brain views, the Context surgery view (read-only,
-then edits), and prefill measurement only if the server ever sends
+Not done: R5c+ — pins are re-scoped to markers on book entries (settled
+2026-11-20) but the code still stores them as a separate record kind; the
+re-structure is a proposal for the person to confirm (below). The Brain
+views are read-only two-pane lists; surgery edits beyond delete are
+unbuilt; prefill measurement only if the server ever sends
 `prompt_progress`.
 
 ### Addendum — the limits audit, 2026-11-20 (this branch)
@@ -649,3 +663,44 @@ AGENTS.md forbids… including all tools and such"). Findings:
   timeouts, config validation). Findings needing a person's ruling or a
   decision are listed in the session reply this date — nothing from the
   audit is fixed silently.
+
+## R5 cleanup, 2026-11-20 — wakes scrapped, context view renders the payload
+
+Wakes are scrapped (the person's word): the timer, the path watches, the
+wake records, and the deferred wake tool are gone. MINI.md §2, §6.1, §10,
+§10a and this file no longer name wakes. Pi's own feature list (§11) keeps
+the wakes Pi Durable stores — that is the dependency's fact, not Carto's.
+The Brain holds Atlas, Ledger, Chat; the state block renders no wakes line
+and no pins part; the footer and sidebar count no wakes. Nothing in the tool
+surface re-engages the agent except the person.
+
+**The pins re-scope is settled and built (2026-11-20, the person's word).**
+A pin is a marker on a book entry — any Brain record: atlas, ledger, chat —
+never a separate Pins book, carrying no reason, no source, no other
+bookkeeping. An item pinned on the context layer never falls to the archive
+layer; an item pinned on the archive layer never gets deleted; pins render
+inline on the entry they mark. MINI.md §2, §2's confirmation quote, §3, §4,
+§4.1, §6.1, and §10a say exactly that. The code is re-structured the same
+day: records carry a pin marker, the projection renders `· [pinned]` inline
+on the entry, the state block's space line has no pins part, handles carry
+no pin prefix, the views render the marker inline, and the separate pin
+records are gone. The `pin` tool now pins or removes a marker on one entry.
+
+**The disclosure question was already answered.** Q12.2 in
+`docs/open-questions.md` was bookkeeping, not an open design question:
+disclosure rows and folds are built and used in the views. It is resolved;
+the views fold as needed, no fixed row count exists.
+
+**The Context view renders the actual payload.** It previously re-rendered
+the Brain projection from the live records and rendered the state block
+with an empty pending list and zeroed estimates — a fake guess, not what
+the model reads. It now renders the frozen projection bytes from the
+generation snapshot (`session.markdownPath`), the state block from the
+same inputs `beforeRequest` uses (the real stripped transcript, the real
+pending list, the real tree), and the same tool registration the live
+session runs. If the view cannot render what the request would send, the
+request cannot be trusted to render either — that is the feature.
+
+**What pins look like now.** Records carry the marker; the views render it
+inline on the Atlas/Ledger entries (a `P` badge); the state block's space
+line has no pins part; the pin tool pins or removes a marker by handle.

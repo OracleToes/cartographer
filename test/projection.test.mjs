@@ -49,13 +49,13 @@ test("ledger answers render with evidence handles; empty brain renders the place
   assert.match(projection.text, /→ answered: projection lands/);
 });
 
-test("pins and wakes render their own lines with handles and ISO stamps", () => {
+test("pins render inline on their entries", () => {
   let brain = emptyBrain();
-  brain = applyWrite(brain, { kind: "pin.add", layer: "user", pin: { id: "p1", item: "the archive rule", reason: "keep", source: source("docs/intent.md"), createdAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
-  brain = applyWrite(brain, { kind: "wake.arm", wake: { id: "w1", kind: "time", condition: "1780000000000", status: "armed", reason: "check the build", createdAt: at("2026-11-16T04:01:00.000Z") } }, at("2026-11-16T04:01:00.000Z"));
+  brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "n1", title: "The collapse boundary", claim: "Collapse is person-triggered or agent-triggered", evidence: [], edges: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: true }, at("2026-11-16T04:00:00.000Z"));
   const projection = projectContext(brain);
-  assert.match(projection.text, /P1 the archive rule — keep · docs\/intent\.md:10-20 \[fresh\] — 2026-11-16T04:00:00.000Z/);
-  assert.match(projection.text, /W1 \[time\] 1780000000000 \(armed\) — check the build — 2026-11-16T04:01:00.000Z/);
+  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned\]/);
+  assert.doesNotMatch(projection.text, /Pins/);
 });
 
 test("the projection omits nothing: all 50 ledger entries render in the frozen text", () => {

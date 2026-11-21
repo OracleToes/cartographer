@@ -219,7 +219,7 @@ test("unknown handles are explicit errors, never guesses", async () => {
     /does not name/,
   );
   await assert.rejects(
-    byName.pin.execute({ action: "remove", handle: "Q4" }, api, {}),
+    byName.pin.execute({ action: "pin", handle: "Q4" }, api, {}),
     /does not name/,
   );
   await cleanup();

@@ -57,6 +57,8 @@ export interface ContextWorkItem {
 export interface ContextViewData {
   brain: CartoBrain;
   systemPrompt: string;
+  /** The frozen projection's exact bytes — the carto-context section the model reads. */
+  projectionText?: string | undefined;
   tools: ContextToolItem[];
   transcriptMessages: ContextDialogueMessage[];
   toolWorkItems: ContextWorkItem[];
@@ -94,17 +96,20 @@ export class ContextView implements Component, Focusable {
 
   setData(data: ContextViewData): void {
     this.data = data;
-    const projection = projectContext(data.brain);
+    // The frozen projection is the model's own bytes; re-rendering the live
+    // Brain here would fabricate a projection mid-generation. When the bytes
+    // are unavailable (a crash remainder), the fallback is the same re-render
+    // pi itself performs — the view never invents a projection.
+    const projectionText = data.projectionText ?? projectContext(data.brain).text;
 
     const systemPromptText = data.systemPrompt;
-    const projectionText = projection.text;
     const toolsRawText = JSON.stringify(data.tools, null, 2);
     const transcriptRawText = JSON.stringify(data.transcriptMessages, null, 2);
     const toolWorkRawText = JSON.stringify(data.toolWorkItems, null, 2);
     const stateBlockText = data.stateBlockText;
 
     const systemTokens = estimateTokens(systemPromptText);
-    const projTokens = projection.total;
+    const projTokens = estimateTokens(projectionText);
     const toolsTokens = estimateSerialized(data.tools);
     const transTokens = estimateSerialized(data.transcriptMessages);
     const workTokens = estimateSerialized(data.toolWorkItems);

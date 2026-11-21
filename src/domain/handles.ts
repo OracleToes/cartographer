@@ -13,8 +13,6 @@ const PREFIX: Record<HandleKind, string> = {
   ledger: "L",
   chat: "C",
   atlas: "A",
-  pin: "P",
-  wake: "W",
 };
 
 interface Located {
@@ -28,9 +26,7 @@ function locate(brain: CartoBrain): Located[] {
   for (const entry of brain.ledger) located.push({ kind: "ledger", id: entry.id, createdAt: entry.createdAt });
   for (const record of brain.chat) located.push({ kind: "chat", id: record.id, createdAt: record.createdAt });
   for (const node of brain.atlas) located.push({ kind: "atlas", id: node.id, createdAt: node.createdAt });
-  for (const pin of brain.userPins) located.push({ kind: "pin", id: pin.id, createdAt: pin.createdAt });
-  for (const pin of brain.carryPins) located.push({ kind: "pin", id: pin.id, createdAt: pin.createdAt });
-  for (const wake of brain.wakes) located.push({ kind: "wake", id: wake.id, createdAt: wake.createdAt });
+
   // Collapse-time convention: creation order, ties broken by id. MINI.md §6 —
   // order is a convention at rebuild, not a product requirement.
   return located.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));

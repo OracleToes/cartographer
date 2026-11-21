@@ -11,17 +11,16 @@ function brainWith() {
   brain.chat.push({ id: "chat-b", author: "agent", text: "later", createdAt: at(20), updatedAt: at(20) });
   brain.chat.push({ id: "chat-a", author: "user", text: "earlier", createdAt: at(10), updatedAt: at(10) });
   brain.ledger.push({ id: "ledger-1", kind: "goal", text: "goal", status: "open", answer: null, createdAt: at(30), updatedAt: at(30) });
-  brain.userPins.push({ id: "pin-1", item: "x", reason: "keep", source: { kind: "context", contextId: "gen", excerpt: "x", freshness: "fresh" }, createdAt: at(5) });
   return brain;
 }
 
 test("rebuildHandles assigns contiguous prefixes in creation order", () => {
   const brain = brainWith();
   const handles = rebuildHandles(brain);
-  // pin-1 (t=5) < chat-a (t=10) < chat-b (t=20) < ledger-1 (t=30); each prefix counts from 1.
+  // chat-a (t=10) < chat-b (t=20) < ledger-1 (t=30); each prefix counts from 1.
   assert.deepEqual(
     handles.entries.map((entry) => [entry.kind, entry.handle]),
-    [["pin", "P1"], ["chat", "C1"], ["chat", "C2"], ["ledger", "L1"]],
+    [["chat", "C1"], ["chat", "C2"], ["ledger", "L1"]],
   );
   assert.equal(handleOf(handles, "chat", "chat-a"), "C1");
   assert.equal(handleOf(handles, "chat", "chat-b"), "C2");

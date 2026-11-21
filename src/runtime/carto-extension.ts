@@ -35,9 +35,9 @@ export const CARTO_INSTRUCTIONS = [
   "You are Carto, the project's long-lived working memory.",
   "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
   "Read before you claim anything about a project file.",
-  "Keep the Brain: Atlas for source-backed claims, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words, pins to keep something close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
+  "Keep the Brain: Atlas for source-backed claims, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
-  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale evidence, armed wakes, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
+  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale evidence, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
   "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
 ].join("\n");
 
@@ -63,20 +63,13 @@ export interface CartoExtensionOptions {
 const estimatePart = estimateSerialized;
 
 /** Records whose file-backed evidence drifted at the last rebuild, as typed marks. */
-export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas" | "pin"; label: string }> {
-  const marks: Array<{ kind: "atlas" | "pin"; label: string }> = [];
+export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas"; label: string }> {
+  const marks: Array<{ kind: "atlas"; label: string }> = [];
   for (const node of brain.atlas) {
     const drifted = node.evidence.some((ref) => ref.kind === "file" && ref.freshness === "stale");
     if (!drifted) continue;
     const handle = handleOf(brain.handles, "atlas", node.id);
     if (handle !== undefined) marks.push({ kind: "atlas", label: `${handle} (evidence changed)` });
-  }
-  for (const layer of [brain.userPins, brain.carryPins]) {
-    for (const pin of layer) {
-      if (pin.source.kind !== "file" || pin.source.freshness !== "stale") continue;
-      const handle = handleOf(brain.handles, "pin", pin.id);
-      if (handle !== undefined) marks.push({ kind: "pin", label: `${handle} (source changed)` });
-    }
   }
   const seen = new Set<string>();
   const unique = marks.filter((mark) => {
@@ -110,9 +103,6 @@ export async function renderLiveStateBlock(
       lines: [`(tree unavailable: ${error instanceof Error ? error.message : String(error)})`],
     };
   }
-  const wakes = brain.wakes
-    .filter((wake) => wake.status === "armed" || wake.status === "ready")
-    .map((wake) => ({ ...wake }));
   return renderStateBlock({
     contextWindow: options.session.contextWindow,
     lastReportedInput: options.session.lastReportedInput,
@@ -124,12 +114,9 @@ export async function renderLiveStateBlock(
       atlas: estimatePart(brain.atlas),
       ledger: estimatePart(brain.ledger),
       chat: estimatePart(brain.chat),
-      pins: estimatePart([...brain.userPins, ...brain.carryPins]),
-      wakes: estimatePart(brain.wakes),
     },
     pending: options.session.pending,
     stale: staleHandles(brain),
-    wakes,
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     tree,
   });

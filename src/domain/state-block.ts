@@ -12,14 +12,12 @@
  *
  *   <carto-state>
  *   context: 12,410 / 32,768 tokens (last reported 9,841 + tool work since +2,569)
- *   space: system+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980 · pins ~120 · wakes ~40
+ *   space: system+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
  *   pending:
  *     A3 · atlas upsert
  *     C7 · chat record
  *   stale:
  *     A5 (evidence changed)
- *     P2 (source changed)
- *   wakes: W1 [time] 1780000000000 (armed) — check the build
  *   tree: /abs/path (depth 2)
  *     ./
  *     MINI.md  22K  A1
@@ -28,7 +26,6 @@
  * Every item that names a record names it by handle. Empty sections say
  * `none` rather than lying by omission, and nothing is omitted.
  */
-import type { WakeEntry } from "./records.js";
 import { estimateSerialized, estimateTokens } from "./estimate.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
@@ -38,8 +35,8 @@ export const STATE_BLOCK_MARKER = "<carto-state/>";
 
 export interface PendingWrite {
   /** The handle kind of the record, used to resolve the handle at render time. */
-  kind: "ledger" | "chat" | "atlas" | "pin" | "wake";
-  /** What happened, as a bare verb phrase: upsert, record, update, delete, pin, arm, cancel… */
+  kind: "ledger" | "chat" | "atlas";
+  /** What happened, as a bare verb phrase: upsert, record, update, delete, pin… */
   action: string;
   /** The durable ID. Never rendered raw; always resolved to a handle here. */
   id: string;
@@ -59,12 +56,11 @@ export interface StateBlockInput {
   /** Estimated tool-work tokens added since the last provider report. */
   toolWorkSince: number;
   /** Estimated sizes of the Brain, by part — now, not at the freeze. */
-  sizes: { atlas: number; ledger: number; chat: number; pins: number; wakes: number };
+  sizes: { atlas: number; ledger: number; chat: number };
   /** Pending Brain writes since the projection was rebuilt. Ephemeral (§34). */
   pending: PendingWrite[];
   /** Handles whose evidence no longer verifies, as labelled (e.g. "A5 (evidence changed)"). */
   stale: string[];
-  wakes: WakeEntry[];
   /** Handles for the write-resolution of pending entries (the Brain's table). */
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
   tree: { root: string; depth: number; lines: string[] };
@@ -85,24 +81,15 @@ export function renderStateBlock(input: StateBlockInput): string {
   const space =
     `space: system+tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
-    `chat ~${thousands(input.sizes.chat)} · pins ~${thousands(input.sizes.pins)} · wakes ~${thousands(input.sizes.wakes)}`;
+    `chat ~${thousands(input.sizes.chat)}`;
   const pending =
     input.pending.length === 0
       ? "pending: none"
       : ["pending:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${write.kind} ${write.action}`)].join("\n");
   const stale =
     input.stale.length === 0 ? "stale: none" : ["stale:", ...input.stale.map((item) => `  ${item}`)].join("\n");
-  const wakeLines =
-    input.wakes.length === 0
-      ? "wakes: none"
-      : `wakes: ${input.wakes
-          .map((wake) => {
-            const handle = input.resolveHandle("wake", wake.id) ?? "wake";
-            return `${handle} [${wake.kind}] ${wake.condition} (${wake.status}) — ${wake.reason}`;
-          })
-          .join(" · ")}`;
   const treeLines = [`tree: ${input.tree.root} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
-  return [STATE_BLOCK_OPEN, fullness, space, pending, stale, wakeLines, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
+  return [STATE_BLOCK_OPEN, fullness, space, pending, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };
