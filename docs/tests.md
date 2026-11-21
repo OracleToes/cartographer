@@ -91,6 +91,23 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — collapse, freshness, projection, state block, 2026-11-21
+
+- Read `domain/projection.ts`, `domain/state-block.ts`, `domain/freshness.ts`,
+  `domain/estimate.ts`, `runtime/collapse.ts`, and `runtime/projection-files.ts`
+  before their tests. No unearned tests found; nothing removed.
+- Coverage confirmed: newest-first discovery; a crashed head purged; one
+  sealed archive with older remainders purged; seal → new generation → purge
+  after the exports seam; the byte-stable frozen snapshot; drift by mtime
+  (newer stale, older fresh, missing stale) with non-file attachments unchecked
+  and handles surviving a refresh; the projection's handles, timestamps, no
+  raw ids, no chat text, `(gone)` links, ledger answers, inline pins, and the
+  nothing-omitted guard; the block's contents and delimiters, its `none` and
+  unknown-window forms, marker stripping, exclusive token buckets, and the
+  trailing append.
+- Suite 99 → 99. Boundaries preserved: real temporary files and a real SQLite
+  Brain store.
+
 ### Stage: tests audit (campaign) — Brain writes, storage, handles, 2026-11-21
 
 - Read `domain/brain.ts`, `domain/records.ts`, `domain/handles.ts`, and
