@@ -10,6 +10,11 @@ reason, no source, no other bookkeeping — an item pinned on the context layer
 never falls to the archive layer, and an item pinned on the archive layer
 never gets deleted.
 
+> Amended 2026-11-21, by the person: a pin also records who placed it — the author,
+> "user" or "agent" — and nothing else. Brain records survive collapse by existing,
+> so a pin never falls to the archive layer; the archive-export seam is not built
+> today (the purge exports nothing, and no archive-layer pin exists).
+
 What the person wants to be true. Each entry records the decision and the
 confirmation that established it. Nothing here is inferred. Nothing here is a
 transcript of their words standing in for agreement.
@@ -114,6 +119,12 @@ there or recovered is deleted at the next collapse.
 **Pin** means "keep it here" — in the Brain if it is there, in the archive if it
 is there. **Recover** exists only for the archive and means "put it back in the
 Brain". Recover does not pin; a pin is a separate action.
+
+> Amended 2026-11-21, by the person: Brain records survive collapse by existing,
+> so there is no archive-layer pin today — the pinned-to-archive export seam
+> is dark, and the purge exports nothing. The person's pins ("user" author) and
+> the agent's pins ("agent" author) coexist; the person may remove either, the
+> agent only its own.
 
 **The agent does not know the archive exists.**
 
@@ -485,6 +496,10 @@ exports pinned-to-archive records into the Brain, flushes, and only then
 deletes the sealed store. Unpinned material leaves with the file. The Brain
 grows only by what is explicitly kept.
 
+> Amended 2026-11-21, by the person: this export does not exist today. Pins
+> attach to Brain records only (§4.1); the archive's purge exports nothing —
+> the seam is dark until the person resolves it.
+
 **Established by.** Blessed by the person: 'Blessed.'
 
 
@@ -664,7 +679,11 @@ workspace.
 
 > Amended 2026-11-20 by the person: wakes are scrapped and pins are markers
 > on book entries, not records — the set is atlas, ledger, chat, with
-> pins riding the entries. What is created is authentic and standard: identical in every
+> pins riding the entries.
+>
+> Amended 2026-11-21, by the person: a pin records its author — "user" or "agent"
+> — and nothing else. The person may remove any pin from any view; the agent may
+> remove only its own pins. What is created is authentic and standard: identical in every
 respect to an agent-created record. The agent does not know the
 difference, and does not know that the person created, deleted, or moved
 anything at all. This is previously stated intent, not a new decision; it

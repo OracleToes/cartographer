@@ -77,6 +77,12 @@ flushes, and only then deletes the sealed store. Unpinned material leaves with
 the file. Order matters: a crash before the delete loses nothing; a crash
 after loses only what was never pinned.
 
+> Amended 2026-11-21, by the person: this seam is dark today. Pins attach to
+> Brain records only, and Brain records survive collapse by existing — they
+> never fall to the archive layer, and the purge exports nothing. The
+> pinned-to-archive export is unresolved, not built; the person owns the
+> choice (dark-pins-in-Brain only / archive pins with export-back / defer).
+
 **The Brain grows only by what is explicitly kept.** `.brain` gains records
 only through the agent's writes and the purge's pinned exports — nothing else
 enters it, so it cannot balloon. One sealed generation exists at a time.
@@ -269,19 +275,26 @@ MINI.md §8 frame and three-tab split are "not necessarily required"; the
 Context view and the token bar are required, the former being the flagship
 ("the open-brain surgery section": see, remove, reorder, edit, add — an
 accurate, structured, editable representation of everything the agent sees).
-R4 and any slice's testing is blocked on the person having a UI they are
-comfortable working in. The proposal is `docs/ui-proposal.md`; the frame/tab
-questions below now resolve at the person's marks on that proposal.
+Testing of slices is the person's to do at their own pace —
+the confirmed marks say R4 and any slice's testing is never raised again.
+The proposal is `docs/ui-proposal.md`. The person's
+marks on it are resolved (2026-11-20, its §10) and the UI is built on this
+branch — R5a shell + Chat, R5b token bar, R5c Brain views, R5d Context surgery
+view — so the frame/tab questions below are answered by the build as much as by
+the proposal.
 
-**Q12.1 — The three tabs.** Open — superseded by the re-scope. The proposal
-offers modes-not-tabs against literal tabs; the person's marks decide.
+**Q12.1 — The three tabs.** *Resolved 2026-11-20:* modes, not tabs
+(`docs/intent.md` §44); the build renders Chat / Context / Brain as views,
+reachable by jump keys and the palette.
 
 **Q12.2 — Five-row disclosure.** *Resolved 2026-11-20:* the disclosure feature
 is already done — the views fold and expand as needed, no fixed row count
 exists. The question was bookkeeping, not an open design question; the
 person has marked it resolved.
 
-**Q12.3 — The footer hint set.** Open — the proposal replaces the enumerated hint set with a context-sensitive footer (Posting's idiom); what keys are guaranteed is one of the marks the person makes on the proposal.
+**Q12.3 — The footer hint set.** *Resolved 2026-11-20:* the footer is
+context-sensitive (Posting's idiom) — it shows the keys that work where you
+are — and is built with R5a.
 
 ## §13. Small things that are probably assumptions
 

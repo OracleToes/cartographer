@@ -1,8 +1,18 @@
-> **Status, 2026-11-16:** the Context tab this document plans was torn out
-> with the rest of the UI before any of it landed. `meter.ts`, the prefill
+> **Status, 2026-11-21:** the Context tab this document argues for is built.
+> It was torn out with the rest of the UI before then (2026-11-16, the status
+> note that once read "the Context tab ... was torn out"), and re-landed with
+> the R5d Context surgery view (2026-11-20, `docs/rebuild-slices.md`): it
+> renders the actual payload — the frozen projection bytes from the
+> generation snapshot, the state block from the same inputs `beforeRequest`
+> uses, and the same tool registration the live session runs — read-only,
+> with delete-with-Now wired to the Chat part. `meter.ts`, the prefill
 > monitor, and `prompt-tree.ts` no longer exist. The requirement quoted below
-> is the person's and still stands; it applies to whatever screen is built
-> when the person says to build it. Nothing here is a plan for the rebuild.
+> is the person's and still stands and is now the spec the built view
+> obeys; the fold-tree shape this document proposes (tools sub-tree by tool,
+> left/right folds) is not what the landed view renders — the view renders a
+> parts rail plus content panes with the formatted/raw toggle, which is the
+> actual-payload requirement met in the shape that shipped. Nothing here is a
+> plan for anything beyond recording the requirement and its history.
 
 # The Context tab is the prompt
 
@@ -127,8 +137,10 @@ that looked editable but was not would be worse than one that explains itself.
 
 - **The literal-prompt layer.** Not built, for the reason above. It needs a
   decision about where a literal override is stored.
-- **The bar's number** still comes from the prefill monitor's server reading,
-  not from `usage.input`. Once a provider reports usage, the bar should prefer
-  it; that is a change to `meter.ts` and its own stage.
+- **The bar's number.** Historical: this bullet imagined a prefill monitor and a
+  `meter.ts`, both deleted. The built token bar (R5b) carries the state block's
+  own arithmetic — the real provider usage once it lands, estimate-glyphed
+  before that — and the Context view's per-part estimates. The question as
+  written here resolves to: prefer usage, estimate-glyph the rest.
 - A node's `▤` share is proportional, not measured, and there is no per-node
   exact count anywhere — the provider reports one number for the whole request.

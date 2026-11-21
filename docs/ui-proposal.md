@@ -1,8 +1,14 @@
 # R5 — the Carto workspace: proposal
 
-*Draft for the person to mark up, 2026-11-20. Not authority. Nothing here is
-built, and nothing is binding until the person marks it. Where the person and
-this document disagree, the person wins.*
+*Draft for the person to mark up, 2026-11-20 — superseded. The person marked it
+(2026-11-20, §10 below: no open questions remain) and the build landed in this
+tree (R5a shell + Chat, R5b token bar, R5c Brain views, R5d Context surgery
+view — see `docs/rebuild-slices.md`). Not authority. The person and `MINI.md`
+win wherever this disagrees with them.*
+
+> Amended 2026-11-21: the marks stand as recorded below; the header reflects the
+> landed state, not the draft's. This remains a proposal for R5's history, not
+> a spec.
 
 ## 1. What the screen is for
 

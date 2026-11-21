@@ -197,9 +197,9 @@ The frozen projection and the collapse ceremony exist and are tested.
   filling it invents an unconfirmed format. Open question for the person
   below.
 
-Not done: R3 (tools, live session, state block), R4 (config, llama-swap,
-driver). The collapse exists but nothing triggers it yet; the live session
-wires the trigger in R3.
+Not done at the time of writing: R3 (tools, live session, state block), R4
+(config, llama-swap, driver). Both landed 2026-11-20 — see the R3 and R4
+landings below; the live session wires the collapse trigger in R3.
 ## R3 landed, 2026-11-20 (`755f1c7` and the R3c commits)
 
 The live session and the tools exist and are wired end to end.
@@ -334,7 +334,11 @@ placeholder headless driver.
   and `edit` enforce (a command like `cat .brain/brain.sqlite` runs); the
   spec line is the person's, the bypass decide is also pending.
 
-Not done: R5+ (the interface, when the person settles §8's marks).
+Not done: R5+ — the interface. The marks the person settled (2026-11-20)
+were R5a–R5d: shell + Chat, token bar, Brain views, Context surgery view —
+all landed; the remaining R5 work is surgery edits beyond delete-with-Now
+(edit/insert/reorder), and prefill measurement if the server ever sends
+`prompt_progress`.
 ### R4 addendum II — the shell call and the dependency-first audit, 2026-11-20
 
 **The shell, by the person's call: pi's built-in bash tool ("C").** The
@@ -538,12 +542,12 @@ Also landed with R5b:
   philosophy, pillar by pillar, with the rejections recorded (no modals, no
   backend ceremony, no chrome on the edge). MINI.md unchanged.
 
-Not done: R5c+ — pins are re-scoped to markers on book entries (settled
-2026-11-20) but the code still stores them as a separate record kind; the
-re-structure is a proposal for the person to confirm (below). The Brain
-views are read-only two-pane lists; surgery edits beyond delete are
-unbuilt; prefill measurement only if the server ever sends
-`prompt_progress`.
+Not done: R5c+ — the pins re-structure landed the same day the marks did
+(see the R5 cleanup addendum below): records carry the marker, the
+projection renders `· [pinned]` inline, the state block has no pins part,
+handles carry no pin prefix. The Brain views are read-only two-pane lists;
+surgery edits beyond delete are unbuilt; prefill measurement only if the
+server ever sends `prompt_progress`.
 
 ### Addendum — the limits audit, 2026-11-20 (this branch)
 

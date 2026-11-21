@@ -32,12 +32,22 @@ happened:**
 the wake tool, and the armed-wake line in the state block are gone; the
 projections and the state block no longer carry them. The surviving suite
 mentions wakes only here, as history of the teardown.
+
 - The suite went from 109 to 58 tests. The surviving suite covers the
   domain and runtime foundation (Brain, handles, collapse, projection,
   state block, wakes, legacy import, workspace, launcher).
 - The UI will be rebuilt only after the person marks the decisions, per the
   confrontation this file once proposed for G3. Until then there is no
   screen, and that is the intended state.
+
+**Amended 2026-11-21:** the state below is historical. The gut was executed
+and the suite grew again past 58 (now 99 tests — see `docs/tests.md`).
+Nothing here is current authority: the built UI is the R5 shell + Chat
+(R5a), token bar (R5b), Brain views (R5c), and Context surgery view (R5d)
+landed 2026-11-20 (`docs/rebuild-slices.md`), not the G1→G3→G2→G4 sequence;
+the G3 confrontation happened as the person's marks on `docs/ui-proposal.md`
+(2026-11-20). The legacy import, prefill monitor, and UI screen are deleted;
+`wakes` no longer exist.
 
 ---
 

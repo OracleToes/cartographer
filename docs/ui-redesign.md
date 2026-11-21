@@ -39,8 +39,11 @@ listed there or in the footer.
 Applied: fixed header (project · generation · model · active window), one
 dense main area, the token bar always above a context-sensitive footer, one
 cell of padding on every edge so the chrome never touches the terminal edge
-(this turn). Chat is the boot view; the other views land with their slices
-and are honestly absent until then — never a fake.
+(this turn). Chat is the boot view (R5a); the Brain views, Atlas and Ledger
+two-pane (R5c), and the Context surgery view (R5d, read-only) have landed in
+the same tree, so nothing is honestly absent that was supposed to exist —
+the one remaining gap is surgery edits beyond delete-with-Now, which is
+honestly absent.
 
 **5. Whitespace & padding.** Applied this turn: one cell on every edge
 (`Spacer` margins; the layout solver handles resize). No border glyphs —
