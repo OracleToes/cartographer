@@ -52,13 +52,14 @@ test("edges survive deletion as written (no cascade); a pin is a marker on the e
   assert.equal(brain.atlas[0].edges.length, 1);
   assert.equal(brain.atlas[0].edges[0].target, "a1");
 
-  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: true }, at(4));
-  assert.equal(brain.atlas[0].pinned, true);
-  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: false }, at(5));
-  assert.equal(brain.atlas[0].pinned, false);
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: "user" }, at(4));
+  assert.equal(brain.atlas[0].pinned, "user");
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: null }, at(5));
+  assert.equal(brain.atlas[0].pinned, undefined);
+  assert.ok(!("pinned" in brain.atlas[0]), "a cleared pin removes the key, not a phantom undefined");
   const withChat = applyWrite(emptyBrain(), { kind: "chat.record", record: chat("c1", "user", "hi", at(1)) }, at(1));
-  const chatPinned = applyWrite(withChat, { kind: "pin.set", target: "chat", id: "c1", pinned: true }, at(2));
-  assert.equal(chatPinned.chat[0].pinned, true);
+  const chatPinned = applyWrite(withChat, { kind: "pin.set", target: "chat", id: "c1", pinned: "agent" }, at(2));
+  assert.equal(chatPinned.chat[0].pinned, "agent");
 });
 
 test("deletion is single-step in every layer; unknown IDs throw", () => {

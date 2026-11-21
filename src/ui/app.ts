@@ -390,6 +390,44 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
+
+  /** Person-side pin toggles: place/remove a pin as "user". Shared by every view that can toggle a pin. */
+  const togglePin = async (target: "chat" | "ledger" | "atlas", id: string) => {
+    const brainState = await brain.read();
+    const record =
+      target === "chat"
+        ? brainState.chat.find((r) => r.id === id)
+        : target === "ledger"
+          ? brainState.ledger.find((e) => e.id === id)
+          : brainState.atlas.find((n) => n.id === id);
+    if (record === undefined) return;
+    if (record.pinned === undefined) {
+      await brain.apply({ kind: "pin.set", target, id: record.id, pinned: "user" }, Date.now());
+      pushStatus(`pinned ${target} record #${record.id} (you)`);
+    } else {
+      await brain.apply({ kind: "pin.set", target, id: record.id, pinned: null }, Date.now());
+      pushStatus(`unpinned ${target} record #${record.id}`);
+    }
+    await rebuildTranscript();
+    const fresh = await brain.read();
+    if (state.view === "atlas") atlasView.setData(fresh, staleMarks(fresh));
+    if (state.view === "ledger") ledgerView.setData(fresh);
+    if (state.view === "context") await syncContextView(fresh);
+    await refreshSidebar();
+    tui.requestRender();
+  };
+
+  transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
+  ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
+  atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
+  contextView.onTogglePin = (_partId: string, itemId: string | number) => {
+    void (async () => {
+      const brainState = await brain.read();
+      const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
+      if (chatRecord === undefined) return;
+      await togglePin("chat", chatRecord.id);
+    })();
+  };
   contextView.onDelete = async (partId, itemId, now) => {
     if (partId === "transcript") {
       const brainState = await brain.read();
@@ -595,7 +633,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       for (const record of brainState.chat) {
         if (record.author !== "agent") continue;
         if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
-        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text } });
+        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text, recordId: record.id, pinned: record.pinned } });
       }
 
       // Clear pending items whose placement we can now see: same text, an
@@ -632,7 +670,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         person.map((item) => item.key).join(","),
         cards.map((item) => item.key).join(","),
         stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
-        String(agent.length),
+        agent.map((item) => `${String(item.key)}:${item.entry.kind === "agent" ? String(item.entry.recordId ?? "") + ":" + String(item.entry.pinned ?? "") : ""}`).join(","),
         state.sealedAgentIds.size,
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),

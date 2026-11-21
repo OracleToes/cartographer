@@ -17,11 +17,13 @@ import {
 
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, LedgerEntry } from "../domain/records.js";
-import { padLine, tokens } from "./tokens.js";
+import { padLine, tokens, pinBadgeText } from "./tokens.js";
 
 export class LedgerView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /** Fired on `p`: toggle the pin marker on the selected entry. */
+  onTogglePin?: (id: string) => void;
 
   private focusedPane: "list" | "detail" = "list";
   private brain: CartoBrain | undefined;
@@ -103,10 +105,20 @@ export class LedgerView implements Component, Focusable {
         this.detailExpanded = !this.detailExpanded;
         return;
       }
+      if (matchesKey(data, "p")) {
+        const entry = filtered[this.selectedIndex];
+        if (entry) this.onTogglePin?.(entry.id);
+        return;
+      }
     } else {
       // Detail pane focused
       if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
         this.focusedPane = "list";
+        return;
+      }
+      if (matchesKey(data, "p")) {
+        const entry = this.getFilteredEntries()[this.selectedIndex];
+        if (entry) this.onTogglePin?.(entry.id);
         return;
       }
       if (matchesKey(data, "j") || matchesKey(data, "down")) {
@@ -189,12 +201,11 @@ export class LedgerView implements Component, Focusable {
 
   private renderDetail(entry: LedgerEntry, handle: string, width: number, maxLines: number = 28): string[] {
     const rawLines: string[] = [];
-    const isPinned = entry.pinned === true;
     const isoDate = new Date(entry.updatedAt).toISOString();
 
     const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.kindBadge(entry.kind)} ${entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status)}`;
     const badges: string[] = [];
-    if (isPinned) badges.push(tokens.pinBadge("pin"));
+    if (entry.pinned !== undefined) badges.push(pinBadgeText(entry.pinned, "pin"));
     badges.push(tokens.muted(isoDate));
     if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
 
@@ -251,7 +262,7 @@ export class LedgerView implements Component, Focusable {
     const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
     const openCount = this.entries.filter((e) => e.status === "open").length;
     const headerLeft = ` ${tokens.bold(tokens.accent("LEDGER"))} ${tokens.muted("·")} ${filtered.length} entries (${openCount} open) ${tokens.warn(filterInfo)}`;
-    const headerRight = `${tokens.muted("h/l switch panes · esc chat ")}`;
+    const headerRight = `${tokens.muted("h/l panes · p pin · / filter · esc chat ")}`;
     const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
     lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
     lines.push(padLine("", width));
@@ -274,11 +285,9 @@ export class LedgerView implements Component, Focusable {
       filtered.forEach((entry, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? `L${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = entry.pinned === true;
-
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const handleStr = `[${handle}]`.padEnd(6);
-        const pinStr = isPinned ? tokens.pinBadge("P") : "";
+        const pinStr = pinBadgeText(entry.pinned, "P");
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
         const kindStr = tokens.muted(`[${entry.kind}]`);
 
@@ -306,10 +315,8 @@ export class LedgerView implements Component, Focusable {
       filtered.forEach((entry, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? `L${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = entry.pinned === true;
-
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
-        const pinStr = isPinned ? tokens.pinBadge("pin") : "";
+        const pinStr = pinBadgeText(entry.pinned, "pin");
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
         const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} [${entry.kind}] ${entry.text} ${statusStr} ${pinStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);

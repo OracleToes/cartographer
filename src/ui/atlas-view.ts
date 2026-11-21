@@ -18,11 +18,13 @@ import {
 
 import { handleOf } from "../domain/handles.js";
 import type { AtlasNode, CartoBrain } from "../domain/records.js";
-import { padLine, tokens } from "./tokens.js";
+import { padLine, tokens, pinBadgeText } from "./tokens.js";
 
 export class AtlasView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /** Fired on `p`: toggle the pin marker on the selected node. */
+  onTogglePin?: (id: string) => void;
 
   private focusedPane: "list" | "detail" = "list";
   private brain: CartoBrain | undefined;
@@ -112,10 +114,20 @@ export class AtlasView implements Component, Focusable {
         this.detailExpanded = !this.detailExpanded;
         return;
       }
+      if (matchesKey(data, "p")) {
+        const node = filtered[this.selectedIndex];
+        if (node) this.onTogglePin?.(node.id);
+        return;
+      }
     } else {
       // Detail pane focused
       if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
         this.focusedPane = "list";
+        return;
+      }
+      if (matchesKey(data, "p")) {
+        const node = this.getFilteredNodes()[this.selectedIndex];
+        if (node) this.onTogglePin?.(node.id);
         return;
       }
       if (matchesKey(data, "j") || matchesKey(data, "down")) {
@@ -197,13 +209,12 @@ export class AtlasView implements Component, Focusable {
 
   private renderDetail(node: AtlasNode, handle: string, width: number, maxLines: number = 28): string[] {
     const rawLines: string[] = [];
-    const isPinned = node.pinned === true;
     const isStale = this.staleHandles.has(handle);
     const isoDate = new Date(node.updatedAt).toISOString();
 
     const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.bold(node.title || node.claim || "")}`;
     const badges: string[] = [];
-    if (isPinned) badges.push(tokens.pinBadge("pin"));
+    if (node.pinned !== undefined) badges.push(pinBadgeText(node.pinned, "pin"));
     if (isStale) badges.push(tokens.staleBadge("!stale"));
     badges.push(tokens.muted(isoDate));
     if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
@@ -276,7 +287,7 @@ export class AtlasView implements Component, Focusable {
     // Top Header Banner
     const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
     const headerLeft = ` ${tokens.bold(tokens.accent("ATLAS"))} ${tokens.muted("·")} ${filtered.length} nodes ${tokens.warn(filterInfo)}`;
-    const headerRight = `${this.staleHandles.size > 0 ? tokens.warn(`!${this.staleHandles.size} stale  `) : ""}${tokens.muted("h/l switch panes · esc chat ")}`;
+    const headerRight = `${this.staleHandles.size > 0 ? tokens.warn(`!${this.staleHandles.size} stale  `) : ""}${tokens.muted("h/l panes · p pin · / filter · esc chat ")}`;
     const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
     lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
     lines.push(padLine("", width));
@@ -299,12 +310,11 @@ export class AtlasView implements Component, Focusable {
       filtered.forEach((node, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "atlas", node.id) : "") ?? `A${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = node.pinned === true;
         const isStale = this.staleHandles.has(handle);
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const handleStr = `[${handle}]`.padEnd(6);
-        const pinStr = isPinned ? tokens.pinBadge("P") : "";
+        const pinStr = pinBadgeText(node.pinned, "P");
         const staleStr = isStale ? tokens.staleBadge("!") : "";
         const badges = `${pinStr}${staleStr}`;
         const titleSpace = Math.max(4, listWidth - 10 - visibleWidth(badges));
@@ -330,11 +340,10 @@ export class AtlasView implements Component, Focusable {
       filtered.forEach((node, idx) => {
         const handle = (this.brain ? handleOf(this.brain.handles, "atlas", node.id) : "") ?? `A${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
-        const isPinned = node.pinned === true;
         const isStale = this.staleHandles.has(handle);
 
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
-        const pinStr = isPinned ? tokens.pinBadge("pin") : "";
+        const pinStr = pinBadgeText(node.pinned, "pin");
         const staleStr = isStale ? tokens.staleBadge("!stale") : "";
         const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${node.title || node.claim || ""} ${pinStr} ${staleStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);

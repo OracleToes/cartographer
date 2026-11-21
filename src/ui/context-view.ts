@@ -28,9 +28,9 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
-import type { CartoBrain } from "../domain/records.js";
+import type { ChatRecord, CartoBrain } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
-import { padLine, tokens } from "./tokens.js";
+import { padLine, pinBadgeText, tokens } from "./tokens.js";
 
 export interface ContextToolItem {
   name: string;
@@ -77,6 +77,8 @@ export class ContextView implements Component, Focusable {
   onBack?: () => void;
   onDelete?: (partId: string, itemId: string | number, now: boolean) => void;
   onCollapse?: () => void;
+  /** Fired on `p` over a transcript item that names a Brain chat record: toggle the pin marker. */
+  onTogglePin?: (partId: string, itemId: string | number) => void;
 
   private focusedPane: "rail" | "content" = "rail";
   private selectedPartIndex = 0;
@@ -202,6 +204,14 @@ export class ContextView implements Component, Focusable {
       // Content pane focused
       if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
         this.focusedPane = "rail";
+        return;
+      }
+      if (matchesKey(data, "p")) {
+        const selectedPart = this.parts[this.selectedPartIndex];
+        if (selectedPart?.id === "transcript" && this.data && !this.showRaw) {
+          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
+          if (msg !== undefined && this.chatRecordFor(msg.id) !== undefined) this.onTogglePin?.("transcript", msg.id);
+        }
         return;
       }
       if (matchesKey(data, "!") || data === "!") {
@@ -400,6 +410,11 @@ export class ContextView implements Component, Focusable {
     return lines;
   }
 
+  private chatRecordFor(itemId: string | number): ChatRecord | undefined {
+    if (!this.data) return undefined;
+    return this.data.brain.chat.find((record) => String(record.id) === String(itemId));
+  }
+
   private renderTranscriptFormatted(messages: ContextDialogueMessage[], width: number): string[] {
     const lines: string[] = [];
     this.itemRanges = [];
@@ -424,7 +439,9 @@ export class ContextView implements Component, Focusable {
       const ts = msg.timestamp ? ` · ${new Date(msg.timestamp).toISOString()}` : "";
       const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
 
-      const headerText = `${prefix}${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)} ${tokens.muted(foldGlyph)}`;
+      const record = this.chatRecordFor(msg.id);
+      const pinStr = record !== undefined && record.pinned !== undefined ? ` ${pinBadgeText(record.pinned, "pin")}` : "";
+      const headerText = `${prefix}${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)} ${tokens.muted(foldGlyph)}${pinStr}`;
       lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
 
       if (isOpen) {
@@ -565,7 +582,7 @@ export class ContextView implements Component, Focusable {
 
     // Header banner
     const headerLeft = ` ${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.muted("· what the model reads")} ${tokens.muted(`· ~${this.totalTokens.toLocaleString("en-US")} total tokens`)}`;
-    const headerRight = `${tokens.muted("h/l switch panes · tab raw · esc chat ")}`;
+    const headerRight = `${tokens.muted("h/l panes · p pin · tab raw · esc chat ")}`;
     const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
     lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
     lines.push(padLine("", width));

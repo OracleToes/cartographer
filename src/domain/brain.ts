@@ -26,7 +26,7 @@ export type BrainWrite =
   | { kind: "chat.update"; id: RecordId; text: string; updatedAt: number }
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
-  | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: boolean }
+  | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: "user" | "agent" | null }
   | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
@@ -93,7 +93,9 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
 
     case "pin.set": {
       // A pin means "keep it here" (MINI.md §4.1). A marker on the entry; no
-      // reason, no source, no bookkeeping.
+      // reason, no source, no bookkeeping. The marker records who placed it:
+      // "user" | "agent" — the person may remove either kind of pin, the agent
+      // may remove only its own.
       return setPin(brain, write.target, write.id, write.pinned);
     }
 
@@ -124,19 +126,31 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
   }
 }
 
-function setPin(brain: CartoBrain, target: "chat" | "ledger" | "atlas", id: RecordId, pinned: boolean): CartoBrain {
+/** Places or clears the pin marker on one record; a cleared pin removes the key, never leaves `pinned: undefined` lying around. */
+function setPinRecord<T extends { pinned?: "user" | "agent" }>(record: T, pinned: "user" | "agent" | null): T {
+  if (pinned === null) {
+    // Deleting the key is what "unpinned" means; a cleared pin must not
+    // leave `pinned: undefined` lying around in the persisted document.
+    const copy: Record<string, unknown> = { ...record };
+    delete copy.pinned;
+    return copy as T;
+  }
+  return { ...record, pinned };
+}
+
+function setPin(brain: CartoBrain, target: "chat" | "ledger" | "atlas", id: RecordId, pinned: "user" | "agent" | null): CartoBrain {
   switch (target) {
     case "chat": {
       if (!brain.chat.some((record) => record.id === id)) throw new BrainError("No Chat record is named by that handle.");
-      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? { ...record, pinned } : record)) };
+      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? setPinRecord(record, pinned) : record)) };
     }
     case "ledger": {
       if (!brain.ledger.some((entry) => entry.id === id)) throw new BrainError("No Ledger record is named by that handle.");
-      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? { ...entry, pinned } : entry)) };
+      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? setPinRecord(entry, pinned) : entry)) };
     }
     case "atlas": {
       if (!brain.atlas.some((node) => node.id === id)) throw new BrainError("No Atlas node is named by that handle.");
-      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? { ...node, pinned } : node)) };
+      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? setPinRecord(node, pinned) : node)) };
     }
   }
 }

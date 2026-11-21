@@ -73,7 +73,7 @@ export function projectContext(brain: CartoBrain): Projection {
   if (brain.atlas.length > 0) {
     atlas.push("Atlas");
     for (const node of brain.atlas) {
-      atlas.push(`${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? " · [pinned]" : ""}`);
+      atlas.push(`${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned:${node.pinned}]` : ""}`);
       atlas.push(`  ${node.claim}`);
       for (const ref of node.evidence) atlas.push(`  evidence: ${sourceLine(ref)}`);
       for (const edge of node.edges) {
@@ -87,7 +87,7 @@ export function projectContext(brain: CartoBrain): Projection {
     ledger.push("Ledger");
     for (const entry of brain.ledger) {
       ledger.push(
-        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? " · [pinned]" : ""}`,
+        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned:${entry.pinned}]` : ""}`,
       );
       if (entry.answer !== null) {
         const evidence = entry.answer.evidenceIds.map((id) => resolveHandle(brain, id)).join(", ");

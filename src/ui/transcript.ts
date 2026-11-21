@@ -37,7 +37,9 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 
-import { statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { pinBadgeText, statusLine, statusWarnLine, tokens } from "./tokens.js";
+
+type BlockRange = { id: string; start: number; end: number };
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
@@ -56,7 +58,7 @@ export type CardEntry =
 
 export type TranscriptEntry =
   | { kind: "person"; text: string }
-  | { kind: "agent"; text: string }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -183,7 +185,10 @@ export class TranscriptView implements Component {
   private expanded = new Map<string, boolean>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
+  private blockRanges: BlockRange[] = [];
   private cacheWidth = -1;
+  /** Fired on a click of an agent block that names a Brain record: toggle the pin marker. */
+  onTogglePin?: (recordId: string) => void;
   private cacheLines: string[] = [];
 
   /** Replace the landed list (already in final order) and the queued list (rendered after it). */
@@ -274,13 +279,14 @@ export class TranscriptView implements Component {
     return lines.join("\n");
   }
 
-  private block(who: "you" | "carto", text: string, width: number): string[] {
+  private block(who: "you" | "carto", text: string, width: number, extra?: string): string[] {
     const pad = " ".repeat(Math.max(0, PREFIX_WIDTH - visibleWidth(who)));
     const prefix = tokens.bold(who === "you" ? tokens.accent(who) : tokens.agent(who)) + pad;
     const body = Math.max(1, width - PREFIX_WIDTH);
     const wrapped = wrapTextWithAnsi(text, body);
     const indent = " ".repeat(PREFIX_WIDTH);
-    return wrapped.map((line, index) => (index === 0 ? prefix + line : indent + line));
+    const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
+    return wrapped.map((line, index) => (index === 0 ? prefix + line + marker : indent + line));
   }
 
   private wrapBody(card: CardEntry, width: number): string[] {
@@ -343,17 +349,24 @@ export class TranscriptView implements Component {
     return this.ranges.find((range) => y >= range.start && y < range.end);
   }
 
-  /** A click folds or unfolds a card. The wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
+  /** A click folds or unfolds a card; a click on an agent block toggles its record's pin; the wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
-    const range = this.rangeAt(event.y);
-    if (range === undefined) return undefined;
-    const card = this.cardById(range.id);
-    if (card === undefined) return undefined;
+    const cardRange = this.rangeAt(event.y);
+    const block = this.blockRanges.find((range) => event.y >= range.start && event.y < range.end);
+    if (cardRange === undefined && block === undefined) return undefined;
 
     if (event.type === "press") {
       return { handled: true };
     }
     if (event.type === "click") {
+      if (block !== undefined) {
+        this.onTogglePin?.(block.id);
+        this.cacheWidth = -1;
+        return { handled: true, render: true };
+      }
+      if (cardRange === undefined) return undefined;
+      const card = this.cardById(cardRange.id);
+      if (card === undefined) return undefined;
       this.expanded.set(card.id, !this.isExpanded(card));
       this.cacheWidth = -1;
       return { handled: true, render: true };
@@ -366,6 +379,7 @@ export class TranscriptView implements Component {
     const lines: string[] = [];
     const total = this.items.length + this.liveCards.length + this.queued.length;
     this.ranges = [];
+    this.blockRanges = [];
     if (total === 0) {
       lines.push("");
       lines.push(`  ${tokens.bold(tokens.accent("carto"))} ${tokens.muted("— your pair on this project")}`);
@@ -394,9 +408,16 @@ export class TranscriptView implements Component {
       if (isCard(entry)) pushCard(entry);
       else {
         gap();
-        if (entry.kind === "person") lines.push(...this.block("you", entry.text, width));
-        else if (entry.kind === "agent") lines.push(...this.block("carto", entry.text, width));
-        else lines.push(...wrapTextWithAnsi(entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text), width));
+        if (entry.kind === "person") {
+          lines.push(...this.block("you", entry.text, width));
+        } else if (entry.kind === "agent") {
+          const start = lines.length;
+          const pinStr = entry.pinned !== undefined && entry.pinned !== null ? pinBadgeText(entry.pinned, "pin") : "";
+          lines.push(...this.block("carto", entry.text, width, pinStr.length > 0 ? pinStr : undefined));
+          if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
+        } else {
+          lines.push(...wrapTextWithAnsi(entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text), width));
+        }
       }
     }
     for (const card of this.liveCards) pushCard(card);

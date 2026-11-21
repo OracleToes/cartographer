@@ -52,9 +52,9 @@ test("ledger answers render with evidence handles; empty brain renders the place
 test("pins render inline on their entries", () => {
   let brain = emptyBrain();
   brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "n1", title: "The collapse boundary", claim: "Collapse is person-triggered or agent-triggered", evidence: [], edges: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
-  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: true }, at("2026-11-16T04:00:00.000Z"));
+  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: "agent" }, at("2026-11-16T04:00:00.000Z"));
   const projection = projectContext(brain);
-  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned\]/);
+  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned:agent\]/);
   assert.doesNotMatch(projection.text, /Pins/);
 });
 

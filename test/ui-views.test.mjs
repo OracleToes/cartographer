@@ -331,7 +331,7 @@ test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", 
     status: "open",
     answer: null,
     evidence: [],
-    pinned: true,
+    pinned: "agent",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
@@ -407,4 +407,90 @@ test("TranscriptView displays tool name in card header when known", () => {
   const headerLine = rendered[0];
   assert.ok(headerLine.includes("tool read"));
   assert.ok(headerLine.includes("running"));
+});
+
+test("the p key toggles the pin on the selected entry (ledger and atlas)", () => {
+  const ledger = new LedgerView();
+  const brain = emptyBrain();
+  brain.ledger.push({
+    id: "l-a",
+    kind: "note",
+    text: "pin me",
+    status: "open",
+    answer: null,
+    evidence: [],
+    pinned: "agent",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  brain.handles.entries.push({ kind: "ledger", id: "l-a", handle: "L1", timestamp: Date.now() });
+  let toggled = null;
+  ledger.onTogglePin = (id) => { toggled = id; };
+  ledger.setData(brain);
+  ledger.handleInput("p");
+  assert.equal(toggled, "l-a");
+
+  const atlas = new AtlasView();
+  const atlasBrain = emptyBrain();
+  atlasBrain.atlas.push({
+    id: "n-a",
+    title: "pin me",
+    claim: "claim",
+    edges: [],
+    evidence: [],
+    pinned: "user",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  atlasBrain.handles.entries.push({ kind: "atlas", id: "n-a", handle: "A1", timestamp: Date.now() });
+  let atlasToggled = null;
+  atlas.onTogglePin = (id) => { atlasToggled = id; };
+  atlas.setData(atlasBrain, []);
+  atlas.handleInput("p");
+  assert.equal(atlasToggled, "n-a");
+});
+
+test("an agent block in the transcript renders the pin badge and click toggles the pin", () => {
+  const transcript = new TranscriptView();
+  let toggled = null;
+  transcript.onTogglePin = (id) => { toggled = id; };
+  transcript.setEntries([
+    { kind: "agent", text: "a durable agent statement", recordId: "c-a", pinned: "user" },
+    { kind: "agent", text: "another agent statement", recordId: "c-b" },
+  ]);
+  const lines = transcript.render(120);
+  assert.match(lines.join("\n"), /pin·u/, "the pin badge renders on the agent block");
+  assert.ok(transcript.length >= 2, "two agent blocks rendered");
+
+  // Click the first agent block (line 0 is its first line)
+  const click = transcript.handleMouse({
+    type: "click",
+    x: 5,
+    y: 0,
+    screenX: 5,
+    screenY: 0,
+    width: 120,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(click?.handled, "agent block click is handled");
+  assert.equal(toggled, "c-a");
+
+  // The second agent block (line 2) toggles its own pin
+  const click2 = transcript.handleMouse({
+    type: "click",
+    x: 5,
+    y: 2,
+    screenX: 5,
+    screenY: 2,
+    width: 120,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(click2?.handled, "second agent block click is handled");
+  assert.equal(toggled, "c-b");
 });

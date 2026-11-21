@@ -103,6 +103,22 @@ export async function renderLiveStateBlock(
       lines: [`(tree unavailable: ${error instanceof Error ? error.message : String(error)})`],
     };
   }
+  const pinned: Array<{ handle: string; author: "user" | "agent" }> = [];
+  for (const node of brain.atlas) {
+    if (node.pinned === undefined) continue;
+    const handle = handleOf(brain.handles, "atlas", node.id);
+    if (handle !== undefined) pinned.push({ handle, author: node.pinned });
+  }
+  for (const entry of brain.ledger) {
+    if (entry.pinned === undefined) continue;
+    const handle = handleOf(brain.handles, "ledger", entry.id);
+    if (handle !== undefined) pinned.push({ handle, author: entry.pinned });
+  }
+  for (const record of brain.chat) {
+    if (record.pinned === undefined) continue;
+    const handle = handleOf(brain.handles, "chat", record.id);
+    if (handle !== undefined) pinned.push({ handle, author: record.pinned });
+  }
   return renderStateBlock({
     contextWindow: options.session.contextWindow,
     lastReportedInput: options.session.lastReportedInput,
@@ -116,6 +132,7 @@ export async function renderLiveStateBlock(
       chat: estimatePart(brain.chat),
     },
     pending: options.session.pending,
+    pinned,
     stale: staleHandles(brain),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     tree,

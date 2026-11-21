@@ -32,8 +32,8 @@ export interface ChatRecord {
   id: RecordId;
   author: "user" | "agent";
   text: string;
-  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
-  pinned?: boolean;
+  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
+  pinned?: "user" | "agent";
   createdAt: number;
   updatedAt: number;
 }
@@ -53,8 +53,8 @@ export interface LedgerEntry {
   status: LedgerStatus;
   /** Null while open; set when a question is answered or an entry is closed with its outcome. */
   answer: LedgerAnswer | null;
-  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
-  pinned?: boolean;
+  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
+  pinned?: "user" | "agent";
   createdAt: number;
   updatedAt: number;
 }
@@ -77,8 +77,8 @@ export interface AtlasNode {
   claim: string;
   evidence: SourceRef[];
   edges: AtlasEdge[];
-  /** The pin marker: an item pinned stays put. No reason, no source, no other bookkeeping. */
-  pinned?: boolean;
+  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
+  pinned?: "user" | "agent";
   createdAt: number;
   updatedAt: number;
 }

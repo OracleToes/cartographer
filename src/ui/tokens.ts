@@ -87,6 +87,10 @@ export const tokens = {
 } as const;
 
 /** Dim full-line helper for status/flash-style lines. */
+/** The pin badge, carrying the author: "u" for the person, "a" for the agent. No badge at all when unpinned. */
+export const pinBadgeText = (pinned: "user" | "agent" | undefined, label: string): string =>
+  pinned === undefined ? "" : tokens.pinBadge(`${label}·${pinned === "user" ? "u" : "a"}`);
+
 export const statusLine = (text: string): string => tokens.muted(tokens.italic(`· ${text}`));
 export const statusWarnLine = (text: string): string => tokens.warn(tokens.italic(`· ${text}`));
 

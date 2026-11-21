@@ -63,6 +63,8 @@ export interface StateBlockInput {
   stale: string[];
   /** Handles for the write-resolution of pending entries (the Brain's table). */
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
+  /** Every record carrying a pin marker, as handle + who placed it, in template order. */
+  pinned: Array<{ handle: string; author: "user" | "agent" }>;
   tree: { root: string; depth: number; lines: string[] };
 }
 
@@ -88,8 +90,12 @@ export function renderStateBlock(input: StateBlockInput): string {
       : ["pending:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${write.kind} ${write.action}`)].join("\n");
   const stale =
     input.stale.length === 0 ? "stale: none" : ["stale:", ...input.stale.map((item) => `  ${item}`)].join("\n");
+  const pinned =
+    input.pinned.length === 0
+      ? "pinned: none"
+      : ["pinned:", ...input.pinned.map((item) => `  ${item.handle} [${item.author === "user" ? "u" : "a"}]`)].join("\n");
   const treeLines = [`tree: ${input.tree.root} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
-  return [STATE_BLOCK_OPEN, fullness, space, pending, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
+  return [STATE_BLOCK_OPEN, fullness, space, pending, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

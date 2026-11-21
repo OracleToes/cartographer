@@ -21,6 +21,10 @@ const input = (overrides = {}) => ({
     { kind: "atlas", action: "upsert", id: "a3" },
     { kind: "chat", action: "record", id: "c7" },
   ],
+  pinned: [
+    { handle: "L2", author: "user" },
+    { handle: "A6", author: "agent" },
+  ],
   stale: ["A5 (evidence changed)"],
   resolveHandle: (kind, id) => ({ "atlas:a3": "A3", "chat:c7": "C7" })[`${kind}:${id}`],
   tree: { root: "/project", depth: 2, lines: ["./", "src/  24K", "  cli.ts  3K  A9"] },
@@ -34,13 +38,15 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /context: ~12,410 \/ 32,768 tokens \(last reported 9,841 \+ tool work since \+2,569\)/);
   assert.match(block, /space: system\+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   assert.match(block, /pending:\n  A3 · atlas upsert\n  C7 · chat record/);
+  assert.match(block, /pinned:\n  L2 \[u\]\n  A6 \[a\]/);
   assert.match(block, /stale:\n  A5 \(evidence changed\)/);
   assert.match(block, /tree: \/project \(depth 2\)/);
 });
 
 test("empty pending and stale say none; missing provider report is explicit", () => {
-  const block = renderStateBlock(input({ pending: [], stale: [], lastReportedInput: undefined }));
+  const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], lastReportedInput: undefined }));
   assert.match(block, /pending: none/);
+  assert.match(block, /pinned: none/);
   assert.match(block, /stale: none/);
   assert.match(block, /context: ~[\d,]+ \/ 32,768 tokens \(not yet reported by the provider\)/);
 });

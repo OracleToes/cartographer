@@ -153,7 +153,12 @@ archive.
   never falls to the archive layer; an item pinned on the archive layer never
   gets deleted — the purge exports it back into the Brain first, and only then
   deletes the store. Each pin survives the purge it is attached to, until
-  removed. Pins render inline on the record they mark.
+  removed. Pins render inline on the record they mark. A pin records who
+  placed it — the author, "user" or "agent" — and nothing else: the person may
+  place and remove any pin from any view (chat, ledger, atlas, context), the
+  agent may place its own pins and remove only its own pins; the agent may not
+  remove a pin the person placed. The state block lists every pinned record,
+  with its author, pre-collapse.
 - **Recover** exists only for the archive. It means "put it back in the Brain."
   It does not also pin; a pin is a separate action that either party can take.
 

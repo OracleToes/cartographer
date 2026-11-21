@@ -203,7 +203,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        "Pin or remove one Brain record — “keep it here”. A pin is a marker on the entry; no reason or source. Pinned records stay close at collapse. Unpin by handle.",
+        "Pin or remove one Brain record — “keep it here”. A pin is a marker on the entry; no reason or source. Pinned records stay close at collapse. A pin placed by the agent is the agent's; the person may remove any pin, but the agent may not remove a pin the person placed. Unpin by handle.",
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: HandleRef,
@@ -212,12 +212,34 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args, api) => {
         const current = await brain.read();
         const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "a Brain record");
-        const next = await brain.apply(
-          { kind: "pin.set", target: target.kind as "ledger" | "chat" | "atlas", id: target.id, pinned: args.action === "pin" },
+        const kind = target.kind as "ledger" | "chat" | "atlas";
+        const record =
+          kind === "ledger"
+            ? current.ledger.find((entry) => entry.id === target.id)
+            : kind === "atlas"
+              ? current.atlas.find((node) => node.id === target.id)
+              : current.chat.find((entry) => entry.id === target.id);
+        if (args.action === "pin" && record?.pinned === "user") {
+          throw new Error(`${normalizeHandle(args.handle)} is pinned by the person — the agent may not take the person's pin.`);
+        }
+        if (args.action === "unpin" && record?.pinned === "user") {
+          throw new Error(`${normalizeHandle(args.handle)} is pinned by the person — only the person may remove it; leave it alone.`);
+        }
+        await brain.apply(
+          { kind: "pin.set", target: kind, id: target.id, pinned: args.action === "pin" ? "agent" : null },
           api.now(),
         );
-        pendingWrite(session, { kind: target.kind as "ledger" | "chat" | "atlas", action: args.action, id: target.id });
-        return textOutput(`${args.action === "pin" ? "Pinned" : "Unpinned"} ${normalizeHandle(args.handle)}.`);
+        pendingWrite(session, { kind, action: args.action, id: target.id });
+        const placed = args.action === "pin";
+        const note =
+          placed && record?.pinned === "agent"
+            ? `${normalizeHandle(args.handle)} was already pinned by you.`
+            : placed
+              ? `Pinned ${normalizeHandle(args.handle)}.`
+              : record?.pinned === "agent"
+                ? `Unpinned ${normalizeHandle(args.handle)}.`
+                : `${normalizeHandle(args.handle)} was not pinned.`;
+        return textOutput(note);
       },
     }),
 
