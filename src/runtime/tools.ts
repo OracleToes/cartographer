@@ -10,12 +10,11 @@ import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-s
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool } from "@earendil-works/pi-durable";
 
-import type { CartoBrain, SourceRef } from "../domain/records.js";
+import type { CartoBrain, Attachment } from "../domain/records.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
-import { sha256File } from "./digest.js";
-import { applyAtomicEdit, readRange, resolveProjectPath, WorkspaceError } from "./workspace.js";
+import { applyAtomicEdit, lexicalProjectPath, readRange, WorkspaceError } from "./workspace.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -52,29 +51,32 @@ const pendingWrite = (session: ToolSession, write: PendingWrite): void => {
   session.pending.push(write);
 };
 
+/**
+ * Resolve one attachment: a file path that stays inside the project root
+ * (scoped, never required to exist — the stale mark is what notices it), or
+ * a handle naming any other record. The caller carries the resolved value.
+ */
+function resolveAttachment(
+  current: CartoBrain,
+  root: string,
+  attachment: { kind: "file"; path: string } | { kind: "record"; handle: string },
+): Attachment {
+  if (attachment.kind === "file") {
+    lexicalProjectPath(root, attachment.path);
+    return { kind: "file", path: attachment.path };
+  }
+  const found = findByHandle(current.handles, normalizeHandle(attachment.handle));
+  if (found === undefined) {
+    throw new Error(`The handle ${normalizeHandle(attachment.handle)} does not name a record. Use a handle from the current context.`);
+  }
+  return { kind: "record", id: found.id };
+}
+
 const textOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "text", text }] });
 const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "text", text }], isError: true });
 
 export function createTools(deps: ToolDeps): ToolRegistration[] {
   const { root, brain, session } = deps;
-
-  const verifyFileEvidence = async (evidence: { path: string; startLine: number; endLine: number; digest: string; excerpt: string }): Promise<SourceRef> => {
-    const real = resolveProjectPath(root, evidence.path);
-    const digest = await sha256File(real);
-    if (digest === null) throw new WorkspaceError(`cannot read ${evidence.path}`);
-    if (digest !== evidence.digest) {
-      throw new WorkspaceError(`Evidence for ${evidence.path} changed since it was read. Re-read it with read and try again.`);
-    }
-    return {
-      kind: "file",
-      path: evidence.path,
-      startLine: evidence.startLine,
-      endLine: evidence.endLine,
-      digest,
-      excerpt: evidence.excerpt,
-      freshness: "fresh",
-    };
-  };
 
   return [
     defineTool({
@@ -93,33 +95,23 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with read; the digest must still match.",
+        "Create or update one Atlas node: a name and a text entry. A node may be linked to other Atlas nodes, or attached to any other reference in Carto — a file by path, or a record by handle. Pass the handle of an existing node to update it; links and attachments are re-written wholesale. Omit the handle to create a new node.",
       parameters: obj({
         handle: opt(HandleRef),
         title: str({ minLength: 1 }),
-        claim: Text,
-        evidence: arr(
-          obj({
-            path: str({ minLength: 1 }),
-            startLine: int({ minimum: 1 }),
-            endLine: int({ minimum: 1 }),
-            digest: str({ minLength: 1 }),
-            excerpt: Text,
-          }),
-          { minItems: 1 },
-        ),
-        edges: opt(
+        text: Text,
+        links: opt(arr(HandleRef)),
+        attachments: opt(
           arr(
-            obj({
-              kind: oneOf(["replaces", "depends-on", "contradicts"] as const),
-              handle: HandleRef,
-            }),
+            union([
+              obj({ kind: lit("file"), path: str({ minLength: 1 }) }),
+              obj({ kind: lit("record"), handle: HandleRef }),
+            ]),
           ),
         ),
       }),
       replay: "safe",
       execute: async (args, api) => {
-        const evidence = await Promise.all(args.evidence.map(verifyFileEvidence));
         const current = await brain.read();
         const handleArg = args.handle;
         const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["atlas"], "an Atlas record");
@@ -128,19 +120,17 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           throw new Error(`The handle ${normalizeHandle(handleArg ?? "")} does not name an Atlas record.`);
         }
         const id = previous?.id ?? `atlas:${api.callId}`;
-        const edges = (args.edges ?? []).map((edge) => ({
-          kind: edge.kind,
-          target: resolveKnown(current, edge.handle, ["atlas"], "an Atlas record").id,
-        }));
+        const links = (args.links ?? []).map((link) => resolveKnown(current, link, ["atlas"], "an Atlas record").id);
+        const attachments = (args.attachments ?? []).map((attachment) => resolveAttachment(current, root, attachment));
         const next = await brain.apply(
           {
             kind: "atlas.upsert",
             node: {
               id,
               title: args.title,
-              claim: args.claim,
-              evidence,
-              edges,
+              text: args.text,
+              links,
+              attachments,
               createdAt: previous?.createdAt ?? api.now(),
               updatedAt: api.now(),
             },
@@ -155,14 +145,13 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "ledger",
       description:
-        "Create or update one durable Ledger record: a goal, a note, a question, an instruction, or progress. Pass the handle to update, or leave it out to create. An answer may cite any handles as evidence.",
+        "Create or update one durable Ledger record: a goal, a note, a question, an instruction, or progress. Pass the handle to update, or leave it out to create.",
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),
         text: Text,
         status: oneOf(["open", "answered", "closed"] as const),
         answer: opt(Text),
-        evidence: opt(arr(HandleRef)),
       }),
       replay: "safe",
       execute: async (args, api) => {
@@ -174,12 +163,6 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           throw new Error(`The handle ${normalizeHandle(handleArg ?? "")} does not name a Ledger record.`);
         }
         const id = previous?.id ?? `ledger:${api.callId}`;
-        const resolvedEvidence = (args.evidence ?? []).map((handle) => findByHandle(current.handles, normalizeHandle(handle)));
-        const missing = (args.evidence ?? []).filter((_, index) => resolvedEvidence[index] === undefined).map(normalizeHandle);
-        if (missing.length > 0) {
-          throw new Error(`Unknown handle(s): ${missing.join(", ")}.`);
-        }
-        const evidenceIds = resolvedEvidence.map((entry) => entry!.id);
         const next = await brain.apply(
           {
             kind: "ledger.upsert",
@@ -188,7 +171,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               kind: args.kind,
               text: args.text,
               status: args.status,
-              answer: args.answer === undefined ? null : { text: args.answer, evidenceIds },
+              answer: args.answer === undefined ? null : { text: args.answer },
               createdAt: previous?.createdAt ?? api.now(),
               updatedAt: api.now(),
             },
@@ -245,7 +228,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
 
     defineTool({
       name: "read",
-      description: "Read a file inside the project root. Omit both startLine and endLine to read the whole file; pass startLine only to read from that line to the end of the file; pass endLine only to read from line 1 through that line; pass both to read a line range. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
+      description: "Read a file inside the project root. Omit both startLine and endLine to read the whole file; pass startLine only to read from that line to the end of the file; pass endLine only to read from line 1 through that line; pass both to read a line range. Returns the path, the range, the total lines, and the excerpt.",
       parameters: obj({
         path: str({ minLength: 1 }),
         startLine: opt(int({ minimum: 1 })),
@@ -255,7 +238,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args) => {
         const range = await readRange(root, args.path, args.startLine, args.endLine);
         return textOutput(
-          `${range.path}:${range.startLine}-${range.endLine} (of ${range.totalLines} lines)\ndigest: ${range.digest}\n\n${range.excerpt}`,
+          `${range.path}:${range.startLine}-${range.endLine} (of ${range.totalLines} lines)\n\n${range.excerpt}`,
         );
       },
     }),

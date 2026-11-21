@@ -230,8 +230,8 @@ rebuilt *from the same records*, so an Atlas edit here changes what the next
 collapse freezes (and what the state block's Atlas lines show) — the person
 sees the consequence in one place.
 
-- **Atlas** — nodes by handle, claim on the head row, evidence + edges folded;
-  stale evidence highlighted (`A5 · stale`), matching the state block's stale
+- **Atlas** — nodes by handle, title on the head row, text + links/attachments
+  folded; stale entries highlighted (`A5 · stale`), matching the state block's stale
   line and the projection's `[stale]` marks. A pin renders inline on the entry;
   never a separate list, never a separate record.
 - **Ledger** — open questions/instructions first; answers folded under their

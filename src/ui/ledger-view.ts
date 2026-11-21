@@ -227,18 +227,6 @@ export class LedgerView implements Component, Focusable {
       for (const al of answerLines) {
         rawLines.push(tokens.cardBg(padLine(`   ${tokens.agent(al)}`, width)));
       }
-      if (entry.answer.evidenceIds.length > 0) {
-        let evidenceHandles = "";
-        if (this.brain) {
-          evidenceHandles = entry.answer.evidenceIds
-            .map((id) => {
-              const hit = this.brain!.handles.entries.find((e) => e.id === id);
-              return hit ? hit.handle : "(gone)";
-            })
-            .join(", ");
-        }
-        rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted(`Evidence handles: ${evidenceHandles}`)}`, width)));
-      }
       rawLines.push(tokens.cardBg(" ".repeat(width)));
     }
 

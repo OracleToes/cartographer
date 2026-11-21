@@ -22,7 +22,7 @@ export class BrainError extends Error {}
 
 export type BrainWrite =
   | { kind: "chat.record"; record: ChatRecord }
-  | { kind: "evidence.refresh"; marks: Array<{ record: "atlas"; id: RecordId; index: number | null; freshness: "fresh" | "stale" }> }
+  | { kind: "atlas.stale"; id: RecordId; stale: boolean }
   | { kind: "chat.update"; id: RecordId; text: string; updatedAt: number }
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
@@ -36,27 +36,21 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
-    case "evidence.refresh": {
-      // Written only at a rebuild (MINI.md §28: digest drift is marked stale
-      // at rebuild). Blocks nothing, deletes nothing, and never renumbers
-      // handles.
-      let next = brain;
-      for (const mark of write.marks) {
-        if (mark.record !== "atlas") throw new BrainError("An evidence mark names a record that does not exist.");
-        const node = next.atlas.find((candidate) => candidate.id === mark.id);
-        if (node === undefined) throw new BrainError("An evidence mark names an Atlas node that does not exist.");
-        if (mark.index === null || node.evidence[mark.index] === undefined) {
-          throw new BrainError("An evidence mark names evidence that does not exist.");
-        }
-        const evidence = node.evidence.map((ref, index) =>
-          index === mark.index ? { ...ref, freshness: mark.freshness } : ref,
-        );
-        next = {
-          ...next,
-          atlas: next.atlas.map((candidate) => (candidate.id === mark.id ? { ...candidate, evidence } : candidate)),
-        };
-      }
-      return next;
+    case "atlas.stale": {
+      // Written only at a rebuild (MINI.md §28: a file attachment that
+      // drifted since the entry was written is marked stale at rebuild). The
+      // mark is a marker on the entry, like a pin — and clearing is a delete,
+      // never a phantom undefined. Blocks nothing, deletes nothing.
+      const node = brain.atlas.find((candidate) => candidate.id === write.id);
+      if (node === undefined) throw new BrainError("An Atlas stale mark names a node that does not exist.");
+      const atlas = brain.atlas.map((candidate) => {
+        if (candidate.id !== write.id) return candidate;
+        if (write.stale === true) return { ...candidate, stale: true };
+        const { stale: _stale, ...cleared } = candidate;
+        void _stale;
+        return cleared;
+      });
+      return { ...brain, atlas };
     }
 
     case "chat.record":
@@ -80,14 +74,18 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
 
     case "atlas.upsert": {
-      // Edges are stored as written (MINI.md §2.1, confirmed): the graph is
-      // the agent's garden and permissive by intent — a flood of unconnected
-      // nodes or an edge to a vanished target is the agent's to tend, not
-      // the runtime's to validate away.
+      // Links and attachments are stored as written (MINI.md §2.1, confirmed):
+      // the Atlas is the agent's garden and permissive by intent — a node
+      // floating unconnected, or one linking a vanished target, is the
+      // agent's to tend, not the runtime's to validate away.
+      // An update re-asserts the entry and clears the stale marker, like an
+      // update would re-assert any other promise: the marker is collapse-time
+      // truth, and the live check re-detects drift from updatedAt.
       const exists = brain.atlas.some((node) => node.id === write.node.id);
+      const node: AtlasNode = exists ? clearStale(write.node) : write.node;
       const atlas = exists
-        ? brain.atlas.map((node) => (node.id === write.node.id ? write.node : node))
-        : [...brain.atlas, write.node];
+        ? brain.atlas.map((candidate) => (candidate.id === node.id ? node : candidate))
+        : [...brain.atlas, node];
       return { ...brain, atlas };
     }
 
@@ -109,14 +107,12 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
         case "ledger": {
           const ledger = brain.ledger.filter((entry) => entry.id !== write.id);
           if (ledger.length === brain.ledger.length) throw new BrainError("No Ledger record is named by that handle.");
-          // Evidence IDs pointing at the deleted entry are the agent's to clean up;
-          // the Brain does not cascade a delete across the graph.
           return { ...brain, ledger };
         }
         case "atlas": {
           const atlas = brain.atlas.filter((node) => node.id !== write.id);
           if (atlas.length === brain.atlas.length) throw new BrainError("No Atlas node is named by that handle.");
-          // No cascade: edges naming the deleted node stay as they are. The
+          // No cascade: links and attachments naming the deleted node stay as they are. The
           // agent tends its own graph (§2.1, §2.3); a dead reference is
           // something it can see and repair, not something to hide.
           return { ...brain, atlas };
@@ -127,6 +123,14 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
 }
 
 /** Places or clears the pin marker on one record; a cleared pin removes the key, never leaves `pinned: undefined` lying around. */
+/** A re-written node re-asserts its text and attachments; the stale marker is collapse-time truth and is cleared. */
+function clearStale(node: AtlasNode): AtlasNode {
+  if (node.stale === undefined) return node;
+  const { stale: _stale, ...cleared } = node;
+  void _stale;
+  return cleared;
+}
+
 function setPinRecord<T extends { pinned?: "user" | "agent" }>(record: T, pinned: "user" | "agent" | null): T {
   if (pinned === null) {
     // Deleting the key is what "unpinned" means; a cleared pin must not

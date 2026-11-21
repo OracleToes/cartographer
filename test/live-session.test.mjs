@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,8 +12,6 @@ import { openBrain } from "../dist/runtime/brain-store.js";
 import { closeLiveSession, interruptRun, openLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
-
-const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -106,16 +103,15 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
   }
 });
 
-test("read feeds atlas evidence; the digest verifies end to end", async () => {
+test("read feeds atlas attachments; the node carries the reference", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
-  const fileDigest = sha256(readFileSync(join(root, "src", "verify-me.ts")));
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
-      claim: "The answer is 42.",
-      evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: fileDigest, excerpt: "export const answer = 42;" }],
+      text: "The answer is 42.",
+      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
@@ -126,8 +122,7 @@ test("read feeds atlas evidence; the digest verifies end to end", async () => {
     assert.equal(settled.status, "done");
     const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
-    assert.equal(nodes[0].evidence[0].digest, fileDigest);
-    assert.equal(nodes[0].evidence[0].freshness, "fresh");
+    assert.deepEqual(nodes[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
     assert.match(blockOf(captured[2]).content, /pending:\n  A1 · atlas create/);
   } finally {
     await closeLiveSession(session);
@@ -176,15 +171,16 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await cleanup();
 });
 
-test("read reports the digest and range an evidence claim cites", async () => {
+test("read reports the path, range, total lines, and excerpt", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-y", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   const range = await byName.read.execute({ path: "src/verify-me.ts", startLine: 1, endLine: 1 }, api, {});
   const output = range.output.map((part) => part.text).join("");
-  assert.match(output, /digest: [0-9a-f]{64}/);
   assert.match(output, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
+  assert.match(output, /export const answer = 42;/);
+  assert.doesNotMatch(output, /digest/);
   await cleanup();
 });
 
@@ -197,7 +193,6 @@ test("read bounds are independently open: whole file, from a line, through a lin
   const output = whole.output.map((part) => part.text).join("");
   assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
   assert.match(output, /export const answer = 42;/);
-  assert.match(output, /digest: [0-9a-f]{64}/);
   const fromStart = await byName.read.execute({ path: "src/verify-me.ts", startLine: 2 }, api, {});
   const fromStartOut = fromStart.output.map((part) => part.text).join("");
   assert.match(fromStartOut, /src\/verify-me\.ts:2-2 \(of 2 lines\)/);
@@ -213,9 +208,8 @@ test("unknown handles are explicit errors, never guesses", async () => {
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  const goodDigest = sha256(readFileSync(join(root, "src", "verify-me.ts")));
   await assert.rejects(
-    byName.atlas.execute({ handle: "Z9", title: "t", claim: "c", evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: goodDigest, excerpt: "export const answer = 42;" }] }, api, {}),
+    byName.atlas.execute({ handle: "Z9", title: "t", text: "c" }, api, {}),
     /does not name/,
   );
   await assert.rejects(
@@ -232,8 +226,8 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
-      claim: "The answer is 42.",
-      evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: sha256(readFileSync(join(root, "src", "verify-me.ts"))), excerpt: "export const answer = 42;" }],
+      text: "The answer is 42.",
+      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "the map and the books diverged" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
@@ -280,7 +274,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
   }
 });
 
-test("stale evidence rides the collapse: the frozen projection carries the marks", async () => {
+test("drift rides the collapse: the frozen projection carries the marks", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
@@ -288,8 +282,8 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
     factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
-      claim: "The answer is 42.",
-      evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: sha256(readFileSync(join(root, "src", "verify-me.ts"))), excerpt: "export const answer = 42;" }],
+      text: "The answer is 42.",
+      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "rebuild" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
@@ -297,8 +291,11 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
   try {
     const first = await submitInput(session, "learn this");
     await first.wait(BACKGROUND_CONTEXT);
-    // The evidence file drifts after the claim was written.
-    writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 43;\n");
+    // The file drifts (and is touched) after the entry was written.
+    const driftPath = join(root, "src", "verify-me.ts");
+    writeFileSync(driftPath, "export const answer = 43;\n");
+    const drift = new Date(1_700_001_000_000);
+    utimesSync(driftPath, drift, drift);
     const reason = session.takeCollapseRequest();
     const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
     const outcome = await collapseLiveSession(session, options(), reason ?? "person-triggered");
@@ -307,12 +304,12 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
       { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },
       [],
     );
-    assert.match(block, /stale:\n  A1 \(evidence changed\)/);
+    assert.match(block, /stale:\n  A1 \(stale\)/);
     const fresh = outcome.session;
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-3" })], { stopReason: "toolUse" }))]);
     const again = await submitInput(fresh, "and now?");
     await again.wait(BACKGROUND_CONTEXT);
-    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 \(evidence changed\)/);
+    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 \(stale\)/);
     await closeLiveSession(fresh);
   } finally {
     await closeLiveSession(session).catch(() => undefined);

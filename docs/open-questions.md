@@ -310,9 +310,12 @@ matches "current state, not audit history", but it has not been checked that Pi
 supports it for this document type in this version. *Needs:* a check before it is
 relied on.
 
-**Q13.5 — Resolved.** Confirmed by the person: a changed digest marks the
+**Q13.5 — Resolved.** Confirmed by the person: a changed digest marked the
 record stale — a gentle signal to update the Brain, never a block. See
-`docs/intent.md` §28.
+`docs/intent.md` §28. Amended 2026-11-21: the digest check was removed with
+the evidence machinery; the same rule now applies to a file attachment
+changing (missing, or newer than the entry was written) — a gentle signal
+to update the Brain, never a block.
 
 ## §14. Matters of taste, low stakes
 

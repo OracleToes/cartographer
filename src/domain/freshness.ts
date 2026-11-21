@@ -1,34 +1,33 @@
 /**
- * Digest drift, checked at a rebuild (MINI.md §28; docs/intent.md §28).
+ * Attachment-drift checks (MINI.md §28; docs/intent.md §28).
  *
- * An Atlas claim whose evidence file changed since it was checked is marked
- * stale. It gently informs the agent to update its Brain; it blocks nothing
- * and deletes nothing. Between collapses nothing is re-checked — the
- * projection is frozen, and the stale line names what was stale at rebuild.
+ * An Atlas node attached to a file is stale when the file is missing, or when
+ * its mtime is newer than the node was written. It gently informs the agent
+ * to update its Brain; it blocks nothing and deletes nothing. Non-file
+ * attachments carry no signal and are never checked — the Brain is tended by
+ * the agent, not by the runtime.
  *
- * Only file-backed evidence is checked here. `context` sources verify by
- * hand and keep whatever freshness they carry.
+ * The mark is checked live (the state block names what is stale now) and
+ * stored at collapse, so the frozen projection carries the collapse-time
+ * truth.
  */
-import type { BrainWrite } from "./brain.js";
 import type { CartoBrain } from "./records.js";
 
 /**
- * @param digestFor Returns the file's current digest, or `null` when the
- *   path escapes the project root, is missing, or cannot be read.
+ * @param mtimeFor Returns the file's mtime in ms, or `null` when the path is
+ *   missing or cannot be resolved inside the project root.
  */
-export function freshnessMarks(
-  brain: CartoBrain,
-  digestFor: (path: string) => string | null,
-): BrainWrite {
-  const marks: Array<{ record: "atlas"; id: string; index: number | null; freshness: "fresh" | "stale" }> = [];
-  const verify = (stored: string, current: string | null): "fresh" | "stale" =>
-    current !== null && current === stored ? "fresh" : "stale";
-
+export function staleAtlasNodeIds(brain: CartoBrain, mtimeFor: (path: string) => number | null): string[] {
+  const stale: string[] = [];
   for (const node of brain.atlas) {
-    node.evidence.forEach((ref, index) => {
-      if (ref.kind !== "file") return;
-      marks.push({ record: "atlas", id: node.id, index, freshness: verify(ref.digest, digestFor(ref.path)) });
-    });
+    for (const attachment of node.attachments) {
+      if (attachment.kind !== "file") continue;
+      const mtime = mtimeFor(attachment.path);
+      if (mtime === null || mtime > node.updatedAt) {
+        stale.push(node.id);
+        break;
+      }
+    }
   }
-  return { kind: "evidence.refresh", marks };
+  return stale;
 }

@@ -6,26 +6,15 @@
 
 export type RecordId = string;
 
-export type Freshness = "fresh" | "stale" | "unknown";
-
-export type SourceRef =
-  | {
-      kind: "file";
-      path: string;
-      startLine: number;
-      endLine: number;
-      /** Content digest at the time the evidence was checked. */
-      digest: string;
-      excerpt: string;
-      freshness: Freshness;
-    }
-  | {
-      kind: "context";
-      /** The generation the excerpt came from. */
-      contextId: string;
-      excerpt: string;
-      freshness: Freshness;
-    };
+/**
+ * Anything an Atlas node points at. A file attachment resolves to a path
+ * inside the project root (the workspace boundary, MINI.md §7 — the file
+ * may not exist yet; the stale mark is what notices). A record attachment
+ * resolves to any other Brain record by id. No types, no kinds, no digests.
+ */
+export type Attachment =
+  | { kind: "file"; path: string }
+  | { kind: "record"; id: RecordId };
 
 /** A deliberate durable conversation record. Plain model output is not Chat. */
 export interface ChatRecord {
@@ -43,7 +32,6 @@ export type LedgerStatus = "open" | "answered" | "closed";
 
 export interface LedgerAnswer {
   text: string;
-  evidenceIds: RecordId[];
 }
 
 export interface LedgerEntry {
@@ -59,24 +47,29 @@ export interface LedgerEntry {
   updatedAt: number;
 }
 
-export type AtlasEdgeKind = "replaces" | "depends-on" | "contradicts";
-
 /**
- * A typed, optional edge to another Atlas node (MINI.md §2.1, confirmed).
- * Nothing requires an edge; a node or a sub-graph may float unconnected.
+ * An Atlas node: a name and a text entry (MINI.md §2.1, confirmed). A node
+ * may be linked to other Atlas nodes, or attached to any other reference in
+ * Carto — a file, a Ledger entry, a Chat record. Nothing requires a node to
+ * connect to anything: a node, or a sub-graph, may float unconnected, and
+ * the Atlas is the agent's garden.
+ *
+ * The stale marker is stored at collapse: like a pin, it persists on the
+ * entry — set when a file attachment has drifted (missing, or newer than
+ * the entry was written), cleared when it has not.
  */
-export interface AtlasEdge {
-  kind: AtlasEdgeKind;
-  target: RecordId;
-}
-
 export interface AtlasNode {
   id: RecordId;
+  /** The node's name. */
   title: string;
-  /** The claim the node makes — the trees's leaves are these. */
-  claim: string;
-  evidence: SourceRef[];
-  edges: AtlasEdge[];
+  /** The text entry — what the node holds. */
+  text: string;
+  /** Links to other Atlas nodes' IDs. Plain; nothing typed, nothing required. */
+  links: RecordId[];
+  /** Attachments to files and other records. */
+  attachments: Attachment[];
+  /** The collapse-time marker: a file attachment has drifted. No reason, no bookkeeping. */
+  stale?: boolean;
   /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
   pinned?: "user" | "agent";
   createdAt: number;

@@ -1,29 +1,12 @@
 /**
- * File digests for the rebuild-time freshness check. Hashes bytes; never
- * reads outside the project root.
+ * Path containment inside the project root. The workspace boundary is what
+ * the agentic tools enforce (MINI.md §7); it is not a permission gate.
  */
-import { createHash } from "node:crypto";
-import { createReadStream, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
-export async function sha256File(path: string): Promise<string | null> {
-  try {
-    const stream = createReadStream(path);
-    const hash = createHash("sha256");
-    return await new Promise((resolvePromise, reject) => {
-      stream.on("data", (chunk) => hash.update(chunk as Buffer));
-      stream.on("error", reject);
-      stream.on("end", () => resolvePromise(hash.digest("hex")));
-    });
-  } catch {
-    return null;
-  }
-}
-
-/** Resolve a claim path inside the root; reject anything outside it. */
+/** Resolve a path inside the root; reject anything outside it. */
 export function resolveInsideRoot(root: string, path: string): string | null {
-  // Evidence paths are written by the agent and may be relative to the root
-  // or absolute. Containment is the safety boundary, not a permission ask.
   const candidate = resolve(root, path);
   let real: string;
   try {

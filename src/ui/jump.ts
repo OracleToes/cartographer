@@ -18,7 +18,7 @@ export interface JumpTarget {
 
 export const JUMP_TARGETS: JumpTarget[] = [
   { key: "c", label: "chat — conversation & cards" },
-  { key: "a", label: "atlas — source-backed claims & graph" },
+  { key: "a", label: "atlas — nodes, links & attachments" },
   { key: "l", label: "ledger — goals, notes, questions & progress" },
   { key: "x", label: "context — the surgery view" },
 ];

@@ -6,10 +6,9 @@ import { emptyBrain } from "../dist/domain/records.js";
 import { handleOf } from "../dist/domain/handles.js";
 
 const at = (n) => 1_700_000_000_000 + n * 1_000;
-const source = () => ({ kind: "context", contextId: "gen", excerpt: "excerpt", freshness: "fresh" });
 const chat = (id, author, text, createdAt) => ({ id, author, text, createdAt, updatedAt: createdAt });
 const ledger = (id, kind, text, createdAt) => ({ id, kind, text, status: "open", answer: null, createdAt, updatedAt: createdAt });
-const node = (id, title, claim, createdAt, edges = []) => ({ id, title, claim, evidence: [source()], edges, createdAt, updatedAt: createdAt });
+const node = (id, title, text, createdAt, links = [], attachments = []) => ({ id, title, text, links, attachments, createdAt, updatedAt: createdAt });
 
 test("chat.record appends and handles are assigned", () => {
   const brain = applyWrite(emptyBrain(), { kind: "chat.record", record: chat("c1", "user", "hello", at(1)) }, at(1));
@@ -34,29 +33,41 @@ test("ledger.upsert creates then replaces; instructions and progress are Ledger 
   assert.equal(ledger("p1", "progress", "made progress", at(3)).kind, "progress");
 });
 
-test("atlas.upsert stores edges as written; unconnected nodes float freely", () => {
-  const brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "title", "claim", at(1), [{ kind: "depends-on", target: "ghost" }]) }, at(1));
-  assert.equal(brain.atlas[0].edges.length, 1);
-  assert.equal(brain.atlas[0].edges[0].target, "ghost");
-  const floating = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "solo", "claim", at(2)) }, at(2));
+test("atlas.upsert stores links as written; unconnected nodes float freely", () => {
+  const brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "title", "c", at(1), ["ghost"]) }, at(1));
+  assert.equal(brain.atlas[0].links.length, 1);
+  assert.equal(brain.atlas[0].links[0], "ghost");
+  const floating = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "solo", "c", at(2)) }, at(2));
   assert.equal(floating.atlas.length, 2);
-  assert.equal(floating.atlas[1].edges.length, 0);
+  assert.equal(floating.atlas[1].links.length, 0);
 });
 
-test("edges survive deletion as written (no cascade); a pin is a marker on the entry", () => {
+test("links survive deletion as written (no cascade); a pin is a marker on the entry; stale is a marker on the entry", () => {
   let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "c", at(1)) }, at(1));
-  brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), [{ kind: "depends-on", target: "a1" }]) }, at(2));
+  brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), ["a1"]) }, at(2));
   brain = applyWrite(brain, { kind: "delete", target: "atlas", id: "a1" }, at(3));
-  // No cascade: the edge to the deleted node stays as written; the agent tends it.
+  // No cascade: the link to the deleted node stays as written; the agent tends it.
   assert.equal(brain.atlas.length, 1);
-  assert.equal(brain.atlas[0].edges.length, 1);
-  assert.equal(brain.atlas[0].edges[0].target, "a1");
+  assert.equal(brain.atlas[0].links.length, 1);
+  assert.equal(brain.atlas[0].links[0], "a1");
 
   brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: "user" }, at(4));
   assert.equal(brain.atlas[0].pinned, "user");
   brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: null }, at(5));
   assert.equal(brain.atlas[0].pinned, undefined);
   assert.ok(!("pinned" in brain.atlas[0]), "a cleared pin removes the key, not a phantom undefined");
+
+  brain = applyWrite(brain, { kind: "atlas.stale", id: "a2", stale: true }, at(6));
+  assert.equal(brain.atlas[0].stale, true);
+  brain = applyWrite(brain, { kind: "atlas.stale", id: "a2", stale: false }, at(7));
+  assert.equal(brain.atlas[0].stale, undefined);
+  assert.ok(!("stale" in brain.atlas[0]), "a cleared stale mark removes the key, not a phantom undefined");
+
+  // An update re-asserts the entry: the stale marker is collapse-time truth and is cleared.
+  brain = applyWrite(brain, { kind: "atlas.stale", id: "a2", stale: true }, at(8));
+  brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(9), ["a1"], []) }, at(9));
+  assert.equal(brain.atlas[0].stale, undefined);
+
   const withChat = applyWrite(emptyBrain(), { kind: "chat.record", record: chat("c1", "user", "hi", at(1)) }, at(1));
   const chatPinned = applyWrite(withChat, { kind: "pin.set", target: "chat", id: "c1", pinned: "agent" }, at(2));
   assert.equal(chatPinned.chat[0].pinned, "agent");

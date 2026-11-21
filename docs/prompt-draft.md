@@ -51,9 +51,9 @@ The Brain is how we know anything across a collapse. It has three parts, and
 they are not interchangeable.
 
 **Atlas** is the map of what is true about the project: what a part does, what
-was found, what was ruled out, each backed by evidence we can point at. It is
+was found, what was ruled out, each linked or attached to what it points at. It is
 what we consult before touching something, and it is only worth having while it
-is true. A claim whose evidence changed is stale; we look again rather than
+is true. A node attached to a file that changed is stale; we look again rather than
 trust it.
 
 **Ledger** is our working intent: what we are trying to do, what we have decided,

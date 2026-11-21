@@ -88,7 +88,7 @@ person.
 ## Slice 4 — archive recovery, for the person
 
 Recovery opens the archive read-only and restores chosen entries back into the
-context, restoring original types; evidence that no longer verifies is marked
+context, restoring original types; the entry that no longer verifies is marked
 stale. The archive is Carto's own database, swept item by item (re-scoped
 2026-11-21 — see docs/intent.md §50 and docs/open-questions.md §15). The agent
 gets no tool, command, or signal for any of this (§29, §30).
@@ -137,15 +137,15 @@ the agent; amendments are the person's.
 
 ### Slices
 
-- **R1 — the Brain.** Explicit records as built: Atlas with typed optional
-  edges, Ledger with goals/notes/questions/instructions/progress, Chat, pins.
+- **R1 — the Brain.** Explicit records as built: Atlas (a name and a text entry
+  with plain links to other nodes and attachments to any reference in Carto), Ledger with goals/notes/questions/instructions/progress, Chat, pins.
   (Amended 2026-11-20: pins are markers on any of these records, not a
   separate record kind — see the R5 cleanup addendum.) Single-step delete,
   generation-local handles, the Brain
   store (one document per project, `history: "latest"`, secure-delete, WAL,
   VACUUM on demand), `.brain` out of the agent's reach.
 - **R2 — the projection and the collapse.** Frozen projection persisted per
-  generation, stale-by-digest marking, person-triggered or agent-triggered
+  generation, stale-by-attachment-drift marking, person-triggered or agent-triggered
   collapse, fresh generation, the old store sealed read-only as the archive,
   one collapse of grace, purge that sweeps pinned-to-archive records first,
   then deletes the store, Brain VACUUM.
@@ -165,13 +165,14 @@ the agent; amendments are the person's.
 Not rebuilt and not deleted: `MINI.md`, `AGENTS.md`, `docs/`, `bin/`
 (launcher), `package.json`/`tsconfig.json` (build scaffolding), `LICENSE`.
 
-**Atlas edges are stored as written, 2026-11-20.** The person ruled that
+**Atlas links are stored as written.** The person ruled that
 MINI.md §2.1 is to be applied to the letter: no existence validation on
-edges at write time, and no cascade stripping edges when a node is
+links at write time, and no cascade stripping links when a node is
 deleted. The graph is the agent's garden — a flood of unconnected nodes,
-islands, and edges naming vanished nodes are the agent's to tend. The
+islands, and links naming vanished nodes are the agent's to tend. The
 tool boundary still resolves handles and errors on unknown ones (§6);
-renderers must tolerate dangling edges.
+renderers must tolerate dangling links. (Typed edges were removed 2026-11-21 —
+nothing in this rule applies to them.)
 
 ## R2 landed, 2026-11-20 (`b2c5a44`, `d901f13`)
 
@@ -180,12 +181,14 @@ The frozen projection and the collapse ceremony exist and are tested.
 - **Projection** (`domain/projection.ts`): structure, handles, state; no
   transcript copy, no Chat text; no context budget and no omission list —
   none was ever confirmed; every durable ID line carries an ISO 8601 UTC
-  timestamp; dangling edges render as `(gone)`. Empty Brain renders
+  timestamp; dangling links and attachments render as `(gone)`. Empty Brain renders
   `(the Brain is empty)`.
-- **Freshness at rebuild** (`domain/freshness.ts`, `runtime/digest.ts`):
-  digest drift on file-backed evidence marks stale; nothing blocks,
-  nothing deletes; `context` sources verify by hand; paths resolve inside
-  the root or not at all. Between collapses nothing is re-checked.
+- **Freshness at rebuild** (`domain/freshness.ts`):
+  attachment drift on file-backed references marks the node stale —
+  missing, or newer than the entry was written; nothing blocks, nothing
+  deletes; paths resolve inside the root or not at all. Between collapses
+  the state block and the views check the same signal live; the collapse
+  stores the mark on the entry.
 - **Snapshots** (`runtime/projection-files.ts`): one `.projection.md` +
   `.projection.json` per generation, written atomically, sealed `0o444`
   with the store at collapse, deleted at purge; a crash reopens identical
@@ -216,8 +219,9 @@ The live session and the tools exist and are wired end to end.
   `edit`, `shell`, `tree`, `collapse`, `sleep` — the confirmed §10a surface,
   nothing more; wakes are scrapped. pi-schema validators;
   handles are the only record references; unknown handles are explicit
-  errors at the call site. Atlas evidence is verified against the file's
-  current digest. The pin tool pins or removes a marker on one Brain record
+  errors at the call site. Atlas attachments are stored as written — a
+  file attachment stays inside the root (it need not exist; the stale mark
+  is what notices) — not verified against a digest. The pin tool pins or removes a marker on one Brain record
   (atlas, ledger, chat) — no reason, no source, no bookkeeping. The boundary: every path resolves inside the project root, a
   symlink that escapes is rejected, `.brain` is untouchable by Carto tools.
 - **Live session** (`runtime/live-session.ts`, `runtime/carto-extension.ts`):
@@ -235,7 +239,7 @@ The live session and the tools exist and are wired end to end.
 - **The block** is rendered from the Brain and the session, never persisted:
   context fullness (last provider report + tool work since), space by Brain
   part, one line per pending write named by handle (ephemeral, cleared at
-  collapse), stale evidence named by handle, the tree anchored
+  collapse), stale entries named by handle, the tree anchored
   where the agent's attention is with Atlas-attached files marked.
 - **Fixed in passing:** the collapse ceremony now creates the new generation's
   store (empty, valid) at snapshot time — without it an open-time reconcile
@@ -404,8 +408,7 @@ against the installed packages, none resolved by fiat:
   `SqliteStorage` and `openNodeSqliteDatabase` (used, not reimplemented),
   the collapse ceremony's primitives, pi-schema arg validation, pi-ai faux
   provider in tests, Node builtins only where Pi has no opinion
-  (`parseArgs`, `readline` for the headless placeholder, `path`/`fs`/`os`,
-  `crypto` for digests).
+  (`parseArgs`, `readline` for the headless placeholder, `path`/`fs`/`os`).
 - Not pi's job by design: our projection/handles/freshness/state-block
   machinery, the tree renderer, config files, the installer, the CLI shim.
   pi-tui is unused so far (nothing renders yet).
@@ -484,12 +487,10 @@ Sweep results, everything not previously recorded:
   provider responses; it has no client-side token estimator — our
   JSON-length/4 counts (`estimatePart`, state block) are labelled
   estimates and stay.
-- **sha256 / digests vs pi — kept.** pi ships no file-digest helper
-  (its read/edit/path-utils hash nothing). `digest.ts` (`sha256File`)
-  backs evidence freshness; `workspace.ts` inlines the same hex sha256
-  over bytes it already holds in memory (same format, one-liner,
-  intentional — avoids a second read). MINI.md's digests are product
-  semantics pi has no opinion on.
+- **sha256 / digests — removed 2026-11-21.** Digests were the check on
+  evidence; evidence is gone, so the digests are gone with it. `digest.ts`
+  is now the path-containment helper only; `read`'s output carries no
+  digest; attachment staleness is checked by mtime, not by content hash.
 - **project-tree vs pi — kept.** An Atlas-attached, display-bounded
   renderer for the state block (spec §6.1). pi-tui is interactive
   rendering; nothing pi ships renders a prompt-tail tree.
@@ -585,13 +586,13 @@ AGENTS.md forbids… including all tools and such"). Findings:
 - **Model-visible schema budgets, all unasked, all removed:** Text
   maxLength 24,000 (the spec strikes "model-visible length limits on Brain
   entries", §13), HandleRef 8, atlas title 240, path 4,096 (five uses),
-  digest 128, evidence maxItems 32/12, ledger evidence maxItems 32, pin
+  pin
   item 500 / reason 1,000, tree depth maximum 12 (minimum 0 kept),
   collapse reason 1,000, edit oldText/newText 100,000 — plus the matching
   runtime rejection `MAX_EDIT_CHARS` and its tool-description sentence.
   The real guard in edit is the unique-occurrence rule; the real wall in
-  inspect/edit/shell is root confinement with symlink rejection; the real
-  check on evidence is the digest. None of those count characters.
+  inspect/edit/shell is root confinement with symlink rejection. None of
+  those count characters.
 - **inspect has NO limits, person's word 2026-11-20**: "NO LIMITS ON
   THE INSPECT TOOL" — the 400-line / 24,000-char excerpt bounds, the
   range-width rejection, and the `[...truncated]` marker were mine, built
@@ -659,8 +660,7 @@ AGENTS.md forbids… including all tools and such"). Findings:
 - **`read` without a range reads the whole file** — `startLine`/`endLine`
   are optional; omit both for the whole file, pass both for a range, one
   without the other errors ("pass both startLine and endLine, or neither").
-  The digest is always the whole file's. The tool description states exactly
-  that.
+  The tool description states exactly that — the excerpt carries no digest.
 - **The `contextWindow` ≥ 1024 floor is gone.** It was Carto's invention, not
   llama.cpp's — nothing in the server enforces it. The config and the
   `--context-window` flag now require only an integer ≥ 0: 0 is the valid

@@ -17,7 +17,7 @@
  *     A3 · atlas upsert
  *     C7 · chat record
  *   stale:
- *     A5 (evidence changed)
+ *     A5 (stale)
  *   tree: /abs/path (depth 2)
  *     ./
  *     MINI.md  22K  A1
@@ -59,7 +59,7 @@ export interface StateBlockInput {
   sizes: { atlas: number; ledger: number; chat: number };
   /** Pending Brain writes since the projection was rebuilt. Ephemeral (§34). */
   pending: PendingWrite[];
-  /** Handles whose evidence no longer verifies, as labelled (e.g. "A5 (evidence changed)"). */
+  /** Handles of Atlas entries whose file attachment has drifted, as labelled (e.g. "A5 (stale)"). */
   stale: string[];
   /** Handles for the write-resolution of pending entries (the Brain's table). */
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
@@ -172,9 +172,4 @@ export function stripStateBlocks<T extends MessageLike>(messages: readonly T[]):
 /** Strip markers, then append the block as the trailing user message. */
 export function appendStateBlock(messages: readonly MessageLike[], block: string, now: number): MessageLike[] {
   return [...stripStateBlocks(messages), { role: "user", content: block, timestamp: now }];
-}
-
-/** Resolve a handle for the stale list, prefixed by what changed. */
-export function staleHandle(label: string, handle: string | undefined, what: string): string {
-  return `${handle ?? label} (${what})`;
 }

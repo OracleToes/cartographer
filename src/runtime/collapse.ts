@@ -23,12 +23,12 @@ import { chmodSync, existsSync, readdirSync, statSync, unlinkSync } from "node:f
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
-import { freshnessMarks } from "../domain/freshness.js";
+import { staleAtlasNodeIds } from "../domain/freshness.js";
 import { projectContext } from "../domain/projection.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
-import { sha256File, resolveInsideRoot } from "./digest.js";
+import { lexicalProjectPath } from "./workspace.js";
 import { contextDirectory, removeSnapshot, sealSnapshot, snapshotPaths, unsealSnapshot, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -161,23 +161,41 @@ export function reconcileGenerations(root: string): { live: GenerationFiles | nu
   return { live, archive, removed };
 }
 
+/** Lexical resolve; returns null instead of throwing. */
+function safeResolve(root: string, path: string): string | null {
+  try {
+    return lexicalProjectPath(root, path);
+  } catch {
+    return null;
+  }
+}
+
+function mtimeOf(root: string, path: string): number | null {
+  const real = safeResolve(root, path);
+  if (real === null) return null;
+  try {
+    return statSync(real).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Verify every file-backed evidence reference against the filesystem and
- * apply the resulting marks. Must run before the snapshot is rendered, so
- * the frozen projection carries the fresh-from-rebuild truth.
+ * Check every Atlas file attachment against the filesystem and apply the
+ * resulting collapse-time marks. Must run before the snapshot is rendered,
+ * so the frozen projection carries the fresh-from-rebuild truth: a drifted
+ * attachment marks the node stale, a fresh one clears the mark, like a pin.
  */
 export async function refreshFreshness(root: string, brain: CartoBrain, apply: BrainStore["apply"], now: number): Promise<CartoBrain> {
-  const paths = new Set<string>();
-  for (const node of brain.atlas) for (const ref of node.evidence) if (ref.kind === "file") paths.add(ref.path);
-  const digests = new Map<string, string | null>();
-  for (const path of paths) {
-    const real = resolveInsideRoot(root, path);
-    digests.set(path, real === null ? null : await sha256File(real));
+  const stale = new Set(staleAtlasNodeIds(brain, (path) => mtimeOf(root, path)));
+  let next = brain;
+  for (const node of brain.atlas) {
+    const shouldBeStale = stale.has(node.id);
+    const isStale = node.stale === true;
+    if (shouldBeStale === isStale) continue;
+    next = await apply({ kind: "atlas.stale", id: node.id, stale: shouldBeStale }, now);
   }
-  const digestFor = (path: string): string | null => digests.get(path) ?? null;
-  const marks = freshnessMarks(brain, digestFor);
-  if (marks.kind === "evidence.refresh" && marks.marks.length === 0) return brain;
-  return apply(marks, now);
+  return next;
 }
 
 export interface CollapseOptions {

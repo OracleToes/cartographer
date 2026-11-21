@@ -8,7 +8,7 @@
  * one row, segmented by part, honest about what is estimate and what is measured.
  * The whole app carries one cell of padding on every edge.
  *
- * Pinned items and stale evidence are evident directly inside their books.
+ * Pinned items and stale Atlas entries are evident directly inside their books.
  *
  * State is one explicit value; behaviour is functions over it (MINI.md §12).
  * Pi performs; Carto adds only the composition.
@@ -46,7 +46,7 @@ import {
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
-import { CARTO_INSTRUCTIONS, renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
+import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
@@ -103,8 +103,8 @@ interface TuiState {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, contextTokens: number = 0): SidebarCounts {
-  const marks = staleMarks(brainState);
+function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root: string, contextTokens: number = 0): SidebarCounts {
+  const marks = liveStaleMarks(brainState, root);
   const stale: Partial<Record<"atlas" | "ledger", number>> = {};
   for (const mark of marks) {
     if (mark.kind === "atlas") {
@@ -259,7 +259,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const refreshSidebar = async () => {
     const brainState = await brain.read();
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
-    sidebar.setCounts(countSidebar(brainState, contextTokens));
+    sidebar.setCounts(countSidebar(brainState, options.root, contextTokens));
     sidebar.setActiveBook(state.view);
     tui.requestRender();
   };
@@ -369,7 +369,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sidebar.setActiveBook(view);
 
     const brainState = await brain.read();
-    const marks = staleMarks(brainState);
+    const marks = liveStaleMarks(brainState, options.root);
 
     if (view === "chat") {
       tui.setFocus(editor);
@@ -410,7 +410,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     await rebuildTranscript();
     const fresh = await brain.read();
-    if (state.view === "atlas") atlasView.setData(fresh, staleMarks(fresh));
+    if (state.view === "atlas") atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
     if (state.view === "ledger") ledgerView.setData(fresh);
     if (state.view === "context") await syncContextView(fresh);
     await refreshSidebar();

@@ -118,7 +118,8 @@ records coverage and gaps, not a score.
   test names the break it catches. Deleted what did not earn its place,
   consolidated what covered the same break twice, and strengthened weak
   assertions in place rather than padding the count.
-- Removed: the `contradicts`-edges storage test (duplicate of the
+- Removed (and re-scoped 2026-11-21 with the evidence/edge cut): the
+  `contradicts`-edges storage test (duplicate of the
   storage-as-written guard — the same break through a second door; the
   no-cascade law stays covered by the deletion test); a tautological
   `total`/`sizes` assertion pair in the projection test (it re-derived the
@@ -130,8 +131,8 @@ records coverage and gaps, not a score.
 - Strengthened in place: `splitContextMessages` now asserts exclusive
   bucket attribution (an empty bucket reports zero, not a share of the
   rest) instead of "everything > 0".
-- Housekeeping: the misleading "delete removes edges" title corrected to
-  state the law (no cascade; edges stay as written); the CLI test helper's
+- Housekeeping: the misleading "delete removes links" title corrected to
+  state the law (no cascade; links stay as written); the CLI test helper's
   vestigial `cwd` parameter and dead variable removed; an unused
   `void faux` dropped.
 - Suite 74 → 73. Boundaries preserved: SQLite (brain-store), the faux
@@ -168,9 +169,9 @@ records coverage and gaps, not a score.
 - As of R3 (2026-11-20): the live session runs against a faux pi-ai provider,
   end to end — a full tool turn with the pending list asserted by handle;
   the `onYield` continuation with the marker asserted present in the store
-  and absent from the payload; `read` feeding `atlas` evidence digests;
+  and absent from the payload; `read` feeding `atlas` file attachments;
   the `tree` tool moving the anchor; an agent-triggered collapse through the
-  ceremony with stale-evidence marks riding the rebuild; a person-triggered
+  ceremony with attachment-drift marks riding the rebuild; a person-triggered
   collapse with no run in flight. Known limit: a tool-calling reply only
   enters a tool round with stopReason `toolUse` — the faux scripts set it,
   and real providers do the same. The ten-second budget is still unaddressed;

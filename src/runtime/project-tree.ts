@@ -133,37 +133,38 @@ export function formatSize(bytes: number): string {
 }
 
 /**
- * Absolute paths of the files an Atlas node links to, mapped to their
- * handles (several nodes may link one file). Evidence paths that resolve
- * outside the project root are dropped — the tree cannot show them anyway.
+ * Absolute paths of the files an Atlas node attaches to, mapped to their
+ * handles (several nodes may attach one file). Attachment paths that
+ * resolve outside the project root are dropped — the tree cannot show them
+ * anyway.
  */
-export function atlasLinkedPaths(brain: CartoBrain, root: string): Map<string, string[]> {
-  const linked = new Map<string, string[]>();
+export function atlasAttachedPaths(brain: CartoBrain, root: string): Map<string, string[]> {
+  const attached = new Map<string, string[]>();
   const r = resolve(root);
   for (const node of brain.atlas) {
     const handle = handleOf(brain.handles, "atlas", node.id) ?? "?";
-    for (const ref of node.evidence) {
-      if (ref.kind !== "file") continue;
-      const absolute = resolve(r, ref.path);
+    for (const attachment of node.attachments) {
+      if (attachment.kind !== "file") continue;
+      const absolute = resolve(r, attachment.path);
       const rel = relative(r, absolute);
       if (rel.startsWith("..") || isAbsolute(rel)) continue;
-      const list = linked.get(absolute) ?? [];
+      const list = attached.get(absolute) ?? [];
       if (!list.includes(handle)) list.push(handle);
-      linked.set(absolute, list);
+      attached.set(absolute, list);
     }
   }
-  return linked;
+  return attached;
 }
 
 /** Render the entry lines (no header — the caller prints the anchor line itself). Display is bounded by depth. */
-export function renderTreeLines(entry: TreeEntry, depth: number, linked: Map<string, string[]>): string[] {
+export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<string, string[]>): string[] {
   const lines: string[] = [];
   const walk = (node: TreeEntry, level: number): void => {
     if (level > depth) return;
     for (const child of node.children ?? []) {
       const indent = "  ".repeat(level);
       const name = child.directory ? `${child.name}/` : child.name;
-      const marks = child.directory ? [] : (linked.get(child.path) ?? []);
+      const marks = child.directory ? [] : (attached.get(child.path) ?? []);
       lines.push(`${indent}${name}  ${formatSize(child.size)}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`);
       walk(child, level + 1);
     }
@@ -182,6 +183,6 @@ export function projectTreeBlock(
   if (!Number.isInteger(depth) || depth < 0) throw new AnchorError(`depth must be a whole number >= 0, got ${depth}`);
   const target = containedAnchor(root, anchor);
   const entry = scanTree(root, target);
-  const lines = renderTreeLines(entry, depth, atlasLinkedPaths(brain, root));
+  const lines = renderTreeLines(entry, depth, atlasAttachedPaths(brain, root));
   return { root: target, depth, lines };
 }

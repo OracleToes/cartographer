@@ -10,6 +10,7 @@
  * the generation's store at collapse. Blocks never accumulate.
  */
 import { readFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 
 import { CompactionTask, GenerationTask, defineExtension, hook, section } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
@@ -27,6 +28,7 @@ import {
 } from "../domain/state-block.js";
 import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
+import { lexicalProjectPath } from "./workspace.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 
@@ -34,10 +36,10 @@ import type { BrainStore } from "./brain-store.js";
 export const CARTO_INSTRUCTIONS = [
   "You are Carto, the project's long-lived working memory.",
   "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
-  "Read before you claim anything about a project file.",
-  "Keep the Brain: Atlas for source-backed claims, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
+  "Read before you write anything about a project file.",
+  "Keep the Brain: Atlas for what you understand about the project, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
-  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale evidence, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
+  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale entries, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
   "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
 ].join("\n");
 
@@ -62,27 +64,50 @@ export interface CartoExtensionOptions {
 
 const estimatePart = estimateSerialized;
 
-/** Records whose file-backed evidence drifted at the last rebuild, as typed marks. */
-export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas"; label: string }> {
-  const marks: Array<{ kind: "atlas"; label: string }> = [];
-  for (const node of brain.atlas) {
-    const drifted = node.evidence.some((ref) => ref.kind === "file" && ref.freshness === "stale");
-    if (!drifted) continue;
-    const handle = handleOf(brain.handles, "atlas", node.id);
-    if (handle !== undefined) marks.push({ kind: "atlas", label: `${handle} (evidence changed)` });
+/** Lexical resolve; returns null instead of throwing (a path outside the root is a stale reference, not a crash). */
+function lexicalProjectPathSafe(root: string, path: string): string | null {
+  try {
+    return lexicalProjectPath(root, path);
+  } catch {
+    return null;
   }
-  const seen = new Set<string>();
-  const unique = marks.filter((mark) => {
-    if (seen.has(mark.label)) return false;
-    seen.add(mark.label);
-    return true;
-  });
-  return unique.sort((left, right) => left.label.localeCompare(right.label));
 }
 
-/** Handles of records whose file-backed evidence drifted at the last rebuild. */
-export function staleHandles(brain: CartoBrain): string[] {
-  return staleMarks(brain).map((mark) => mark.label);
+/** The file's mtime in ms, or null when it cannot be stat'd. */
+function statMtimeSafe(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Atlas nodes whose file attachment has drifted (missing, or newer than
+ * the entry was written) — checked live against the filesystem, not against
+ * the stored marker. The state block and the views ask this; the collapse
+ * persists the same truth onto the entries.
+ */
+export function liveStaleMarks(brain: CartoBrain, root: string): Array<{ kind: "atlas"; label: string }> {
+  const marks: Array<{ kind: "atlas"; label: string }> = [];
+  for (const node of brain.atlas) {
+    const drifted = node.attachments.some((attachment) => {
+      if (attachment.kind !== "file") return false;
+      const real = lexicalProjectPathSafe(root, attachment.path);
+      if (real === null) return true;
+      const stat = statMtimeSafe(real);
+      return stat === null || stat > node.updatedAt;
+    });
+    if (!drifted) continue;
+    const handle = handleOf(brain.handles, "atlas", node.id);
+    if (handle !== undefined) marks.push({ kind: "atlas", label: `${handle} (stale)` });
+  }
+  return marks.sort((left, right) => left.label.localeCompare(right.label));
+}
+
+/** Labels ("A5 (stale)") of Atlas nodes whose file attachment has drifted. */
+export function staleHandles(brain: CartoBrain, root: string): string[] {
+  return liveStaleMarks(brain, root).map((mark) => mark.label);
 }
 
 /** Everything the block reports, from the Brain and the session, for one request. Exported for the tests. */
@@ -133,7 +158,7 @@ export async function renderLiveStateBlock(
     },
     pending: options.session.pending,
     pinned,
-    stale: staleHandles(brain),
+    stale: staleHandles(brain, options.root),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     tree,
   });

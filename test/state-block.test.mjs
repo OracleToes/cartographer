@@ -25,7 +25,7 @@ const input = (overrides = {}) => ({
     { handle: "L2", author: "user" },
     { handle: "A6", author: "agent" },
   ],
-  stale: ["A5 (evidence changed)"],
+  stale: ["A5 (stale)"],
   resolveHandle: (kind, id) => ({ "atlas:a3": "A3", "chat:c7": "C7" })[`${kind}:${id}`],
   tree: { root: "/project", depth: 2, lines: ["./", "src/  24K", "  cli.ts  3K  A9"] },
   ...overrides,
@@ -39,7 +39,7 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /space: system\+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   assert.match(block, /pending:\n  A3 · atlas upsert\n  C7 · chat record/);
   assert.match(block, /pinned:\n  L2 \[u\]\n  A6 \[a\]/);
-  assert.match(block, /stale:\n  A5 \(evidence changed\)/);
+  assert.match(block, /stale:\n  A5 \(stale\)/);
   assert.match(block, /tree: \/project \(depth 2\)/);
 });
 

@@ -6,11 +6,11 @@ import test from "node:test";
 
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
-import { AnchorError, atlasLinkedPaths, formatSize, projectTreeBlock, scanTree } from "../dist/runtime/project-tree.js";
+import { AnchorError, atlasAttachedPaths, formatSize, projectTreeBlock, scanTree } from "../dist/runtime/project-tree.js";
 
 const at = (iso) => Date.parse(iso);
-const source = (path, freshness = "fresh") => ({ kind: "file", path, startLine: 1, endLine: 10, digest: "d", excerpt: "e", freshness });
-const atlasNode = (id, evidence) => ({ id, title: `title ${id}`, claim: `claim ${id}`, evidence, edges: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") });
+const fileAttachment = (path) => ({ kind: "file", path });
+const atlasNode = (id, attachments) => ({ id, title: `title ${id}`, text: `text ${id}`, links: [], attachments, createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") });
 
 const makeProject = () => {
   const root = mkdtempSync(join(tmpdir(), "carto-tree-"));
@@ -64,15 +64,15 @@ test("depth bounds the display; zero depth renders nothing below the anchor", ()
   }
 });
 
-test("Atlas-linked files are marked by handle; relative and absolute evidence paths both resolve", () => {
+test("Atlas-attached files are marked by handle; relative and absolute attachment paths both resolve", () => {
   const root = makeProject();
   try {
     let brain = emptyBrain();
-    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n1", [source("src/cli.ts")]) }, at("2026-11-16T04:00:00.000Z"));
-    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n2", [source(join(root, "MINI.md"))]) }, at("2026-11-16T04:01:00.000Z"));
-    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n3", [source("src/cli.ts")]) }, at("2026-11-16T04:02:00.000Z"));
-    const linked = atlasLinkedPaths(brain, root);
-    assert.deepEqual(linked.get(join(root, "src/cli.ts")), ["A1", "A3"]);
+    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n1", [fileAttachment("src/cli.ts")]) }, at("2026-11-16T04:00:00.000Z"));
+    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n2", [fileAttachment(join(root, "MINI.md"))]) }, at("2026-11-16T04:01:00.000Z"));
+    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n3", [fileAttachment("src/cli.ts")]) }, at("2026-11-16T04:02:00.000Z"));
+    const attached = atlasAttachedPaths(brain, root);
+    assert.deepEqual(attached.get(join(root, "src/cli.ts")), ["A1", "A3"]);
     const block = projectTreeBlock(root, root, 1, brain);
     const mine = block.lines.find((line) => line.includes("MINI.md"));
     assert.match(mine, /MINI\.md  2K  A2$/);
@@ -84,12 +84,12 @@ test("Atlas-linked files are marked by handle; relative and absolute evidence pa
   }
 });
 
-test("evidence paths escaping the root never mark anything", () => {
+test("attachment paths escaping the root never mark anything", () => {
   const root = makeProject();
   try {
     let brain = emptyBrain();
-    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n1", [source("../outside.txt")]) }, at("2026-11-16T04:00:00.000Z"));
-    assert.equal(atlasLinkedPaths(brain, root).size, 0);
+    brain = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("n1", [fileAttachment("../outside.txt")]) }, at("2026-11-16T04:00:00.000Z"));
+    assert.equal(atlasAttachedPaths(brain, root).size, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

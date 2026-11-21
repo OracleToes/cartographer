@@ -7,7 +7,6 @@
  * scoped at the OS level; its cwd is pinned to the root and the boundary
  * above is what the agentic tools enforce.
  */
-import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, writeFile, rename, chmod } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -36,6 +35,14 @@ function lexicalContainment(rootReal: string, candidate: string): void {
   }
 }
 
+/** Lexically resolve a path inside the root, without requiring it to exist. Throws WorkspaceError. */
+export function lexicalProjectPath(root: string, path: string): string {
+  const rootReal = realpathSync(root);
+  const candidate = resolve(rootReal, path);
+  lexicalContainment(rootReal, candidate);
+  return candidate;
+}
+
 /** Resolve an existing path inside the root. Throws WorkspaceError. */
 export function resolveProjectPath(root: string, path: string): string {
   const rootReal = realpathSync(root);
@@ -53,17 +60,15 @@ export interface ReadRange {
   startLine: number;
   endLine: number;
   totalLines: number;
-  digest: string;
   excerpt: string;
 }
 
 /**
- * Read a file, or a line range of it, with the whole file's digest for
- * evidence. Each bound is independently open: omit both for the whole file,
- * pass startLine only to read from that line to the end of the file, pass
- * endLine only to read from line 1 through that line, pass both for a
- * range. A startLine past the end of the file is an error, never an empty
- * read pretending to be an answer.
+ * Read a file, or a line range of it. Each bound is independently open:
+ * omit both for the whole file, pass startLine only to read from that line
+ * to the end of the file, pass endLine only to read from line 1 through
+ * that line, pass both for a range. A startLine past the end of the file
+ * is an error, never an empty read pretending to be an answer.
  */
 export async function readRange(root: string, path: string, startLine?: number, endLine?: number): Promise<ReadRange> {
   if (startLine !== undefined && !Number.isInteger(startLine) || endLine !== undefined && !Number.isInteger(endLine)) {
@@ -80,7 +85,6 @@ export async function readRange(root: string, path: string, startLine?: number, 
   }
   const real = resolveProjectPath(root, path);
   const bytes = await readFile(real);
-  const digest = createHash("sha256").update(bytes).digest("hex");
   const lines = bytes.toString("utf8").split("\n");
   if (startLine !== undefined && startLine > lines.length) {
     throw new WorkspaceError(`startLine ${startLine} is past the end of the file (${lines.length} lines)`);
@@ -89,7 +93,7 @@ export async function readRange(root: string, path: string, startLine?: number, 
   const to = endLine ?? lines.length;
   const slice = lines.slice(from - 1, to);
   const excerpt = slice.join("\n");
-  return { path, startLine: from, endLine: to, totalLines: lines.length, digest, excerpt };
+  return { path, startLine: from, endLine: to, totalLines: lines.length, excerpt };
 }
 
 export interface EditResult {

@@ -118,7 +118,7 @@ behind that node, titled `edit C1`. Submitting writes the record, not the prompt
 | --- | --- | --- |
 | `Person · you` | Chat | `project.editChat` |
 | A Ledger block | Ledger | `project.upsertLedger` |
-| An Atlas block | Atlas | refused, with the reason: its claim is source-backed, so `/atlas` owns the edit |
+| An Atlas block | Atlas | refused — the reason is unruling (previously: its claim was source-backed, so the Atlas owned the edit; the claim is gone 2026-11-21, and the record layer's atlas-edit question is open) |
 | The instructions, a tool schema, the transcript | none | refused, with the reason |
 
 The person said "both layers". This is the record layer. The literal-prompt layer

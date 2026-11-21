@@ -8,13 +8,14 @@
  * list: the person never confirmed one, and a limit the agent cannot
  * measure is worse than no limit (§2.3's logic, applied to the projection).
  *
- * Every durable ID line carries an ISO 8601 UTC timestamp (§6). Edges that
- * name a node which no longer exists render as `(gone)` — the agent tends
- * its graph; the projection never hides a dead reference (§2.1, §2.3).
+ * Every durable ID line carries an ISO 8601 UTC timestamp (§6). Links and
+ * attachments that name a record which no longer exists render as `(gone)` —
+ * the agent tends its graph; the projection never hides a dead reference
+ * (§2.1, §2.3).
  */
 import { handleOf } from "./handles.js";
 import { estimateTokens } from "./estimate.js";
-import type { CartoBrain, SourceRef } from "./records.js";
+import type { CartoBrain } from "./records.js";
 
 export type ProjectionPartId = "atlas" | "ledger";
 
@@ -39,21 +40,6 @@ const tokens = estimateTokens;
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-function sourceLine(source: SourceRef): string {
-  const freshness = `[${source.freshness}]`;
-  if (source.kind === "file") {
-    return `${source.path}:${source.startLine}-${source.endLine} ${freshness}`;
-  }
-  return `context ${source.contextId} ${freshness}`;
-}
-
-function edgeLine(brain: CartoBrain, target: string): string {
-  for (const entry of brain.handles.entries) {
-    if (entry.id === target && entry.kind === "atlas") return entry.handle;
-  }
-  return "(gone)";
-}
-
 function resolveHandle(brain: CartoBrain, id: string): string {
   const hit = brain.handles.entries.find((entry) => entry.id === id);
   return hit === undefined ? "(gone)" : hit.handle;
@@ -73,11 +59,17 @@ export function projectContext(brain: CartoBrain): Projection {
   if (brain.atlas.length > 0) {
     atlas.push("Atlas");
     for (const node of brain.atlas) {
-      atlas.push(`${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned:${node.pinned}]` : ""}`);
-      atlas.push(`  ${node.claim}`);
-      for (const ref of node.evidence) atlas.push(`  evidence: ${sourceLine(ref)}`);
-      for (const edge of node.edges) {
-        atlas.push(`  → ${edge.kind} ${edgeLine(brain, edge.target)}`);
+      atlas.push(
+        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned:${node.pinned}]` : ""}${node.stale ? " · [stale]" : ""}`,
+      );
+      atlas.push(`  ${node.text}`);
+      for (const link of node.links) atlas.push(`  link: ${resolveHandle(brain, link)}`);
+      for (const attachment of node.attachments) {
+        atlas.push(
+          attachment.kind === "file"
+            ? `  attach: ${attachment.path}`
+            : `  attach: ${resolveHandle(brain, attachment.id)}`,
+        );
       }
     }
   }
@@ -90,8 +82,7 @@ export function projectContext(brain: CartoBrain): Projection {
         `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned:${entry.pinned}]` : ""}`,
       );
       if (entry.answer !== null) {
-        const evidence = entry.answer.evidenceIds.map((id) => resolveHandle(brain, id)).join(", ");
-        ledger.push(`  → answered: ${entry.answer.text}${evidence === "" ? "" : ` (evidence: ${evidence})`}`);
+        ledger.push(`  → answered: ${entry.answer.text}`);
       }
     }
   }

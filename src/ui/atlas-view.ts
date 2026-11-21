@@ -1,10 +1,11 @@
 /**
- * The Atlas view (MINI.md §2.1, §6): source-backed claims and the graph.
+ * The Atlas view (MINI.md §2.1, §6): nodes — a name and a text entry —
+ * linked to other nodes or attached to any reference.
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,
  * h/l or left/right to switch between list and detail, esc to return to Chat).
  *
  * Designed with Posting's visual hierarchy: background tints and card surfaces
- * rather than excessive line borders. Pinned nodes and stale evidence are
+ * rather than excessive line borders. Pinned nodes and stale entries are
  * evident directly inside the book entries.
  */
 import {
@@ -202,7 +203,7 @@ export class AtlasView implements Component, Focusable {
       return (
         handle.toLowerCase().includes(q) ||
         node.title.toLowerCase().includes(q) ||
-        node.claim.toLowerCase().includes(q)
+        node.text.toLowerCase().includes(q)
       );
     });
   }
@@ -212,7 +213,7 @@ export class AtlasView implements Component, Focusable {
     const isStale = this.staleHandles.has(handle);
     const isoDate = new Date(node.updatedAt).toISOString();
 
-    const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.bold(node.title || node.claim || "")}`;
+    const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.bold(node.title)}`;
     const badges: string[] = [];
     if (node.pinned !== undefined) badges.push(pinBadgeText(node.pinned, "pin"));
     if (isStale) badges.push(tokens.staleBadge("!stale"));
@@ -222,48 +223,48 @@ export class AtlasView implements Component, Focusable {
     rawLines.push(tokens.cardHeaderBg(padLine(` ${titlePrefix} ${badges.join(" ")}`, width)));
     rawLines.push(tokens.cardBg(" ".repeat(width)));
 
-    // Claim
-    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted("Claim:"))}`, width)));
-    const claimLines = wrapTextWithAnsi(node.claim, Math.max(1, width - 4));
-    for (const cl of claimLines) {
-      rawLines.push(tokens.cardBg(padLine(`   ${cl}`, width)));
+    // Text entry
+    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted("Text:"))}`, width)));
+    const textLines = wrapTextWithAnsi(node.text, Math.max(1, width - 4));
+    for (const tl of textLines) {
+      rawLines.push(tokens.cardBg(padLine(`   ${tl}`, width)));
     }
     rawLines.push(tokens.cardBg(" ".repeat(width)));
 
-    // Evidence
-    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted(`Evidence (${node.evidence.length}):`))}`, width)));
-    if (node.evidence.length === 0) {
+    // Links
+    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted(`Links (${node.links.length}):`))}`, width)));
+    if (node.links.length === 0) {
       rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted("(none)")}`, width)));
     } else {
-      for (const ref of node.evidence) {
-        if (ref.kind === "file") {
-          const freshTag = ref.freshness === "stale" ? tokens.warn("[stale]") : tokens.muted(`[${ref.freshness}]`);
-          rawLines.push(tokens.cardBg(padLine(`   ${tokens.accent("▎")} ${tokens.muted(ref.path)}:${ref.startLine}-${ref.endLine} ${freshTag}`, width)));
-          rawLines.push(tokens.cardBg(padLine(`     ${tokens.muted(`sha256: ${ref.digest.slice(0, 16)}…`)}`, width)));
-          const excerptLines = wrapTextWithAnsi(`"${ref.excerpt.trim()}"`, Math.max(1, width - 6));
-          for (const el of excerptLines) {
-            rawLines.push(tokens.cardBg(padLine(`     ${tokens.output(el)}`, width)));
-          }
-        } else {
-          rawLines.push(tokens.cardBg(padLine(`   ${tokens.accent("▎")} context ${ref.contextId} [${ref.freshness}]`, width)));
+      for (const link of node.links) {
+        let targetHandle = "(gone)";
+        if (this.brain) {
+          const hit = this.brain.handles.entries.find((e) => e.id === link && e.kind === "atlas");
+          if (hit) targetHandle = hit.handle;
         }
+        const targetText = targetHandle === "(gone)" ? tokens.danger("(gone)") : tokens.accent(targetHandle);
+        rawLines.push(tokens.cardBg(padLine(`   ${tokens.accent("▎")} ${targetText}`, width)));
       }
     }
     rawLines.push(tokens.cardBg(" ".repeat(width)));
 
-    // Edges
-    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted(`Graph Edges (${node.edges.length}):`))}`, width)));
-    if (node.edges.length === 0) {
-      rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted("(unconnected node)")}`, width)));
+    // Attachments
+    rawLines.push(tokens.cardBg(padLine(` ${tokens.bold(tokens.muted(`Attachments (${node.attachments.length}):`))}`, width)));
+    if (node.attachments.length === 0) {
+      rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted("(none)")}`, width)));
     } else {
-      for (const edge of node.edges) {
-        let targetHandle = "(gone)";
-        if (this.brain) {
-          const hit = this.brain.handles.entries.find((e) => e.id === edge.target && e.kind === "atlas");
-          if (hit) targetHandle = hit.handle;
+      for (const attachment of node.attachments) {
+        if (attachment.kind === "file") {
+          rawLines.push(tokens.cardBg(padLine(`   ${tokens.accent("▎")} ${tokens.muted(attachment.path)}`, width)));
+        } else {
+          let recordHandle = "(gone)";
+          if (this.brain) {
+            const hit = this.brain.handles.entries.find((e) => e.id === attachment.id);
+            if (hit) recordHandle = hit.handle;
+          }
+          const targetText = recordHandle === "(gone)" ? tokens.danger("(gone)") : tokens.accent(recordHandle);
+          rawLines.push(tokens.cardBg(padLine(`   ${tokens.accent("▎")} ${targetText}`, width)));
         }
-        const targetText = targetHandle === "(gone)" ? tokens.danger("(gone)") : tokens.accent(targetHandle);
-        rawLines.push(tokens.cardBg(padLine(`   ${tokens.muted("→")} ${tokens.tool(edge.kind)} ${targetText}`, width)));
       }
     }
     rawLines.push(tokens.cardBg(" ".repeat(width)));
@@ -293,7 +294,7 @@ export class AtlasView implements Component, Focusable {
     lines.push(padLine("", width));
 
     if (filtered.length === 0) {
-      lines.push(`  ${tokens.muted("(The Atlas is empty. Call the atlas tool to create source-backed claims.)")}`);
+      lines.push(`  ${tokens.muted("(The Atlas is empty. Call the atlas tool to create nodes.)")}`);
       return lines;
     }
 
@@ -318,7 +319,7 @@ export class AtlasView implements Component, Focusable {
         const staleStr = isStale ? tokens.staleBadge("!") : "";
         const badges = `${pinStr}${staleStr}`;
         const titleSpace = Math.max(4, listWidth - 10 - visibleWidth(badges));
-        const titleStr = truncateToWidth(node.title || node.claim || "", titleSpace, "…");
+        const titleStr = truncateToWidth(node.title, titleSpace, "…");
 
         const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${titleStr} ${badges}`;
         const paddedRow = isSelected
@@ -345,7 +346,7 @@ export class AtlasView implements Component, Focusable {
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const pinStr = pinBadgeText(node.pinned, "pin");
         const staleStr = isStale ? tokens.staleBadge("!stale") : "";
-        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${node.title || node.claim || ""} ${pinStr} ${staleStr}`;
+        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${node.title} ${pinStr} ${staleStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);
 
         if (isSelected && this.detailExpanded) {
