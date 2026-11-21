@@ -6,6 +6,10 @@ It works in small, atomic steps, and it treats its own working context as an
 explicit object it maintains: what the context holds can be written, pinned,
 swept, rebuilt, and deleted for good.
 
+It is lightweight, and what it shows the person is information rather than
+chrome. What makes it different is that the context is maintained as a real
+object rather than left to accumulate.
+
 The Brain persists across restarts and collapses. The live context does not.
 
 ## 1. Scope
@@ -17,6 +21,10 @@ Carto has three defining properties:
 2. **Ephemeral context around a persistent Brain.** The working context is
    disposable; the Brain is the memory.
 3. **Scoped tasking.** The agent works in small, atomic steps.
+
+The governing idea is that a model only needs what it needs to act now. Carto
+curates the context to be exactly that, which is why it is short and why what is
+in it carries so much weight.
 
 **Permissive first, and the prompt is trusted.** Carto places no limit on the
 agent that the person has not defined: no turn limit, no maximum length on a name
@@ -63,7 +71,15 @@ the Atlas contains.
 The Atlas is not scored. Attention is a consequence of a small context, not a
 value the system computes.
 
+The Brain stands in for memory: Atlas and Ledger tell the agent its own state,
+what it understands and what it is working on. The agent follows its Brain rather
+than re-deriving what it already decided.
+
 The Atlas tools do not validate connectivity.
+
+What is in the Brain is what is in focus. The agent decides when a record has
+stopped earning its place and deletes it, or moves it to a more permanent Atlas
+entry. Nothing removes a record on the agent's behalf, and nothing scores it.
 
 ### 2.2 Ledger
 
@@ -117,6 +133,11 @@ Everything else is swept to the archive at collapse.
 
 Brain records are not ephemeral. They stay in the Brain until they are deleted,
 or until they are marked for archive and a collapse moves them out (§4.1).
+
+**Only Chat is a conversation.** The person's message is already in the
+transcript, so the prefill does not repeat it. The agent's Chat reaches the model
+as the `chat` tool's result. The prefill carries structure, handles, and state,
+and the transcript is the dialogue.
 
 ### 3.2 Pins
 
@@ -213,11 +234,14 @@ A collapse:
 Brain records not marked for archive are never moved. No Brain record is deleted
 by a collapse; only a delete deletes.
 
-The system prompt carries one standing line: Context may collapse at any time, 
+The system prompt carries one standing line: the context may collapse at any time,
 and a collapse rebuilds the agent's context from the Brain.
 
 The agent is expected to keep its brain up-to-date, because it does not want to
-forget.
+forget: a collapse rebuilds its context and everything it did not write down is
+gone. That is also why the agent rarely collapses on its own. Knowing the person
+may collapse at any moment is what keeps its record of intent, progress, and
+understanding current.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -231,6 +255,12 @@ changed or withdrawn until then.
   next collapse.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
   for now and returns it to the context at the next collapse.
+
+The person and the agent can both create, edit, delete, reorder, and mark records
+of every type the Brain knows, from the workspace as much as from a tool. A record
+the person made is a record of its type, in every respect: the agent does not know
+the difference, and does not know the person made, deleted, or moved anything. To
+the agent, the Brain is simply itself.
 
 Each action can also be **applied now**. Applying an action now changes the
 context immediately, which forces a rebuild at that point: the prefill runs
@@ -290,6 +320,9 @@ is the live context in the order it actually occurred, one entry at a time:
 - new Chat,
 - tool results,
 - the person's messages.
+
+A Brain record written since the last collapse appears here, at the point it was
+written, as `E`. It reaches the head at the next collapse, not before (§5.6).
 
 Body entries are never gathered into clusters, never sorted by kind, and never
 listed by type. They appear where they actually are.
@@ -583,6 +616,13 @@ folded. Each tool gets one collapsible entry in its own sub-tree. Schema-shaped
 content has a human-readable view and a real view. A row that trails off is
 readable in full somewhere.
 
+**An edit made there is an edit to the source of truth.** A Brain-backed entry is
+edited in the Brain, and the change is everywhere that record appears: the
+record, the pending line in the state block, and the next collapse. It is never a
+private annotation layer over what the model sees. Anything not kept stays
+ephemeral, and a staged change takes effect at the next collapse unless the person
+applies it now (§4.1).
+
 **The transcript renders everything the model does.** The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
@@ -668,6 +708,10 @@ The run resumes, the stream continues, and the text stays where it is until it i
 sent.
 
 **Cancel** is an interrupt plus dropping what was queued.
+
+**Interrupt is immediate, not polite. It does not wait for a boundary.** The
+stream stops when the person says so. The three verbs above are what the person
+can do during a run; none of them is a request to stop gracefully.
 
 ## 10. Sleep
 
