@@ -192,6 +192,8 @@ export class ContextView implements Component, Focusable {
   onBack?: () => void;
   onDelete?: (partId: string, itemId: string | number, now: boolean) => void;
   onCollapse?: () => void;
+  /** Fired on `u` over an entry that names a Brain record: withdraw the mark on it (§4.1). */
+  onWithdrawMark?: (partId: string, itemId: string | number) => void;
   /** Fired on `p` over an entry that names a Brain chat record: toggle the pin marker. */
   onTogglePin?: (partId: string, itemId: string | number) => void;
 
@@ -513,6 +515,11 @@ export class ContextView implements Component, Focusable {
         this.onDelete?.(node.target.part, node.target.id, this.nowArmed);
         this.nowArmed = false;
       }
+      return;
+    }
+    if (matchesKey(data, "u")) {
+      const node = this.selectedNode();
+      if (node !== undefined && node.target !== undefined) this.onWithdrawMark?.(node.target.part, node.target.id);
       return;
     }
   }

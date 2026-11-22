@@ -682,47 +682,79 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await refreshSidebar();
     })();
   };
+  /** Mark one archived item for restore, applied by the next collapse (§4.1). */
   archiveView.onRestore = (id) => {
     void (async () => {
-      // An ephemeral item's home is the live context, so it is written there
-      // first and only then taken out of the archive: a store that will not take
-      // it leaves it in the archive, where it still is, rather than nowhere
-      // (§3.3). A Brain record is a transaction inside the Brain and needs no
-      // such ordering.
-      const pending = (await brain.readArchive()).items.find((item) => item.id === id);
-      if (pending === undefined) return;
-      if (pending.record === undefined && !(await restoreEphemeral(state.session, pending))) {
-        pushStatus("the live context would not take it back; it is still in the archive");
+      const result = await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
+      pushStatus(
+        result.refused
+          ? "that item is marked by the agent, and that mark is the agent's to withdraw"
+          : "marked for restore: it comes back at the next collapse",
+      );
+      await refreshArchive();
+      tui.requestRender();
+    })();
+  };
+  /**
+   * Apply an archive mark now (§4.1).
+   *
+   * Restoring an ephemeral item before the collapse it belongs to still rebuilds,
+   * because the item's home is a live store and the only one being built is the
+   * next generation's. That is the honest cost of putting it back early, and the
+   * status line says so rather than pretending the head was untouched.
+   */
+  archiveView.onApplyNow = (id, action) => {
+    void (async () => {
+      if (action === "delete") {
+        await brain.applyArchive({ kind: "drop", id });
+        pushStatus("an archived item is deleted for good");
+        await refreshArchive();
+        await refreshSidebar();
         tui.requestRender();
         return;
       }
-      const result = await brain.applyArchive({ kind: "restore", id });
-      if (result.item === undefined) return;
-      const kind = result.item.record?.kind;
-      // A record that came back can point at a file that has drifted or gone:
-      // the same freshness pass a collapse runs marks it stale, so the person
-      // sees that its attachment no longer resolves the moment it is back
-      // (§3.3) rather than carrying an attachment that quietly lies.
-      if (kind === "atlas") await refreshFreshness(options.root, await brain.read(), brain.apply.bind(brain), Date.now());
-      // A restored ephemeral went back into the live context, which is where it
-      // came from; it is not in the Brain and not in the head (§3.3).
-      pushStatus(
-        kind === undefined
-          ? "put an item back into the live context; pin it to keep it through the next collapse"
-          : `restored ${kind} record ${result.item.record?.value.id ?? ""}`.trim(),
-      );
+      const pending = (await brain.readArchive()).items.find((item) => item.id === id);
+      if (pending === undefined) return;
+      if (pending.record === undefined) {
+        // An ephemeral item's home is the live context, so it is written there
+        // first and only then taken out of the archive: a store that will not
+        // take it leaves it in the archive, where it still is, rather than
+        // nowhere (§3.3).
+        if (!(await restoreEphemeral(state.session, pending))) {
+          pushStatus("the live context would not take it back; it is still in the archive");
+          tui.requestRender();
+          return;
+        }
+      }
+      await brain.applyArchive({ kind: "restore", id });
+      pushStatus(pending.record === undefined ? "put an item back into the live context" : "restored a record to the Brain");
       await refreshArchive();
       await rebuildTranscript();
       await refreshSidebar();
       if (state.view === "context") await syncContextView(await brain.read());
+      tui.requestRender();
     })();
   };
+  /** Withdraw the mark on an archived item: the item stays where it is (§4.1). */
+  archiveView.onWithdrawMark = (id) => {
+    void (async () => {
+      const result = await brain.applyArchive({ kind: "mark", id, action: null, author: "user" });
+      pushStatus(result.refused ? "that mark is the agent's, and it stays until the agent withdraws it" : "mark withdrawn");
+      await refreshArchive();
+      tui.requestRender();
+    })();
+  };
+  /** Mark one archived item for delete; the next collapse is what deletes it (§4.1). */
   archiveView.onDelete = (id) => {
     void (async () => {
-      await brain.applyArchive({ kind: "drop", id });
-      pushStatus("an archived item is deleted for good");
+      const result = await brain.applyArchive({ kind: "mark", id, action: "delete", author: "user" });
+      pushStatus(
+        result.refused
+          ? "that item is marked by the agent, and that mark is the agent's to withdraw"
+          : "marked for delete: it goes at the next collapse, and `d` again applies it now",
+      );
       await refreshArchive();
-      await refreshSidebar();
+      tui.requestRender();
     })();
   };
 
@@ -797,25 +829,72 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * a collapse sweeps it — and apply-now is a rebuild, not a patch.
    */
   contextView.onDelete = async (partId, itemId, now) => {
-    if (partId === "transcript") {
-      const brainState = await brain.read();
-      const chatRecord = brainState.chat.find((r) => r.id === itemId || String(r.id) === String(itemId));
-      if (chatRecord) {
-        await brain.apply({ kind: "mark.set", target: "chat", id: chatRecord.id, action: "delete", author: "user" }, Date.now());
-        pushStatus(`marked chat record #${chatRecord.id} for delete${now ? "" : " at the next collapse"}`);
-      }
+    // A mark on a Brain record, whichever view the person pointed at it from
+    // (§4.1). A chat record arrives from the transcript; the rest arrive by the
+    // id the Context view drew them under.
+    const brainState = await brain.read();
+    const found =
+      brainState.chat.find((record) => String(record.id) === String(itemId)) !== undefined
+        ? ({ kind: "chat", id: String(itemId) } as const)
+        : brainState.ledger.find((entry) => String(entry.id) === String(itemId)) !== undefined
+          ? ({ kind: "ledger", id: String(itemId) } as const)
+          : brainState.atlas.find((node) => String(node.id) === String(itemId)) !== undefined
+            ? ({ kind: "atlas", id: String(itemId) } as const)
+            : undefined;
+    if (found !== undefined) {
+      await brain.apply({ kind: "mark.set", target: found.kind, id: found.id, action: "delete", author: "user" }, Date.now());
+      pushStatus(`marked ${found.kind} record for delete${now ? " now" : " at the next collapse"}`);
+    } else if (partId !== "transcript" && partId !== "tools" && partId !== "ephemera") {
+      pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
     }
-    if (now) {
+    if (now && found !== undefined) {
       await runCollapse("context surgery (now)");
-    } else {
-      await rebuildTranscript();
-      const brainState = await brain.read();
-      await syncContextView(brainState);
-      await refreshSidebar();
+      tui.requestRender();
+      return;
     }
+    await rebuildTranscript();
+    await syncContextView(await brain.read());
+    await refreshSidebar();
     tui.requestRender();
   };
 
+  /**
+   * Withdraw a mark on a Brain record, or leave the record alone if the mark is
+   * the agent's. The person withdraws their own marks; the Brain refuses the
+   * rest, and this is where that refusal is put into words (§4.1).
+   */
+  const withdrawRecordMark = async (target: "chat" | "ledger" | "atlas", id: string) => {
+    try {
+      await brain.apply({ kind: "mark.clear", target, id, author: "user" }, Date.now());
+      pushStatus("mark withdrawn");
+    } catch {
+      pushStatus("that mark is the agent's, and it stays until the agent withdraws it");
+    }
+    await rebuildTranscript();
+    await syncContextView(await brain.read());
+    await refreshSidebar();
+    tui.requestRender();
+  };
+
+  contextView.onWithdrawMark = (partId, itemId) => {
+    void (async () => {
+      const brainState = await brain.read();
+      const kind =
+        brainState.chat.some((record) => String(record.id) === String(itemId))
+          ? "chat"
+          : brainState.ledger.some((entry) => String(entry.id) === String(itemId))
+            ? "ledger"
+            : brainState.atlas.some((node) => String(node.id) === String(itemId))
+              ? "atlas"
+              : undefined;
+      if (kind === undefined) {
+        pushStatus(partId === "ephemera" ? "an item kept in the context carries no mark; a pin is what holds it" : "nothing here carries a mark");
+        tui.requestRender();
+        return;
+      }
+      await withdrawRecordMark(kind, String(itemId));
+    })();
+  };
   // ── The screen ────────────────────────────────────────────────────────────
   // Posting's map of a screen, in bands: one header row, the working area, the
   // prompt (only where you type), the key bar, and the context bar along the
@@ -1161,7 +1240,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       barState.session = outcome.session;
       void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
+      // What the archive did is the person's business, so it is said. Nothing
+      // here reaches the agent: the archive is not in any of its views (§3.3).
+      if (outcome.report.restored.length > 0) pushStatus(`${outcome.report.restored.length} item(s) came back out of the archive`);
+      if (outcome.report.deleted.length > 0) pushStatus(`${outcome.report.deleted.length} archived item(s) deleted for good`);
+      if (outcome.report.dropped.length > 0) pushStatus(`${outcome.report.dropped.length} archived item(s) past their grace, gone`);
       await refreshSidebar();
+      await refreshArchive();
     } catch (error) {
       pushStatus(`collapse failed: ${errorText(error)}`);
     } finally {
@@ -1452,24 +1537,36 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     {
       id: "archive-restore",
       group: "the archive",
-      label: "restore it where it came from",
+      label: "mark it for restore",
+      hint: "at the next collapse; `!r` restores it now",
       key: "r",
       run: () => {
-        const item = archiveView.selectedItem();
-        if (item !== undefined) archiveView.onRestore?.(item.id);
+        if (archiveView.restoreSelected() === "applied") pushStatus("restored now, not at the next collapse");
+        tui.requestRender();
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-withdraw",
+      group: "the archive",
+      label: "withdraw the mark",
+      key: "u",
+      run: () => {
+        if (!archiveView.withdrawSelected()) pushStatus("nothing is marked here");
+        tui.requestRender();
       },
       available: onArchive,
     },
     {
       id: "archive-delete",
       group: "the archive",
-      label: "delete it for good",
-      hint: "takes a second press",
+      label: "mark it for delete",
+      hint: "takes a second press to delete now",
       key: "d",
       run: () => {
         // One act behind one implementation: the key, the palette and `f1` all
         // come here, so the two presses cannot be had from a second route.
-        if (archiveView.deleteSelected() === "armed") pushStatus("press `d` again to delete it for good");
+        if (archiveView.deleteSelected() === "marked") pushStatus("marked for delete; `d` again applies it now");
         tui.requestRender();
       },
       available: onArchive,

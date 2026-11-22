@@ -25,10 +25,14 @@ export class ArchiveView implements Component, Focusable {
   focused = false;
   /** Fired on `p`: place or remove the pin. A pin suspends grace. */
   onTogglePin?: (id: string) => void;
-  /** Fired on `r`: restore the item out of the archive. */
+  /** Fired on `r`: mark the item for restore at the next collapse. */
   onRestore?: (id: string) => void;
   /** Fired on `d`: mark the item for delete at the next collapse. */
   onDelete?: (id: string) => void;
+  /** Fired on `p`/`r`/`d` with the apply-now arm set: the mark, applied at once (§4.1). */
+  onApplyNow?: (id: string, action: "restore" | "delete") => void;
+  /** Fired on `u`: withdraw the mark on the item. A person's own mark is always theirs to withdraw. */
+  onWithdrawMark?: (id: string) => void;
   onBack?: () => void;
 
   private archive: Archive | undefined;
@@ -40,6 +44,12 @@ export class ArchiveView implements Component, Focusable {
    * once, and the second press is what makes the loss deliberate.
    */
   private armed: string | undefined;
+  /**
+   * The apply-now arm (§4.1). `!` arms it so the next mark is applied by a
+   * rebuild now rather than at the next collapse. It is the person's, and it
+   * costs work, so it is armed explicitly every time and clears itself.
+   */
+  private nowArmed = false;
   private scrollOffset = 0;
 
   /**
@@ -52,19 +62,41 @@ export class ArchiveView implements Component, Focusable {
   }
 
   /**
-   * The one `d`: the first press arms the item under the cursor, the second
-   * deletes it. Says which happened, so the caller can tell the person.
+   * The one `d`: the first press marks the item for delete, the second applies
+   * that mark now. Says which happened, so the caller can tell the person.
    */
-  deleteSelected(): "armed" | "deleted" | "none" {
+  deleteSelected(): "marked" | "applied" | "none" {
     const item = this.selectedItem();
     if (item === undefined) return "none";
     if (this.armed === item.id) {
       this.armed = undefined;
-      this.onDelete?.(item.id);
-      return "deleted";
+      this.onApplyNow?.(item.id, "delete");
+      return "applied";
     }
     this.armed = item.id;
-    return "armed";
+    this.onDelete?.(item.id);
+    return "marked";
+  }
+
+  /** The one `u`: withdraw the mark, leaving the item where it is. */
+  withdrawSelected(): boolean {
+    const item = this.selectedItem();
+    if (item === undefined || item.mark === undefined) return false;
+    this.onWithdrawMark?.(item.id);
+    return true;
+  }
+
+  /** The one `r`: mark the item for restore, or apply that mark now when `!` is armed. */
+  restoreSelected(): "marked" | "applied" | "none" {
+    const item = this.selectedItem();
+    if (item === undefined) return "none";
+    if (this.nowArmed) {
+      this.nowArmed = false;
+      this.onApplyNow?.(item.id, "restore");
+      return "applied";
+    }
+    this.onRestore?.(item.id);
+    return "marked";
   }
 
   setData(archive: Archive): void {
@@ -114,23 +146,36 @@ export class ArchiveView implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "r")) {
-      this.onRestore?.(selected.id);
+      // Restore is a mark by default (§4.1): it leaves the item in the archive
+      // and the next collapse returns it. With `!` armed it applies now.
+      this.restoreSelected();
       return;
     }
     if (matchesKey(data, "d")) {
-      // The registry owns `d` while this layer is up, so this is the path only
-      // for a view driven on its own (a test, a preview); it calls the same
-      // rule, so no route deletes in one press.
+      // Delete is a mark too, and the dangerous one, so it takes two presses:
+      // the first marks, the second applies the mark now. A collapse applies a
+      // single-press mark all the same (§4.1).
       if (this.armed === selected.id) {
         this.armed = undefined;
-        this.onDelete?.(selected.id);
+        this.onApplyNow?.(selected.id, "delete");
       } else {
         this.armed = selected.id;
+        this.onDelete?.(selected.id);
       }
+      return;
+    }
+    if (matchesKey(data, "u")) {
+      this.onWithdrawMark?.(selected.id);
+      this.armed = undefined;
+      return;
+    }
+    if (data === "!") {
+      this.nowArmed = !this.nowArmed;
       return;
     }
     // Any other key withdraws the arm: a person who moved on did not mean it.
     this.armed = undefined;
+    this.nowArmed = false;
   }
 
   render(width: number): string[] {
@@ -149,6 +194,7 @@ export class ArchiveView implements Component, Focusable {
       return lines;
     }
     lines.push(canvasLine(`  ${tokens.faint("swept by a collapse · waits one collapse · a pin keeps it")}`, width));
+    if (this.nowArmed) lines.push(canvasLine(`  ${tokens.warn("! armed: the next mark is applied now, not at the next collapse")}`, width));
     lines.push(canvasLine("", width));
     this.items.forEach((item, index) => {
       const selected = index === this.selectedIndex;
@@ -156,12 +202,18 @@ export class ArchiveView implements Component, Focusable {
       const pin = item.pinned === undefined ? "" : ` ${tokens.pin(`⊙ ${item.pinned === "user" ? "you" : "agent"}`)}`;
       // Armed for deletion, said in words: a second press is a real loss, and a
       // key that does nothing visible the first time reads as broken.
-      const armed = this.armed === item.id ? ` ${tokens.warn("d again: delete for good")}` : "";
+      const armed = this.armed === item.id ? ` ${tokens.warn("d again: delete now")}` : "";
+      // A mark is a decision waiting for a collapse, so the row says which one
+      // and who made it: a mark nobody can see reads as nothing having happened.
+      const mark =
+        item.mark === undefined
+          ? ""
+          : ` ${tokens.pin(`→ ${item.mark.action} at the next collapse · ${item.mark.author === "user" ? "you" : "agent"}`)}`;
       const kind = item.record !== undefined ? item.record.kind : (item.ephemeral?.kind ?? "item");
       // A result of a `read` is not just text: restoring it is a claim about a
       // file, so the row says so rather than looking like any other result.
       const from = item.ephemeral?.kind === "readResult" ? readPathOf(item) : undefined;
-      const head = `${marker} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}${armed}`;
+      const head = `${marker} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}${mark}${armed}`;
       lines.push(canvasLine(`  ${head}`, width));
       const summary = from === undefined ? summaryOf(item) : `read of ${from} — ${summaryOf(item)}`;
       const body = wrapTextWithAnsi(summary, Math.max(16, inner - 6)).slice(0, 3);

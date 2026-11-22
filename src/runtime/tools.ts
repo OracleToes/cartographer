@@ -354,7 +354,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw.",
+        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
       parameters: obj({
         handle: HandleRef,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -363,13 +363,18 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args, api) => {
         const current = await brain.read();
         const target = resolveRecord(current, args.handle);
-        if (target.mark?.author === "user" && args.action === "none") {
-          throw new Error(
-            `${normalizeHandle(args.handle)} is marked by the person, and only the person withdraws that mark. Leave it; it is applied at the next collapse.`,
-          );
-        }
+        // Withdrawing a mark the person placed is refused by the Brain (§4.1),
+        // which is the same rule the person's own operations go through. The
+        // refusal is turned into a sentence here, because a tool's error is
+        // something the agent reads and acts on.
         if (args.action === "none") {
-          await brain.apply({ kind: "mark.clear", target: target.kind, id: target.id }, api.now());
+          try {
+            await brain.apply({ kind: "mark.clear", target: target.kind, id: target.id, author: "agent" }, api.now());
+          } catch {
+            throw new Error(
+              `${normalizeHandle(args.handle)} is marked by the person, and only the person withdraws that mark. Leave it; it is applied at the next collapse.`,
+            );
+          }
           pendingWrite(session, { kind: target.kind, action: "unmark", id: target.id });
           return textOutput(`The mark on ${normalizeHandle(args.handle)} is withdrawn.`);
         }

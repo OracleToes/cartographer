@@ -7,6 +7,7 @@ import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript } from "../dist/ui/preview.js";
 import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
+import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
@@ -703,11 +704,12 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
   assert.ok(layer.includes("restore") || layer.includes("delete for good"), "the person's keys are the footer's");
 });
 
-test("the archive deletes for good only on the second press, and says so between them", async () => {
-  const { ArchiveView } = await import("../dist/ui/archive-view.js");
+test("the archive marks first and applies now only on the second press, and says so between them", async () => {
   const view = new ArchiveView();
-  const deleted = [];
-  view.onDelete = (id) => deleted.push(id);
+  const marked = [];
+  const applied = [];
+  view.onDelete = (id) => marked.push(id);
+  view.onApplyNow = (id, action) => applied.push(`${action}:${id}`);
   view.setData({
     version: 1,
     items: [
@@ -716,18 +718,39 @@ test("the archive deletes for good only on the second press, and says so between
     ],
   });
 
-  assert.equal(view.deleteSelected(), "armed", "the first press only arms");
-  assert.deepEqual(deleted, [], "nothing is deleted on the first press");
-  assert.match(view.render(80).join("\n"), /d again: delete for good/, "the arming is visible, or the key looks broken");
-  assert.equal(view.deleteSelected(), "deleted", "the second press deletes");
-  assert.deepEqual(deleted, ["2"], "and deletes the item the cursor named");
+  assert.equal(view.deleteSelected(), "marked", "the first press marks it for delete");
+  assert.deepEqual(marked, ["2"], "and the mark names the item the cursor is on");
+  assert.deepEqual(applied, [], "nothing is applied by the first press");
+  assert.match(view.render(80).join("\n"), /d again: delete now/, "the arming is visible, or the key looks broken");
+  assert.equal(view.deleteSelected(), "applied", "the second press applies the mark now");
+  assert.deepEqual(applied, ["delete:2"], "deleting the item the cursor named");
 
   // Moving the cursor withdraws the arm: a person who moved on did not mean it.
   view.deleteSelected();
   view.handleInput("j");
   view.handleInput("k");
-  assert.equal(view.deleteSelected(), "armed", "the arm did not survive a move");
-  assert.deepEqual(deleted, ["2"], "and nothing else was deleted");
+  assert.equal(view.deleteSelected(), "marked", "the arm did not survive a move");
+  assert.deepEqual(applied, ["delete:2"], "and nothing else was applied");
+});
+
+test("an archive mark is drawn with its action and its author, so it is not invisible", () => {
+  const view = new ArchiveView();
+  view.setData({
+    version: 1,
+    items: [
+      {
+        id: "1",
+        layer: "ephemeral",
+        ephemeral: { kind: "plainText", text: "marked by the agent" },
+        sweptAtGeneration: "g",
+        sweptAtCollapse: 1,
+        sweptAt: 10,
+        mark: { action: "restore", author: "agent" },
+      },
+    ],
+  });
+  const frame = view.render(90).join("\n");
+  assert.match(frame, /→ restore at the next collapse · agent/, "the row says what the collapse will do, and who decided it");
 });
 
 test("the archive keeps a restored item's type and the author of its pin", () => {

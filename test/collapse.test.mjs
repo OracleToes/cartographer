@@ -209,6 +209,88 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
   }
 });
 
+test("restore is a mark: the item waits in the archive, and the next collapse returns it as its type", async () => {
+  const root = tempRoot();
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-live00b", 1_700_000_100);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "a marked note", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "agent" }, at(2));
+    await collapse(root, store);
+    const item = (await store.readArchive()).items[0];
+    assert.ok(item !== undefined);
+
+    // Marked, not moved: §4.1 says the mark is what the collapse applies.
+    await store.applyArchive({ kind: "mark", id: item.id, action: "restore", author: "user" });
+    const waiting = (await store.readArchive()).items;
+    assert.equal(waiting.length, 1, "the item is still in the archive until a collapse runs");
+    assert.deepEqual(waiting[0].mark, { action: "restore", author: "user" });
+    assert.equal((await store.read()).ledger.length, 0, "and it is not in the Brain yet");
+
+    const report = await collapse(root, store);
+    assert.equal(report.restored.length, 1, "the collapse applied the mark");
+    assert.equal((await store.readArchive()).items.length, 0, "it leaves the archive");
+    const brain = await store.read();
+    assert.equal(brain.ledger.length, 1, "and it is a Brain record again");
+    assert.equal(brain.ledger[0].text, "a marked note", "of its original type");
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a marked item does not run out of grace while the mark stands", async () => {
+  const root = tempRoot();
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-live00c", 1_700_000_100);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "holds its place", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "agent" }, at(2));
+    await collapse(root, store);
+    const item = (await store.readArchive()).items[0];
+    await store.applyArchive({ kind: "mark", id: item.id, action: "delete", author: "user" });
+    await store.applyArchive({ kind: "mark", id: item.id, action: null, author: "user" });
+    assert.equal((await store.readArchive()).items[0].mark, undefined, "the person withdrew their own mark");
+
+    await store.applyArchive({ kind: "mark", id: item.id, action: "restore", author: "agent" });
+    const second = await collapse(root, store);
+    assert.deepEqual(second.dropped, [], "a mark holds the item through its grace");
+    assert.equal((await store.readArchive()).items.length, 0, "and the collapse applies it");
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a mark the person placed is theirs to withdraw; the agent may not", async () => {
+  const root = tempRoot();
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-live00d", 1_700_000_100);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "the person's call", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "user" }, at(2));
+    // The same rule on the Brain's own marks: only the person withdraws theirs.
+    await assert.rejects(
+      store.apply({ kind: "mark.clear", target: "ledger", id: "l1", author: "agent" }, at(3)),
+      /person/i,
+      "the agent cannot withdraw a mark the person placed",
+    );
+    await store.apply({ kind: "mark.clear", target: "ledger", id: "l1", author: "user" }, at(4));
+    assert.equal((await store.read()).ledger[0].mark, undefined, "the person withdrew their own");
+
+    await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "agent" }, at(5));
+    await collapse(root, store);
+    const item = (await store.readArchive()).items[0];
+    await store.applyArchive({ kind: "mark", id: item.id, action: "delete", author: "user" });
+    const refused = await store.applyArchive({ kind: "mark", id: item.id, action: null, author: "agent" });
+    assert.equal(refused.refused, true, "the agent cannot withdraw the person's archive mark either");
+    assert.deepEqual((await store.readArchive()).items[0].mark, { action: "delete", author: "user" });
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * A real generation store: what pi writes, so the sweep reads what a session
  * actually leaves behind rather than a fixture shaped like the reader.

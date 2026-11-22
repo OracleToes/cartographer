@@ -313,6 +313,10 @@ export async function collapseLiveSession(
   // prefill is built from is the Brain as it stands after that move (§3.3).
   const report = await collapse(session.root, options.brain, ceremony);
   const next = await openLiveSession(options);
+  // An ephemeral item a mark restored comes home to the live context, which is
+  // the store the collapse just built (§3.3): it goes back as the kind it was,
+  // with no pin, so the next collapse sweeps it again unless the person pins it.
+  for (const item of report.restored) await restoreEphemeral(next, item);
   return { session: next, report, reason };
 }
 

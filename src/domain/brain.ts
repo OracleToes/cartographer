@@ -32,7 +32,7 @@ export type BrainWrite =
   | { kind: "atlas.upsert"; node: AtlasNode }
   | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: "user" | "agent" | null }
   | { kind: "mark.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; action: MarkAction; author: Author }
-  | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId }
+  | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId; author?: Author }
   | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId }
   /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
   | { kind: "ephemeral.pin"; item: PinnedEphemeral }
@@ -124,8 +124,16 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       return marked;
     }
 
-    case "mark.clear":
+    case "mark.clear": {
+      // Only the person withdraws a mark the person placed; the agent withdraws
+      // its own. An author left off is the collapse clearing a mark it is
+      // applying, which is not a withdrawal by either party (§4.1).
+      const marked = findMarked(brain, write.target, write.id);
+      if (write.author === "agent" && marked?.mark?.author === "user") {
+        throw new BrainError(`That mark was placed by the person, and only the person withdraws it.`);
+      }
       return clearMark(brain, write.target, write.id);
+    }
 
     case "pin.set": {
       // A pin means "keep it here" (§3.2). A marker on the entry; no
@@ -157,6 +165,22 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
         }
       }
     }
+  }
+}
+
+/** The record a mark write names, or undefined. */
+function findMarked(
+  brain: CartoBrain,
+  target: "chat" | "ledger" | "atlas",
+  id: RecordId,
+): { mark?: Mark } | undefined {
+  switch (target) {
+    case "chat":
+      return brain.chat.find((record) => record.id === id);
+    case "ledger":
+      return brain.ledger.find((entry) => entry.id === id);
+    case "atlas":
+      return brain.atlas.find((node) => node.id === id);
   }
 }
 

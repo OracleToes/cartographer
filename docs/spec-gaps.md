@@ -16,6 +16,10 @@ rule for the rest of this document: nothing here is closed by an intention.
 
 ## Stage 1 — the archive's marks: restore and delete apply at a collapse
 
+**Status: done.** `ArchivedItem` carries a mark, the collapse applies it after
+the sweep and before grace, restore and delete from the UI go through the mark,
+and `mark.clear` carries an author so the person's own marks are theirs alone.
+
 **Spec.** §4.1: "Archive, restore, and delete are three separate actions, and
 each is a mark by default. Marking applies the action at the next collapse…
 **Marked for restore**, for an entry in the archive, leaves it in the archive for

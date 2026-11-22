@@ -31,7 +31,7 @@ import { projectContext } from "../domain/projection.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
-import type { ArchivedRecord, EphemeralKind, IncomingItem } from "../domain/archive.js";
+import type { ArchivedItem, ArchivedRecord, EphemeralKind, IncomingItem } from "../domain/archive.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { lexicalProjectPath } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
@@ -360,6 +360,14 @@ export interface CollapseReport {
   dropped: readonly string[];
   /** Brain records the sweep moved out of the Brain because they were marked for archive. */
   archived: readonly string[];
+  /**
+   * Items a mark restored. A Brain record went back inside the collapse's own
+   * transaction; an ephemeral item has no home in the Brain, so it travels here
+   * for the caller to put back into the live context (§3.3).
+   */
+  restored: readonly ArchivedItem[];
+  /** Archive items a mark deleted for good. */
+  deleted: readonly string[];
 }
 
 /**
@@ -437,6 +445,8 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     swept: live.generation,
     dropped: applied.dropped,
     archived: leaving.filter((record) => record.action === "archive").map((record) => record.id),
+    restored: applied.restored,
+    deleted: applied.deleted,
   };
 }
 

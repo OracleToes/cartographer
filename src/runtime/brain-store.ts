@@ -35,9 +35,11 @@ import { reconcileHandles } from "../domain/handles.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry } from "../domain/records.js";
 import {
+  applyArchiveMarks,
   dropExpired,
   emptyArchive,
   restore,
+  setArchiveMark,
   setArchivePin,
   sweep,
   type ArchivedItem,
@@ -66,9 +68,17 @@ export interface BrainStore {
    * what the archive drops is gone. Nothing half-done survives a crash at a
    * collapse (§2).
    */
-  applyCollapse(change: CollapseChange): Promise<{ brain: CartoBrain; archive: Archive; dropped: string[] }>;
+  applyCollapse(change: CollapseChange): Promise<{
+    brain: CartoBrain;
+    archive: Archive;
+    dropped: string[];
+    /** Ephemera a mark returned to the live context; the caller writes them back (§3.3). */
+    restored: ArchivedItem[];
+    /** Archive items a mark deleted for good. */
+    deleted: string[];
+  }>;
   /** Replace the archive wholesale, for the person's pin and restore operations. */
-  applyArchive(write: ArchiveWrite): Promise<{ archive: Archive; item?: ArchivedItem }>;
+  applyArchive(write: ArchiveWrite): Promise<{ archive: Archive; item?: ArchivedItem; refused: boolean }>;
   /** Secure-delete the old pages: WAL checkpoint and VACUUM. */
   compact(): Promise<void>;
   close(): Promise<void>;
@@ -123,9 +133,25 @@ export interface CollapseChange {
   now: number;
 }
 
-/** One person-facing archive operation (§3.3). Nothing here is reachable from a tool. */
+/** What a collapse did to the archive, beyond taking items in. */
+export interface ArchiveApplied {
+  /** Items a mark returned to where they came from, in the order they were marked. */
+  restored: ArchivedItem[];
+  /** Items a mark deleted for good. */
+  deleted: string[];
+}
+
+/**
+ * One archive operation (§3.3, §4.1). Nothing here is reachable from a tool.
+ *
+ * Marking is the default and the collapse applies it. `restore` and `drop` are
+ * the same actions applied now, which §4.1 allows for either party: they go
+ * through the mark first so there is one rule, and then the store applies it
+ * immediately instead of waiting.
+ */
 export type ArchiveWrite =
   | { kind: "pin"; id: string; pinned: "user" | "agent" | null }
+  | { kind: "mark"; id: string; action: "restore" | "delete" | null; author: "user" | "agent" }
   | { kind: "restore"; id: string }
   | { kind: "drop"; id: string };
 
@@ -229,11 +255,25 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
         const collapse = (counter?.collapses ?? 0) + 1;
         await tx.run("UPDATE archive_counter SET collapses = ? WHERE id = 1", collapse);
-        const archive = sweep(await readArchiveFrom(tx), change.generation, collapse, change.now, change.incoming);
-        const { archive: nextArchive, dropped } = dropExpired(archive, collapse);
+        // The marks the archive is carrying are applied here, with the Brain's
+        // own (§4.1, §4 step 3-4): a restore puts an item back where it came
+        // from, a delete removes it for good, and then grace is counted, so an
+        // item marked this time is not also dropped this time.
+        const swept = sweep(await readArchiveFrom(tx), change.generation, collapse, change.now, change.incoming);
+        const applied = applyArchiveMarks(swept);
+        for (const item of applied.restored) {
+          // A restored Brain record goes back into the Brain it left, in this
+          // same transaction: there is no moment where it is in neither place.
+          const back = writeBackOf(item);
+          if (back !== undefined) brain = applyWrite(brain, back, change.now);
+        }
+        const { archive: nextArchive, dropped } = dropExpired(applied.archive, collapse);
         await tx.run(UPSERT, JSON.stringify(brain));
         await writeArchiveRows(tx, nextArchive);
-        return { brain, archive: nextArchive, dropped };
+        // Every item a mark restored is reported, whoever's business it is to
+        // put it back: a Brain record went back above, and an ephemeral item has
+        // no home in the Brain, so the caller puts it into the live context.
+        return { brain, archive: nextArchive, dropped, restored: applied.restored, deleted: applied.deleted };
       }),
 
     applyArchive: (write) =>
@@ -243,29 +283,37 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         if (write.kind === "pin") {
           const next = setArchivePin(current, write.id, write.pinned);
           await writeArchiveRows(tx, next);
-          return { archive: next };
+          return { archive: next, refused: false };
         }
-        if (write.kind === "drop") {
-          // The person deletes an archived item for good, now. Grace is for
-          // the items nobody is looking at.
-          const next = { ...current, items: current.items.filter((item) => item.id !== write.id) };
-          await writeArchiveRows(tx, next);
-          return { archive: next };
+        if (write.kind === "mark") {
+          // A mark changes nothing now: it is a decision the next collapse
+          // applies (§4.1). The one thing it can do is be refused, when the
+          // agent tries to withdraw a mark the person placed.
+          const marked = setArchiveMark(current, write.id, write.action === null ? null : { action: write.action, author: write.author }, write.author);
+          if (marked.refused) return { archive: current, refused: true };
+          await writeArchiveRows(tx, marked.archive);
+          return { archive: marked.archive, refused: false };
         }
-        const next = restore(current, write.id);
-        await writeArchiveRows(tx, next.archive);
-        if (next.item === undefined) return { archive: next.archive };
+        // Applying now is allowed to either party (§4.1), and it is the mark's
+        // own application: the mark is placed and then applied in one step, so
+        // the rule for what a restore or a delete means lives in one place.
+        const action = write.kind === "drop" ? "delete" : "restore";
+        const marked = setArchiveMark(current, write.id, { action, author: "user" }, "user");
+        const applied = applyArchiveMarks(marked.archive);
+        await writeArchiveRows(tx, applied.archive);
+        const item = applied.restored[0];
+        if (item === undefined) return { archive: applied.archive, refused: marked.refused };
         // A Brain record goes back as the type it was, in the same transaction
         // that takes it out of the archive (§3.3). An ephemeral item goes back
         // to the live context, which this store is not: the caller holds the
         // session and writes it there, so it returns unwritten here and is
         // never left in two places.
-        const back = writeBackOf(next.item);
+        const back = writeBackOf(item);
         if (back !== undefined) {
           const brain = applyWrite(await readFrom(tx), back, now);
           await tx.run(UPSERT, JSON.stringify(brain));
         }
-        return { archive: next.archive, item: next.item };
+        return { archive: applied.archive, item, refused: false };
       }),
 
     async compact() {

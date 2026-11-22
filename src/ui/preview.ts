@@ -219,6 +219,9 @@ export function previewArchive(width = 110): string {
         sweptAtGeneration: "gen-7b21ee",
         sweptAtCollapse: 3,
         sweptAt: 1,
+        // A mark waiting for the next collapse: the row says what will happen
+        // and who decided it, because a mark nobody can see reads as nothing.
+        mark: { action: "restore", author: "user" },
       },
     ],
   });
