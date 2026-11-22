@@ -1,5 +1,5 @@
 /**
- * The sidebar: the workspace index (MINI.md §8; docs/ui-proposal.md §4).
+ * The sidebar: the workspace index (§8).
  * Lists Chat, Context, Atlas, and Ledger with counts and status badges.
  */
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
@@ -7,6 +7,8 @@ import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { padLine, tokens } from "./tokens.js";
 
 export type BookKind = "chat" | "context" | "atlas" | "ledger";
+/** The archive is reached from the palette, not the books: it is the person's (§3.3). */
+const notABook = (view: string): view is BookKind => view === "chat" || view === "context" || view === "atlas" || view === "ledger";
 
 export interface SidebarCounts {
   chat: number;
@@ -30,8 +32,8 @@ export class Sidebar implements Component {
     this.counts = { ...counts, stale: { ...counts.stale } };
   }
 
-  setActiveBook(item: BookKind): void {
-    this.activeItem = item;
+  setActiveBook(item: string): void {
+    if (notABook(item)) this.activeItem = item;
   }
 
   invalidate(): void {

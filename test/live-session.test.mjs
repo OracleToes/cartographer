@@ -257,8 +257,8 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     const outcome = await collapseLiveSession(session, options(), reason);
     assert.equal(outcome.reason, reason);
     assert.notEqual(outcome.report.generation, previousGeneration);
-    assert.equal(outcome.report.sealed, previousGeneration);
-    assert.equal(outcome.report.purged, undefined);
+    assert.equal(outcome.report.swept, previousGeneration);
+    assert.deepEqual(outcome.report.dropped, []);
     // The Brain survived; handles were rebuilt, not carried over.
     const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
@@ -269,10 +269,10 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     assert.equal(outcome.session.state.tree.anchor, realpathSync(root));
     assert.equal(outcome.session.markdownPath.includes(outcome.report.generation), true);
     assert.equal(readFileSync(outcome.session.markdownPath, "utf8").includes("A1 The answer"), true);
-    // The old store is sealed read-only.
+    // The old store is deleted whole, not sealed (§3.4).
     const { generationPaths } = await import("../dist/runtime/collapse.js");
     const oldStore = generationPaths(root, previousGeneration).store;
-    assert.equal((await import("node:fs")).statSync(oldStore).mode & 0o444, 0o444);
+    assert.equal((await import("node:fs")).existsSync(oldStore), false);
     // The fresh session is functional.
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-2" })], { stopReason: "toolUse" }))]);
     const second = await submitInput(outcome.session, "still here?");
@@ -338,7 +338,7 @@ test("a person-triggered collapse with no run in flight: interrupt is a no-op an
   const previousGeneration = session.generation;
   const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
   const outcome = await collapseLiveSession(session, options(), "person pressed collapse");
-  assert.equal(outcome.report.sealed, previousGeneration);
+  assert.equal(outcome.report.swept, previousGeneration);
   assert.notEqual(outcome.session.generation, previousGeneration);
   assert.deepEqual(outcome.session.state.pending, []);
   await closeLiveSession(outcome.session);

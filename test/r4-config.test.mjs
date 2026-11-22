@@ -280,7 +280,7 @@ test("/collapse runs the ceremony on the spot and reports it; /quit ends before 
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["/collapse", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
     assert.match(out.text(), /context collapsed and rebuilt from the Brain/);
-    assert.match(out.text(), /sealed gen-/);
+    assert.match(out.text(), /swept gen-/);
   } finally {
     await cleanup();
   }

@@ -1,7 +1,5 @@
 /**
- * The chrome: one fixed header row and one fixed footer row (MINI.md §8 —
- * fixed header, fixed footer, one row of padding, nothing touches the
- * terminal edge). The header names the project, the generation, the active
+ * The chrome: one fixed header row and one fixed footer row (§8). The header names the project, the generation, the active
  * view mode, the model, and the active context window; the footer carries the
  * keys that work where you are (Posting's context-sensitive idiom) and the armed
  * send mode when in chat.
@@ -14,7 +12,8 @@ import {
 
 import { tokens } from "./tokens.js";
 
-export type ViewMode = "chat" | "atlas" | "ledger" | "context";
+/** The archive is a view, not a book: it is the person's, and the agent has no handle for it (§3.3). */
+export type ViewMode = "chat" | "atlas" | "ledger" | "context" | "archive";
 export type SendMode = "steer" | "after run" | "now";
 
 export interface HeaderState {
@@ -97,6 +96,16 @@ export class FooterView implements Component {
         key("^o", "jump"),
         key("^p", "palette"),
         key("^h", "sidebar"),
+        key("^c", "quit"),
+      );
+    } else if (this.state.view === "archive") {
+      segments.push(
+        key("j/k", "move"),
+        key("p", "pin"),
+        key("r", "restore"),
+        key("d", "delete"),
+        key("esc", "chat"),
+        key("^p", "palette"),
         key("^c", "quit"),
       );
     } else if (this.state.view === "context") {

@@ -1,5 +1,5 @@
 /**
- * Generation-local handles (MINI.md §6).
+ * Generation-local handles (§5.4).
  *
  * A handle is short, type-prefixed, and stable within one live generation.
  * A collapse rebuilds the table from 1; nothing about a handle survives a
@@ -27,7 +27,7 @@ function locate(brain: CartoBrain): Located[] {
   for (const record of brain.chat) located.push({ kind: "chat", id: record.id, createdAt: record.createdAt });
   for (const node of brain.atlas) located.push({ kind: "atlas", id: node.id, createdAt: node.createdAt });
 
-  // Collapse-time convention: creation order, ties broken by id. MINI.md §6 —
+  // Collapse-time convention: creation order, ties broken by id (§5.4) —
   // order is a convention at rebuild, not a product requirement.
   return located.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 }

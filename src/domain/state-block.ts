@@ -1,5 +1,5 @@
 /**
- * The state block (MINI.md §6.1, §6.2, §6.3; docs/intent.md §12, §12a, §12b, §21, §34).
+ * The state block (§5.3, §5.7, §6.1).
  *
  * Injected as the trailing user-role message on every request and never
  * persisted; the Pi store accumulates only markers, which die with the
@@ -8,19 +8,26 @@
  * system prompt describes once. Nothing in the block is instructive; it is
  * what things are now, not what to do about it.
  *
+ * It is also the continuation (§5.7): a run that ends without a tool call ends,
+ * and the block arrives as the next turn.
+ *
  * The block is plain text:
  *
  *   <carto-state>
+ *   [EDIT MODE]
  *   context: 12,410 / 32,768 tokens (last reported 9,841 + tool work since +2,569)
  *   space: system+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
  *   pending:
  *     A3 · atlas upsert
- *     C7 · chat record
+ *   marks:
+ *     A5 archive [u]
+ *   pinned:
+ *     A1 [a]
  *   stale:
- *     A5 (stale)
+ *     A7 (stale)
  *   tree: /abs/path (depth 2)
  *     ./
- *     MINI.md  22K  A1
+ *     src  4K  D1
  *   </carto-state>
  *
  * Every item that names a record names it by handle. Empty sections say
@@ -42,8 +49,15 @@ export interface PendingWrite {
   id: string;
 }
 
+/** One entry's pending mark (§4.1): what will happen to it at the next collapse, and who said so. */
+export interface MarkLine {
+  handle: string;
+  action: "archive" | "restore" | "delete";
+  author: "user" | "agent";
+}
+
 export interface StateBlockInput {
-  /** The server's advertised window or the person's pin; 0 = unknown, never a made-up number. */
+  /** The server's advertised window; 0 = unknown, never a made-up number. */
   contextWindow: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
@@ -67,6 +81,8 @@ export interface StateBlockInput {
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
   /** Every record carrying a pin marker, as handle + who placed it, in template order. */
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
+  /** Every entry carrying a mark, with its action and its author (§4.1). */
+  marks: MarkLine[];
   tree: { root: string; depth: number; lines: string[] };
 }
 
@@ -96,9 +112,13 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.pinned.length === 0
       ? "pinned: none"
       : ["pinned:", ...input.pinned.map((item) => `  ${item.handle} [${item.author === "user" ? "u" : "a"}]`)].join("\n");
+  const marks =
+    input.marks.length === 0
+      ? "marks: none"
+      : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} ${mark.action} [${mark.author === "user" ? "u" : "a"}]`)].join("\n");
   const treeLines = [`tree: ${input.tree.root} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
-  const mode = input.mode === "read only" ? "mode: READ ONLY (create and edit refuse)" : "mode: edit";
-  return [STATE_BLOCK_OPEN, fullness, mode, space, pending, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
+  const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
+  return [STATE_BLOCK_OPEN, mode, fullness, space, pending, marks, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

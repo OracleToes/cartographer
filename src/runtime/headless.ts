@@ -1,6 +1,6 @@
 /**
  * The headless driver — a placeholder, not the designed interface
- * (MINI.md §8 is the person's to mark). A bare line-based stdin/stdout loop
+ * (§8). A bare line-based stdin/stdout loop
  * so the agent can be driven and tested without a screen.
  *
  * Line semantics (placeholders, to be replaced by §8):
@@ -10,7 +10,7 @@
  *   anything else — a person message to the agent.
  *
  * The only words the person sees are the agent's `chat` tool calls: plain
- * model text never reaches the person (MINI.md §10a). A run that ends
+ * model text never reaches the person (§7). A run that ends
  * without a chat message prints one quiet parenthetical saying so. When the
  * agent asks to collapse (the collapse tool), the driver performs the
  * ceremony at once and says what happened.
@@ -95,7 +95,10 @@ export async function applyCapacityRefresh(
 async function runCollapse(session: LiveSession, options: HeadlessOptions, output: Writable, reason: string): Promise<LiveSession> {
   const previousGeneration = session.generation;
   const outcome = await collapseLiveSession(session, options, reason);
-  writeLine(output, `context collapsed and rebuilt from the Brain (${previousGeneration} → ${outcome.report.generation}; sealed ${outcome.report.sealed ?? "nothing"}${outcome.report.purged === undefined ? "" : `; purged ${outcome.report.purged}`}).`);
+  const swept = outcome.report.swept === undefined ? "" : `; swept ${outcome.report.swept}`;
+  const archived = outcome.report.archived.length === 0 ? "" : `; archived ${outcome.report.archived.length}`;
+  const dropped = outcome.report.dropped.length === 0 ? "" : `; dropped ${outcome.report.dropped.length} past grace`;
+  writeLine(output, `context collapsed and rebuilt from the Brain (${previousGeneration} → ${outcome.report.generation}${swept}${archived}${dropped}).`);
   return outcome.session;
 }
 

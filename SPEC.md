@@ -355,6 +355,7 @@ dashboard about its Brain and the project, and it reports:
   read results whose file changed since the read, named by handle (§5.5).
 - **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
+- **Marks** — every entry carrying a mark, with its action and its author (§4.1).
 - **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
 
 A long pending list is the signal to collapse.
@@ -592,6 +593,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
+| `mark` | Marks one Brain record for archive or delete, or withdraws a mark the agent placed. Applies at the next collapse. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |

@@ -1,5 +1,5 @@
 /**
- * The frozen projection (MINI.md §6; docs/intent.md §19).
+ * The frozen projection (§5.1).
  *
  * Rebuilt only at collapse; never patched between collapses. It carries
  * structure, handles, and state — never a second copy of the dialogue: a
@@ -32,7 +32,7 @@ export interface Projection {
   parts: ProjectionPart[];
   /** Sum of the parts' estimated tokens; informational, never enforced. */
   total: number;
-  /** Sizes by part, for the state block's space accounting (MINI.md §6.1). */
+  /** Sizes by part, for the state block's space accounting (§5.3). */
   sizes: Record<ProjectionPartId, number>;
 }
 

@@ -1,5 +1,5 @@
 /**
- * The Ledger view (MINI.md §2, §6): goals, notes, questions, instructions,
+ * The Ledger view (§2): goals, notes, questions, instructions,
  * and progress through problems.
  *
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,

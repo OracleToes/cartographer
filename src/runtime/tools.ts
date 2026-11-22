@@ -1,10 +1,10 @@
 /**
- * The product tools (MINI.md §10a).
+ * The product tools (§7).
  *
  * Plain model text is not Chat. Every tool is scoped and unique; the tool
  * descriptions are the authority on what each does. A Brain write appears
  * here as the tool's result and as a pending-change line in the state
- * block — never as a projection patch (MINI.md §6).
+ * block — never as a projection patch (§5.6).
  */
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
@@ -54,6 +54,28 @@ function resolveKnown(brain: CartoBrain, handle: string, kinds: readonly string[
     throw new Error(`The handle ${normalizeHandle(handle)} does not name ${what}. Use a handle from the current context.`);
   }
   return { kind: found.kind, id: found.id };
+}
+
+/** One Brain record by handle, and the kind it lives under. */
+function resolveRecord(
+  brain: CartoBrain,
+  handle: string,
+): { kind: "ledger" | "chat" | "atlas"; id: string; mark?: { action: string; author: "user" | "agent" }; pinned?: "user" | "agent" } {
+  const target = resolveKnown(brain, handle, ["ledger", "chat", "atlas"], "a Brain record");
+  const kind = target.kind as "ledger" | "chat" | "atlas";
+  const record =
+    kind === "ledger"
+      ? brain.ledger.find((entry) => entry.id === target.id)
+      : kind === "atlas"
+        ? brain.atlas.find((node) => node.id === target.id)
+        : brain.chat.find((entry) => entry.id === target.id);
+  if (record === undefined) throw new Error(`The handle ${normalizeHandle(handle)} does not name a Brain record.`);
+  return {
+    kind,
+    id: target.id,
+    ...(record.mark === undefined ? {} : { mark: record.mark }),
+    ...(record.pinned === undefined ? {} : { pinned: record.pinned }),
+  };
 }
 
 const pendingWrite = (session: ToolSession, write: PendingWrite): void => {
@@ -318,6 +340,32 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
                 ? `Unpinned ${normalizeHandle(args.handle)}.`
                 : `${normalizeHandle(args.handle)} was not pinned.`;
         return textOutput(note);
+      },
+    }),
+
+    defineTool({
+      name: "mark",
+      description:
+        "Mark one Brain record for archive or delete, or withdraw a mark. A mark applies at the next collapse: a marked entry stays in the context until then, and marking again with a different action replaces it. Pass action \"none\" to withdraw a mark you placed. You may not withdraw a mark the person placed, only your own.",
+      parameters: obj({
+        handle: HandleRef,
+        action: oneOf(["archive", "delete", "none"] as const),
+      }),
+      replay: "safe",
+      execute: async (args, api) => {
+        const current = await brain.read();
+        const target = resolveRecord(current, args.handle);
+        if (target.mark?.author === "user" && args.action === "none") {
+          throw new Error(`${normalizeHandle(args.handle)} is marked by the person — only the person may withdraw that mark; leave it alone.`);
+        }
+        if (args.action === "none") {
+          await brain.apply({ kind: "mark.clear", target: target.kind, id: target.id }, api.now());
+          pendingWrite(session, { kind: target.kind, action: "unmark", id: target.id });
+          return textOutput(`Withdrew the mark on ${normalizeHandle(args.handle)}.`);
+        }
+        await brain.apply({ kind: "mark.set", target: target.kind, id: target.id, action: args.action, author: "agent" }, api.now());
+        pendingWrite(session, { kind: target.kind, action: `mark ${args.action}`, id: target.id });
+        return textOutput(`Marked ${normalizeHandle(args.handle)} for ${args.action}. It applies at the next collapse.`);
       },
     }),
 

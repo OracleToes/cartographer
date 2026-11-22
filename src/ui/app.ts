@@ -1,6 +1,5 @@
 /**
- * The workspace (MINI.md §8 as re-scoped 2026-11-20 — modes, not tabs; the
- * Posting layout philosophy on pi-tui primitives).
+ * The workspace (§8).
  *
  * Chat is the boot view; Atlas, Ledger, and Context surgery views are reachable
  * via jump keys (^o a, ^o l, ^o x) and the summoned palette (^p). The token bar
@@ -10,7 +9,7 @@
  *
  * Pinned items and stale Atlas entries are evident directly inside their books.
  *
- * State is one explicit value; behaviour is functions over it (MINI.md §12).
+ * State is one explicit value; behaviour is functions over it (§8).
  * Pi performs; Carto adds only the composition.
  */
 import { readFile } from "node:fs/promises";
@@ -62,6 +61,7 @@ import { TranscriptView, formatToolArgs, type CardEntry, type TranscriptEntry } 
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
+import { ArchiveView } from "./archive-view.js";
 import { tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -254,6 +254,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
   const contextView = new ContextView();
+  const archiveView = new ArchiveView();
 
   sidebar.onSelect = (book) => void switchToView(book);
 
@@ -383,11 +384,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     } else if (view === "context") {
       await syncContextView(brainState);
       tui.setFocus(contextView);
+    } else if (view === "archive") {
+      archiveView.setData(await brain.readArchive());
+      tui.setFocus(archiveView);
     }
     tui.requestRender();
   };
 
   atlasView.onBack = () => void switchToView("chat");
+  archiveView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
@@ -418,6 +423,45 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  /**
+   * The person's archive operations (§3.3). There is no tool for any of these,
+   * and no handle that names an archived item: the agent does not know the
+   * archive exists.
+   */
+  const refreshArchive = async () => {
+    const archive = await brain.readArchive();
+    archiveView.setData(archive);
+    tui.requestRender();
+  };
+  archiveView.onTogglePin = (id) => {
+    void (async () => {
+      const archive = await brain.readArchive();
+      const item = archive.items.find((candidate) => candidate.id === id);
+      if (item === undefined) return;
+      await brain.applyArchive({ kind: "pin", id, pinned: item.pinned === undefined ? "user" : null });
+      pushStatus(`${item.pinned === undefined ? "pinned" : "unpinned"} an archived item`);
+      await refreshArchive();
+    })();
+  };
+  archiveView.onRestore = (id) => {
+    void (async () => {
+      const result = await brain.applyArchive({ kind: "restore", id });
+      if (result.item === undefined) return;
+      const kind = result.item.record?.kind;
+      pushStatus(kind === undefined ? "restored an ephemeral item" : `restored ${kind} record ${result.item.record?.value.id ?? ""}`.trim());
+      await refreshArchive();
+      await rebuildTranscript();
+      await refreshSidebar();
+    })();
+  };
+  archiveView.onDelete = (id) => {
+    void (async () => {
+      await brain.applyArchive({ kind: "drop", id });
+      pushStatus("an archived item is deleted for good");
+      await refreshArchive();
+    })();
+  };
+
   transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
   ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
   atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
@@ -429,13 +473,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await togglePin("chat", chatRecord.id);
     })();
   };
+  /**
+   * Context surgery (§4.1): `d` marks one entry for delete, `!` arms apply-now,
+   * and `c` collapses. A mark is not a deletion — the entry stays visible until
+   * a collapse sweeps it — and apply-now is a rebuild, not a patch.
+   */
   contextView.onDelete = async (partId, itemId, now) => {
     if (partId === "transcript") {
       const brainState = await brain.read();
       const chatRecord = brainState.chat.find((r) => r.id === itemId || String(r.id) === String(itemId));
       if (chatRecord) {
-        await brain.apply({ kind: "delete", target: "chat", id: chatRecord.id }, Date.now());
-        pushStatus(`deleted chat record #${chatRecord.id}`);
+        await brain.apply({ kind: "mark.set", target: "chat", id: chatRecord.id, action: "delete", author: "user" }, Date.now());
+        pushStatus(`marked chat record #${chatRecord.id} for delete${now ? "" : " at the next collapse"}`);
       }
     }
     if (now) {
@@ -463,6 +512,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
               { component: atlasView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" },
               { component: ledgerView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" },
               { component: contextView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" },
+              { component: archiveView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "archive" },
             ]),
             basis: 0,
             grow: 1,
@@ -927,6 +977,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         label: "toggle read only mode",
         hint: "^r",
         run: () => toggleReadOnly(),
+      },
+      {
+        value: "archive",
+        label: "open the archive",
+        hint: "the person's, not the agent's",
+        run: () => void switchToView("archive"),
       },
       {
         value: "collapse",

@@ -1,5 +1,5 @@
 /**
- * The Atlas view (MINI.md §2.1, §6): nodes — a name and a text entry —
+ * The Atlas view (§2.1): nodes — a name and a text entry —
  * linked to other nodes or attached to any reference.
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,
  * h/l or left/right to switch between list and detail, esc to return to Chat).

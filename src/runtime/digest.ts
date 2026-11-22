@@ -1,6 +1,6 @@
 /**
  * Path containment inside the project root. The workspace boundary is what
- * the agentic tools enforce (MINI.md §7); it is not a permission gate.
+ * the agentic tools enforce (§6.2); it is not a permission gate.
  */
 import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";

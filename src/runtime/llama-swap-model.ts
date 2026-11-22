@@ -1,5 +1,5 @@
 /**
- * The llama-swap provider (MINI.md §11 — Pi AI owns the provider layer).
+ * The llama-swap provider (§8).
  * Rewritten fresh for the rebuild, informed by main's documented approach:
  *
  * - keyless: llama-swap serves keyless llama.cpp locally; Pi's OpenAI client

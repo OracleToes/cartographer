@@ -1,5 +1,5 @@
 /**
- * The Context view — the surgery view (MINI.md §8; docs/ui-proposal.md §5).
+ * The Context view — the surgery view (§8).
  * Read-only accurate rendering of what the model reads, grouped by part
  * in the real order it appears in the context window:
  *

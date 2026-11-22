@@ -25,6 +25,10 @@ const input = (overrides = {}) => ({
     { handle: "L2", author: "user" },
     { handle: "A6", author: "agent" },
   ],
+  marks: [
+    { handle: "A8", action: "archive", author: "user" },
+    { handle: "C3", action: "delete", author: "agent" },
+  ],
   stale: ["A5 (stale)"],
   resolveHandle: (kind, id) => ({ "atlas:a3": "A3", "chat:c7": "C7" })[`${kind}:${id}`],
   mode: "edit",
@@ -39,14 +43,20 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /context: ~12,410 \/ 32,768 tokens \(last reported 9,841 \+ tool work since \+2,569\)/);
   assert.match(block, /space: system\+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   assert.match(block, /pending:\n  A3 · atlas upsert\n  C7 · chat record/);
+  // A mark carries its action and its author (§4.1).
+  assert.match(block, /marks:\n  A8 archive \[u\]\n  C3 delete \[a\]/);
   assert.match(block, /pinned:\n  L2 \[u\]\n  A6 \[a\]/);
   assert.match(block, /stale:\n  A5 \(stale\)/);
   assert.match(block, /tree: \/project \(depth 2\)/);
+  // The mode is stated in the block's own words (§6.1).
+  assert.match(block, /^<carto-state>\n\[EDIT MODE\]\n/);
+  assert.match(renderStateBlock(input({ mode: "read only" })), /^<carto-state>\n\[READ ONLY MODE\]\n/);
 });
 
-test("empty pending and stale say none; missing provider report is explicit", () => {
-  const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], lastReportedInput: undefined }));
+test("empty pending, marks, and stale say none; missing provider report is explicit", () => {
+  const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], marks: [], lastReportedInput: undefined }));
   assert.match(block, /pending: none/);
+  assert.match(block, /marks: none/);
   assert.match(block, /pinned: none/);
   assert.match(block, /stale: none/);
   assert.match(block, /context: ~[\d,]+ \/ 32,768 tokens \(not yet reported by the provider\)/);

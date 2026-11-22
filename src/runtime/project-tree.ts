@@ -1,5 +1,5 @@
 /**
- * The project tree (MINI.md §6.1, §10a).
+ * The project tree (§6.3).
  *
  * Anchored at a directory inside the project root, to a depth, rendered for
  * the state block: files, directories, sizes, and which files an Atlas node
@@ -9,7 +9,7 @@
  * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` and
  * `.git` are never shown: they are skipped everywhere they would appear, and
  * they may not be an anchor — the agent does not see the Brain or repository
- * internals (MINI.md §2.3, §7). Gitignored paths are skipped the same way (the
+ * internals (§2.3, §7). Gitignored paths are skipped the same way (the
  * project's own `.gitignore` chain — root file, `.git/info/exclude`, nested
  * files below the anchor): no line, no bytes in any aggregate, and ignored
  * directories are pruned, not merely hidden. Rendering is display-bounded by
@@ -38,7 +38,7 @@ export interface TreeEntry {
 
 export class AnchorError extends Error {}
 
-/** The internal anchor must stay inside the project root and outside `.brain` and `.git`, as MINI.md §2.3 and §7 require. */
+/** The internal anchor must stay inside the project root and outside `.brain` and `.git`, as §2.3 and §7 require. */
 export function containedAnchor(root: string, anchor: string): string {
   const r = resolve(root);
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));

@@ -1,7 +1,5 @@
 /**
- * The token bar (MINI.md §9; docs/ui-proposal.md §7, candidate A — the breakdown
- * line is not part of the bar; it lands with the Context view's parts rail in
- * R5d). One row, segmented by part, numbers right-aligned, always visible.
+ * The token bar (§5.3). One row, segmented by part, numbers right-aligned, always visible.
  *
  * Honesty rules, standing (2026-11-20): live, never invented. Before the first
  * provider report the bar is all estimate and the fill is hatched (`▤`); once

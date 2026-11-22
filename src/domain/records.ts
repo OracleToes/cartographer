@@ -1,5 +1,5 @@
 /**
- * The Brain's records (MINI.md §2). Explicit values, no behaviour: every
+ * The Brain's records (§2). Explicit values, no behaviour: every
  * transformation lives in `brain.ts` and `handles.ts`, and nothing in this
  * file reads a clock, a file, or a model.
  */
@@ -8,7 +8,7 @@ export type RecordId = string;
 
 /**
  * Anything an Atlas node points at. A file attachment resolves to a path
- * inside the project root (the workspace boundary, MINI.md §7 — the file
+ * inside the project root (the workspace boundary, §7 — the file
  * may not exist yet; the stale mark is what notices). A record attachment
  * resolves to any other Brain record by id. No types, no kinds, no digests.
  */
@@ -17,12 +17,26 @@ export type Attachment =
   | { kind: "record"; id: RecordId };
 
 /** A deliberate durable conversation record. Plain model output is not Chat. */
+/** What the next collapse does with an entry (§4.1). A mark, not a state: applying it changes the Brain. */
+export type MarkAction = "archive" | "delete" | "restore";
+
+/** Who placed a mark or a pin. The person may withdraw either; the agent only its own. */
+export type Author = "user" | "agent";
+
+/** A pending action on one entry, with its author (§4.1). Cleared when a collapse applies it. */
+export interface Mark {
+  action: MarkAction;
+  author: Author;
+}
+
 export interface ChatRecord {
   id: RecordId;
   author: "user" | "agent";
   text: string;
   /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
   pinned?: "user" | "agent";
+  /** The pending mark the next collapse applies (§4.1); its author rides with it. */
+  mark?: Mark;
   createdAt: number;
   updatedAt: number;
 }
@@ -43,12 +57,14 @@ export interface LedgerEntry {
   answer: LedgerAnswer | null;
   /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
   pinned?: "user" | "agent";
+  /** The pending mark the next collapse applies (§4.1); its author rides with it. */
+  mark?: Mark;
   createdAt: number;
   updatedAt: number;
 }
 
 /**
- * An Atlas node: a name and a text entry (MINI.md §2.1, confirmed). A node
+ * An Atlas node: a name and a text entry (§2.1). A node
  * may be linked to other Atlas nodes, or attached to any other reference in
  * Carto — a file, a Ledger entry, a Chat record. Nothing requires a node to
  * connect to anything: a node, or a sub-graph, may float unconnected, and
@@ -72,6 +88,8 @@ export interface AtlasNode {
   stale?: boolean;
   /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
   pinned?: "user" | "agent";
+  /** The pending mark the next collapse applies (§4.1); its author rides with it. */
+  mark?: Mark;
   createdAt: number;
   updatedAt: number;
 }
@@ -79,7 +97,7 @@ export interface AtlasNode {
 export type HandleKind = "ledger" | "chat" | "atlas";
 
 /**
- * One short, type-prefixed, generation-local public handle (MINI.md §6).
+ * One short, type-prefixed, generation-local public handle (§5.4).
  * Stable within one live generation; rebuilt from 1 at every collapse.
  * The private durable ID behind a handle is never rendered to the agent.
  */
@@ -96,9 +114,9 @@ export interface HandleTable {
 }
 
 /**
- * The Brain: the only durable storage (MINI.md §2). One current document per
+ * The Brain: the only durable storage (§2). One current document per
  * project; `history: "latest"` in spirit — the store keeps current state, not
- * an audit trail (MINI.md §4.2).
+ * an audit trail (§2.2).
  */
 export interface CartoBrain {
   version: 1;

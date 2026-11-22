@@ -1,6 +1,5 @@
 /**
- * Semantic colour tokens for the workspace (MINI.md §8; Posting's token
- * vocabulary; Posting visual hierarchy with background tints and card surfaces).
+ * Semantic colour tokens for the workspace (§8).
  *
  * Colours are hex, converted once at first use (after the terminal is up).
  * Roles only: surfaces, text, interaction, feedback. Nothing else in the UI

@@ -1,8 +1,9 @@
 /**
- * The Brain store (MINI.md §2, §4.2).
+ * The Brain store (§2, §3.3, §4.2).
  *
- * One document per project, current state only — the Brain has no audit
- * trail of old values. Reads return a fresh value; `apply` runs inside a
+ * One database per project, under `.brain/`: the Brain document and the
+ * archive's rows, so a move between them is one transaction. One document per
+ * project, current state only — the Brain has no audit trail of old values. Reads return a fresh value; `apply` runs inside a
  * single transaction and cannot leave a half-written Brain behind. Deletion
  * is a single step.
  *
@@ -32,13 +33,34 @@ import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlit
 
 import { reconcileHandles } from "../domain/handles.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { emptyBrain, type CartoBrain } from "../domain/records.js";
+import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry } from "../domain/records.js";
+import {
+  dropExpired,
+  emptyArchive,
+  restore,
+  setArchivePin,
+  sweep,
+  type ArchivedItem,
+  type Archive,
+  type IncomingItem,
+} from "../domain/archive.js";
 
 export interface BrainStore {
   /** The current Brain, handles reconciled. Never undefined. */
   read(): Promise<CartoBrain>;
   /** Apply one write inside one transaction; returns the next Brain. */
   apply(write: BrainWrite, now: number): Promise<CartoBrain>;
+  /** The archive as it stands. The agent never sees it (§3.3). */
+  readArchive(): Promise<Archive>;
+  /**
+   * One collapse's worth of Brain and archive change, in one transaction: the
+   * writes apply to the Brain, what `sweep` says moves into the archive, and
+   * what the archive drops is gone. Nothing half-done survives a crash at a
+   * collapse (§2).
+   */
+  applyCollapse(change: CollapseChange): Promise<{ brain: CartoBrain; archive: Archive; dropped: string[] }>;
+  /** Replace the archive wholesale, for the person's pin and restore operations. */
+  applyArchive(write: ArchiveWrite): Promise<{ archive: Archive; item?: ArchivedItem }>;
   /** Secure-delete the old pages: WAL checkpoint and VACUUM. */
   compact(): Promise<void>;
   close(): Promise<void>;
@@ -46,9 +68,54 @@ export interface BrainStore {
 
 const TABLE =
   "CREATE TABLE IF NOT EXISTS brain_document (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
+/**
+ * The archive is rows, not one document: an item has to be deletable on its
+ * own when its grace runs (§3.3), and a single blob would make every drop a
+ * rewrite of everything. `swept_at_generation` is what grace is counted from.
+ */
+const ARCHIVE_TABLE =
+  "CREATE TABLE IF NOT EXISTS archive_item (id TEXT PRIMARY KEY, swept_at_collapse INTEGER NOT NULL, swept_at_generation TEXT NOT NULL, pinned TEXT, document TEXT NOT NULL)";
+/** The collapse counters, so grace can be counted and the archive survives a restart. */
+const COUNTER_TABLE = "CREATE TABLE IF NOT EXISTS archive_counter (id INTEGER PRIMARY KEY CHECK (id = 1), collapses INTEGER NOT NULL)";
+const ARCHIVE_INSERT =
+  "INSERT INTO archive_item (id, swept_at_collapse, swept_at_generation, pinned, document) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET swept_at_collapse = excluded.swept_at_collapse, swept_at_generation = excluded.swept_at_generation, pinned = excluded.pinned, document = excluded.document";
+const ARCHIVE_SELECT = "SELECT document FROM archive_item ORDER BY rowid";
+const ARCHIVE_DELETE = "DELETE FROM archive_item WHERE id = ?";
 const UPSERT =
   "INSERT INTO brain_document (id, document) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET document = excluded.document";
 const DOCUMENT = "SELECT document FROM brain_document WHERE id = 1";
+
+/** The Brain write that puts an archived record back as the type it was. */
+function writeBackOf(item: ArchivedItem): BrainWrite | undefined {
+  const record = item.record;
+  if (record === undefined) return undefined;
+  switch (record.kind) {
+    case "chat":
+      return { kind: "chat.record", record: record.value as ChatRecord };
+    case "ledger":
+      return { kind: "ledger.upsert", entry: record.value as LedgerEntry };
+    case "atlas":
+      return { kind: "atlas.upsert", node: record.value as AtlasNode };
+  }
+}
+
+/** Everything one collapse changes, applied as one transaction. */
+export interface CollapseChange {
+  /** Brain writes to apply, in order, before anything is swept. */
+  writes: readonly { write: BrainWrite; now: number }[];
+  /** The generation whose collapse this is. */
+  generation: string;
+
+  /** Items leaving the Brain and the generation's store, on their way in. */
+  incoming: readonly IncomingItem[];
+  now: number;
+}
+
+/** One person-facing archive operation (§3.3). Nothing here is reachable from a tool. */
+export type ArchiveWrite =
+  | { kind: "pin"; id: string; pinned: "user" | "agent" | null }
+  | { kind: "restore"; id: string }
+  | { kind: "drop"; id: string };
 
 export async function openBrain(databasePath: string): Promise<BrainStore> {
   // pi defaults to WAL + synchronous=NORMAL + a 5,000 ms busy timeout and
@@ -56,6 +123,9 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
   const database = await openNodeSqliteDatabase(databasePath);
   await database.exec("PRAGMA secure_delete = ON");
   await database.exec(TABLE);
+  await database.exec(ARCHIVE_TABLE);
+  await database.exec(COUNTER_TABLE);
+  await database.exec("INSERT OR IGNORE INTO archive_counter (id, collapses) VALUES (1, 0)");
 
   const decode = (document: string): CartoBrain => {
     // A corrupt Brain throws. It must never silently read as an empty Brain —
@@ -77,6 +147,32 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     return row === undefined ? emptyBrain() : decode(row.document);
   };
 
+  const readArchiveFrom = async (source: SqliteExecutor): Promise<Archive> => {
+    const rows = await source.all<{ document: string }>(ARCHIVE_SELECT);
+    if (rows.length === 0) return emptyArchive();
+    const items = rows.map((row) => JSON.parse(row.document) as ArchivedItem);
+    return { version: 1, items };
+  };
+
+  /** Write the archive's rows to match a value: insert or update what is there, delete what is not. */
+  const writeArchiveRows = async (source: SqliteExecutor, archive: Archive): Promise<void> => {
+    const existing = await source.all<{ id: string }>("SELECT id FROM archive_item");
+    const keep = new Set(archive.items.map((item) => item.id));
+    for (const row of existing) {
+      if (!keep.has(row.id)) await source.run(ARCHIVE_DELETE, row.id);
+    }
+    for (const item of archive.items) {
+      await source.run(
+        ARCHIVE_INSERT,
+        item.id,
+        item.sweptAtCollapse,
+        item.sweptAtGeneration,
+        item.pinned ?? null,
+        JSON.stringify(item),
+      );
+    }
+  };
+
   return {
     read: () => readFrom(database),
 
@@ -86,6 +182,54 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         const next = applyWrite(current, writeToApply, now);
         await tx.run(UPSERT, JSON.stringify(next));
         return next;
+      }),
+
+    readArchive: () => readArchiveFrom(database),
+
+    applyCollapse: (change) =>
+      database.transaction(async (tx) => {
+        let brain = await readFrom(tx);
+        for (const step of change.writes) brain = applyWrite(brain, step.write, step.now);
+        // A record marked for archive leaves the Brain here (§4.1): the mark is
+        // what puts it in `incoming`, and the Brain it is written back to has no
+        // archived state to hold.
+        const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
+        const collapse = (counter?.collapses ?? 0) + 1;
+        await tx.run("UPDATE archive_counter SET collapses = ? WHERE id = 1", collapse);
+        const archive = sweep(await readArchiveFrom(tx), change.generation, collapse, change.now, change.incoming);
+        const { archive: nextArchive, dropped } = dropExpired(archive, collapse);
+        await tx.run(UPSERT, JSON.stringify(brain));
+        await writeArchiveRows(tx, nextArchive);
+        return { brain, archive: nextArchive, dropped };
+      }),
+
+    applyArchive: (write) =>
+      database.transaction(async (tx) => {
+        const current = await readArchiveFrom(tx);
+        const now = Date.now();
+        if (write.kind === "pin") {
+          const next = setArchivePin(current, write.id, write.pinned);
+          await writeArchiveRows(tx, next);
+          return { archive: next };
+        }
+        if (write.kind === "drop") {
+          // The person deletes an archived item for good, now. Grace is for
+          // the items nobody is looking at.
+          const next = { ...current, items: current.items.filter((item) => item.id !== write.id) };
+          await writeArchiveRows(tx, next);
+          return { archive: next };
+        }
+        const next = restore(current, write.id);
+        await writeArchiveRows(tx, next.archive);
+        if (next.item === undefined) return { archive: next.archive };
+        // A restored Brain record goes back as the type it was (§3.3), in the
+        // same transaction that takes it out of the archive.
+        const back = writeBackOf(next.item);
+        if (back !== undefined) {
+          const brain = applyWrite(await readFrom(tx), back, now);
+          await tx.run(UPSERT, JSON.stringify(brain));
+        }
+        return { archive: next.archive, item: next.item };
       }),
 
     async compact() {

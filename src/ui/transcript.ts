@@ -1,5 +1,5 @@
 /**
- * The transcript (MINI.md §8, §10a as re-scoped 2026-11-20): everything the
+ * The transcript (§8): everything the
  * agent does is visible — its Chat words, its reasoning, its plain model
  * text, and its tool calls — alongside the person's own lines and quiet
  * status lines. Chat remains the only channel that addresses the person; the
@@ -11,7 +11,7 @@
  * the landed assistant entry renders as the same cards, folded by default.
  * A card folds to its header — a click on it (or `ctrl+e` for all of them)
  * toggles it back. An open LANDED card emits every retained row into the
- * page — the one scrolling owner is the page (MINI.md §8); the wheel is the
+ * page — the one scrolling owner is the page (§8); the wheel is the
  * page's everywhere, so scrolling up suspends the tail-follow and the person
  * scrolls the rest themselves. An open LIVE card keeps the bounded tail: a
  * growing stream must stay bounded or the page could not keep up with it.

@@ -1,6 +1,6 @@
 /**
  * The Carto extension: the frozen projection as a byte-stable section, the
- * product tools, and the hooks that carry the state block (MINI.md §6.1-6.3).
+ * product tools, and the hooks that carry the state block (§5.3, §5.7).
  *
  * The block is appended to every request as a trailing user-role message and
  * never persisted: `beforeRequest` strips the markers the transcript
@@ -25,6 +25,7 @@ import {
   renderStateBlock,
   splitContextMessages,
   stripStateBlocks,
+  type MarkLine,
 } from "../domain/state-block.js";
 import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
@@ -32,14 +33,15 @@ import { lexicalProjectPath } from "./workspace.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 
-/** The minimal system prompt (docs/intent.md §22): the tools describe themselves; this carries only what no tool can say. */
+/** The minimal system prompt (§22): the tools describe themselves; this carries only what no tool can say. */
 export const CARTO_INSTRUCTIONS = [
   "You are Carto, the long-lived working attention on one project.",
   "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
   "Read before you write anything about a project file.",
   "Keep the Brain: Atlas for what you understand about the project, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
+  "A record you no longer want in the Brain is marked: mark it for archive or for delete, and the next collapse carries that out. A mark stays until the next collapse and can be withdrawn while it is still a mark; the state block lists every mark with who placed it.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
-  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale entries, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
+  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: the mode, context fullness, space by Brain part, pending writes, marks, pins, stale entries, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
   "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
   "The two modes: in edit mode you change the project as you work. In read only mode the person has taken that away — `create` and `edit` will refuse you. Do not work around it, and do not propose, queue, or ask permission for changes: read, answer, and say what you would change when you are asked for it.",
   "Collapse when it is appropriate, not when the context is full. When a task is done and the Brain is current, collapse and carry the result forward. Before a long piece of work, pin what you will need, collapse, and start inside a context built for the problem instead of one you accumulated on the way there.",
@@ -151,6 +153,18 @@ export async function renderLiveStateBlock(
     const handle = handleOf(brain.handles, "chat", record.id);
     if (handle !== undefined) pinned.push({ handle, author: record.pinned });
   }
+  const marks: MarkLine[] = [];
+  const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; mark?: { action: string; author: "user" | "agent" } }>): void => {
+    for (const record of records) {
+      if (record.mark === undefined) continue;
+      const handle = handleOf(brain.handles, kind, record.id);
+      if (handle === undefined) continue;
+      marks.push({ handle, action: record.mark.action as MarkLine["action"], author: record.mark.author });
+    }
+  };
+  collectMarks("atlas", brain.atlas);
+  collectMarks("ledger", brain.ledger);
+  collectMarks("chat", brain.chat);
   return renderStateBlock({
     contextWindow: options.session.contextWindow,
     lastReportedInput: options.session.lastReportedInput,
@@ -165,6 +179,7 @@ export async function renderLiveStateBlock(
     },
     pending: options.session.pending,
     pinned,
+    marks,
     stale: staleHandles(brain, options.root),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     mode: options.session.readOnly ? "read only" : "edit",

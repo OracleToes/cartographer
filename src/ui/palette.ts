@@ -1,5 +1,5 @@
 /**
- * The command palette (Posting's idiom, MINI.md §8: no permanent palette —
+ * The command palette (Posting's idiom, §8: no permanent palette —
  * it is summoned, never standing). A summoned overlay: type to filter,
  * arrows to choose, enter to run, esc to leave. Everything not on a key
  * lives here.

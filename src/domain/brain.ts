@@ -1,5 +1,5 @@
 /**
- * Brain writes as pure transformations over an explicit value (MINI.md §12).
+ * Brain writes as pure transformations over an explicit value (§2).
  *
  * `applyWrite(brain, write, now)` returns the next Brain, or throws a
  * `BrainError` with a person-readable message. Unknown handles and unknown
@@ -7,12 +7,15 @@
  * store applies it inside one transaction or not at all.
  *
  * Deletion is a single step with no pending state and no undo
- * (MINI.md §2.1, confirmed).
+ * (§3.3, §4.1).
  */
 import { reconcileHandles } from "./handles.js";
 import type {
+  Author,
   CartoBrain,
   LedgerEntry,
+  Mark,
+  MarkAction,
   RecordId,
   AtlasNode,
   ChatRecord,
@@ -27,6 +30,8 @@ export type BrainWrite =
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
   | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: "user" | "agent" | null }
+  | { kind: "mark.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; action: MarkAction; author: Author }
+  | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId }
   | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
@@ -37,8 +42,7 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
     case "atlas.stale": {
-      // Written only at a rebuild (MINI.md §28: a file attachment that
-      // drifted since the entry was written is marked stale at rebuild). The
+      // Written only at a rebuild (§5.5). The
       // mark is a marker on the entry, like a pin — and clearing is a delete,
       // never a phantom undefined. Blocks nothing, deletes nothing.
       const node = brain.atlas.find((candidate) => candidate.id === write.id);
@@ -74,7 +78,7 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
 
     case "atlas.upsert": {
-      // Links and attachments are stored as written (MINI.md §2.1, confirmed):
+      // Links and attachments are stored as written (§2.1):
       // the Atlas is the agent's garden and permissive by intent — a node
       // floating unconnected, or one linking a vanished target, is the
       // agent's to tend, not the runtime's to validate away.
@@ -89,8 +93,24 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       return { ...brain, atlas };
     }
 
+    case "mark.set": {
+      // A mark is a marker on the entry, like a pin (§4.1): it says what the
+      // next collapse does, and the collapse is what does it. Absent = not
+      // marked for this; archive and delete are the two marks a Brain record
+      // carries, and `restore` belongs to an entry in the archive, so it is
+      // refused here rather than stored against a record that is in the Brain.
+      if (write.action === "restore") {
+        throw new BrainError("Restore is for an entry in the archive; a Brain record is not in the archive.");
+      }
+      const marked = setMark(brain, write.target, write.id, { action: write.action, author: write.author });
+      return marked;
+    }
+
+    case "mark.clear":
+      return clearMark(brain, write.target, write.id);
+
     case "pin.set": {
-      // A pin means "keep it here" (MINI.md §4.1). A marker on the entry; no
+      // A pin means "keep it here" (§3.2). A marker on the entry; no
       // reason, no source, no bookkeeping. The marker records who placed it:
       // "user" | "agent" — the person may remove either kind of pin, the agent
       // may remove only its own.
@@ -121,6 +141,44 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
   }
 }
+
+/** Sets the mark on one record; the author rides with it (§4.1). */
+function setMark(brain: CartoBrain, target: MarkTarget, id: RecordId, mark: Mark): CartoBrain {
+  const withMark = <T extends { mark?: Mark }>(record: T): T => ({ ...record, mark });
+  switch (target) {
+    case "chat": {
+      if (!brain.chat.some((record) => record.id === id)) throw new BrainError("No Chat record is named by that handle.");
+      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? withMark(record) : record)) };
+    }
+    case "ledger": {
+      if (!brain.ledger.some((entry) => entry.id === id)) throw new BrainError("No Ledger record is named by that handle.");
+      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? withMark(entry) : entry)) };
+    }
+    case "atlas": {
+      if (!brain.atlas.some((node) => node.id === id)) throw new BrainError("No Atlas node is named by that handle.");
+      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? withMark(node) : node)) };
+    }
+  }
+}
+
+/** Clears the mark; the key goes, never `mark: undefined` lying around. */
+function clearMark(brain: CartoBrain, target: MarkTarget, id: RecordId): CartoBrain {
+  const without = <T extends { mark?: Mark }>(record: T): T => {
+    const copy: Record<string, unknown> = { ...record };
+    delete copy.mark;
+    return copy as T;
+  };
+  switch (target) {
+    case "chat":
+      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? without(record) : record)) };
+    case "ledger":
+      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? without(entry) : entry)) };
+    case "atlas":
+      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? without(node) : node)) };
+  }
+}
+
+type MarkTarget = "chat" | "ledger" | "atlas";
 
 /** Places or clears the pin marker on one record; a cleared pin removes the key, never leaves `pinned: undefined` lying around. */
 /** A re-written node re-asserts its text and attachments; the stale marker is collapse-time truth and is cleared. */

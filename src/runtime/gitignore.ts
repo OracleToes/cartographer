@@ -1,5 +1,5 @@
 /**
- * `.gitignore` semantics for the project tree scan (MINI.md §6.1).
+ * `.gitignore` semantics for the project tree scan (§6.3).
  *
  * Scope, deliberately: the project root's `.gitignore`, the repository's
  * `.git/info/exclude`, and nested `.gitignore` files below the anchor.

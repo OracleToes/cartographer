@@ -1,5 +1,5 @@
 /**
- * Attachment-drift checks (MINI.md §28; docs/intent.md §28).
+ * Attachment-drift checks (§5.5).
  *
  * An Atlas node attached to a file is stale when the file is missing, or when
  * its mtime is newer than the node was written. It gently informs the agent

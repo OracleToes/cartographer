@@ -1,8 +1,7 @@
 /**
  * carto — the entry point.
  *
- * On a TTY, carto boots the workspace TUI (MINI.md §8 as re-scoped: modes,
- * sidebar, footer, the person's Input). Off a TTY — piped stdin, CI — it runs
+ * On a TTY, carto boots the workspace TUI (§8). Off a TTY — piped stdin, CI — it runs
  * the line driver instead, where the only words the person sees are the
  * agent's `chat` tool calls. `--headless` forces the line driver.
  */

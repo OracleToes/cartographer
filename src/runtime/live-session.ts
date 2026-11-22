@@ -1,5 +1,5 @@
 /**
- * The live session (MINI.md §4, §5, §6, §12; docs/intent.md §34).
+ * The live session (§4, §5.7).
  *
  * One Pi Durable store per generation under `.brain/context/`, one Brain
  * per project. At open, generations are reconciled: a head missing its
@@ -63,7 +63,7 @@ export interface LiveSession {
   readonly conversation: Conversation;
   /** The underlying database handle; closed by closeLiveSession. */
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
-  /** The mutable present; named fields, no hidden state (MINI.md §12). */
+  /** The mutable present; named fields, no hidden state (§5.3). */
   readonly state: LiveSessionState;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
@@ -242,18 +242,18 @@ export async function closeLiveSession(session: LiveSession): Promise<void> {
 export interface CollapseOutcome {
   /** The fresh session on the new generation; the old session must not be used again. */
   readonly session: LiveSession;
-  /** What collapse did: the new generation, the sealed archive, the purged one. */
+  /** What collapse did: the new generation, the store it swept, and what the archive took and dropped. */
   readonly report: CollapseReport;
   /** Why the collapse happened: the agent's reason, or the person's act. */
   readonly reason: string;
 }
 
 /**
- * Collapse the live session (MINI.md §5): interrupt the run at its boundary,
- * close the store, run the ceremony — freshness marks, new snapshot from the
- * Brain, seal the old store as the archive, export-then-delete the archive
- * whose grace expired, VACUUM — and reopen on the new generation. The
- * person's path passes any reason (or none); no boundary, no warning. The
+ * Collapse the live session (§4): interrupt the run at its boundary, close the
+ * store, run the ceremony — freshness marks, new snapshot from the Brain, the
+ * marks applied, the old store swept into the archive and deleted whole, the
+ * archive's expired items dropped, VACUUM — and reopen on the new generation.
+ * The person's path passes any reason (or none); no boundary, no warning. The
  * caller shows the plain report afterwards.
  */
 export async function collapseLiveSession(
@@ -264,6 +264,8 @@ export async function collapseLiveSession(
 ): Promise<CollapseOutcome> {
   await interruptRun(session);
   await closeLiveSession(session);
+  // The Brain moves the marked records itself; what the new generation's frozen
+  // prefill is built from is the Brain as it stands after that move (§3.3).
   const report = await collapse(session.root, options.brain, ceremony);
   const next = await openLiveSession(options);
   return { session: next, report, reason };
