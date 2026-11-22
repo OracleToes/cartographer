@@ -174,6 +174,13 @@ description. Which one it is, is decided per parameter by whether the tool can
 work without it: a bound the tool genuinely cannot run without is stated; the
 rest go.
 
+**Status: done.** `minLength: 1` is gone from every entry's text, an Atlas
+node's name and a file path: an empty entry is the agent's own business (§2.5).
+Three bounds remain because the tool cannot run without them, and each is now
+said in its own description: a handle to act on, a title to name a schema by,
+and a rest of at least one second. The test walks every product tool's schema
+and fails on any bound the description does not state, so one cannot creep back.
+
 **Test.** No product tool's parameters carry a limit its description does not
 state.
 

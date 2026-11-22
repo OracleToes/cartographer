@@ -51,8 +51,13 @@ export interface ToolDeps {
   session: ToolSession;
 }
 
-const Text = str({ minLength: 1 });
-const HandleRef = str({ minLength: 1 });
+// §1 and §2.5: no length limit the person did not set. An empty entry is the
+// agent's own business — the prompt asks it to size what it writes — so these
+// are plain strings and nothing here refuses on a count of characters.
+const Text = str();
+const HandleRef = str();
+/** A handle is what a handle-taking tool acts on, so it cannot be empty (§1). */
+const ExistingHandle = str({ minLength: 1, description: "A handle from your context, such as A3, L1, C2, F4." });
 
 const normalizeHandle = (handle: string): string => handle.trim().toUpperCase();
 
@@ -251,13 +256,13 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         "Write what you understand about the project: one node, a name and the understanding itself. A node may link to other nodes and may attach to what it is about — a file by path, or a record by handle. Pass a handle to rewrite that node; links and attachments are replaced wholesale, so send the whole set you want. Without a handle it is a new node. Nothing requires a node to connect to anything.",
       parameters: obj({
         handle: opt(HandleRef),
-        title: str({ minLength: 1, description: "The node's name: what this understanding is about." }),
+        title: str({ description: "The node's name: what this understanding is about." }),
         text: Text,
         links: opt(arr(HandleRef)),
         attachments: opt(
           arr(
             union([
-              obj({ kind: lit("file"), path: str({ minLength: 1 }) }),
+              obj({ kind: lit("file"), path: str() }),
               obj({ kind: lit("record"), handle: HandleRef }),
             ]),
           ),
@@ -333,10 +338,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        "Pin one entry, or take your pin off it: \"keep this here\". The entry is a Brain record named by its handle, or a file named by the handle the tree gives it; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
+        "Pin one entry, or take your pin off it: \"keep this here\". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a Brain record's, or a file's from the tree; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
-        handle: HandleRef,
+        handle: ExistingHandle,
       }),
       replay: "safe",
       execute: async (args, api) => {
@@ -400,9 +405,9 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
+        "Decide what one record is for, or withdraw the decision. The record is named by a handle of at least 1 character: an empty handle names nothing, and there is nothing else to act on. `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
       parameters: obj({
-        handle: HandleRef,
+        handle: ExistingHandle,
         action: oneOf(["archive", "delete", "none"] as const),
       }),
       replay: "safe",
@@ -444,7 +449,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         "Move the project tree in your state block to where your attention is, and end the turn so you can read it: the block arrives as your next turn with the tree rendered at the anchor you just set. The arguments are optional and stick — an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is `T1` there. Nothing is returned here beyond the fact of the move.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
-        anchor: opt(str({ minLength: 1 })),
+        anchor: opt(str()),
         depth: opt(int({ description: "How many levels below the anchor to render. One is the anchor's own contents, and less than one renders the same as one." })),
       }),
       replay: "safe",
@@ -500,7 +505,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "sleep",
       description:
-        "End the turn and rest — the honest way to stop. With no argument you stay stopped until the person messages you. With whole seconds you rest that long, then start again on your own from the state block. Either way a message from the person brings you back sooner. Nothing is said to the person by this call.",
+        "End the turn and rest — the honest way to stop. With no argument you stay stopped until the person messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from the person brings you back sooner. Nothing is said to the person by this call.",
       parameters: obj({ seconds: opt(int({ minimum: 1, description: "Whole seconds to rest before starting again. Omit to rest until the person messages you." })) }),
       replay: "safe",
       execute: async (args) => {

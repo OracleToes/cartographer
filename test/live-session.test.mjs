@@ -426,3 +426,38 @@ test("the tree is addressable: a directory handle anchors it, a file handle does
     await cleanup();
   }
 });
+
+test("no product tool carries a bound its own description does not state", async () => {
+  const { root, brain, cleanup } = await fixture();
+  try {
+    const tools = createTools({
+      root,
+      brain,
+      session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false },
+    });
+    const BOUND_KEYS = ["minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"];
+    const boundsOf = (schema, path, found = []) => {
+      if (schema === null || typeof schema !== "object") return found;
+      for (const [key, value] of Object.entries(schema)) {
+        if (BOUND_KEYS.includes(key) && value !== undefined) found.push({ path, key, value });
+        boundsOf(value, `${path}.${key}`, found);
+      }
+      return found;
+    };
+
+    // §1: a bound is part of how a tool works and is said so in that tool's own
+    // description and nowhere else. So any bound left on a parameter has to be
+    // a number the description states — and an empty string is not a length.
+    for (const tool of tools) {
+      for (const bound of boundsOf(tool.parameters, tool.name)) {
+        assert.notEqual(bound.value, 0, `${tool.name}${bound.path} carries a ${bound.key} of 0, which asks nothing and only constrains`);
+        assert.ok(
+          (tool.description ?? "").includes(String(bound.value)),
+          `${tool.name}${bound.path} carries ${bound.key}=${bound.value}, and its description does not state it`,
+        );
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
