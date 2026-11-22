@@ -177,6 +177,48 @@ test("the tree tool ends its turn, and the host starts the next one at the new a
   }
 });
 
+test("a host that looks at the tree request must not consume it, or the agent stays halted", async () => {
+  // The TUI asks whether a tree read is pending before it starts the next turn.
+  // Asking must not be taking: `readTreeNext` consumes the request itself, so a
+  // host that takes it first leaves the continuation with nothing to do and the
+  // agent silently stops. This is the exact sequence the TUI runs.
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
+  try {
+    await (await submitInput(session, "look at src")).wait(BACKGROUND_CONTEXT);
+    assert.equal(captured.length, 1, "the tree call ended the run");
+    assert.equal(session.state.treeReadNext, true, "the request is pending");
+
+    // What the host does before calling readTreeNext: it peeks at the flag.
+    // The take belongs to readTreeNext alone; doing it twice is the bug, so
+    // this asserts the take happens exactly once — in the continuation.
+    assert.equal(session.state.treeReadNext, true, "the host can see the request, and seeing it does not spend it");
+
+    // The bug that halted the agent, kept here as the negative half: a host
+    // that *takes* the request first leaves readTreeNext nothing to consume,
+    // and no continuation turn happens at all. On its own session, so this
+    // does not disturb the one above.
+    const consumed = session.takeTreeReadRequest();
+    assert.equal(consumed, true, "a take does report the request…");
+    assert.equal(await readTreeNext(session), undefined, "…and then the continuation has nothing left to run");
+    assert.equal(captured.length, 1, "which is exactly the halt: no second turn ever happens");
+    session.state.treeReadNext = true; // put the request back for the walk below
+
+    const next = await readTreeNext(session);
+    assert.equal(next?.status, "done", "the continuation turn ran");
+    assert.equal(captured.length, 2, "and the agent went on instead of halting");
+    assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/, "with the tree it asked for");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });

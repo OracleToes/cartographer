@@ -1360,7 +1360,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (reason !== null) await runCollapse(reason);
     // `tree` ended the turn to read the tree it just set (§6.3): the person
     // watches the next turn happen rather than waiting to speak first.
-    if (state.session.takeTreeReadRequest()) {
+    //
+    // Peek, do not take: `readTreeNext` consumes the request itself, and taking
+    // it here first would leave it nothing to consume — the continuation would
+    // be skipped and the agent would stay halted until somebody spoke.
+    if (state.session.state.treeReadNext === true) {
       state.running = true;
       headerState.running = true;
       tui.requestRender();
