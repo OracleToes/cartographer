@@ -105,7 +105,7 @@ test("collapse creates the new generation, sweeps the old store into the archive
     const newPaths = generationPaths(root, report.generation);
     assert.equal(existsSync(newPaths.markdown), true);
     const markdown = readFileSync(newPaths.markdown, "utf8");
-    assert.match(markdown, /Ledger — what you are working on|Atlas — what you understand|\(the Brain is empty/);
+    assert.match(markdown, /Chat — what you and .* have said to each other\nC1 \[.*\] — .*\n  before collapse/);
     await store.close();
   } finally {
     for (const name of ["gen-20261116T020000Z-live001.sqlite", "gen-20261116T020000Z-live001.projection.md", "gen-20261116T020000Z-live001.projection.json"]) {

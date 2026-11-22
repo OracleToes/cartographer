@@ -137,10 +137,13 @@ to delete it at that collapse (§4.1).
 Brain records are not ephemeral. They stay in the Brain until they are deleted,
 or until they are marked for archive and a collapse moves them out (§4.1).
 
-**Only Chat is a conversation.** The person's message is already in the
-transcript, so the prefill does not repeat it. The agent's Chat reaches the model
-as the `chat` tool's result. The prefill carries structure, handles, and state,
-and the transcript is the dialogue.
+**Only Chat is a conversation.** Inside a generation the person's message is
+already in the body, where it was said, and the agent's Chat reaches the model as
+the `chat` tool's result; the head does not repeat either until a collapse ends
+that body. Both are Chat records in the Brain, so they stay until someone deletes
+them, and the collapse places them in the head (§3.2, §5.1): the conversation
+goes on across a collapse, and the transcript and the Context view are two views
+of the same records. Only a delete or an archive mark removes one.
 
 ### 3.2 Pins
 

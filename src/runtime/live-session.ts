@@ -13,7 +13,7 @@
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -88,6 +88,10 @@ export interface LiveSession {
   readonly conversation: Conversation;
   /** The underlying database handle; closed by closeLiveSession. */
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
+  /** The Brain this session reads and writes: where the person's words are recorded as they are sent (§2.3). */
+  readonly brain: BrainStore;
+  /** The session's clock, so a record the host writes is stamped the way the tools stamp theirs. */
+  readonly now: () => number;
   /** The mutable present; named fields, no hidden state (§5.3). */
   readonly state: LiveSessionState;
   /** The gate every model response body passes through: `^v` holds it (§9). */
@@ -222,6 +226,8 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       harness,
       conversation,
       database,
+      brain: options.brain,
+      now: options.now ?? Date.now,
       state,
       freeze,
       takeCollapseRequest() {
@@ -290,6 +296,19 @@ export async function submitInput(session: LiveSession, text: UserInput, whenBus
   // The person has spoken: whatever the agent was caught in, this is a new
   // direction, so a collapse after it is not judged against the stall before it.
   session.state.rebuiltAutomatically = false;
+  // Person Chat is the person's own message, recorded as it is sent (§2.3): it
+  // is a Brain record, so it stays until someone deletes it and a collapse
+  // carries it into the head instead of ending the conversation. The message
+  // itself still goes in as the turn the agent answers. A message carried over
+  // a collapse is admitted without passing here, so it is recorded once.
+  const said = inputText(text);
+  if (said.trim().length > 0 && said.trim() !== STATE_BLOCK_MARKER) {
+    const at = session.now();
+    await session.brain.apply(
+      { kind: "chat.record", record: { id: `chat:person:${randomUUID()}`, author: "user", text: said, createdAt: at, updatedAt: at } },
+      at,
+    );
+  }
   return admitInput(session, text, whenBusy);
 }
 

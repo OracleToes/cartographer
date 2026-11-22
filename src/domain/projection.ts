@@ -2,11 +2,13 @@
  * The frozen projection (§5.1).
  *
  * Rebuilt only at collapse; never patched between collapses. It carries
- * structure, handles, and state — never a second copy of the dialogue: a
- * Person message lives in the transcript, and Agent Chat reaches the model
- * as the `chat` tool's result. There is no context budget and no omission
- * list: the person never confirmed one, and a limit the agent cannot
- * measure is worse than no limit (§2.3's logic, applied to the projection).
+ * structure, handles, and state, and every Chat record the Brain holds, the
+ * person's and the agent's (§3.2 step 4, §5.1). While a generation lives, a
+ * Chat record is in the body where it was said; a collapse ends that body, so
+ * the record reaches the head here, once, and the conversation goes on across
+ * the collapse. There is no context budget and no omission list: the person
+ * never confirmed one, and a limit the agent cannot measure is worse than no
+ * limit (§2.3's logic, applied to the projection).
  *
  * Every durable ID line carries an ISO 8601 UTC timestamp (§6). Links and
  * attachments that name a record which no longer exists render as `(gone)` —
@@ -18,7 +20,7 @@ import { personName } from "./person.js";
 import { estimateTokens } from "./estimate.js";
 import type { CartoBrain } from "./records.js";
 
-export type ProjectionPartId = "atlas" | "ledger" | "files" | "ephemera";
+export type ProjectionPartId = "atlas" | "ledger" | "chat" | "files" | "ephemera";
 
 export interface ProjectionPart {
   id: ProjectionPartId;
@@ -115,6 +117,21 @@ export function projectContext(
     }
   }
 
+  // Chat is the conversation (§2.3), and the head holds all of it (§5.1): the
+  // person's words and the agent's own, in the order they were said, each under
+  // its handle. A record the person or the agent deleted is not here, and one
+  // marked for archive left the Brain before this was built.
+  const chat: string[] = [];
+  if (brain.chat.length > 0) {
+    chat.push(`Chat — what you and ${person} have said to each other`);
+    for (const record of brain.chat) {
+      chat.push(
+        `${partOf("chat", record.id)} [${record.author === "user" ? person : "you"}] — ${iso(record.createdAt)}${record.pinned ? ` · [pinned by ${record.pinned === "user" ? person : "you"}]` : ""}`,
+      );
+      chat.push(indent(record.text));
+    }
+  }
+
   // Pinned ephemera come after Chat in the head (§5.1): what the person kept in
   // front of the agent, each item under its own handle. They are not Brain
   // records, so they are not part of the Atlas or the Ledger part; they are the
@@ -147,6 +164,7 @@ export function projectContext(
   const parts: ProjectionPart[] = [];
   if (atlas.length > 0) parts.push(makePart("atlas", "Atlas", atlas));
   if (ledger.length > 0) parts.push(makePart("ledger", "Ledger", ledger));
+  if (chat.length > 0) parts.push(makePart("chat", "Chat", chat));
   if (files.length > 0) parts.push(makePart("files", "Pinned files", files));
   if (ephemera.length > 0) parts.push(makePart("ephemera", "Pinned", ephemera));
 
@@ -154,7 +172,7 @@ export function projectContext(
     parts.length === 0
       ? "(the Brain is empty: nothing recorded yet. Write what you learn about the project, and the plan you are working to.)"
       : parts.map((part) => part.text).join("\n\n");
-  const sizes: Record<ProjectionPartId, number> = { atlas: 0, ledger: 0, files: 0, ephemera: 0 };
+  const sizes: Record<ProjectionPartId, number> = { atlas: 0, ledger: 0, chat: 0, files: 0, ephemera: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
   return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes };
 }

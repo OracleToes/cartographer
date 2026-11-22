@@ -20,13 +20,19 @@ test("the projection carries Atlas structure, handles, timestamps, never raw ids
   assert.doesNotMatch(projection.text, /raw-node-id/);
 });
 
-test("chat text never appears in the projection", () => {
+test("the head holds every Chat record, the person's and the agent's, in the order said, under handles", () => {
   let brain = emptyBrain();
-  brain = applyWrite(brain, { kind: "chat.record", record: timed("raw-chat-id", "user", "the person's secret words", "2026-11-16T04:00:00.000Z") }, at("2026-11-16T04:00:00.000Z"));
+  brain = applyWrite(brain, { kind: "chat.record", record: timed("raw-chat-id", "user", "the person's words\nover two lines", "2026-11-16T04:00:00.000Z") }, at("2026-11-16T04:00:00.000Z"));
   brain = applyWrite(brain, { kind: "chat.record", record: timed("raw-chat-id-2", "agent", "the agent's answer", "2026-11-16T04:01:00.000Z") }, at("2026-11-16T04:01:00.000Z"));
-  const projection = projectContext(brain);
-  assert.doesNotMatch(projection.text, /secret words|the agent's answer/);
+  const projection = projectContext(brain, new Map(), "OracleToes");
+  assert.match(projection.text, /C1 \[OracleToes\] — 2026-11-16T04:00:00.000Z\n  the person's words\n  over two lines/);
+  assert.match(projection.text, /C2 \[you\] — 2026-11-16T04:01:00.000Z\n  the agent's answer/);
+  assert.ok(projection.text.indexOf("C1") < projection.text.indexOf("C2"));
   assert.doesNotMatch(projection.text, /raw-chat-id/);
+  assert.ok(projection.sizes.chat > 0, "the head's Chat is sized like the other parts");
+  // A deleted record is not in the head: only a delete removes Chat, and it is gone.
+  const gone = projectContext(applyWrite(brain, { kind: "delete", target: "chat", id: "raw-chat-id" }, 1), new Map(), "OracleToes");
+  assert.doesNotMatch(gone.text, /the person's words/);
 });
 
 test("a link to a deleted node renders as (gone), never as a raw id", () => {

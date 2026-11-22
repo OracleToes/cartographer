@@ -63,13 +63,14 @@ export interface BrainStore {
   /** Serialize filesystem recovery with other journal writers, clearing only after success. */
   recoverCollapseJournal(recover: (journal: CollapseJournal) => Promise<void>): Promise<void>;
   /**
-   * Every Agent Chat record that still exists anywhere — in the Brain, or in
-   * the archive because a collage swept it out. A Chat record does not leave
-   * the agent's context when a collapse rebuilds it, and the transcript is where
-   * the person reads the conversation, so it stays on screen; this is how the
-   * transcript finds it after the store it was written in is gone.
+   * Every Chat record that still exists anywhere, the person's and the
+   * agent's — in the Brain, or in the archive because a collapse swept it out.
+   * A Chat record does not leave the agent's context when a collapse rebuilds
+   * it, and the transcript is where the person reads the conversation, so it
+   * stays on screen; this is how the transcript finds it after the store it
+   * was written in is gone.
    */
-  readAgentChat(): Promise<ChatRecord[]>;
+  readChat(): Promise<ChatRecord[]>;
   /**
    * One collapse's worth of Brain and archive change, in one transaction: the
    * writes apply to the Brain, what `sweep` says moves into the archive, and
@@ -302,15 +303,15 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
 
     readArchive: () => readArchiveFrom(database),
 
-    readAgentChat: async () => {
-      // Both places an Agent Chat record can be: the Brain, and the archive —
+    readChat: async () => {
+      // Both places a Chat record can be: the Brain, and the archive —
       // archived records keep their id, so a swept record is the same record,
       // and the transcript shows it once either way.
-      const brainRecords = (await readFrom(database)).chat.filter((record) => record.author === "agent");
+      const brainRecords = (await readFrom(database)).chat;
       const archived = (await readArchiveFrom(database)).items
         .filter((item) => item.layer === "record" && item.record?.kind === "chat")
         .map((item) => item.record?.value as ChatRecord | undefined)
-        .filter((record): record is ChatRecord => record !== undefined && record.author === "agent");
+        .filter((record): record is ChatRecord => record !== undefined);
       const seen = new Set(brainRecords.map((record) => record.id));
       return [...brainRecords, ...archived.filter((record) => !seen.has(record.id))].sort(
         (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),

@@ -120,8 +120,13 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       assert.notEqual(outcome.session.generation, session.generation);
       assert.equal(captured.length, 3, "the new generation worked on its own: a chat, then a rest");
       assert.ok(blockOf(captured[1]), "the first request after the rebuild is a state block");
-      assert.ok(!flat(captured[1]).includes("zebra"), "the old context's talk is gone");
-      assert.deepEqual((await env.brain.read()).chat.map((record) => record.text), ["back, from the Brain alone"]);
+      // The old context's turns are gone, but what the person said is Chat: it
+      // is a Brain record and the rebuilt head holds it, once (§2.3, §3.2).
+      assert.equal(flat(captured[1]).split("zebra").length - 1, 1, "the person's words come back once, from the Brain");
+      assert.deepEqual((await env.brain.read()).chat.map((record) => [record.author, record.text]), [
+        ["user", "please reset the context, zebra"],
+        ["agent", "back, from the Brain alone"],
+      ]);
       assert.equal(next.state.rebuiltAutomatically, true);
     } finally {
       await closeLiveSession(next ?? session).catch(() => undefined);

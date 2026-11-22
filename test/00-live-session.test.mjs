@@ -108,9 +108,11 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     const current = await brain.read();
     assert.equal(current.atlas.length, 1);
     assert.deepEqual(current.atlas[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
-    assert.equal(current.chat.length, 1);
-    assert.equal(current.chat[0].text, "hello person");
-    assert.equal(current.chat[0].author, "agent");
+    // The person's words are Chat, recorded as they were sent (§2.3), then the agent's.
+    assert.deepEqual(current.chat.map((record) => [record.author, record.text]), [
+      ["user", "remember this fact"],
+      ["agent", "hello person"],
+    ]);
     assert.ok(session.state.pending.some((item) => item.kind === "chat" && item.action === "record" && item.id === "chat:call-1"));
     assert.equal(captured.length, 2);
     const firstBlock = blockOf(captured[0]);
@@ -122,7 +124,7 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     assert.ok(secondBlock);
     assert.match(flatten(captured[1]), /export const answer = 42/);
     assert.match(secondBlock.content, /since the rebuild:/);
-    assert.match(secondBlock.content, /C1 · said to OracleToes/);
+    assert.match(secondBlock.content, /C2 · said to OracleToes/);
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER));
     assert.match(secondBlock.content, /A1 · written/);
@@ -423,4 +425,23 @@ test("a person-triggered collapse with no run in flight: interrupt is a no-op an
   await cleanup();
 });
 
+});
+
+test("the person's message is recorded as Chat once, and a collapse brings it back in the head", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" }))]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
+  try {
+    await (await submitInput(session, "  keep this across a collapse")).wait(BACKGROUND_CONTEXT);
+    const records = (await brain.read()).chat;
+    assert.equal(records.length, 1, "one message, one record");
+    assert.deepEqual([records[0].author, records[0].text, records[0].createdAt], ["user", "  keep this across a collapse", 1_700_000_000_000]);
+    // Blank input is not a message.
+    await submitInput(session, "   ").then((submission) => submission.wait(BACKGROUND_CONTEXT)).catch(() => undefined);
+    assert.equal((await brain.read()).chat.length, 1);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
 });

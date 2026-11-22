@@ -1405,9 +1405,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // remove its content from the retained prefix, not just from the render.
       state.sealed = retained;
       const retainedChat = new Set(retained.flatMap((entry) => entry.kind === "agent" && entry.recordId !== undefined ? [entry.recordId] : []));
-      const chatRecords = await brain.readAgentChat();
+      const chatRecords = await brain.readChat();
       const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
+      // The person's own Chat is a record too (§2.3), and the transcript is a
+      // view of the same records the Context view lists, so none is missing
+      // from it. A person's line the context already shows live, the retained
+      // history already holds, or the queue still waits to land is that very
+      // record, and it is not drawn a second time; any other is history from
+      // before this screen opened, and it is drawn here, in order.
+      const shownPerson = new Map<string, number>();
+      const showing = (text: string): void => void shownPerson.set(text, (shownPerson.get(text) ?? 0) + 1);
+      for (const entry of retained) if (entry.kind === "person") showing(entry.text);
+      for (const item of person) if (item.entry.kind === "person") showing(item.entry.text);
+      for (const item of state.pending) showing(item.text);
       for (const record of chatRecords) {
+        if (record.author === "user") {
+          const left = shownPerson.get(record.text) ?? 0;
+          if (left > 0) {
+            shownPerson.set(record.text, left - 1);
+          } else {
+            agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "person", text: record.text } });
+          }
+          continue;
+        }
         if (retainedChat.has(record.id)) continue;
         const chatHandle = handleOf(brainState.handles, "chat", record.id);
         agent.push({
