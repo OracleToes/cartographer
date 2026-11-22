@@ -285,16 +285,24 @@ export class AtlasView implements Component, Focusable {
     const lines: string[] = [];
     const filtered = this.getFilteredNodes();
 
-    // Top Header Banner
-    const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
-    const headerLeft = ` ${tokens.bold(tokens.accent("ATLAS"))} ${tokens.muted("·")} ${filtered.length} nodes ${tokens.warn(filterInfo)}`;
-    const headerRight = `${this.staleHandles.size > 0 ? tokens.warn(`!${this.staleHandles.size} stale  `) : ""}${tokens.muted("h/l panes · p pin · / filter · esc chat ")}`;
-    const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
-    lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
+    // One header row, Posting's shape: the book's name, its figure, and what the
+    // keys do here. The book itself starts one quiet line below it.
+    const name = tokens.bold(tokens.atlas("ATLAS"));
+    const figure = `${tokens.text(String(filtered.length))} ${tokens.faint("nodes")}`;
+    const filter = this.filtering
+      ? ` ${tokens.accent(`/${this.filterText}█`)}`
+      : this.filterText
+        ? ` ${tokens.accent(`/${this.filterText}`)}`
+        : "";
+    const stale = this.staleHandles.size > 0 ? ` ${tokens.warn(`!${this.staleHandles.size} stale`)}` : "";
+    const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
+    const right = `${tokens.faint("j/k move · enter open · p pin · / filter ")}`;
+    const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+    lines.push(tokens.panel(padLine(left + " ".repeat(gap) + right, width)));
     lines.push(padLine("", width));
 
     if (filtered.length === 0) {
-      lines.push(`  ${tokens.muted("(The Atlas is empty. Call the atlas tool to create nodes.)")}`);
+      lines.push(`  ${tokens.muted("The Atlas is empty. The agent creates nodes with the atlas tool.")}`);
       return lines;
     }
 

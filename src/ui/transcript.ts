@@ -1,41 +1,34 @@
 /**
- * The transcript (§8): everything the
- * agent does is visible — its Chat words, its reasoning, its plain model
- * text, and its tool calls — alongside the person's own lines and quiet
- * status lines. Chat remains the only channel that addresses the person; the
- * rest renders as foldable cards, dimmer and in their own hues, never
- * mistaken for Chat.
+ * The transcript (§8): everything the agent does, in the order it did it.
  *
- * The cards are the working's window: while the model streams, a card shows
- * the live tail in a limited-height window (8 lines); when the run settles,
- * the landed assistant entry renders as the same cards, folded by default.
- * A card folds to its header — a click on it (or `ctrl+e` for all of them)
- * toggles it back. An open LANDED card emits every retained row into the
- * page — the one scrolling owner is the page (§8); the wheel is the
- * page's everywhere, so scrolling up suspends the tail-follow and the person
- * scrolls the rest themselves. An open LIVE card keeps the bounded tail: a
- * growing stream must stay bounded or the page could not keep up with it.
- * Landed cards default folded; cards from the in-flight partial default open,
- * so streaming is always watchable and settle folds everything automatically.
+ * Posting's screen is one document you read top to bottom, with the working
+ * surface in front and everything else quiet around it. The transcript is that
+ * document:
  *
- * Order is the context's order, not the arrival order of the person's lines:
- * a line shows up where it actually landed in the context (the Brain, and the
- * entries inside it), which is what "live and honest" means for the window.
- * Submitted-but-unplaced lines render after everything, dimmed, labelled
- * queued; they move into place when the run reaches its boundary. State-block
- * markers never appear at all (they are not landed user entries).
+ * - A **person's line** is a block with a cyan spine, the word `you`, and the
+ *   text in body ink. It is never folded and never truncated.
+ * - An **agent Chat record** is the same block in the agent's green. Chat is the
+ *   only channel that addresses the person (§2.3), so it is the only thing on
+ *   screen at full weight other than the person's own words.
+ * - Everything else — reasoning, plain model text, tool calls and their results
+ *   — is a **card**: one line when folded, a guttered body when open, in its own
+ *   hue and quieter than Chat. A card that is streaming stays open inside a
+ *   bounded window; the moment the round lands it folds to its header.
+ * - **Status lines** are a faint middot and a sentence: quiet facts about the
+ *   session, never the agent's voice.
  *
- * Nothing here is data — the caller (the workspace) rebuilds the landed list
- * from the session and the Brain at every drain, and pushes the in-flight
- * partial separately with `setLive`. The view only renders, folds, and
- * flashes, and it can render itself as plain text for `/copy`.
+ * A click folds or unfolds a card, a click on a Chat block toggles its pin,
+ * `ctrl+e` folds every card in view, and the wheel belongs to the page — the
+ * one scrolling owner (§8) — so scrolling up simply stops following the tail.
+ *
+ * Order is the context's order, not arrival order: a person's line appears
+ * where it actually landed, and a line that is submitted but not yet placed sits
+ * at the end, dimmed and labelled, until the run reaches a boundary.
+ *
+ * Nothing here is data: the workspace rebuilds the landed list from the session
+ * and the Brain at every drain and pushes the in-flight partial separately.
  */
-import {
-  truncateToWidth,
-  visibleWidth,
-  wrapTextWithAnsi,
-  type Component,
-} from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 import { pinBadgeText, statusLine, statusWarnLine, tokens } from "./tokens.js";
 
@@ -65,9 +58,14 @@ export type TranscriptEntry =
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
 
-const PREFIX_WIDTH = 7; // matches the person/agent blocks; gutter column starts here
-const LIVE_TAIL = 8; // lines an in-flight card shows; a settled open card emits every retained row
+/** Spine, gap, then a six-cell label column; the body starts here and every continuation lines up under it. */
+const LABEL_WIDTH = 6;
+const PREFIX_WIDTH = LABEL_WIDTH + 2;
+/** The body's left margin, added to every line after it is built. Text must fit inside it. */
+const INSET = 2;
+const SPINE = "▌";
 const GUTTER = "│ ";
+const LIVE_TAIL = 8;
 
 interface CardRange {
   id: string;
@@ -81,9 +79,10 @@ interface WrapMemo {
   lines: string[];
 }
 
-const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "think" : card.kind === "output" ? "text" : "tool");
-const kindColor = (card: CardEntry): ((text: string) => string) =>
+const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "thinking" : card.kind === "output" ? "text" : `tool ${card.name}`.trim());
+const kindTint = (card: CardEntry): ((text: string) => string) =>
   card.kind === "reasoning" ? tokens.reasoning : card.kind === "output" ? tokens.output : tokens.tool;
+
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 const firstLine = (text: string): string => {
   for (const line of text.split("\n")) {
@@ -172,9 +171,7 @@ export function formatToolArgs(args: unknown, name?: string): string {
     }
     return args;
   }
-  if (isRecord(args)) {
-    return formatObjectArgs(args);
-  }
+  if (isRecord(args)) return formatObjectArgs(args);
   return String(args);
 }
 
@@ -190,6 +187,8 @@ export class TranscriptView implements Component {
   /** Fired on a click of an agent block that names a Brain record: toggle the pin marker. */
   onTogglePin?: (recordId: string) => void;
   private cacheLines: string[] = [];
+
+  constructor(private readonly options: { project?: string } = {}) {}
 
   /** Replace the landed list (already in final order) and the queued list (rendered after it). */
   setEntries(entries: TranscriptEntry[], queued: Array<{ text: string; mode: string }> = []): void {
@@ -232,7 +231,10 @@ export class TranscriptView implements Component {
   toggleAllCards(): void {
     const ids = this.cardIds();
     if (ids.length === 0) return;
-    const anyOpen = ids.some((id) => this.isExpanded(this.cardById(id)!));
+    const anyOpen = ids.some((id) => {
+      const card = this.cardById(id);
+      return card !== undefined && this.isExpanded(card);
+    });
     for (const id of ids) this.expanded.set(id, !anyOpen);
     this.cacheWidth = -1;
   }
@@ -266,12 +268,12 @@ export class TranscriptView implements Component {
       if (entry.kind === "person") lines.push(`you: ${entry.text}`);
       else if (entry.kind === "agent") lines.push(`carto: ${entry.text}`);
       else if (entry.kind === "status") lines.push(`· ${entry.text}`);
-      else if (entry.kind === "reasoning") lines.push(`think: ${entry.text}`);
+      else if (entry.kind === "reasoning") lines.push(`thinking: ${entry.text}`);
       else if (entry.kind === "output") lines.push(`text: ${entry.text}`);
       else lines.push(`tool ${entry.name}`, ...(entry.output ?? entry.args).split("\n").map((line) => `  ${line}`));
     }
     for (const card of this.liveCards) {
-      if (card.kind === "reasoning") lines.push(`think: ${card.text}`);
+      if (card.kind === "reasoning") lines.push(`thinking: ${card.text}`);
       else if (card.kind === "output") lines.push(`text: ${card.text}`);
       else lines.push(`tool ${card.name}`, ...(card.output ?? card.args).split("\n").map((line) => `  ${line}`));
     }
@@ -279,14 +281,24 @@ export class TranscriptView implements Component {
     return lines.join("\n");
   }
 
+  /**
+   * A voice block: a coloured spine, a label in its own hue, the text in body
+   * ink, and every continuation line aligned under the text column.
+   */
   private block(who: "you" | "carto", text: string, width: number, extra?: string): string[] {
-    const pad = " ".repeat(Math.max(0, PREFIX_WIDTH - visibleWidth(who)));
-    const prefix = tokens.bold(who === "you" ? tokens.accent(who) : tokens.agent(who)) + pad;
-    const body = Math.max(1, width - PREFIX_WIDTH);
+    const tint = who === "you" ? tokens.person : tokens.agent;
+    const label = who === "you" ? "you" : "carto";
+    const body = Math.max(1, width - INSET - PREFIX_WIDTH);
     const wrapped = wrapTextWithAnsi(text, body);
     const indent = " ".repeat(PREFIX_WIDTH);
-    const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
-    return wrapped.map((line, index) => (index === 0 ? prefix + line + marker : indent + line));
+    return wrapped.map((line, index) => {
+      if (index !== 0) return `${indent}${tokens.text(line)}`;
+      const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
+      // The marker rides at the end of the first line; the text gives it the room.
+      const room = Math.max(1, Math.max(1, width - INSET - PREFIX_WIDTH) - visibleWidth(marker));
+      const first = truncateToWidth(line, room, "…");
+      return `${tint(SPINE)} ${tint(tokens.bold(label.padEnd(LABEL_WIDTH)))}${tokens.text(first)}${marker}`;
+    });
   }
 
   private wrapBody(card: CardEntry, width: number): string[] {
@@ -308,21 +320,29 @@ export class TranscriptView implements Component {
   }
 
   private cardHeader(card: CardEntry, width: number, expanded: boolean): string {
+    const tint = kindTint(card);
     const glyph = expanded ? "▾" : "▸";
-    const isTool = card.kind === "tool";
-    const labelText = isTool && card.name ? `tool ${card.name}` : kindLabel(card);
-    const label = kindColor(card)(tokens.bold(labelText));
-    const pad = " ".repeat(Math.max(1, PREFIX_WIDTH - visibleWidth(labelText)));
+    const labelText = kindLabel(card);
+    const label = tint(tokens.bold(labelText));
+    const gap = " ".repeat(Math.max(1, 6 - labelText.length)); // the label column: thinking/text/tool …
+    const keyPrefix = `  ${tint(glyph)} ${label}`;
+
     const marks: string[] = [];
-    if (card.status !== undefined && expanded) marks.push(tokens.muted(`· ${card.status}`));
-    if (card.failed === true) marks.push(tokens.danger(tokens.bold("· failed")));
-    if (expanded) return `${label}${pad}${glyph}${marks.length > 0 ? ` ${marks.join(" ")}` : ""}`;
-    const summary = isTool
-      ? (card.args.trim().length > 0 ? `${card.name}(${oneLine(card.args)})` : card.name)
+    if (card.failed === true) marks.push(tokens.danger("· failed"));
+    else if (card.status === "running") marks.push(tokens.faint("· running"));
+    else if (card.status === "pending") marks.push(tokens.faint("· queued"));
+
+    if (expanded) {
+      const tail = marks.length > 0 ? ` ${marks.join(" ")}` : "";
+      return `${keyPrefix}${tail}`;
+    }
+    const summary = card.kind === "tool"
+      ? (card.args.trim().length > 0 ? oneLine(card.args) : "")
       : firstLine(card.text);
-    const preview = truncateToWidth(summary.length === 0 ? "…" : summary, Math.max(1, width - PREFIX_WIDTH - 2), "…");
-    if (card.status !== undefined) marks.push(tokens.muted(`· ${card.status}`));
-    return `${label}${pad}${glyph}${tokens.muted(" ")}${tokens.muted(preview)}${marks.length > 0 ? ` ${marks.join(" ")}` : ""}`;
+    const room = Math.max(1, width - visibleWidth(keyPrefix) - gap.length - 2);
+    const preview = truncateToWidth(summary.length === 0 ? "…" : summary, room, "…");
+    const tail = marks.length > 0 ? ` ${marks.join(" ")}` : "";
+    return `${keyPrefix}${gap}${tokens.muted(preview)}${tail}`;
   }
 
   private renderCard(card: CardEntry, width: number): string[] {
@@ -331,17 +351,16 @@ export class TranscriptView implements Component {
     if (!expanded) return lines;
     const body = this.wrapBody(card, width);
     const total = body.length;
-    const indent = " ".repeat(PREFIX_WIDTH);
+    const indent = " ".repeat(PREFIX_WIDTH - 2);
+    const gutter = tokens.rule(GUTTER);
+    const paint = (line: string): string =>
+      card.kind === "reasoning" ? tokens.reasoning(line) : card.kind === "output" ? tokens.output(line) : tokens.text(line);
     if (card.live === true && total > LIVE_TAIL) {
-      lines.push(`${indent}${tokens.muted(GUTTER)}${tokens.muted(`⋯ ${total - LIVE_TAIL} earlier lines — bounded while it streams`)}`);
-      for (const line of body.slice(total - LIVE_TAIL)) {
-        lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
-      }
+      lines.push(`${indent}${gutter}${tokens.faint(`⋯ ${total - LIVE_TAIL} earlier lines`)}`);
+      for (const line of body.slice(total - LIVE_TAIL)) lines.push(`${indent}${gutter}${paint(line)}`);
       return lines;
     }
-    for (const line of body) {
-      lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
-    }
+    for (const line of body) lines.push(`${indent}${gutter}${paint(line)}`);
     return lines;
   }
 
@@ -349,15 +368,13 @@ export class TranscriptView implements Component {
     return this.ranges.find((range) => y >= range.start && y < range.end);
   }
 
-  /** A click folds or unfolds a card; a click on an agent block toggles its record's pin; the wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
+  /** A click folds or unfolds a card; a click on a Chat block toggles its pin. The wheel is the page's. */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
     const cardRange = this.rangeAt(event.y);
     const block = this.blockRanges.find((range) => event.y >= range.start && event.y < range.end);
     if (cardRange === undefined && block === undefined) return undefined;
 
-    if (event.type === "press") {
-      return { handled: true };
-    }
+    if (event.type === "press") return { handled: true };
     if (event.type === "click") {
       if (block !== undefined) {
         this.onTogglePin?.(block.id);
@@ -374,6 +391,26 @@ export class TranscriptView implements Component {
     return undefined;
   }
 
+  /** The first thing a person sees: what this is, and the three keys that get them around. */
+  private emptyState(width: number): string[] {
+    const project = this.options.project ?? "this project";
+    const rule = tokens.faint("─".repeat(Math.max(1, Math.min(width - 4, 46))));
+    return [
+      "",
+      `  ${tokens.bold(tokens.accent("carto"))} ${tokens.faint("·")} ${tokens.text(project)}`,
+      `  ${rule}`,
+      "",
+      `  ${tokens.muted("Your working attention on this project. The Brain holds what it")}`,
+      `  ${tokens.muted("understands; the context is rebuilt from it at every collapse.")}`,
+      "",
+      `  ${tokens.muted("Type to work. The agent speaks through")} ${tokens.agent("chat")}${tokens.muted("; its reasoning")}`,
+      `  ${tokens.muted("and tool calls appear here as cards you can fold open.")}`,
+      "",
+      `  ${tokens.accent("^p")} ${tokens.faint("palette")}   ${tokens.accent("^o")} ${tokens.faint("jump")}   ${tokens.accent("/help")} ${tokens.faint("commands")}`,
+      "",
+    ];
+  }
+
   render(width: number): string[] {
     if (this.cacheWidth === width) return this.cacheLines;
     const lines: string[] = [];
@@ -381,16 +418,9 @@ export class TranscriptView implements Component {
     this.ranges = [];
     this.blockRanges = [];
     if (total === 0) {
-      lines.push("");
-      lines.push(`  ${tokens.bold(tokens.accent("carto"))} ${tokens.muted("— your pair on this project")}`);
-      lines.push(`  ${tokens.muted("Type to work. The agent speaks through chat;")}`);
-      lines.push(`  ${tokens.muted("its reasoning and tool calls render as foldable cards.")}`);
-      lines.push("");
-      lines.push(`  ${tokens.muted("^o jump · ^p palette · ⇧tab send mode · ^x stop · ^e fold cards")}`);
-      lines.push(`  ${tokens.muted("/help lists the commands")}`);
-      this.cacheLines = lines;
+      this.cacheLines = this.inset(this.emptyState(width));
       this.cacheWidth = width;
-      return lines;
+      return this.cacheLines;
     }
     let first = true;
     const gap = () => {
@@ -400,34 +430,43 @@ export class TranscriptView implements Component {
     const pushCard = (card: CardEntry) => {
       gap();
       const start = lines.length;
-      const rendered = this.renderCard(card, width);
-      lines.push(...rendered);
+      lines.push(...this.renderCard(card, width));
       this.ranges.push({ id: card.id, start, end: lines.length });
     };
     for (const entry of this.items) {
-      if (isCard(entry)) pushCard(entry);
-      else {
-        gap();
-        if (entry.kind === "person") {
-          lines.push(...this.block("you", entry.text, width));
-        } else if (entry.kind === "agent") {
-          const start = lines.length;
-          const pinStr = entry.pinned !== undefined && entry.pinned !== null ? pinBadgeText(entry.pinned, "pin") : "";
-          lines.push(...this.block("carto", entry.text, width, pinStr.length > 0 ? pinStr : undefined));
-          if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
-        } else {
-          lines.push(...wrapTextWithAnsi(entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text), width));
-        }
+      if (isCard(entry)) {
+        pushCard(entry);
+        continue;
+      }
+      gap();
+      if (entry.kind === "person") {
+        lines.push(...this.block("you", entry.text, width));
+      } else if (entry.kind === "agent") {
+        const start = lines.length;
+        const pin = entry.pinned !== undefined && entry.pinned !== null ? pinBadgeText(entry.pinned, "pin") : "";
+        lines.push(...this.block("carto", entry.text, width, pin.length > 0 ? pin : undefined));
+        if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
+      } else {
+        const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);
+        for (const line of wrapTextWithAnsi(`${text}`, width - 3)) lines.push(`  ${line}`);
       }
     }
     for (const card of this.liveCards) pushCard(card);
     for (const item of this.queued) {
       gap();
-      lines.push(...wrapTextWithAnsi(tokens.muted(tokens.italic(`you ⏛ ${item.text} (${item.mode === "after run" ? "after the run" : "queued"} — lands at the boundary)`)), width));
+      const label = item.mode === "after run" ? "sends after the run" : item.mode === "now" ? "sends now" : "steers at the next boundary";
+      const head = `${tokens.faint("⏸")} ${tokens.person(tokens.bold("you".padEnd(LABEL_WIDTH)))}`;
+      const room = Math.max(1, width - INSET - visibleWidth(head));
+      lines.push(`  ${head}${tokens.faint(tokens.italic(truncateToWidth(item.text, room, "…")))}`);
+      lines.push(`  ${" ".repeat(PREFIX_WIDTH)}${tokens.faint(`· ${label}`)}`);
     }
-    lines.push("");
     this.cacheWidth = width;
-    this.cacheLines = lines;
-    return lines;
+    this.cacheLines = this.inset(lines);
+    return this.cacheLines;
+  }
+
+  /** The body breathes: two cells of left margin, the same on every line. */
+  private inset(lines: string[]): string[] {
+    return lines.map((line) => (line.length === 0 ? line : `  ${line}`));
   }
 }

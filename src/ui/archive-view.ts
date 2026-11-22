@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { Archive, ArchivedItem } from "../domain/archive.js";
-import { padLine, tokens } from "./tokens.js";
+import { padLine, tokens, visibleWidth } from "./tokens.js";
 
 export class ArchiveView implements Component, Focusable {
   focused = false;
@@ -48,7 +48,7 @@ export class ArchiveView implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+t") || matchesKey(data, "q")) {
       this.onBack?.();
       return;
     }
@@ -90,30 +90,36 @@ export class ArchiveView implements Component, Focusable {
 
   render(width: number): string[] {
     const lines: string[] = [];
-    lines.push(padLine(tokens.bold("The archive"), width));
-    lines.push(
-      padLine(
-        tokens.muted("person only · p pin · r restore · d delete · esc back · a pinned item is never dropped"),
-        width,
-      ),
-    );
+    const inner = Math.max(20, width - 2);
+    // A layer wears the same header as the working area it covers, so the person
+    // always knows which layer they are looking at.
+    const left = `${tokens.bold(tokens.warn("ARCHIVE"))} ${tokens.faint("· the person's, never the agent's")}`;
+    const right = tokens.faint(`${this.items.length} item${this.items.length === 1 ? "" : "s"} `);
+    const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(right));
+    lines.push(tokens.panel(padLine(` ${left}${" ".repeat(gap)}${right}`, width)));
+    lines.push("");
     if (this.items.length === 0) {
-      lines.push("");
-      lines.push(padLine(tokens.muted("nothing archived"), width));
+      lines.push(`  ${tokens.muted("Nothing is archived.")}`);
+      lines.push(`  ${tokens.faint("A collapse sweeps what the Brain let go of; it waits one collapse, then it is gone.")}`);
       return lines;
     }
+    lines.push(`  ${tokens.faint("swept by a collapse · waits one collapse · a pin keeps it")}`);
     lines.push("");
-    const visible = Math.max(1, this.items.length);
-    for (let index = 0; index < visible; index += 1) {
-      const item = this.items[index];
-      if (item === undefined) continue;
-      const marker = index === this.selectedIndex ? "› " : "  ";
-      const pin = item.pinned === undefined ? "" : ` · pinned (${item.pinned === "user" ? "you" : "agent"})`;
-      const kind = item.record !== undefined ? `record · ${item.record.kind}` : `ephemeral · ${item.ephemeral?.kind ?? "item"}`;
-      lines.push(padLine(`${marker}${kind}${pin}`, width));
-      lines.push(padLine(tokens.muted(`    ${summaryOf(item)}`), width));
+    this.items.forEach((item, index) => {
+      const selected = index === this.selectedIndex;
+      const marker = selected ? tokens.warn("▸") : tokens.faint("▸");
+      const pin = item.pinned === undefined ? "" : ` ${tokens.pin(`⊙ ${item.pinned === "user" ? "you" : "agent"}`)}`;
+      const kind = item.record !== undefined ? item.record.kind : (item.ephemeral?.kind ?? "item");
+      const head = `${marker} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}`;
+      lines.push(padLine(`  ${head}`, width));
+      const summary = summaryOf(item);
+      const body = wrapTextWithAnsi(summary, Math.max(16, inner - 6)).slice(0, 3);
+      body.forEach((line, lineIndex) => {
+        const lead = lineIndex === 0 ? `${tokens.rule("│")} ` : "  ";
+        lines.push(padLine(`    ${lead}${tokens.faint(line)}`, width));
+      });
       lines.push("");
-    }
+    });
     return lines;
   }
 }

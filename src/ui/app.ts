@@ -1,16 +1,26 @@
 /**
  * The workspace (§8).
  *
- * Chat is the boot view; Atlas, Ledger, and Context surgery views are reachable
- * via jump keys (^o a, ^o l, ^o x) and the summoned palette (^p). The token bar
- * sits above the footer on every view (docs/ui-proposal.md §7, candidate A):
- * one row, segmented by part, honest about what is estimate and what is measured.
- * The whole app carries one cell of padding on every edge.
+ * Posting's anatomy, in Carto's names: one header line that says where you are,
+ * a full-height sidebar on the left, one working area in front, one context bar
+ * spanning the bottom, and one footer that lists the keys that work *here*.
+ * Everything the person can press is declared once, in `commands.ts`; the
+ * footer, `f1`, and `^p` are all drawn from it, so no two of them can disagree.
  *
- * Pinned items and stale Atlas entries are evident directly inside their books.
+ * The books are layers of the same workspace, not separate screens:
  *
- * State is one explicit value; behaviour is functions over it (§8).
- * Pi performs; Carto adds only the composition.
+ * - the **transcript** is the boot view and the only place you type;
+ * - the **atlas** and the **ledger** are the Brain, read and pinned;
+ * - the **context** is the real prompt, and the only place surgery happens;
+ * - the **archive** is a layer over the working area, toggled by `ctrl+t`, the
+ *   sidebar's layer row, or the palette (§3.3) — it is the person's, and no
+ *   handle names it to the agent.
+ *
+ * The context bar is the one thing that is never not there: one row, spanning
+ * the whole width, its width the server's own capacity.
+ *
+ * State is one explicit value; behaviour is functions over it (§8). Pi
+ * performs; Carto adds only the composition.
  */
 import { readFile } from "node:fs/promises";
 import { Writable } from "node:stream";
@@ -19,14 +29,11 @@ import { basename } from "node:path";
 import {
   Editor,
   HStack,
-  matchesKey,
   ProcessTerminal,
   ScrollView,
-  Spacer,
   TuiAltScreen,
   VStack,
   type Component,
-  type Focusable,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -50,10 +57,12 @@ import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../run
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
-import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode, type ViewMode } from "./chrome.js";
-import { TokenBarView, type TokenBarState } from "./token-bar.js";
+import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
+import { Registry, type Command } from "./commands.js";
+import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
 import { flattenEntry } from "./dump.js";
+import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
@@ -81,7 +90,9 @@ interface TuiState {
   sealedAgentIds: Set<string>;
   sendMode: SendMode;
   view: ViewMode;
-  /** True while at least one submission is in flight; drives the footer badge and the live timer's rebuilds. */
+  /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
+  layer: Layer;
+  /** True while at least one submission is in flight; drives the header and the footer's live hint. */
   running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
   pending: PendingItem[];
@@ -104,21 +115,33 @@ interface TuiState {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root: string, contextTokens: number = 0): SidebarCounts {
+function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root: string, contextTokens: number = 0, archive?: { total: number; pinned: number }): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
-  const stale: Partial<Record<"atlas" | "ledger", number>> = {};
+  const stale: Partial<Record<"atlas" | "ledger" | "chat" | "context", number>> = {};
   for (const mark of marks) {
     if (mark.kind === "atlas") {
       stale.atlas = (stale.atlas ?? 0) + 1;
     }
+  }
+  const pinned: Partial<Record<BookKind, number>> = {};
+  for (const record of brainState.chat) if (record.pinned !== undefined) pinned.chat = (pinned.chat ?? 0) + 1;
+  for (const node of brainState.atlas) if (node.pinned !== undefined) pinned.atlas = (pinned.atlas ?? 0) + 1;
+  for (const entry of brainState.ledger) if (entry.pinned !== undefined) pinned.ledger = (pinned.ledger ?? 0) + 1;
+  const marked: Partial<Record<BookKind, number>> = {};
+  for (const record of brainState.chat) {
+    if (record.mark?.action === "delete") marked.chat = (marked.chat ?? 0) + 1;
   }
   return {
     chat: brainState.chat.length,
     contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
+    pinned,
+    marked,
     stale,
     staleTotal: marks.length,
+    archive: archive?.total ?? 0,
+    archivePinned: archive?.pinned ?? 0,
   };
 }
 
@@ -215,12 +238,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   if (options.refreshCapacity === true) await refresh();
 
+  const boot = await brain.read();
   const session = await openLiveSession(options);
   const state: TuiState = {
     session,
-    sealedAgentIds: new Set((await brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id)),
+    sealedAgentIds: new Set(boot.chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
     view: "chat",
+    layer: "context",
     running: false,
     pending: [],
     sealed: [],
@@ -240,29 +265,69 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
-  const headerState = { project, modelLabel, session: state.session, view: state.view };
+  const headerState = {
+    project,
+    modelLabel,
+    session: state.session,
+    view: state.view,
+    layer: state.layer,
+    running: state.running,
+    windowUnknown: state.session.state.contextWindow <= 0,
+  };
   const header = new HeaderView(headerState);
-  const barState: TokenBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
+  const barState: ContextBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
-  const footer = new FooterView(state);
-  const transcript = new TranscriptView();
+  const transcript = new TranscriptView({ project });
   const sidebar = new Sidebar();
-  const scroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
-  const editorTheme = { borderColor: (line: string) => tokens.muted(line), selectList: selectTheme };
-  const editor = new Editor(tui, editorTheme);
+  const transcriptScroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
+  /**
+   * The prompt's frame: Posting puts the name of the thing at the top of it, so
+   * the box says what it is for. One rule above, `message` in it, one rule below.
+   */
+  class PromptEditor extends Editor {
+    protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+      const label = " message ";
+      const filler = Math.max(0, width - label.length - 1);
+      const scroll = hiddenLineCount > 0 ? `↑${hiddenLineCount} ` : "";
+      return `${tokens.rule("─")}${tokens.faint(` ${scroll}${label.trim()} `)}${tokens.rule("─".repeat(Math.max(0, filler - scroll.length)))}`;
+    }
+
+    protected override renderBottomBorder(width: number, hiddenLineCount: number): string {
+      const scroll = hiddenLineCount > 0 ? `↓${hiddenLineCount} ` : "";
+      return tokens.rule("─".repeat(width - scroll.length)) + tokens.faint(scroll);
+    }
+  }
+
+  const editorTheme = { borderColor: (line: string) => tokens.rule(line), selectList: selectTheme };
+  const editor = new PromptEditor(tui, editorTheme);
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
   const contextView = new ContextView();
   const archiveView = new ArchiveView();
 
+  // Each pannable view gets its own scroll view: Posting's "one scrolling pane in
+  // front" — the wheel and the arrow keys move whatever is focused.
+  const atlasScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
+  const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
+  const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
+
   sidebar.onSelect = (book) => void switchToView(book);
+  sidebar.onToggleLayer = (layer) => void switchLayer(layer);
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
+    const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
-    sidebar.setCounts(countSidebar(brainState, options.root, contextTokens));
+    sidebar.setCounts(
+      countSidebar(brainState, options.root, contextTokens, {
+        total: archive.items.length,
+        pinned: archive.items.filter((item) => item.pinned !== undefined).length,
+      }),
+    );
     sidebar.setActiveBook(state.view);
+    sidebar.setLayer(state.layer);
     tui.requestRender();
   };
 
@@ -364,35 +429,69 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     });
   };
 
+  /** Focus follows the view: Posting's rule, and the reason the footer can be honest. */
+  const focusCurrent = () => {
+    if (!state.sidebarVisible) {
+      // nop: the sidebar is not focusable
+    }
+    if (state.layer === "archive") {
+      tui.setFocus(archiveView);
+      return;
+    }
+    if (state.view === "chat") tui.setFocus(editor);
+    else if (state.view === "atlas") tui.setFocus(atlasView);
+    else if (state.view === "ledger") tui.setFocus(ledgerView);
+    else tui.setFocus(contextView);
+  };
+
   const switchToView = async (view: ViewMode) => {
     state.view = view;
     headerState.view = view;
-    footer.invalidate();
     sidebar.setActiveBook(view);
-
+    focusCurrent();
     const brainState = await brain.read();
-    const marks = liveStaleMarks(brainState, options.root);
 
-    if (view === "chat") {
-      tui.setFocus(editor);
-    } else if (view === "atlas") {
-      atlasView.setData(brainState, marks);
-      tui.setFocus(atlasView);
+    if (view === "atlas") {
+      atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
     } else if (view === "ledger") {
       ledgerView.setData(brainState);
-      tui.setFocus(ledgerView);
     } else if (view === "context") {
       await syncContextView(brainState);
-      tui.setFocus(contextView);
-    } else if (view === "archive") {
-      archiveView.setData(await brain.readArchive());
-      tui.setFocus(archiveView);
     }
+    await refreshSidebar();
     tui.requestRender();
   };
 
+  /**
+   * The archive layer (§3.3): the same workspace, the person's layer instead of
+   * the agent-facing one. Toggling it never re-reads the archive twice; the app
+   * owns the state and both the sidebar and the header show it.
+   */
+  const refreshArchive = async () => {
+    archiveView.setData(await brain.readArchive());
+    tui.requestRender();
+  };
+  const switchLayer = async (layer: Layer) => {
+    state.layer = layer;
+    headerState.layer = layer;
+    sidebar.setLayer(layer);
+    if (layer === "archive") {
+      await refreshArchive();
+    } else if (state.view === "context") {
+      await syncContextView(await brain.read());
+    } else if (state.view === "atlas") {
+      const fresh = await brain.read();
+      atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
+    } else if (state.view === "ledger") {
+      ledgerView.setData(await brain.read());
+    }
+    focusCurrent();
+    await refreshSidebar();
+    tui.requestRender();
+  };
+  const toggleLayer = () => switchLayer(state.layer === "archive" ? "context" : "archive");
+
   atlasView.onBack = () => void switchToView("chat");
-  archiveView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
@@ -428,11 +527,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * and no handle that names an archived item: the agent does not know the
    * archive exists.
    */
-  const refreshArchive = async () => {
-    const archive = await brain.readArchive();
-    archiveView.setData(archive);
-    tui.requestRender();
-  };
   archiveView.onTogglePin = (id) => {
     void (async () => {
       const archive = await brain.readArchive();
@@ -441,6 +535,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await brain.applyArchive({ kind: "pin", id, pinned: item.pinned === undefined ? "user" : null });
       pushStatus(`${item.pinned === undefined ? "pinned" : "unpinned"} an archived item`);
       await refreshArchive();
+      await refreshSidebar();
     })();
   };
   archiveView.onRestore = (id) => {
@@ -459,6 +554,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await brain.applyArchive({ kind: "drop", id });
       pushStatus("an archived item is deleted for good");
       await refreshArchive();
+      await refreshSidebar();
     })();
   };
 
@@ -473,6 +569,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await togglePin("chat", chatRecord.id);
     })();
   };
+
   /**
    * Context surgery (§4.1): `d` marks one entry for delete, `!` arms apply-now,
    * and `c` collapses. A mark is not a deletion — the entry stays visible until
@@ -498,54 +595,51 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  // ── The screen ────────────────────────────────────────────────────────────
+  // One header, one working area, one context bar, one footer. The sidebar runs
+  // the whole height beside them, and its gradient reaches the top and bottom
+  // edges; the working area is the only thing between the header and the bar.
+  const footer = new FooterView(() => footerHints());
+  const workArea = new VStack([
+    { component: transcriptScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+    { component: atlasScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
+    { component: ledgerScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
+    { component: contextScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" && state.layer === "context" },
+    { component: archiveScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.layer === "archive" },
+  ]);
+  const mainColumn = new VStack([
+    { component: header, basis: "auto" },
+    { component: workArea, basis: 0, grow: 1, minSize: 3 },
+    { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+  ]);
+
+  // The context bar is the bottom-most row of the application and spans all of
+  // it: the sidebar stops above it, so the picture of the context is never
+  // stolen by a pane. The key bar sits above the bar, where the eye finishes.
   tui.setLayoutRoot(
-    new HStack([
-      { component: new Spacer(0), basis: 1 },
+    new VStack([
       {
-        component: new VStack([
-          { component: new Spacer(1), basis: 1 },
-          { component: header, basis: "auto" },
-          {
-            component: new HStack([
-              { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-              { component: scroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" },
-              { component: atlasView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" },
-              { component: ledgerView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" },
-              { component: contextView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" },
-              { component: archiveView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "archive" },
-            ]),
-            basis: 0,
-            grow: 1,
-            minSize: 3,
-          },
-          { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" },
-          { component: tokenBar, basis: 1 },
-          { component: footer, basis: 1 },
-          { component: new Spacer(1), basis: 1 },
+        component: new HStack([
+          { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
+          { component: mainColumn, basis: 0, grow: 1, minSize: 20 },
         ]),
         basis: 0,
         grow: 1,
-        minSize: 3,
+        minSize: 6,
       },
-      { component: new Spacer(0), basis: 1 },
+      { component: footer, basis: 2 },
+      { component: tokenBar, basis: 1 },
     ]),
   );
   tui.start();
   tui.setFocus(editor);
 
+  // ── Input ─────────────────────────────────────────────────────────────────
   const closeOverlay = () => {
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
-    if (state.view === "chat") {
-      tui.setFocus(editor);
-    } else if (state.view === "atlas") {
-      tui.setFocus(atlasView);
-    } else if (state.view === "ledger") {
-      tui.setFocus(ledgerView);
-    } else if (state.view === "context") {
-      tui.setFocus(contextView);
-    }
+    focusCurrent();
     tui.requestRender();
   };
 
@@ -740,10 +834,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           [...state.sealed, ...live.map((item) => item.entry)],
           state.pending.map((item) => ({ text: item.text, mode: item.mode })),
         );
+        headerState.windowUnknown = state.session.state.contextWindow <= 0;
         tui.requestRender();
       }
 
-      if (state.view === "context") {
+      if (state.view === "context" && state.layer === "context") {
         await syncContextView(brainState);
       }
     } finally {
@@ -805,6 +900,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       state.collapsing = false;
       state.inFlight = Math.max(0, state.inFlight);
       state.running = state.inFlight > 0;
+      headerState.running = state.running;
       await rebuildTranscript();
       tui.requestRender();
     }
@@ -830,6 +926,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight += 1;
     state.running = true;
+    headerState.running = true;
     tui.requestRender();
     try {
       if (state.sendMode === "now") await interruptRun(state.session);
@@ -845,16 +942,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
+    headerState.running = state.running;
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
     // A timed sleep: the agent rests, then starts again on its own (§10).
     state.running = true;
+    headerState.running = true;
     tui.requestRender();
     try {
       await restThenResume(state.session);
     } finally {
       state.running = false;
+      headerState.running = false;
       await rebuildTranscript();
       tui.requestRender();
     }
@@ -879,137 +979,296 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
-  const slashHelp = [
-    "/help — this screen",
-    "/copy — copy the transcript to the clipboard (also a /tmp fallback file)",
-    "/copy-session — full diagnostic dump: transcript, context, counts (clipboard + /tmp)",
-    "these are the only slash commands; anything else starting with / is not sent to the agent",
-    "keys: ctrl+x stop · shift+tab send mode · ctrl+e fold cards · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+r read only mode · ctrl+c quit",
-  ].join("\n");
+  const copyTranscript = async () => {
+    const text = transcript.toPlainText();
+    const result = await copyWithFallback(text, "transcript");
+    pushStatus(`transcript copied — ${result.where} (${text.split("\n").length} lines)`);
+    return result;
+  };
 
-  const runSlash = async (raw: string) => {
-    const match = /^\/(\S+)(?:\s+(.*))?$/.exec(raw.trim());
-    const command = (match?.[1] ?? "").toLowerCase();
-    try {
-      if (command === "help" || command === "h" || command === "?") {
-        pushStatus(slashHelp);
-      } else if (command === "copy") {
-        const text = transcript.toPlainText();
-        const result = await copyWithFallback(text, "transcript");
-        pushStatus(`/copy — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
-      } else if (command === "copy-session") {
-        const brainState = await brain.read();
-        const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
-        const lines: string[] = [
-          `# carto session dump — ${new Date().toISOString()}`,
-          `project: ${options.root}`,
-          `generation: ${state.session.generation}`,
-          `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
-          `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
-          `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
-          "",
-          "## transcript (what the person saw)",
-          transcript.toPlainText(),
-          "",
-          "## context (what the model sees; oldest first; state-block markers stripped)",
-        ];
-        for (const entry of entries) {
-          const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
-          if (flat === undefined) continue;
-          if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
-          lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
-        }
-        const text = lines.join("\n");
-        const result = await copyWithFallback(text, "session");
-        pushStatus(`/copy-session — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
-      } else {
-        pushStatus(`unknown command /${command} — /help lists them`);
-      }
-    } catch (error) {
-      pushStatus(`/${command} failed: ${errorText(error)}`);
+  const copySession = async () => {
+    const brainState = await brain.read();
+    const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
+    const lines: string[] = [
+      `# carto session dump — ${new Date().toISOString()}`,
+      `project: ${options.root}`,
+      `generation: ${state.session.generation}`,
+      `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
+      `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
+      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
+      "",
+      "## transcript (what the person saw)",
+      transcript.toPlainText(),
+      "",
+      "## context (what the model sees; oldest first; state-block markers stripped)",
+    ];
+    for (const entry of entries) {
+      const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
+      if (flat === undefined) continue;
+      if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
+      lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
     }
-    await rebuildTranscript();
+    const text = lines.join("\n");
+    const result = await copyWithFallback(text, "session");
+    pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);
+    return result;
+  };
+
+  const submitMessage = (message: string) => {
+    state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
+    void rebuildTranscript();
+    void runSubmission(message);
   };
 
   editor.onSubmit = (text: string) => {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
-    if (message.startsWith("/")) {
-      void runSlash(message);
-      return;
-    }
-    state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
-    void rebuildTranscript();
-    void runSubmission(message);
+    submitMessage(message);
+  };
+
+  // ── Commands ─────────────────────────────────────────────────────────────
+  // One registry. The footer, `f1` and `^p` are views of this list; see
+  // `commands.ts`. Order matters twice: input matching goes in declaration
+  // order, and the footer shows the first ones that fit.
+  const inChat = () => state.layer === "context" && state.view === "chat";
+  const inView = (view: ViewMode) => state.layer === "context" && state.view === view;
+  const onArchive = () => state.layer === "archive";
+
+  const commands = new Registry([
+    {
+      id: "help",
+      group: "anywhere",
+      label: "shortcuts",
+      key: "f1",
+      run: () => showHelp(),
+      available: () => true,
+    },
+    {
+      id: "palette",
+      group: "anywhere",
+      label: "palette",
+      key: "ctrl+p",
+      run: () => showPalette(),
+      available: () => true,
+    },
+    {
+      id: "jump",
+      group: "anywhere",
+      label: "jump to a view",
+      key: "ctrl+o",
+      run: () => showJump(),
+      available: () => true,
+    },
+    {
+      id: "quit",
+      group: "anywhere",
+      label: "quit",
+      key: "ctrl+c",
+      run: () => void shutdown(0),
+      available: () => true,
+    },
+    {
+      id: "stop",
+      group: "the run",
+      label: "stop the run",
+      key: "ctrl+x",
+      run: () => {
+        void interruptRun(state.session).then(
+          () => pushStatus("interrupt sent — the run stops"),
+          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
+        ).then(() => rebuildTranscript());
+      },
+      available: () => state.running,
+    },
+    {
+      id: "send-mode",
+      group: "the run",
+      label: "send mode",
+      hint: "steer · after run · now",
+      key: "shift+tab",
+      run: () => {
+        state.sendMode = nextSendMode(state.sendMode);
+        tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
+        tui.requestRender();
+      },
+      available: () => inChat(),
+    },
+    {
+      id: "collapse",
+      group: "the run",
+      label: "collapse now",
+      run: () => void runCollapse("person requested (palette)"),
+      available: () => true,
+    },
+    {
+      id: "fold-all",
+      group: "the transcript",
+      label: "fold the cards",
+      key: "ctrl+e",
+      run: () => {
+        transcript.toggleAllCards();
+        tui.requestRender();
+      },
+      available: () => inChat(),
+    },
+    {
+      id: "read-only",
+      group: "the workspace",
+      label: "read only mode",
+      hint: "flips whether the agent may change files",
+      run: () => toggleReadOnly(),
+      available: () => true,
+    },
+    {
+      id: "sidebar",
+      group: "the workspace",
+      label: "sidebar",
+      key: "ctrl+h",
+      run: () => {
+        state.sidebarVisible = !state.sidebarVisible;
+        focusCurrent();
+        tui.requestRender();
+      },
+      available: () => true,
+    },
+    {
+      id: "archive",
+      group: "the workspace",
+      label: "the archive layer",
+      hint: "the person's, never the agent's",
+      key: "ctrl+t",
+      run: () => void toggleLayer(),
+      available: () => true,
+    },
+    {
+      id: "view-chat",
+      group: "go to",
+      label: "the transcript",
+      run: () => void switchToView("chat"),
+      available: () => !inChat(),
+    },
+    {
+      id: "view-atlas",
+      group: "go to",
+      label: "the atlas",
+      run: () => void switchToView("atlas"),
+      available: () => !inView("atlas"),
+    },
+    {
+      id: "view-ledger",
+      group: "go to",
+      label: "the ledger",
+      run: () => void switchToView("ledger"),
+      available: () => !inView("ledger"),
+    },
+    {
+      id: "view-context",
+      group: "go to",
+      label: "the prompt",
+      hint: "what the model reads, and surgery on it",
+      run: () => void switchToView("context"),
+      available: () => !inView("context"),
+    },
+    {
+      id: "copy",
+      group: "the record",
+      label: "copy the transcript",
+      key: "ctrl+y",
+      run: () => void copyTranscript(),
+      available: () => true,
+    },
+    {
+      id: "copy-session",
+      group: "the record",
+      label: "copy a full session dump",
+      run: () => void copySession(),
+      available: () => true,
+    },
+    {
+      id: "back",
+      group: "anywhere",
+      label: "back to the transcript",
+      key: "escape",
+      run: () => void switchToView("chat"),
+      available: () => state.layer === "context" && state.view !== "chat",
+    },
+  ] satisfies Command[]);
+
+  function footerHints(): Array<{ key: string; label: string }> {
+    return commands.footer().map((command) => ({
+      key: keyText(command.key ?? ""),
+      label: command.key === "shift+tab" ? `${command.label}: ${sendModeLabel(state.sendMode)}` : command.label,
+    }));
+  }
+
+  const helpExtras = (): HelpExtra[] => [
+    { group: "type it", key: "/copy", label: "copy the transcript" },
+    { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
+    { group: "type it", key: "/help", label: "the command list in the transcript" },
+  ];
+
+  const showHelp = () => {
+    if (state.overlayOpen) return;
+    state.overlayOpen = true;
+    const panel = new HelpPanel(commands.all(), helpExtras);
+    panel.onClose = closeOverlay;
+    state.overlayHandle = tui.showOverlay(panel, { width: "70%", maxHeight: "80%", anchor: "center" });
+    tui.setFocus(panel);
+    tui.requestRender();
+  };
+
+  const paletteCommands = (): PaletteCommand[] => {
+    const list: PaletteCommand[] = commands.all()
+      .filter((command) => {
+        try {
+          return command.available();
+        } catch {
+          return false;
+        }
+      })
+      .map((command) => ({
+        id: command.id,
+        group: command.group,
+        label: command.label,
+        ...(command.key === undefined ? {} : { key: command.key }),
+        ...(command.hint === undefined ? {} : { hint: command.hint }),
+        run: () => command.run(),
+      }));
+    // Conditional, dynamically-named entries, as Posting does: the palette names
+    // the layer it would take you to, not a fixed string.
+    list.push({
+      id: "layer-name",
+      group: "the workspace",
+      label: state.layer === "archive" ? "Layer: back to the context" : "Layer: the archive",
+      run: () => void toggleLayer(),
+    });
+    list.push({
+      id: "send-mode-name",
+      group: "the run",
+      label: `Send: ${sendModeLabel(state.sendMode)}`,
+      run: () => {
+        state.sendMode = nextSendMode(state.sendMode);
+        tui.requestRender();
+      },
+    });
+    list.push({
+      id: "read-only-name",
+      group: "the workspace",
+      label: state.session.state.readOnly ? "Mode: back to editing" : "Mode: read only",
+      run: () => toggleReadOnly(),
+    });
+    return list;
   };
 
   const showPalette = () => {
     if (state.overlayOpen) return;
     state.overlayOpen = true;
-    const commands: PaletteCommand[] = [
-      {
-        value: "chat",
-        label: "switch to chat view",
-        hint: "^o c",
-        run: () => void switchToView("chat"),
-      },
-      {
-        value: "atlas",
-        label: "switch to atlas view",
-        hint: "^o a",
-        run: () => void switchToView("atlas"),
-      },
-      {
-        value: "ledger",
-        label: "switch to ledger view",
-        hint: "^o l",
-        run: () => void switchToView("ledger"),
-      },
-      {
-        value: "context",
-        label: "switch to context surgery view",
-        hint: "^o x",
-        run: () => void switchToView("context"),
-      },
-      {
-        value: "read only",
-        label: "toggle read only mode",
-        hint: "^r",
-        run: () => toggleReadOnly(),
-      },
-      {
-        value: "archive",
-        label: "open the archive",
-        hint: "the person's, not the agent's",
-        run: () => void switchToView("archive"),
-      },
-      {
-        value: "collapse",
-        label: "collapse the context now",
-        hint: "the Brain rebuilds it",
-        run: () => void runCollapse("person requested (palette)"),
-      },
-      {
-        value: "sidebar",
-        label: "toggle the sidebar",
-        hint: "ctrl+h",
-        run: () => {
-          state.sidebarVisible = !state.sidebarVisible;
-          tui.requestRender();
-        },
-      },
-      {
-        value: "quit",
-        label: "quit carto",
-        hint: "ctrl+c",
-        run: () => void shutdown(0),
-      },
-    ];
-    const palette = new Palette(commands);
+    const palette = new Palette(paletteCommands());
     palette.onClose = closeOverlay;
-    state.overlayHandle = tui.showOverlay(palette, { width: 58, anchor: "bottom-center", offsetY: -2 });
+    state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
+    tui.requestRender();
   };
 
   const showJump = () => {
@@ -1018,60 +1277,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const jump = new JumpOverlay(JUMP_TARGETS);
     jump.onClose = closeOverlay;
     jump.onJump = (key) => {
-      if (key === "c") void switchToView("chat");
-      else if (key === "a") void switchToView("atlas");
-      else if (key === "l") void switchToView("ledger");
-      else if (key === "x") void switchToView("context");
+      const target = JUMP_TARGETS.find((candidate) => candidate.key === key);
+      if (target === undefined) return;
+      if (state.layer === "archive") void switchLayer("context");
+      void switchToView(target.view);
     };
     state.overlayHandle = tui.showOverlay(jump, { width: 52, anchor: "center" });
     tui.setFocus(jump);
+    tui.requestRender();
   };
 
   tui.addInputListener((data) => {
     if (state.overlayOpen) return undefined;
-    if (matchesKey(data, "ctrl+c")) {
-      void shutdown(0);
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+x")) {
-      if (state.running) {
-        void interruptRun(state.session).then(
-          () => pushStatus("interrupt sent — the run stops"),
-          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
-        ).then(() => rebuildTranscript());
-      } else {
-        tui.flash("no run in flight", 1_500);
-      }
-      return { consume: true };
-    }
-    if (matchesKey(data, "shift+tab") && state.view === "chat") {
-      state.sendMode = nextSendMode(state.sendMode);
-      tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+e") && state.view === "chat") {
-      transcript.toggleAllCards();
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+o")) {
-      showJump();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+p")) {
-      showPalette();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+h")) {
-      state.sidebarVisible = !state.sidebarVisible;
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+r")) {
-      toggleReadOnly();
-      return { consume: true };
-    }
+    // The registry sees keys first: a command that is not available returns the
+    // keystroke untouched, so the focused view still gets it.
+    if (commands.dispatch(data)) return { consume: true };
     return undefined;
   });
 

@@ -1,26 +1,33 @@
 /**
- * Jump mode (Posting's idiom): one key, a label per addressable region, one
- * keystroke to land. Esc leaves untouched.
+ * Jump mode (§8, Posting's idiom).
+ *
+ * Posting's jump mode is the fastest way around a screen you already know: one
+ * key overlays a label on every place you can go, and one keystroke lands you
+ * there. The labels are stable, so they become muscle memory — the same letter
+ * is the same destination every time.
+ *
+ * Ours has the same shape and a fixed alphabet: each view's letter is also its
+ * key in `ctrl+o <letter>`, so the overlay is a reminder of the keys rather than
+ * a second scheme to learn.
  */
-import {
-  matchesKey,
-  type Component,
-  type Focusable,
-} from "@earendil-works/pi-tui";
+import { matchesKey, type Component, type Focusable } from "@earendil-works/pi-tui";
 
-import { tokens } from "./tokens.js";
+import { padLine, tokens, visibleWidth } from "./tokens.js";
 
 export interface JumpTarget {
   /** Single lowercase letter. */
   key: string;
+  /** The view it lands on. */
+  view: "chat" | "atlas" | "ledger" | "context";
   label: string;
+  description: string;
 }
 
 export const JUMP_TARGETS: JumpTarget[] = [
-  { key: "c", label: "chat — conversation & cards" },
-  { key: "a", label: "atlas — nodes, links & attachments" },
-  { key: "l", label: "ledger — goals, notes, questions & progress" },
-  { key: "x", label: "context — the surgery view" },
+  { key: "c", view: "chat", label: "transcript", description: "the conversation" },
+  { key: "a", view: "atlas", label: "atlas", description: "nodes, links and attachments" },
+  { key: "l", view: "ledger", label: "ledger", description: "goals, notes, questions, progress" },
+  { key: "x", view: "context", label: "prompt", description: "what the model reads, and surgery on it" },
 ];
 
 export class JumpOverlay implements Component, Focusable {
@@ -47,17 +54,19 @@ export class JumpOverlay implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    const row = (key: string, label: string) => `   ${tokens.accent(key)}   ${tokens.muted(label)}`;
-    const lines = [
-      "",
-      ` ${tokens.bold(tokens.muted(" jump"))}`,
-      "",
-      ...this.targets.map((target) => row(target.key, target.label)),
-      "",
-      `   ${tokens.muted("esc to stay")}`,
-      "",
-    ];
-    const inner = Math.max(24, Math.min(width, 52));
-    return lines.map((line) => tokens.panel(line.padEnd(inner)));
+    const inner = Math.max(20, Math.min(width, 58));
+    const lines: string[] = [];
+    lines.push(padLine(` ${tokens.bold(tokens.text("Jump"))} ${tokens.faint("· one key, then a letter")}`, inner));
+    lines.push(padLine("", inner));
+    for (const target of this.targets) {
+      const key = tokens.accent(tokens.bold(` ${target.key} `));
+      const name = tokens.text(target.label.padEnd(11));
+      const pad = Math.max(1, inner - 3 - 11 - 4 - visibleWidth(target.description));
+      lines.push(padLine(`  ${key} ${name}${tokens.faint(target.description)}`, inner));
+      void pad;
+    }
+    lines.push(padLine("", inner));
+    lines.push(padLine(`  ${tokens.faint("esc stays where you are")}`, inner));
+    return lines.map((line) => tokens.panel(line));
   }
 }

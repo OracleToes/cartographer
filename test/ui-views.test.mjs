@@ -2,11 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
+import { TokenBarView } from "../dist/ui/context-bar.js";
+import { Registry } from "../dist/ui/commands.js";
+import { previewArchive, previewTranscript } from "../dist/ui/preview.js";
 import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
+
+/** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
+const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 test("padLine pads accurately with and without ANSI escape sequences", () => {
   const plain = "hello";
@@ -22,26 +28,33 @@ test("padLine pads accurately with and without ANSI escape sequences", () => {
   assert.equal(visibleWidth(truncated), 5);
 });
 
-test("Sidebar renders chat, context, atlas, and ledger with tokens and counts", () => {
+test("Sidebar renders the transcript, the prompt, and both books with counts", () => {
   const sidebar = new Sidebar();
   sidebar.setCounts({
     chat: 3,
     contextTokens: 1250,
     atlas: 5,
     ledger: 2,
+    pinned: { atlas: 1 },
+    marked: {},
     stale: { atlas: 1 },
     staleTotal: 1,
+    archive: 4,
+    archivePinned: 1,
   });
   sidebar.setActiveBook("context");
 
   const lines = sidebar.render(30);
-  const rendered = lines.join("\n");
+  const rendered = plain(lines.join("\n"));
 
-  assert.ok(rendered.includes("chat"));
-  assert.ok(rendered.includes("context"));
+  // The workspace's two rows, then the Brain's: names, not old book slugs.
+  assert.ok(rendered.includes("transcript"));
+  assert.ok(rendered.includes("prompt"));
   assert.ok(rendered.includes("atlas"));
   assert.ok(rendered.includes("ledger"));
-  assert.match(rendered, /~1k/, "the context token count renders deterministically as ~Math.round(tokens/1000)k");
+  assert.ok(rendered.includes("1.3k"), "the prompt's figure is the compact token count");
+  assert.ok(rendered.includes("WORKSPACE") && rendered.includes("BRAIN"), "rows are grouped under quiet headings");
+  assert.ok(rendered.includes("LAYER"), "the archive layer toggle sits in the pane, apart from the books");
 
   // Check that every line has the exact requested visible width
   for (const line of lines) {
@@ -56,36 +69,31 @@ test("Sidebar mouse click switches view", () => {
     selected = view;
   };
 
-  const pressRes = sidebar.handleMouse({
-    type: "press",
-    button: "left",
-    x: 5,
-    y: 3, // chat
-    screenX: 5,
-    screenY: 3,
-    width: 22,
-    height: 12,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(pressRes?.handled);
+  // Rows are found where they rendered, not guessed: the pane's layout may change.
+  const lines = sidebar.render(22).map((line) => plain(line));
+  const chatRow = lines.findIndex((line) => line.includes("transcript"));
+  const promptRow = lines.findIndex((line) => line.includes("prompt"));
+  assert.ok(chatRow >= 0 && promptRow >= 0);
 
-  const clickRes = sidebar.handleMouse({
-    type: "click",
-    button: "left",
-    x: 5,
-    y: 4, // context
-    screenX: 5,
-    screenY: 4,
-    width: 22,
-    height: 12,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
+  const click = (y) =>
+    sidebar.handleMouse({
+      type: "click",
+      button: "left",
+      x: 5,
+      y,
+      screenX: 5,
+      screenY: y,
+      width: 22,
+      height: 18,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+
+  assert.ok(click(chatRow)?.handled);
+  assert.equal(selected, "chat");
+  assert.ok(click(promptRow)?.handled);
   assert.equal(selected, "context");
-  assert.ok(clickRes?.handled);
 });
 
 test("TranscriptView mouse click folds and unfolds cards", () => {
@@ -497,4 +505,93 @@ test("an agent block in the transcript renders the pin badge and click toggles t
   });
   assert.ok(click2?.handled, "second agent block click is handled");
   assert.equal(toggled, "c-b");
+});
+
+test("the context bar spans the bottom, reports the server's window, and greys what is no longer live", () => {
+  const state = {
+    // The report already counted the tool work, so nothing accrues after it.
+    session: { state: { contextWindow: 32_768, lastReportedInput: 8_000, toolWorkAtLastReport: 2_000 } },
+    parts: { system: 4_000, transcript: 2_000, toolWork: 2_000 },
+  };
+  const bar = new TokenBarView(state);
+  const lines = bar.render(60);
+  assert.equal(lines.length, 1, "the bar is one row");
+  assert.equal(visibleWidth(lines[0]), 60, "it spans the whole width");
+  assert.match(plain(lines[0]), /8,000 \/ 32,768/);
+
+  // Before any measurement: an estimate, announced as one, against no capacity.
+  state.session.state.contextWindow = 0;
+  state.session.state.lastReportedInput = undefined;
+  bar.invalidate();
+  assert.match(plain(bar.render(60)[0]), /window unknown/);
+
+  // A server that stopped: the last values stay, greyed rather than dropped.
+  state.session.state.contextWindow = 32_768;
+  state.session.state.lastReportedInput = 8_000;
+  state.session.state.serverLost = true;
+  bar.invalidate();
+  assert.match(plain(bar.render(60)[0]), /8,000 \/ 32,768/);
+});
+
+test("the command registry drives the footer, and a key only fires where it is available", () => {
+  let ran = 0;
+  let chat = false;
+  const registry = new Registry([
+    {
+      id: "fold",
+      group: "the transcript",
+      label: "fold the cards",
+      key: "ctrl+e",
+      run: () => {
+        ran += 1;
+      },
+      available: () => chat,
+    },
+    {
+      id: "palette",
+      group: "anywhere",
+      label: "palette",
+      key: "ctrl+p",
+      quiet: true,
+      run: () => {
+        ran += 10;
+      },
+      available: () => true,
+    },
+  ]);
+
+  assert.equal(registry.dispatch("\u0005"), false, "an unavailable command releases the key to the view");
+  assert.equal(ran, 0);
+  chat = true;
+  assert.equal(registry.dispatch("\u0005"), true);
+  assert.equal(ran, 1);
+
+  // `^p` is in the registry but quiet, so it never crowds the footer.
+  assert.deepEqual(registry.footer().map((command) => command.id), ["fold"]);
+  assert.equal(registry.dispatch("\u0010"), true);
+  assert.equal(ran, 11);
+});
+
+test("the drawn workspace is exact to its width, and the archive is a layer over it", () => {
+  const width = 104;
+  const transcript = previewTranscript(width);
+  const archive = previewArchive(width);
+
+  for (const [name, frame] of [["transcript", transcript], ["archive", archive]]) {
+    for (const line of frame.split("\n")) {
+      assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
+    }
+  }
+
+  const shown = plain(transcript);
+  assert.ok(shown.includes("cartographer"), "the header names the project");
+  assert.ok(shown.includes("WORKSPACE") && shown.includes("BRAIN") && shown.includes("LAYER"), "the sidebar's three groups");
+  assert.ok(shown.includes("you") && shown.includes("carto"), "the two voices");
+  assert.ok(shown.includes("thinking") && shown.includes("tool read"), "the agent's work is cards");
+  assert.ok(/\/ 32,768/.test(shown), "the context bar closes the frame");
+
+  // The archive is the same UI over the other layer (§3.3), not a separate screen.
+  const layer = plain(archive);
+  assert.ok(layer.includes("ARCHIVE"), "the layer says what it is");
+  assert.ok(layer.includes("restore") || layer.includes("delete for good"), "the person's keys are the footer's");
 });

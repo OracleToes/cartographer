@@ -37,7 +37,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | Source | Given by | Why it is here | In use |
 | --- | --- | --- | --- |
 | [pi — `packages/tui`](https://github.com/earendil-works/pi/tree/main/packages/tui) | person | Terminal rendering, layout, focus, editors, scrolling, overlays, key parsing | `@earendil-works/pi-tui` 1.5.2 |
-| [pi — `packages/durable`](https://github.com/earendil-works/pi/tree/main/packages/durable) | person | Durable conversations, tasks, tool calls, sleeps, wakes, retries, SQLite storage | `@earendil-works/pi-durable` 1.5.2 |
+| [pi — `packages/durable`](https://github.com/earendil-works/pi/tree/main/packages/durable) | person | Durable conversations, tasks, tool calls, sleeps, resumes, retries, SQLite storage | `@earendil-works/pi-durable` 1.5.2 |
 | [pi — `packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) | person | Models, providers, tool validation, streams, usage, provider errors | `@earendil-works/pi-ai` 1.5.2 |
 | [pi — `packages/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord) | agent | pi-durable's own substrate — documents, store, SQLite facade (`sqlite/node`) the Brain store is built on | `@earendil-works/chord` 1.5.2 |
 | [pi — `packages/schema`](https://github.com/earendil-works/pi/tree/main/packages/schema) | agent | Tool parameter validation for the product tools (`defineTool` arguments) | `@earendil-works/pi-schema` 1.5.2 |

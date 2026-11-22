@@ -581,8 +581,8 @@ export class ContextView implements Component, Focusable {
     const lines: string[] = [];
 
     // Header banner
-    const headerLeft = ` ${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.muted("· what the model reads")} ${tokens.muted(`· ~${this.totalTokens.toLocaleString("en-US")} total tokens`)}`;
-    const headerRight = `${tokens.muted("h/l panes · p pin · tab raw · esc chat ")}`;
+    const headerLeft = ` ${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("·")} ${tokens.text("what the model reads")} ${tokens.faint(`· ~${this.totalTokens.toLocaleString("en-US")} tokens`)}`;
+    const headerRight = `${tokens.faint("enter folds · tab raw · d marks delete · ! applies now · c collapses ")}`;
     const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
     lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
     lines.push(padLine("", width));

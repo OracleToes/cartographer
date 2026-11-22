@@ -1,91 +1,103 @@
 /**
- * The command palette (Posting's idiom, §8: no permanent palette —
- * it is summoned, never standing). A summoned overlay: type to filter,
- * arrows to choose, enter to run, esc to leave. Everything not on a key
- * lives here.
+ * The command palette (§8, Posting's idiom): summoned, never standing.
+ *
+ * Posting's palette is what makes a keyboard-first app learnable: it lists what
+ * the app can do, groups the commands, filters fuzzily as you type, and shows
+ * each command's key on the right, so using the palette is also how you learn
+ * the keys. Nothing in it is a setting — it is the same actions the keys
+ * perform, in one searchable place.
+ *
+ * One difference from Posting, and it is the point: the selected row is a bar,
+ * not a card. Eleven commands should read as a list.
  */
-import {
-  Box,
-  Input,
-  matchesKey,
-  SelectList,
-  Text,
-  type Component,
-  type Focusable,
-  type SelectListTheme,
-} from "@earendil-works/pi-tui";
+import { fuzzyFilter, Input, matchesKey, type Component, type Focusable, type SelectListTheme } from "@earendil-works/pi-tui";
 
-import { tokens } from "./tokens.js";
+import { keyText } from "./help-panel.js";
+import { padLine, ruleLine, tokens, visibleWidth } from "./tokens.js";
 
 export interface PaletteCommand {
-  value: string;
+  /** A stable id; the palette never shows it. */
+  id: string;
+  group: string;
+  /** What the command does. For a toggle this is what pressing it does *now*. */
   label: string;
+  /** The key that does the same thing, if there is one. */
+  key?: string;
   hint?: string;
   run(): void;
 }
 
 export const selectTheme: SelectListTheme = {
   selectedPrefix: (text) => tokens.accent(text),
-  selectedText: (text) => tokens.bold(tokens.accent(text)),
+  selectedText: (text) => tokens.bold(tokens.text(text)),
   description: (text) => tokens.muted(text),
   scrollInfo: (text) => tokens.muted(text),
   noMatch: (text) => tokens.muted(text),
 };
 
+interface Row {
+  command: PaletteCommand;
+  heading?: string;
+}
+
+const MAX_VISIBLE = 9;
+
 export class Palette implements Component, Focusable {
   focused = false;
   onClose?: () => void;
 
-  private readonly input = new Input({ prompt: "› ", placeholder: "command" });
-  private readonly list: SelectList;
-  private readonly commands: Map<string, PaletteCommand>;
-  private readonly box = new Box(1, 1, (line) => tokens.panel(line));
+  private readonly input = new Input({ prompt: "› ", placeholder: "type a command" });
+  private filtered: Row[] = [];
+  private selected = 0;
 
-  constructor(commands: PaletteCommand[]) {
-    this.commands = new Map(commands.map((command) => [command.value, command]));
-    const items = commands.map((command) => ({
-      value: command.value,
-      label: command.label,
-      ...(command.hint === undefined ? {} : { description: command.hint }),
-    }));
-    this.list = new SelectList(items, Math.min(Math.max(items.length, 1), 8), selectTheme);
-    this.list.onSelect = (item) => this.run(item.value);
-    this.list.onCancel = () => this.close();
-    this.box.addChild(new Text(tokens.muted(" commands"), 0, 0));
-    this.box.addChild(this.input);
-    this.box.addChild(this.list);
-    this.input.onSubmit = () => {
-      const selected = this.list.getSelectedItem();
-      if (selected !== null) this.run(selected.value);
-    };
-    this.input.onEscape = () => this.close();
+  constructor(private readonly commands: PaletteCommand[]) {
+    this.filtered = this.rowsFor("");
+    this.input.onSubmit = () => this.runSelected();
+    this.input.onEscape = () => this.onClose?.();
   }
 
-  private close(): void {
+  /** Group the matches in declaration order, so the list keeps a shape while filtering. */
+  private rowsFor(query: string): Row[] {
+    const matched =
+      query.trim().length === 0
+        ? [...this.commands]
+        : fuzzyFilter(this.commands, query, (command) => `${command.group} ${command.label} ${command.key ?? ""} ${command.hint ?? ""}`);
+    const rows: Row[] = [];
+    let lastGroup: string | undefined;
+    for (const command of matched) {
+      rows.push(command.group === lastGroup ? { command } : { command, heading: command.group });
+      lastGroup = command.group;
+    }
+    return rows;
+  }
+
+  private runSelected(): void {
+    const row = this.filtered[this.selected];
     this.onClose?.();
-  }
-
-  private run(value: string): void {
-    const command = this.commands.get(value);
-    this.close();
-    command?.run();
+    row?.command.run();
   }
 
   handleInput(data: string): void {
     this.input.focused = this.focused;
-    const routesToList =
-      matchesKey(data, "up") ||
-      matchesKey(data, "down") ||
-      matchesKey(data, "pageUp") ||
-      matchesKey(data, "pageDown") ||
-      matchesKey(data, "escape") ||
-      matchesKey(data, "ctrl+c");
-    if (routesToList) {
-      this.list.handleInput(data);
+    if (matchesKey(data, "up") || matchesKey(data, "ctrl+p")) {
+      this.selected = Math.max(0, this.selected - 1);
+      return;
+    }
+    if (matchesKey(data, "down") || matchesKey(data, "ctrl+n")) {
+      this.selected = Math.min(this.filtered.length - 1, this.selected + 1);
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      this.runSelected();
+      return;
+    }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.onClose?.();
       return;
     }
     this.input.handleInput(data);
-    this.list.setFilter(this.input.getValue());
+    this.filtered = this.rowsFor(this.input.getValue());
+    this.selected = 0;
   }
 
   invalidate(): void {
@@ -93,6 +105,35 @@ export class Palette implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    return this.box.render(width);
+    const inner = width;
+    const lines: string[] = [];
+    const paint = (line: string) => tokens.panel(padLine(line, inner));
+    lines.push(tokens.panel(padLine("", inner)));
+    lines.push(paint(`  ${tokens.bold(tokens.text("Commands"))} ${tokens.faint("· enter runs · esc closes")}`));
+    lines.push(paint(`  ${this.input.render(inner - 4).join("")}`));
+    lines.push(tokens.panel(ruleLine(inner)));
+
+    if (this.filtered.length === 0) {
+      lines.push(paint(`  ${tokens.faint("nothing matches")}`));
+    }
+    const start = Math.max(0, Math.min(this.selected - MAX_VISIBLE + 1, this.filtered.length - MAX_VISIBLE));
+    const visible = this.filtered.slice(start, start + MAX_VISIBLE);
+    visible.forEach((row, offset) => {
+      const index = start + offset;
+      const selected = index === this.selected;
+      if (row.heading !== undefined) {
+        lines.push(paint(`  ${tokens.faint(tokens.bold(row.heading.toUpperCase()))}`));
+      }
+      const key = row.command.key === undefined ? "" : keyText(row.command.key);
+      const left = `  ${selected ? tokens.accent("▸") : " "} ${row.command.label}`;
+      const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(key) - 3);
+      const line = `${left}${" ".repeat(gap)}${tokens.faint(key)} `;
+      lines.push(selected ? tokens.selectedBg(padLine(line, inner)) : paint(line));
+    });
+    if (this.filtered.length > MAX_VISIBLE) {
+      lines.push(paint(`  ${tokens.faint(`${this.selected + 1} of ${this.filtered.length}`)}`));
+    }
+    lines.push(tokens.panel(padLine("", inner)));
+    return lines;
   }
 }
