@@ -29,8 +29,8 @@ import { projectContext } from "../domain/projection.js";
 import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { BrainStore } from "./brain-store.js";
-import { withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
+import { writeBackOf, type BrainStore } from "./brain-store.js";
+import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { lexicalProjectPath } from "./workspace.js";
@@ -556,6 +556,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
+  const archive = await brain.readArchive();
 
   const discovered = discoverGenerations(root).filter((candidate) => candidate.hasStore);
   if (discovered.length > 1) throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
@@ -622,6 +623,12 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
 
   let next = refreshed;
   for (const step of writes) next = applyWrite(next, step.write, step.now);
+  // Restored Brain records are committed by the same sweep and must already
+  // be present in the frozen head. Ephemeral restores go to the live store.
+  for (const item of applyArchiveMarks(archive).restored) {
+    const write = writeBackOf(item);
+    if (write !== undefined) next = applyWrite(next, write, now);
+  }
   const projection = projectContext(next, fileTexts, options.person ?? personName());
 
   // Reserve the handoff before creating any destination files. Recovery can
@@ -656,6 +663,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     writes,
     generation,
     source: live.generation,
+    expected: { brain: refreshed, archive },
     incoming: [
       ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),
       ...swept,

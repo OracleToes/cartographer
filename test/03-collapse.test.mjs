@@ -258,6 +258,7 @@ test("restore is a mark: the item waits in the archive, and the next collapse re
     const brain = await store.read();
     assert.equal(brain.ledger.length, 1, "and it is a Brain record again");
     assert.equal(brain.ledger[0].text, "a marked note", "of its original type");
+    assert.match(readFileSync(generationPaths(root, report.generation).markdown, "utf8"), /a marked note/, "the restored record is in the frozen model head");
     await store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -384,6 +385,40 @@ test("an interrupted collapse recovers on the correct side of the durable commit
   }
 });
 
+test("collapse refuses a snapshot made stale by concurrent Brain or archive changes", async () => {
+  for (const changed of ["brain", "archive"]) {
+    const root = tempRoot();
+    try {
+      const sourceId = `gen-20261116T020000Z-${changed}change`;
+      const source = await realGeneration(root, sourceId, 1_700_000_100, [
+        { kind: "pi.user", model: [{ role: "user", content: "keep this live" }] },
+      ]);
+      const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+      try {
+        const racing = { ...store, applyCollapse: async (change) => {
+          if (changed === "brain") {
+            await store.apply({ kind: "ledger.upsert", entry: { id: "concurrent", kind: "note", text: "new note", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+          } else {
+            await store.archiveEphemeral({ id: "concurrent", layer: "ephemeral", ephemeral: { kind: "plainText", text: "new archive item" } }, sourceId, at(1));
+          }
+          return store.applyCollapse(change);
+        } };
+        await assert.rejects(collapse(root, racing), /changed during collapse/);
+        assert.equal((await store.readCollapseJournal()).committed, false);
+        const result = await reconcileGenerations(root, store);
+        assert.equal(result.live.generation, sourceId);
+        assert.ok(existsSync(source.store));
+        if (changed === "brain") assert.equal((await store.read()).ledger[0].text, "new note");
+        else assert.ok((await store.readArchive()).items.some((item) => item.id === "concurrent"));
+      } finally {
+        await store.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("a failed Brain transaction cannot mark an uncommitted sweep as committed", async () => {
   const root = tempRoot();
   try {
@@ -395,7 +430,7 @@ test("a failed Brain transaction cannot mark an uncommitted sweep as committed",
       await store.beginCollapse(source, destination);
       const bad = { kind: "plainText", text: "cannot be serialized" };
       bad.data = bad;
-      await assert.rejects(store.applyCollapse({ source, generation: destination, writes: [], incoming: [{ id: "bad", layer: "ephemeral", ephemeral: bad }], now: at(1) }));
+      await assert.rejects(store.applyCollapse({ source, generation: destination, expected: { brain: await store.read(), archive: await store.readArchive() }, writes: [], incoming: [{ id: "bad", layer: "ephemeral", ephemeral: bad }], now: at(1) }));
       assert.equal((await store.readCollapseJournal()).committed, false);
       assert.equal((await store.readArchive()).items.length, 0);
       await recoverCollapse(root, store);

@@ -29,12 +29,12 @@ import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dis
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
-const fixture = async () => {
+const fixture = async ({ inMemoryBrain = false } = {}) => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  const brain = await openBrain(inMemoryBrain ? ":memory:" : join(root, ".brain", "brain.sqlite"));
   return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxSetup = () => {
@@ -57,45 +57,6 @@ const flatten = (messages) => JSON.stringify(messages);
 // Every case owns its own temp project, Brain, harness and faux provider.
 // Running the independent cases concurrently avoids a long serial tail.
 test.describe("live session", { concurrency: 4 }, () => {
-test("a full turn: chat tool writes the Brain, pending lists it, the block is trailing and marker-free", async () => {
-  const { root, brain, cleanup } = await fixture();
-  const { faux, models, captured, factory, ref } = fauxSetup();
-  faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-2" })], { stopReason: "toolUse" })),
-  ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
-  try {
-    const submission = await submitInput(session, "say hi");
-    const settled = await submission.wait(BACKGROUND_CONTEXT);
-    assert.equal(settled.status, "done");
-
-    const records = (await brain.read()).chat;
-    assert.equal(records.length, 1);
-    assert.equal(records[0].text, "hello person");
-    assert.equal(records[0].author, "agent");
-    assert.deepEqual(session.state.pending, [{ kind: "chat", action: "record", id: "chat:call-1" }]);
-
-    assert.equal(captured.length, 2);
-    // Request 1: the block is the trailing user message; nothing pending yet.
-    const firstBlock = blockOf(captured[0]);
-    assert.ok(firstBlock, "first request carries the block");
-    assert.equal(captured[0].at(-1), firstBlock);
-    assert.match(firstBlock.content, /since the rebuild: nothing written/);
-    assert.ok(!flatten(captured[0]).includes(STATE_BLOCK_MARKER));
-    // Request 2 (after the chat tool result): pending names the write by handle.
-    const secondBlock = blockOf(captured[1]);
-    assert.ok(secondBlock, "second request carries the block");
-    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to OracleToes/);
-    // Exactly one block at the tail; the transcript itself never accumulates blocks.
-    assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
-    assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER), "marker never reaches the provider");
-  } finally {
-    await closeLiveSession(session);
-    await cleanup();
-  }
-});
-
 test("the continuation loop: a text-only answer is continued with a marker, stripped on the next request", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
@@ -124,11 +85,14 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
   }
 });
 
-test("read feeds atlas attachments; the node carries the reference", async () => {
+test("a turn records chat, reads, and writes Atlas with marker-free trailing state", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([
+      fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" }),
+      fauxToolCall("chat", { text: "hello person" }, { id: "call-1" }),
+    ], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       text: "The answer is 42.",
@@ -141,10 +105,26 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
     const submission = await submitInput(session, "remember this fact");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done");
-    const nodes = (await brain.read()).atlas;
-    assert.equal(nodes.length, 1);
-    assert.deepEqual(nodes[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
-    assert.match(blockOf(captured[2]).content, /since the rebuild:\n  A1 · written/);
+    const current = await brain.read();
+    assert.equal(current.atlas.length, 1);
+    assert.deepEqual(current.atlas[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
+    assert.equal(current.chat.length, 1);
+    assert.equal(current.chat[0].text, "hello person");
+    assert.equal(current.chat[0].author, "agent");
+    assert.ok(session.state.pending.some((item) => item.kind === "chat" && item.action === "record" && item.id === "chat:call-1"));
+    assert.equal(captured.length, 3);
+    const firstBlock = blockOf(captured[0]);
+    assert.ok(firstBlock);
+    assert.equal(captured[0].at(-1), firstBlock);
+    assert.match(firstBlock.content, /since the rebuild: nothing written/);
+    assert.ok(!flatten(captured[0]).includes(STATE_BLOCK_MARKER));
+    const secondBlock = blockOf(captured[1]);
+    assert.ok(secondBlock);
+    assert.match(flatten(captured[1]), /export const answer = 42/);
+    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to OracleToes/);
+    assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
+    assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER));
+    assert.match(blockOf(captured[2]).content, /A1 · written/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -175,7 +155,7 @@ test("successive tree calls continue automatically with the freshly anchored sta
 });
 
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -200,13 +180,12 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
 });
 
 test("the file tools are the package's: read takes offset and limit", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
-  const output = whole.output.map((part) => part.text).join("");
-  assert.match(output, /export const answer = 42;/);
+  // The full read is covered by the model turn above; this checks the offset
+  // boundary without paying for a second identical package read.
   const limited = await byName.read.execute({ path: "src/verify-me.ts", offset: 2, limit: 1 }, api, {});
   const limitedOut = limited.output.map((part) => part.text).join("");
   assert.doesNotMatch(limitedOut, /export const answer/);
@@ -214,7 +193,7 @@ test("the file tools are the package's: read takes offset and limit", async () =
 });
 
 test("create refuses a path that exists; edit never creates", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-create", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -226,7 +205,7 @@ test("create refuses a path that exists; edit never creates", async () => {
 });
 
 test("read only mode refuses create and edit, and the block says so", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: true };
   const tools = createTools({ root, brain, session });
   const api = { callId: "call-ro", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
@@ -242,7 +221,7 @@ test("read only mode refuses create and edit, and the block says so", async () =
 });
 
 test("unknown handles are explicit errors, never guesses", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));

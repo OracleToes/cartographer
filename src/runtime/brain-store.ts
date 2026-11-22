@@ -122,7 +122,7 @@ const UPSERT =
 const DOCUMENT = "SELECT document FROM brain_document WHERE id = 1";
 
 /** The Brain write that puts an archived record back as the type it was. */
-function writeBackOf(item: ArchivedItem): BrainWrite | undefined {
+export function writeBackOf(item: ArchivedItem): BrainWrite | undefined {
   const record = item.record;
   // An ephemeral item goes back to the live context, which is not the Brain:
   // it is a write to the session's own store, and the caller has the session
@@ -154,6 +154,8 @@ export interface CollapseChange {
   generation: string;
   /** Its source generation; the pair must match the reserved journal. */
   source: string;
+  /** State used to build the snapshot; reject concurrent edits rather than commit a stale head. */
+  expected: { brain: CartoBrain; archive: Archive };
 
   /** Items leaving the Brain and the generation's store, on their way in. */
   incoming: readonly IncomingItem[];
@@ -322,6 +324,10 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           throw new Error("Collapse has no matching uncommitted journal.");
         }
         let brain = await readFrom(tx);
+        const archive = await readArchiveFrom(tx);
+        if (JSON.stringify(brain) !== JSON.stringify(change.expected.brain) || JSON.stringify(archive) !== JSON.stringify(change.expected.archive)) {
+          throw new Error("Brain or archive changed during collapse; refusing to commit a stale snapshot.");
+        }
         for (const step of change.writes) brain = applyWrite(brain, step.write, step.now);
         // A record marked for archive leaves the Brain here (§4.1): the mark is
         // what puts it in `incoming`, and the Brain it is written back to has no
@@ -333,7 +339,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         // own (§4.1, §4 step 3-4): a restore puts an item back where it came
         // from, a delete removes it for good, and then grace is counted, so an
         // item marked this time is not also dropped this time.
-        const swept = sweep(await readArchiveFrom(tx), change.generation, collapse, change.now, change.incoming);
+        const swept = sweep(archive, change.generation, collapse, change.now, change.incoming);
         const applied = applyArchiveMarks(swept);
         for (const item of applied.restored) {
           // A restored Brain record goes back into the Brain it left, in this
