@@ -27,6 +27,7 @@ const input = (overrides = {}) => ({
   ],
   stale: ["A5 (stale)"],
   resolveHandle: (kind, id) => ({ "atlas:a3": "A3", "chat:c7": "C7" })[`${kind}:${id}`],
+  mode: "edit",
   tree: { root: "/project", depth: 2, lines: ["./", "src/  24K", "  cli.ts  3K  A9"] },
   ...overrides,
 });

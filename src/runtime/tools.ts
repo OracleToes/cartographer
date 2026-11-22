@@ -9,12 +9,17 @@
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool } from "@earendil-works/pi-durable";
+// The file tools are the package's, not a layer beside them (§7): scoping is
+// the env's cwd, and the two things Carto adds are the `.brain` wall and the
+// existence check on `create` that the package's `write` does not offer.
+import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { getOrThrow } from "@earendil-works/pi-durable/env";
 
 import type { CartoBrain, Attachment } from "../domain/records.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
-import { applyAtomicEdit, lexicalProjectPath, readRange, WorkspaceError } from "./workspace.js";
+import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -24,6 +29,10 @@ export interface ToolSession {
   tree: { anchor: string; depth: number };
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
+  /** Set by a timed `sleep`: whole seconds to rest before the host starts the next run. Cleared when read. */
+  sleepSeconds: number | undefined;
+  /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
+  readOnly: boolean;
   /** The generation this context belongs to; recorded on context-sourced pins. */
   generation: string;
 }
@@ -74,6 +83,92 @@ function resolveAttachment(
 
 const textOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "text", text }] });
 const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "text", text }], isError: true });
+
+/**
+ * The path a file tool is about to touch, resolved against the project root:
+ * `.brain` is refused here, before the package's tool sees it. Paths outside
+ * the root are the env's business — its cwd is the root, and its own
+ * `absolutePath` refuses what escapes it.
+ */
+function guardedPath(root: string, path: string): void {
+  const absolute = lexicalProjectPath(root, path);
+  refuseBrainPath(root, absolute);
+}
+
+/**
+ * `read`, from the package, with Carto's `.brain` wall in front of it. The
+ * arguments are the package's — a path, an offset, and a limit — and the
+ * package's own bounds are the tool's bounds (§1). `wrapTool` keeps the
+ * package tool's types, so nothing here restates its schema.
+ */
+function scopedRead(root: string): ToolRegistration {
+  const base = createReadTool();
+  return defineTool({
+    ...base,
+    async execute(args, api, context) {
+      guardedPath(root, pathOf(args));
+      return base.execute(args, api, context);
+    },
+  });
+}
+
+/**
+ * `edit`, from the package: ordered replacements matched against the original
+ * file, all or nothing, and a path that must be an existing file. Creating is
+ * `create`'s job, so the package tool's behaviour is the spec's (§7).
+ */
+const scopedEdit = (root: string, readOnly: () => boolean) =>
+  defineTool({
+    ...createEditTool(),
+    async execute(args, api, context) {
+      refuseWhenReadOnly(readOnly());
+      guardedPath(root, pathOf(args));
+      const base = createEditTool();
+      return base.execute(args, api, context);
+    },
+  });
+
+/**
+ * `create`: a file that must not exist. The package's `write` creates or
+ * overwrites; refusing the overwrite is the one check Carto adds (§7).
+ */
+function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration {
+  const write = createWriteTool();
+  return defineTool({
+    ...write,
+    name: "create",
+    description:
+      "Create a new file. The path must not already exist — overwriting a file is not a step toward a goal and discards text you never read; to change an existing file, use `edit`. Refused in read only mode.",
+    async execute(args, api, context) {
+      refuseWhenReadOnly(readOnly());
+      const path = pathOf(args);
+      const env = api.env;
+      if (env === undefined) throw new Error("create needs the project environment");
+      guardedPath(envRoot, path);
+      const absolute = getOrThrow(await env.absolutePath(path, context));
+      if (getOrThrow(await env.exists(absolute, context))) {
+        throw new Error(`${path} already exists; change it with 'edit', or choose a new path.`);
+      }
+      return write.execute(args, api, context);
+    },
+  });
+}
+
+/** The `path` argument of a file tool, as a string. */
+const pathOf = (args: object): string => String((args as { path?: unknown }).path ?? "");
+
+/**
+ * Read only mode is enforced at `create` and `edit` and nowhere else (§6.1).
+ * The tools stay offered — withholding them would re-define the schema, and
+ * the head is frozen — so the refusal is what the agent meets.
+ */
+function refuseWhenReadOnly(readOnly: boolean): void {
+  if (readOnly) {
+    throw new Error(
+      "The project is in read only mode: you may not make edits or any other destructive change. Read, answer, and say what you would change if you were asked.",
+    );
+  }
+}
 
 export function createTools(deps: ToolDeps): ToolRegistration[] {
   const { root, brain, session } = deps;
@@ -226,46 +321,19 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       },
     }),
 
-    defineTool({
-      name: "read",
-      description: "Read a file inside the project root. Omit both startLine and endLine to read the whole file; pass startLine only to read from that line to the end of the file; pass endLine only to read from line 1 through that line; pass both to read a line range. Returns the path, the range, the total lines, and the excerpt.",
-      parameters: obj({
-        path: str({ minLength: 1 }),
-        startLine: opt(int({ minimum: 1 })),
-        endLine: opt(int({ minimum: 1 })),
-      }),
-      replay: "safe",
-      execute: async (args) => {
-        const range = await readRange(root, args.path, args.startLine, args.endLine);
-        return textOutput(
-          `${range.path}:${range.startLine}-${range.endLine} (of ${range.totalLines} lines)\n\n${range.excerpt}`,
-        );
-      },
-    }),
+    scopedRead(root),
 
-    defineTool({
-      name: "edit",
-      description:
-        "Apply one atomic edit to a path inside the project. To create a file, pass oldText \"\" (its parent directory must exist). To change one, pass the exact text to replace — it must appear exactly once.",
-      parameters: obj({
-        path: str({ minLength: 1 }),
-        oldText: str(),
-        newText: str(),
-      }),
-      replay: "unsafe",
-      execute: async (args) => {
-        const result = await applyAtomicEdit(root, args.path, args.oldText, args.newText);
-        return textOutput(result.outcome === "created" ? `Created ${result.path} (${result.bytes} bytes).` : `Edited ${result.path} (${result.bytes} bytes).`);
-      },
-    }),
+    scopedEdit(root, () => session.readOnly),
+
+    createFile(root, () => session.readOnly),
 
     defineTool({
       name: "tree",
       description:
-        "Set the anchor and depth of the project tree in your state block. The anchor stays inside the project and never inside `.brain` or `.git`; `.brain` and `.git` are never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
+        "Set the anchor and depth of the project tree in your state block. Both are optional: the anchor defaults to the project root, the depth to 2. A depth of 1 is the anchor and its immediate contents; anything below 1 renders the same as 1. The anchor stays inside the project and never inside `.brain` or `.git`; `.brain` and `.git` are never listed. Move it where your attention is. The tree marks the Atlas nodes attached to each file.",
       parameters: obj({
         anchor: opt(str({ minLength: 1 })),
-        depth: opt(int({ minimum: 0 })),
+        depth: opt(int({ description: "How many levels below the anchor to render. Defaults to 2." })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -280,21 +348,31 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        "End this context and rebuild it from the Brain. Rare, and never for ordinary work: call this when the map and the books have diverged past what the context can work with. No approval is involved, from either side. Chat anything the person must see first.",
-      parameters: obj({ reason: str({ minLength: 1 }) }),
+        "End this context and rebuild it from the Brain. Collapse at a task boundary: when the work is done and the Brain is current, or before a long piece of work, after pinning what you will need so you start inside a context built for the problem. No approval is involved, from either side. Chat anything the person must see first.",
+      parameters: obj({}),
       replay: "safe",
-      execute: async (args) => {
-        session.collapseRequested = args.reason.trim();
-        return { output: [{ type: "text" as const, text: `Collapse noted: ${args.reason.trim()}. This run ends; the context rebuilds from the Brain.` }], control: { terminate: true } };
+      execute: async () => {
+        session.collapseRequested = "the agent collapsed";
+        return { output: [{ type: "text" as const, text: "Collapse noted. This run ends; the context rebuilds from the Brain." }], control: { terminate: true } };
       },
     }),
 
     defineTool({
       name: "sleep",
-      description: "End the run. There is nothing left to do until the person says otherwise.",
-      parameters: obj({}),
+      description:
+        "Rest. With no argument the run ends and stays ended until the person sends you a message. With a whole number of seconds, you rest that long and then start again on your own, reading the state block as your next turn. A message from the person ends a rest early either way.",
+      parameters: obj({ seconds: opt(int({ minimum: 1, description: "Whole seconds to rest before starting again. Omit to rest until the person messages you." })) }),
       replay: "safe",
-      execute: async () => ({ output: [{ type: "text" as const, text: "Carto is asleep." }], control: { terminate: true } }),
+      execute: async (args) => {
+        if (args.seconds === undefined) {
+          return { output: [{ type: "text" as const, text: "Carto is asleep." }], control: { terminate: true } };
+        }
+        session.sleepSeconds = args.seconds;
+        return {
+          output: [{ type: "text" as const, text: `Carto is asleep for ${args.seconds} second${args.seconds === 1 ? "" : "s"}.` }],
+          control: { terminate: true },
+        };
+      },
     }),
   ];
 }

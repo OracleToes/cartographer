@@ -40,6 +40,7 @@ import {
   interruptRun,
   openLiveSession,
   sessionTranscript,
+  restThenResume,
   submitInput,
   type LiveSession,
   type LiveSessionOptions,
@@ -797,6 +798,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
+    // A timed sleep: the agent rests, then starts again on its own (§10).
+    state.running = true;
+    tui.requestRender();
+    try {
+      await restThenResume(state.session);
+    } finally {
+      state.running = false;
+      await rebuildTranscript();
+      tui.requestRender();
+    }
     if (options.refreshCapacity === true) await refreshAdvertisedWindow();
     await refreshSidebar();
     tui.requestRender();

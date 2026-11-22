@@ -34,13 +34,16 @@ import type { BrainStore } from "./brain-store.js";
 
 /** The minimal system prompt (docs/intent.md §22): the tools describe themselves; this carries only what no tool can say. */
 export const CARTO_INSTRUCTIONS = [
-  "You are Carto, the project's long-lived working memory.",
+  "You are Carto, the long-lived working attention on one project.",
   "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
   "Read before you write anything about a project file.",
   "Keep the Brain: Atlas for what you understand about the project, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
   "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale entries, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
   "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
+  "The two modes: in edit mode you change the project as you work. In read only mode the person has taken that away — `create` and `edit` will refuse you. Do not work around it, and do not propose, queue, or ask permission for changes: read, answer, and say what you would change when you are asked for it.",
+  "Collapse when it is appropriate, not when the context is full. When a task is done and the Brain is current, collapse and carry the result forward. Before a long piece of work, pin what you will need, collapse, and start inside a context built for the problem instead of one you accumulated on the way there.",
+  "Aim at small, atomic steps: one function, one value changed, one chunk removed, one small file added. Nothing refuses a large change; keep the step small because the person can read it and you can describe it.",
 ].join("\n");
 
 export interface LiveSessionState extends ToolSession {
@@ -51,6 +54,10 @@ export interface LiveSessionState extends ToolSession {
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
   toolWorkAtLastRequest: number;
+  /** Set by a timed `sleep`: the rest the host is to wait out (§10). */
+  sleepSeconds: number | undefined;
+  /** Set when the person's message ended a rest early, so the host starts no run of its own. */
+  restEndedByPerson: boolean;
 }
 
 export interface CartoExtensionOptions {
@@ -160,6 +167,7 @@ export async function renderLiveStateBlock(
     pinned,
     stale: staleHandles(brain, options.root),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
+    mode: options.session.readOnly ? "read only" : "edit",
     tree,
   });
 }

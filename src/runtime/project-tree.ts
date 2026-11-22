@@ -180,9 +180,12 @@ export function projectTreeBlock(
   depth: number,
   brain: CartoBrain,
 ): { root: string; depth: number; lines: string[] } {
-  if (!Number.isInteger(depth) || depth < 0) throw new AnchorError(`depth must be a whole number >= 0, got ${depth}`);
+  // Depth 1 is the anchor and its immediate contents; there is no rendering
+  // below that, so anything under 1 renders as 1 (§6.3). Nothing is refused:
+  // a depth below 1 is not an error, it is the same tree.
+  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
   const target = containedAnchor(root, anchor);
   const entry = scanTree(root, target);
-  const lines = renderTreeLines(entry, depth, atlasAttachedPaths(brain, root));
-  return { root: target, depth, lines };
+  const lines = renderTreeLines(entry, shown, atlasAttachedPaths(brain, root));
+  return { root: target, depth: shown, lines };
 }

@@ -29,6 +29,7 @@ import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlit
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
 import { projectContext } from "../domain/projection.js";
+import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 import { createCartoExtension, CARTO_INSTRUCTIONS, type LiveSessionState } from "./carto-extension.js";
 import type { BrainStore } from "./brain-store.js";
 import {
@@ -66,6 +67,8 @@ export interface LiveSession {
   readonly state: LiveSessionState;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
+  /** Bring a timed sleep's wait forward (a host shutting down, or a delivered message). */
+  endRest: (() => void) | undefined;
 }
 
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
@@ -101,6 +104,9 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
+    sleepSeconds: undefined,
+    restEndedByPerson: false,
+    readOnly: false,
     generation,
     lastReportedInput: undefined,
     toolWorkAtLastReport: 0,
@@ -155,6 +161,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         state.collapseRequested = null;
         return reason;
       },
+      endRest: undefined,
     };
   } catch (error) {
     if (harness !== undefined) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
@@ -165,7 +172,52 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 
 /** Submit a person message; the submission settles when the run ends (including any continuations). */
 export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
+  // A message ends a rest early (§10); the message starts its own run.
+  session.state.restEndedByPerson = true;
+  session.endRest?.();
   return session.conversation.submit({ type: "input", content: text, whenBusy }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * Start the next run after a timed `sleep` (§10).
+ *
+ * The agent rests, then starts again by receiving the state block, exactly as
+ * it would after any turn that carried no tool call. The submitted message is
+ * the block's own marker: `beforeRequest` replaces it with the freshly
+ * rendered block, so what starts the run is the state, not a word from the
+ * person.
+ */
+export async function resumeAfterRest(session: LiveSession) {
+  session.state.restEndedByPerson = false;
+  return session.conversation.submit({ type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * Wait out a timed `sleep`, then start the next run. A rest with no time, or
+ * with nothing to rest for, does nothing. A person's message ends the wait
+ * early and starts its own run, so this returns without starting one.
+ */
+export async function restThenResume(session: LiveSession): Promise<{ status: string } | undefined> {
+  const seconds = session.state.sleepSeconds;
+  if (seconds === undefined) return undefined;
+  session.state.sleepSeconds = undefined;
+  session.state.restEndedByPerson = false;
+  await new Promise<void>((wake) => {
+    const timer = setTimeout(wake, seconds * 1000);
+    session.endRest = () => {
+      clearTimeout(timer);
+      wake();
+    };
+  });
+  session.endRest = undefined;
+  if (session.state.restEndedByPerson) return undefined;
+  const submission = await resumeAfterRest(session);
+  return submission.wait(BACKGROUND_CONTEXT);
+}
+
+/** Bring the wait forward, for a host that is shutting down. */
+export function endRest(session: LiveSession): void {
+  session.endRest?.();
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */

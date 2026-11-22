@@ -29,6 +29,7 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  restThenResume,
   submitInput,
   type LiveSession,
   type LiveSessionOptions,
@@ -151,6 +152,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       if (reason !== null) {
         session = await runCollapse(session, options, output, reason);
       }
+      // A timed sleep: the agent rests, then starts again on its own (§10).
+      await restThenResume(session);
       if (options.refreshCapacity === true) {
         await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
       }

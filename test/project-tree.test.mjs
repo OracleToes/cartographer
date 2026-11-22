@@ -49,11 +49,11 @@ test("the tree renders directories first, with honest aggregated sizes", () => {
   }
 });
 
-test("depth bounds the display; zero depth renders nothing below the anchor", () => {
+test("depth bounds the display; depth 1 is the anchor's contents", () => {
   const root = makeProject();
   try {
     const brain = emptyBrain();
-    assert.deepEqual(projectTreeBlock(root, root, 0, brain).lines, []);
+    assert.deepEqual(projectTreeBlock(root, root, 1, brain).lines, projectTreeBlock(root, root, 0, brain).lines);
     assert.deepEqual(projectTreeBlock(root, join(root, "src"), 1, brain).lines, [
       "  domain/  2K",
       "  cli.ts  512B",
@@ -95,14 +95,18 @@ test("attachment paths escaping the root never mark anything", () => {
   }
 });
 
-test("an anchor outside the project root, a file anchor, and a bad depth are rejected", () => {
+test("an anchor outside the project root or on a file is rejected; a depth below one renders as one", () => {
   const root = makeProject();
   try {
     const brain = emptyBrain();
     assert.throws(() => projectTreeBlock(root, join(root, ".."), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, join(root, "MINI.md"), 1, brain), AnchorError);
-    assert.throws(() => projectTreeBlock(root, root, -1, brain), AnchorError);
-    assert.throws(() => projectTreeBlock(root, root, 1.5, brain), AnchorError);
+    // Depth has no meaning below one: nothing is refused, and the render is the same (§6.3).
+    const one = projectTreeBlock(root, root, 1, brain);
+    const zero = projectTreeBlock(root, root, 0, brain);
+    const negative = projectTreeBlock(root, root, -3, brain);
+    assert.deepEqual(zero.lines, one.lines);
+    assert.deepEqual(negative.lines, one.lines);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

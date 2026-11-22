@@ -385,10 +385,10 @@ test("formatToolArgs formats progressively based on tool name availability", () 
   assert.equal(formatToolArgs({ path: "src/app.ts" }, ""), '{\n  "path": "src/app.ts"\n}');
 
   // 2. Tool name known: formats object fields human-readably
-  const formatted = formatToolArgs({ path: "src/app.ts", startLine: 10, endLine: 20 }, "read");
+  const formatted = formatToolArgs({ path: "src/app.ts", offset: 10, limit: 20 }, "read");
   assert.ok(formatted.includes("path: src/app.ts"));
-  assert.ok(formatted.includes("startLine: 10"));
-  assert.ok(formatted.includes("endLine: 20"));
+  assert.ok(formatted.includes("offset: 10"));
+  assert.ok(formatted.includes("limit: 20"));
 
   // 3. Multiline command formatting
   const formattedBash = formatToolArgs({ command: "git status\ngit diff" }, "bash");
@@ -402,7 +402,7 @@ test("TranscriptView displays tool name in card header when known", () => {
       kind: "tool",
       id: "live-tool-1",
       name: "read",
-      args: "path: src/app.ts\nstartLine: 1",
+      args: "path: src/app.ts\noffset: 1",
       live: true,
       status: "running",
     },

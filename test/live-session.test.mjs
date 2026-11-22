@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
@@ -107,7 +108,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       text: "The answer is 42.",
@@ -153,14 +154,16 @@ test("the tree tool moves the anchor and the block renders it there", async () =
 
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
-  const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", startLine: 1, endLine: 1 }, api, {}), /\.brain/);
-  const edit = byName.edit.execute({ path: "../escape.txt", oldText: "", newText: "x" }, api, {});
+  await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", offset: 1, limit: 1 }, api, {}), /\.brain/);
+  const edit = byName.edit.execute({ path: "../escape.txt", edits: [{ oldText: "", newText: "x" }] }, api, {});
   await assert.rejects(edit, /outside the project root/);
-  const editBrain = byName.edit.execute({ path: ".brain/brain.sqlite", oldText: "", newText: "x" }, api, {});
+  const editBrain = byName.edit.execute({ path: ".brain/brain.sqlite", edits: [{ oldText: "", newText: "x" }] }, api, {});
   await assert.rejects(editBrain, /\.brain/);
+  const createBrain = byName.create.execute({ path: ".brain/new.txt", content: "x" }, api, {});
+  await assert.rejects(createBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
   await assert.rejects(tree, /anchor escapes/);
   const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
@@ -171,28 +174,51 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await cleanup();
 });
 
-test("read bounds are independently open: whole file, from a line, through a line", async () => {
+test("the file tools are the package's: read takes offset and limit", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
-  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
   const output = whole.output.map((part) => part.text).join("");
-  assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
   assert.match(output, /export const answer = 42;/);
-  const fromStart = await byName.read.execute({ path: "src/verify-me.ts", startLine: 2 }, api, {});
-  const fromStartOut = fromStart.output.map((part) => part.text).join("");
-  assert.match(fromStartOut, /src\/verify-me\.ts:2-2 \(of 2 lines\)/);
-  const throughEnd = await byName.read.execute({ path: "src/verify-me.ts", endLine: 1 }, api, {});
-  const throughEndOut = throughEnd.output.map((part) => part.text).join("");
-  assert.match(throughEndOut, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
-  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 99 }, api, {}), /past the end/);
+  const limited = await byName.read.execute({ path: "src/verify-me.ts", offset: 2, limit: 1 }, api, {});
+  const limitedOut = limited.output.map((part) => part.text).join("");
+  assert.doesNotMatch(limitedOut, /export const answer/);
+  await cleanup();
+});
+
+test("create refuses a path that exists; edit never creates", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const api = { callId: "call-create", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  const created = await byName.create.execute({ path: "src/new-file.ts", content: "export const x = 1;\n" }, api, {});
+  assert.match(created.output[0].text, /Successfully wrote/);
+  await assert.rejects(byName.create.execute({ path: "src/new-file.ts", content: "replaced" }, api, {}), /already exists/);
+  await assert.rejects(byName.edit.execute({ path: "src/missing.ts", edits: [{ oldText: "", newText: "x" }] }, api, {}), /not_found|not a file/i);
+  await cleanup();
+});
+
+test("read only mode refuses create and edit, and the block says so", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: true };
+  const tools = createTools({ root, brain, session });
+  const api = { callId: "call-ro", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  await assert.rejects(byName.create.execute({ path: "src/ro.ts", content: "x" }, api, {}), /read only mode/);
+  await assert.rejects(
+    byName.edit.execute({ path: "src/verify-me.ts", edits: [{ oldText: "42", newText: "43" }] }, api, {}),
+    /read only mode/,
+  );
+  // The tools stay offered; only the call refuses.
+  assert.ok(byName.create !== undefined && byName.edit !== undefined && byName.read !== undefined);
   await cleanup();
 });
 
 test("unknown handles are explicit errors, never guesses", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   await assert.rejects(
@@ -216,7 +242,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
       text: "The answer is 42.",
       attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "the map and the books diverged" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   const previousGeneration = session.generation;
@@ -224,9 +250,8 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     const submission = await submitInput(session, "remember this, then reset");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done", "the collapse tool ends the run; no continuation follows a terminate");
-    assert.equal(session.state.collapseRequested, "the map and the books diverged");
     const reason = session.takeCollapseRequest();
-    assert.equal(reason, "the map and the books diverged");
+    assert.equal(reason, "the agent collapsed");
 
     const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
     const outcome = await collapseLiveSession(session, options(), reason);
@@ -266,13 +291,13 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       text: "The answer is 42.",
       attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "rebuild" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   try {

@@ -57,6 +57,8 @@ export interface StateBlockInput {
   toolWorkSince: number;
   /** Estimated sizes of the Brain, by part — now, not at the freeze. */
   sizes: { atlas: number; ledger: number; chat: number };
+  /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
+  mode: "edit" | "read only";
   /** Pending Brain writes since the projection was rebuilt. Ephemeral (§34). */
   pending: PendingWrite[];
   /** Handles of Atlas entries whose file attachment has drifted, as labelled (e.g. "A5 (stale)"). */
@@ -95,7 +97,8 @@ export function renderStateBlock(input: StateBlockInput): string {
       ? "pinned: none"
       : ["pinned:", ...input.pinned.map((item) => `  ${item.handle} [${item.author === "user" ? "u" : "a"}]`)].join("\n");
   const treeLines = [`tree: ${input.tree.root} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
-  return [STATE_BLOCK_OPEN, fullness, space, pending, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
+  const mode = input.mode === "read only" ? "mode: READ ONLY (create and edit refuse)" : "mode: edit";
+  return [STATE_BLOCK_OPEN, fullness, mode, space, pending, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

@@ -548,9 +548,9 @@ listing.
 
 The tree is anchored at the project root by default, at a depth of two. The `tree`
 tool sets the anchor and the depth, both optional: the anchor defaults to the
-project root, and the depth defaults to two. A depth of zero renders the same as a
-depth of one — the anchor and its immediate contents — because there is no useful
-rendering of an anchor with nothing under it. The tool does not return the tree:
+project root, and the depth defaults to two. A depth of one is the anchor and its
+immediate contents; anything below one renders the same as one, because there is
+no useful rendering of an anchor with nothing under it. The tool does not return the tree:
 it is already in the state block, which every request carries, and the tool's
 result is only that the block will be rendered at the new anchor.
 
