@@ -59,12 +59,14 @@ function previewRegistry(): Registry {
   const noop = () => undefined;
   const commands: Command[] = [
     { id: "stop", group: "the run", label: "stop", key: "ctrl+x", run: noop, available: () => true },
+    { id: "pause", group: "the run", label: "pause the run", key: "ctrl+v", run: noop, available: () => true },
     { id: "send-mode", group: "the run", label: "send mode: steer", key: "shift+tab", run: noop, available: () => true },
     { id: "fold", group: "the transcript", label: "fold the cards", key: "ctrl+e", run: noop, available: () => true },
     { id: "jump", group: "anywhere", label: "jump", key: "ctrl+o", run: noop, available: () => true },
     { id: "palette", group: "anywhere", label: "palette", key: "ctrl+p", run: noop, available: () => true },
     { id: "sidebar", group: "the workspace", label: "sidebar", key: "ctrl+h", run: noop, available: () => true },
-    { id: "quit", group: "anywhere", label: "quit", key: "ctrl+c", run: noop, available: () => true },
+    { id: "compose", group: "the message", label: "write the message in your editor", key: "ctrl+g", run: noop, available: () => true },
+    { id: "ctrl-c", group: "the message", label: "clear the line, twice to leave", key: "ctrl+c", run: noop, available: () => true },
   ];
   return new Registry(commands);
 }

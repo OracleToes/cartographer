@@ -9,7 +9,7 @@
  *   ────────────────────────────────────────────────────────────────────────
  *   …the working area…
  *
- *   ^x stop  ⇧tab steering  ^e fold  ^o jump  ^p palette  ^h sidebar  ^c quit
+ *   ^x stop  ^v pause  ⇧tab steering  ^e fold  ^o jump  ^p palette  ^g editor  ^c quit
  *
  * The header states the mode in the spec's own words (§6.1) and nothing else
  * that can change on its own; the footer is context-sensitive, so the keys it

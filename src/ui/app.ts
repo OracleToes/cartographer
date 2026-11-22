@@ -67,6 +67,7 @@ import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type S
 import { Registry, type Command } from "./commands.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
+import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
@@ -115,6 +116,11 @@ interface TuiState {
   rebuilding: boolean;
   /** Cheap change signature so the 1.5s timer does not bust the render cache when nothing moved. */
   sig: string;
+  /**
+   * When the last Ctrl-C found the line empty, if it did. A second press inside
+   * the window leaves; anything else lets the arming lapse (see `compose.ts`).
+   */
+  ctrlCArmedAt: number | undefined;
 }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -364,6 +370,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     rebuilding: false,
     sig: "",
     liveWatch: undefined,
+    ctrlCArmedAt: undefined,
   };
 
   const terminal = new ProcessTerminal();
@@ -1467,6 +1474,74 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     submitMessage(message);
   };
 
+  /**
+   * Ctrl-C, as bash does it: a line with text on it is cleared and nothing else
+   * happens; an empty line arms leaving, and a second press inside the window
+   * leaves. The arming is not a mode — it lapses, so an old stray Ctrl-C can
+   * never turn the next one into a quit.
+   */
+  const pressCtrlC = () => {
+    const typed = editor.getExpandedText();
+    const decision = ctrlC({ typed, armedAt: state.ctrlCArmedAt, now: Date.now() });
+    state.ctrlCArmedAt = decision.armedAt;
+    if (decision.outcome.action === "cleared") {
+      editor.setText("");
+      tui.requestRender();
+      return;
+    }
+    if (decision.outcome.action === "armed") {
+      tui.flash(
+        state.running ? "press ^c again to leave — the run stops with the session" : "press ^c again to leave",
+        Math.min(decision.outcome.windowMs, CTRL_C_ARM_WINDOW_MS),
+      );
+      tui.requestRender();
+      return;
+    }
+    void shutdown(0);
+  };
+
+  /**
+   * Ctrl-G: write the message in `$VISUAL`/`$EDITOR` (§8's editor note in
+   * `compose.ts`). The TUI is taken down first, because the editor needs the
+   * terminal in its own mode; it is brought back up afterwards, and the file's
+   * text becomes the prompt. Nothing is sent — the person still presses enter.
+   *
+   * A key the person wants and an editor that is not there are both worth
+   * saying plainly, so a failure flashes the reason instead of looking dead.
+   */
+  const composeInPrompt = async () => {
+    const before = editor.getExpandedText();
+    // A stopped TUI must always come back: if the editor throws on the way out,
+    // leaving `tui` stopped would hand the person a dead terminal with no way
+    // to type, which is worse than a failed edit.
+    let outcome: EditorOutcome;
+    let stopped = false;
+    try {
+      tui.stop();
+      stopped = true;
+      outcome = await composeInEditor(before);
+    } catch (error) {
+      outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (stopped) tui.start();
+      tui.setFocus(editor);
+      void rebuildTranscript().catch(() => undefined);
+      tui.requestRender();
+    }
+    if (!outcome.ok) {
+      tui.flash(`no editor: ${outcome.error}`, 4_000);
+      tui.requestRender();
+      return;
+    }
+    if (outcome.text === before) {
+      // Leaving the file as it was is not an edit: the prompt is left alone, so
+      // a glance in the editor cannot rewrite what was already on the line.
+      return;
+    }
+    editor.setText(outcome.text);
+    tui.requestRender();
+  };
+
   // ── Commands ─────────────────────────────────────────────────────────────
   // One registry. The footer, `f1` and `^p` are views of this list; see
   // `commands.ts`. Order matters twice: input matching goes in declaration
@@ -1501,10 +1576,34 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => true,
     },
     {
+      // Bash-like, and the person's ask: ^c clears the line it finds text on,
+      // and leaves when pressed again on an empty one. Both presses are the
+      // same key, so both are one command; `^c stop` is `ctrl+x` and is not
+      // this (§9: stopping is an interrupt, leaving is leaving).
+      id: "ctrl-c",
+      group: "the message",
+      label: "clear the line, twice to leave",
+      key: "ctrl+c",
+      run: () => pressCtrlC(),
+      available: () => true,
+    },
+    {
+      id: "compose",
+      group: "the message",
+      label: "write the message in your editor",
+      hint: "$VISUAL, else $EDITOR",
+      key: "ctrl+g",
+      run: () => void composeInPrompt(),
+      // Only where there is a message to write, and only with the terminal to
+      // itself: an editor opened over an overlay would fight it for the screen.
+      available: () => inChat() && !state.overlayOpen,
+    },
+    {
       id: "quit",
       group: "anywhere",
       label: "quit",
-      key: "ctrl+c",
+      // No key of its own: ^c twice is how a person leaves, and a separate
+      // binding that also quit would be a second way to lose a run by accident.
       run: () => void shutdown(0),
       available: () => true,
     },
