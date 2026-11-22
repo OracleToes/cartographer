@@ -125,7 +125,9 @@ export class Sidebar implements Component {
   /** The quiet marks after a figure: pins, marks, stale. One glyph each, never a sentence. */
   private marksOf(kind: BookKind): string {
     const parts: string[] = [];
-    if ((this.counts.pinned[kind] ?? 0) > 0) parts.push(tokens.pin("⊙"));
+    // A count of pins, not one pin's name: the sidebar says how many there are,
+    // and the block and the views name each one `P <handle>` (§5.4).
+    if ((this.counts.pinned[kind] ?? 0) > 0) parts.push(tokens.pin("P"));
     if ((this.counts.marked[kind] ?? 0) > 0) parts.push(tokens.warn("◆"));
     if ((this.counts.stale[kind] ?? 0) > 0) parts.push(tokens.warn("!"));
     return parts.join(" ");
@@ -201,7 +203,7 @@ export class Sidebar implements Component {
     const spine = archiveActive ? tokens.warn("▌") : " ";
     const name = archiveActive ? tokens.bold(tokens.warn(label)) : tokens.text(label);
     const figure = archiveActive ? String(this.counts.archive) : "—";
-    const pinMark = archiveActive && this.counts.archivePinned > 0 ? ` ${tokens.pin("⊙")}` : "";
+    const pinMark = archiveActive && this.counts.archivePinned > 0 ? ` ${tokens.pin("P")}` : "";
     const head = `${spine}  ${tokens.faint("layer")} ${name}`;
     const right = `${tokens.muted(figure)}${pinMark}`;
     const gap = Math.max(1, width - 1 - visibleWidth(head) - visibleWidth(right));

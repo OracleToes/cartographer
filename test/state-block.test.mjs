@@ -46,7 +46,8 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to the person/);
   // A mark carries its action, when it lands, and its author (§4.1).
   assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by the person\n  C3 · delete at the next collapse · marked by you/);
-  assert.match(block, /pins:\n  L2 · placed by the person\n  A6 · placed by you/);
+  // §5.4: a pin is named by its own letter and the handle of what it marks.
+  assert.match(block, /pins:\n  P L2 · placed by the person\n  P A6 · placed by you/);
   assert.match(block, /stale:\n  A5 · the file changed after this note/);
   // Each stale entry carries its own reason: a pinned file that is gone is not
   // the same fact as an Atlas note whose file moved on (§5.5).

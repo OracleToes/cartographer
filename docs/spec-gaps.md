@@ -123,6 +123,11 @@ which is a mark on the row rather than a handle the agent can address.
 - One place builds each of these, so the transcript, the Context view and the
   prefill cannot disagree (§5.4: "one numbering").
 
+**Status: done.** The tree line carries `T1` and `tree` takes a directory handle
+as its anchor; every pin is named `P <handle of what it marks>` in the state
+block, the transcript, the Context view and the archive, through one function.
+`F`/`D` on tree rows landed in stage 2 because a pin has to name a file.
+
 **Test.** The state block contains `T1` and a `P` handle for a pinned record;
 the Context view and the block show the same `P` for the same pin.
 

@@ -388,3 +388,27 @@ test("interrupting a run whose bash call is open settles the run instead of orph
     await cleanup();
   }
 });
+
+test("the tree is addressable: a directory handle anchors it, a file handle does not", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false };
+  const tools = createTools({ root, brain, session });
+  const api = { callId: "call-t", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  try {
+    // Which handle is the directory, and which the file, is the tree's business:
+    // ask it, rather than hard-coding a number the rendering decides (§5.4).
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const block = projectTreeBlock(root, root, 2, await brain.read());
+    const dirHandle = [...block.handles].find(([path]) => path.endsWith("src"))?.[1];
+    const fileHandle = [...block.handles].find(([path]) => /\.(ts|md|json)$/.test(path))?.[1];
+    assert.ok(dirHandle !== undefined && fileHandle !== undefined, "the tree handed out both kinds");
+
+    await byName.tree.execute({ handle: dirHandle }, api, {});
+    assert.ok(session.tree.anchor.endsWith("src"), "the tree anchored where the directory is");
+
+    await assert.rejects(byName.tree.execute({ handle: fileHandle }, api, {}), /not a directory/);
+  } finally {
+    await cleanup();
+  }
+});

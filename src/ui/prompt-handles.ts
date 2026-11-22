@@ -32,6 +32,23 @@ export interface PromptHandles {
   person: (key: string) => string | undefined;
   /** `R1` for a tool result, `S1` for a shell result, by the result's row id. */
   result: (key: string) => string | undefined;
+  /**
+   * `P A3` for a pin, by the handle of the entry it marks (§5.4).
+   *
+   * A pin is named by what it marks, not by a number of its own: it is the same
+   * pin whether it is read in the block, in the head, or over an archived item,
+   * and `P A3` says which entry without a second table to look it up in.
+   */
+  pin: (entryHandle: string) => string;
+}
+
+/**
+ * A pin's handle: the pin's letter and the handle of the entry it marks (§5.4).
+ * One function, because the block, the transcript and the Context view all show
+ * the same pin and must show the same name for it.
+ */
+export function pinHandle(entryHandle: string): string {
+  return `P ${entryHandle}`;
 }
 
 export function promptHandles(items: readonly PromptItem[]): PromptHandles {
@@ -62,5 +79,6 @@ export function promptHandles(items: readonly PromptItem[]): PromptHandles {
     ephemeral: (key) => ephemeral.get(key),
     person: (key) => person.get(key),
     result: (key) => results.get(key),
+    pin: pinHandle,
   };
 }

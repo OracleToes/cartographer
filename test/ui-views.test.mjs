@@ -11,7 +11,9 @@ import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
+import { applyWrite } from "../dist/domain/brain.js";
 import { promptHandles } from "../dist/ui/prompt-handles.js";
+import { renderStateBlock } from "../dist/domain/state-block.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -574,11 +576,13 @@ test("an agent block in the transcript renders the pin badge and click toggles t
   let toggled = null;
   transcript.onTogglePin = (id) => { toggled = id; };
   transcript.setEntries([
-    { kind: "agent", text: "a durable agent statement", recordId: "c-a", pinned: "user" },
+    { kind: "agent", text: "a durable agent statement", recordId: "c-a", pinned: "user", handle: "C3" },
     { kind: "agent", text: "another agent statement", recordId: "c-b" },
   ]);
   const lines = transcript.render(120);
-  assert.match(plain(lines.join("\n")), /⊙ you/, "the pin renders on the agent block, and says who placed it");
+  // §5.4: a pin is named by the handle of the entry it marks, so the row reads
+  // `P C3 you` — the pin's handle, the entry's, and who placed it.
+  assert.match(plain(lines.join("\n")), /P C3 you/, "the pin renders with its own handle, and says who placed it");
   assert.ok(transcript.length >= 2, "two agent blocks rendered");
 
   // Click the first agent block (line 0 is its first line)
@@ -775,4 +779,41 @@ test("a pinned file is in the head, under the tree's handle, with the person who
   assert.ok(frame.includes("notes.md"), "the file is in the head");
   assert.match(frame, /F7/, "under the handle the tree gave it");
   assert.match(frame, /pinned by the person/, "and says whose pin it is");
+});
+
+test("a pin reads the same in the block and in the view: P and the handle of what it marks", () => {
+  // One record, added the way the Brain adds one, so its handle comes from the
+  // handle table and both renderings have to agree on the name (§5.4).
+  let brain = emptyBrain();
+  brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "a3", title: "cartography", text: "t", links: [], attachments: [], pinned: "user", createdAt: 1, updatedAt: 1 } }, 1);
+  const handle = brain.handles.entries.find((entry) => entry.id === "a3").handle;
+
+  const block = renderStateBlock({
+    contextWindow: 32768,
+    lastReportedInput: 9000,
+    systemTokens: 500,
+    transcriptTokens: 300,
+    toolWorkTokens: 200,
+    toolWorkSince: 20,
+    sizes: { atlas: 0, ledger: 0, chat: 0, ephemera: 100, files: 0 },
+    pending: [],
+    pinned: [{ handle, author: "user" }],
+    marks: [],
+    stale: [],
+    resolveHandle: (kind, id) => (kind === "atlas" && id === "a3" ? handle : undefined),
+    mode: "edit",
+    tree: { root: "/project", depth: 1, lines: [] },
+  });
+  assert.match(block, new RegExp(`pins:\\n  P ${handle} · placed by the person`));
+
+  const view = new ContextView();
+  view.setData({
+    brain,
+    systemPrompt: "you are carto",
+    tools: [],
+    transcriptMessages: [],
+    toolWorkItems: [],
+    stateBlockText: block,
+  });
+  assert.match(plain(view.render(120).join("\n")), new RegExp(`P ${handle} you`), "the view names the pin the block names");
 });

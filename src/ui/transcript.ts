@@ -49,6 +49,7 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { pinHandle } from "./prompt-handles.js";
 
 type BlockRange = { id: string; start: number; end: number };
 
@@ -555,7 +556,13 @@ export class TranscriptView implements Component {
         lines.push(...this.block("you", entry.text, width, entry.handle));
       } else if (entry.kind === "agent") {
         const start = lines.length;
-        const pin = entry.pinned === undefined ? "" : `⊙ ${entry.pinned === "user" ? "you" : "agent"}`;
+        // A pin is an entry in its own right (§5.4): it carries the `P` handle
+        // named by the handle of what it marks, and says who placed it, so the
+        // row reads as one entry pinned rather than one entry with a badge.
+        const pin =
+          entry.pinned === undefined
+            ? ""
+            : `${pinHandle(entry.handle ?? "?")} ${entry.pinned === "user" ? "you" : "agent"}`;
         lines.push(...this.block("carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
         if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
       } else {

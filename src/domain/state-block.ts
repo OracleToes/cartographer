@@ -173,7 +173,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const pinned: string =
     input.pinned.length === 0
       ? "pins: none"
-      : ["pins:", ...input.pinned.map((item) => `  ${item.handle} · placed by ${authorName(item.author)}`)].join("\n");
+      : ["pins:", ...input.pinned.map((item) => `  P ${item.handle} · placed by ${authorName(item.author)}`)].join("\n");
   const marks: string =
     input.marks.length === 0
       ? "marks: none"

@@ -20,6 +20,21 @@ import {
 
 import type { Archive, ArchivedItem } from "../domain/archive.js";
 import { canvasLine, padLine, tokens, visibleWidth } from "./tokens.js";
+import { pinHandle } from "./prompt-handles.js";
+
+/**
+ * The handle an archived row is named by. An archived record kept its Brain
+ * handle while it was in the Brain and the archive stores it, so that is the
+ * name; an ephemeral item never had one, and its archived id — the sweep's own
+ * name for it — is what it answers to. A pin on either is `P` and that handle
+ * (§5.4), because a pin is named by what it marks.
+ */
+function handleOfRow(item: ArchivedItem): string {
+  const record = item.record;
+  if (record !== undefined && "handle" in record && typeof record.handle === "string") return record.handle;
+  const short = item.id.split(":").at(-1) ?? item.id;
+  return short === "" ? item.id : short;
+}
 
 export class ArchiveView implements Component, Focusable {
   focused = false;
@@ -199,7 +214,12 @@ export class ArchiveView implements Component, Focusable {
     this.items.forEach((item, index) => {
       const selected = index === this.selectedIndex;
       const marker = selected ? tokens.warn("▸") : tokens.faint("▸");
-      const pin = item.pinned === undefined ? "" : ` ${tokens.pin(`⊙ ${item.pinned === "user" ? "you" : "agent"}`)}`;
+      // §5.4: a pin is named by the handle of the entry it marks, so an
+      // archived item shows `P` and its own handle, and nothing else does.
+      const pin =
+        item.pinned === undefined
+          ? ""
+          : ` ${tokens.pin(`${pinHandle(handleOfRow(item))} ${item.pinned === "user" ? "you" : "agent"}`)}`;
       // Armed for deletion, said in words: a second press is a real loss, and a
       // key that does nothing visible the first time reads as broken.
       const armed = this.armed === item.id ? ` ${tokens.warn("d again: delete now")}` : "";

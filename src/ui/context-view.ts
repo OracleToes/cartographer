@@ -282,7 +282,13 @@ export class ContextView implements Component, Focusable {
       });
     });
 
-    const record = (kind: "atlas" | "ledger" | "chat" | "ephemera", id: string, handle: string | undefined, body: string): PromptNode => {
+    const record = (
+      kind: "atlas" | "ledger" | "chat" | "ephemera",
+      id: string,
+      handle: string | undefined,
+      body: string,
+      pinned?: "user" | "agent" | undefined,
+    ): PromptNode => {
       const bytes = handle === undefined ? undefined : projection.get(handle);
       // The two views of one entry: what the person can read, and the bytes the
       // model receives. A record written since the freeze is in the Brain but not
@@ -302,17 +308,18 @@ export class ContextView implements Component, Focusable {
           ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
           : frozen.join("\n"),
         open: false,
+        ...(pinned === undefined ? {} : { pinned }),
       };
     };
 
     for (const node of data.brain.atlas) {
-      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title));
+      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.pinned));
     }
     for (const entry of data.brain.ledger) {
-      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text));
+      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned));
     }
     for (const chat of data.brain.chat) {
-      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text)));
+      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned));
     }
     // Pinned files come before pinned ephemera in the head (§5.1), each under
     // the handle the tree gave it (§5.4), so the person can see what is being
@@ -655,9 +662,15 @@ export class ContextView implements Component, Focusable {
     // entry is, so the column holds its name: `read`, `bash`, a record's title.
     const name = selected ? tokens.bold(ink(node.label)) : ink(node.label);
     const mark = node.marked === undefined ? "" : ` ${tokens.warn(`◆ ${node.marked}`)}`;
+    // A pin is an entry of its own and names itself by what it marks (§5.4),
+    // so the row carries `P <handle>` and who placed it.
+    const pinned =
+      node.pinned === undefined
+        ? ""
+        : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? "you" : "agent"}`)} `;
     const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
-    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}`;
+    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}${pinned}`;
     const lines: string[] = [];
 
     if (!open) {

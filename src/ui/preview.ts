@@ -289,7 +289,7 @@ export function previewContext(width = 110): string {
       { id: "5-0", kind: "toolResult", callId: "4-0", output: "export class ContextView implements Component, Focusable {" },
     ],
     stateBlockText:
-      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\ntree: . (depth 2)\n  src/  24K\npins:\n  X1 · placed by the person\nmarks: none\n</carto-state>",
+      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by the person\nmarks: none\n</carto-state>",
   };
   const view = new ContextView();
   view.setData(data);

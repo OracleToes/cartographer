@@ -7,6 +7,8 @@
  * the state block's record of writes since the rebuild — never as a patch to
  * the frozen projection (§5.6).
  */
+import { existsSync, statSync } from "node:fs";
+
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool } from "@earendil-works/pi-durable";
@@ -434,14 +436,26 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Move the project tree in your state block to where your attention is. Both arguments are optional and stick: an anchor inside the project, and how many levels below it to render. A file the tree shows carries the handles of the Atlas nodes attached to it. The tree is not returned here; the state block carries it from your next request on, so set the anchor and read it there.",
+        "Move the project tree in your state block to where your attention is. The arguments are optional and stick: an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is not returned here; the state block carries it, as `T1`, from your next request on, so set the anchor and read it there.",
       parameters: obj({
+        handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str({ minLength: 1 })),
         depth: opt(int({ description: "How many levels below the anchor to render. One is the anchor's own contents, and less than one renders the same as one." })),
       }),
       replay: "safe",
       execute: async (args) => {
-        const anchor = args.anchor ?? session.tree.anchor;
+        // A directory is addressable by the handle the tree gave it (§5.4), the
+        // same way a file is: the tree is one place, and a handle reaches it.
+        const named = args.handle === undefined ? undefined : treePathOf(root, await brain.read(), session, normalizeHandle(args.handle));
+        // Only a directory can anchor the tree; a file handle is not an anchor.
+        const anchoredByHandle =
+          named === undefined || !existsSync(named) || !statSync(named).isDirectory() ? undefined : named;
+        if (args.handle !== undefined && anchoredByHandle === undefined) {
+          throw new Error(
+            `${normalizeHandle(args.handle)} is not a directory the tree shows, so there is nothing to anchor there. Take a \`D\` handle from the tree, or name an anchor by path.`,
+          );
+        }
+        const anchor = anchoredByHandle ?? args.anchor ?? session.tree.anchor;
         const depth = args.depth ?? session.tree.depth;
         const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
