@@ -178,6 +178,16 @@ export async function readGenerationEphemera(storePath: string, generation: stri
     const parsed = rows
       .filter((row) => Number(row.id) >= newestHead)
       .map((row) => ({ id: String(row.id), entry: JSON.parse(row.record) as StoredEntry }));
+    // Pi's context edits supersede the raw model contribution. A delete applied
+    // now must not reappear in the archive when the old store is swept.
+    const edits = new Map<string, NonNullable<StoredEntry["edits"]>[number]>();
+    for (const { entry } of parsed) {
+      for (const edit of entry.edits ?? []) edits.set(String(edit.target), edit);
+    }
+    for (const item of parsed) {
+      const edit = edits.get(item.id);
+      if (edit !== undefined) item.entry = { ...item.entry, model: edit.action === "replace" ? (edit.messages ?? []) : [] };
+    }
     for (const { entry } of parsed) {
       for (const call of toolCallsOf(entry)) tools.set(call.id, call);
     }
@@ -216,6 +226,7 @@ export async function readGenerationEphemera(storePath: string, generation: stri
 interface StoredEntry {
   kind?: string;
   model?: Array<{ role?: string; content?: unknown }>;
+  edits?: Array<{ target: string | number; action: "omit" | "replace"; messages?: Array<{ role?: string; content?: unknown }> }>;
 }
 
 /** A tool call in one entry, by the id the model issued and the tool's name. */

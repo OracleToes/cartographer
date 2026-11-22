@@ -24,7 +24,7 @@ import {
   togglePause,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { generationPaths } from "../dist/runtime/collapse.js";
+import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -645,6 +645,44 @@ test("applying a deletion now rebuilds the context in place: no collapse, no swe
     // the same one, so the head prefix is untouched (§4.1, §5.6).
     assert.equal(session.state.generation, generation, "no rotation");
     assert.equal(existsSync(generationPaths(root, generation).markdown), true, "the same generation's snapshot is the one in use");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("apply-now removes only the selected work row from the prompt, view and later sweep", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    await session.conversation.submit({
+      type: "write",
+      entry: {
+        kind: "test.work",
+        model: [fauxAssistantMessage([
+          { type: "thinking", thinking: "remove this thought" },
+          fauxText("keep this text"),
+          fauxText("remove this text too"),
+        ])],
+      },
+    }, BACKGROUND_CONTEXT);
+    const original = (await sessionTranscript(session)).find((entry) => entry.kind === "test.work");
+    assert.ok(original);
+    assert.equal(await applyOmitNow(session, ephemeralItemId(session.generation, original.id, "t0")), true);
+    let current = await sessionTranscript(session);
+    assert.ok(!JSON.stringify(current.find((entry) => entry.id === original.id).model).includes("remove this thought"));
+    assert.ok(JSON.stringify(current).includes("keep this text"));
+    assert.equal(await applyOmitNow(session, ephemeralItemId(session.generation, original.id, "x1")), true);
+    const view = await session.conversation.context(BACKGROUND_CONTEXT);
+    assert.ok(!JSON.stringify(view.messages).includes("remove this text too"));
+    assert.ok(JSON.stringify(view.messages).includes("keep this text"));
+    assert.ok(JSON.stringify(view.entries).includes("remove this thought"), "the store remains append-only");
+
+    const swept = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
+    const sweptText = JSON.stringify(swept);
+    assert.ok(!sweptText.includes("remove this thought") && !sweptText.includes("remove this text too"));
+    assert.ok(sweptText.includes("keep this text"));
   } finally {
     await closeLiveSession(session);
     await cleanup();

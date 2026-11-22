@@ -247,6 +247,7 @@ export class ContextView implements Component, Focusable {
   private hits: Array<{ start: number; end: number; index: number }> = [];
 
   setData(data: ContextViewData): void {
+    const previous = this.rows[this.cursor];
     this.data = data;
     this.sections = this.build(data);
     this.rows = [];
@@ -259,7 +260,6 @@ export class ContextView implements Component, Focusable {
     // each time is what made the cursor look like it jumped while scrolling.
     // Only when the entry it was on is gone does it fall back to the first one,
     // and it never lands on a section heading, which carries no cursor.
-    const previous = this.rows[this.cursor];
     const held =
       previous !== undefined && "node" in previous
         ? this.rows.findIndex((row) => "node" in row && row.node.id === previous.node.id)

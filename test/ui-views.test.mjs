@@ -885,6 +885,18 @@ test("the context cursor only lands on entries, stays put at the edges, and surv
   assert.ok(before !== undefined && "node" in before && after !== undefined && "node" in after);
   assert.equal(after.node.id, before.node.id, "the cursor held its entry across the refresh");
   assert.equal(view.cursor, view.rows.findIndex((row) => "node" in row && row.node.id === after.node.id));
+
+  const changed = data();
+  changed.toolWorkItems.unshift({ id: "g1:6:t0", entry: 6, order: 0, kind: "reasoning", text: "new earlier item" });
+  view.setData(changed);
+  const shifted = view.rows[view.cursor];
+  assert.ok(shifted !== undefined && "node" in shifted);
+  assert.equal(shifted.node.id, before.node.id, "a new earlier row does not move the selection to a different item");
+  let target;
+  view.onDelete = (part, id, now) => { target = { part, id, now }; };
+  view.handleInput("!");
+  view.handleInput("d");
+  assert.deepEqual(target, { part: "tool-work", id: before.node.target.id, now: true });
 });
 
 test("a moving cursor is scrolled into view rather than off the pane", () => {

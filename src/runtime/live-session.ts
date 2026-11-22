@@ -250,20 +250,58 @@ export async function readTreeNext(session: LiveSession): Promise<{ status: stri
  * and the head is untouched, so the frozen part of the projection is
  * byte-identical afterwards. A prune is an epilogue, not a head.
  */
-export async function applyOmitNow(session: LiveSession, entryId: string): Promise<boolean> {
-  // The id the package hands out is the one it will accept back, so it is taken
-  // from the entry itself rather than rebuilt from the string the view shows.
-  const entries = await sessionTranscript(session);
-  const entry = entries.find((candidate) => String(candidate.id) === String(entryId));
-  if (entry === undefined) return false;
-  await session.conversation.submit(
-    {
-      type: "write",
-      entry: { kind: "carto.apply-now", data: { entry: String(entryId) }, edits: [{ target: entry.id, action: "omit" }] },
-    },
-    BACKGROUND_CONTEXT,
-  );
-  return true;
+export async function applyOmitNow(session: LiveSession, itemId: string): Promise<boolean> {
+  const view = await session.conversation.context(BACKGROUND_CONTEXT);
+  for (const [index, entry] of view.entries.entries()) {
+    const messages = view.contributions[index] ?? [];
+    const prefix = `${session.generation}:${entry.id}:`;
+    const partKey = itemId.startsWith(prefix) ? itemId.slice(prefix.length) : undefined;
+    if (String(entry.id) !== itemId && partKey === undefined) continue;
+    if (messages.length === 0) return false;
+
+    // Pi edits a whole entry. A row can instead be one part of an assistant
+    // message, so replace that contribution with its other parts intact.
+    let replacement = messages;
+    if (partKey !== undefined && partKey !== "r") {
+      let removed = false;
+      replacement = messages.map((message) => {
+        if (message.role !== "assistant") return message;
+        let thinking = 0;
+        let text = 0;
+        const content = message.content.filter((part, partIndex) => {
+          const key = part.type === "thinking" ? `t${thinking++}`
+            : part.type === "text" ? `x${text++}`
+              : part.type === "toolCall" ? `c${partIndex}` : "";
+          if (key !== partKey) return true;
+          removed = true;
+          return false;
+        });
+        return { ...message, content };
+      });
+      if (!removed) return false;
+      replacement = replacement.filter((message) => message.role !== "assistant" || message.content.length > 0);
+    } else if (partKey === "r" && !messages.some((message) => message.role === "toolResult")) {
+      return false;
+    } else {
+      replacement = [];
+    }
+
+    await session.conversation.submit(
+      {
+        type: "write",
+        entry: {
+          kind: "carto.apply-now",
+          data: { entry: String(entry.id), item: itemId },
+          edits: [replacement.length === 0
+            ? { target: entry.id, action: "omit" }
+            : { target: entry.id, action: "replace", messages: replacement }],
+        },
+      },
+      BACKGROUND_CONTEXT,
+    );
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -443,7 +481,9 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
 
 export async function sessionTranscript(session: LiveSession) {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
-  return view.entries;
+  // The raw entries remain on disk after an apply-now edit. Views must show
+  // the contributions Pi actually sends, not the superseded raw messages.
+  return view.entries.map((entry, index) => ({ ...entry, model: view.contributions[index] ?? [] }));
 }
 
 export async function closeLiveSession(session: LiveSession): Promise<void> {
