@@ -829,7 +829,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           return;
         }
       }
-      await brain.applyArchive({ kind: "restore", id });
+      await brain.applyArchive({ kind: pending.record === undefined ? "restore-complete" : "restore", id });
       pushStatus(pending.record === undefined ? "put an item back into the live context" : "restored a record to the Brain");
       await refreshArchive();
       await rebuildTranscript();

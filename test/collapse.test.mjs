@@ -436,11 +436,65 @@ test("restoring an ephemeral returns it to the archive's absence and the live co
 
     const restored = await store.applyArchive({ kind: "restore", id: item.id });
     assert.equal(restored.item?.ephemeral?.kind, "personMessage", "it comes back as the kind it was");
-    assert.equal((await store.readArchive()).items.length, 0, "it leaves the archive");
+    assert.equal((await store.readArchive()).items.length, 1, "the source stays until the live context acknowledges it");
+    await store.applyArchive({ kind: "restore-complete", id: item.id });
+    assert.equal((await store.readArchive()).items.length, 0, "the acknowledgement removes the source");
     // It went back to the live context, which the store is not: the Brain holds
     // no pin for it, because restoring does not also pin (§3.3).
     assert.equal((await store.read()).ephemera.length, 0, "restoring does not pin it into the head");
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("applying one archive action leaves other pending marks untouched", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live010", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "first" }] },
+      { kind: "pi.user", model: [{ role: "user", content: "second" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      await collapse(root, store);
+      const items = (await store.readArchive()).items;
+      const first = items.find((item) => item.ephemeral?.text === "first");
+      const second = items.find((item) => item.ephemeral?.text === "second");
+      assert.ok(first && second);
+      await store.applyArchive({ kind: "mark", id: second.id, action: "delete", author: "user" });
+      await store.applyArchive({ kind: "drop", id: first.id });
+      const remaining = (await store.readArchive()).items;
+      assert.equal(remaining.length, 1);
+      assert.deepEqual(remaining[0].mark, { action: "delete", author: "user" });
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a collapse keeps an ephemeral restore in the archive until acknowledgement", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live011", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "recover after crash" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      await collapse(root, store);
+      const item = (await store.readArchive()).items.find((candidate) => candidate.ephemeral?.text === "recover after crash");
+      assert.ok(item);
+      await store.applyArchive({ kind: "mark", id: item.id, action: "restore", author: "user" });
+      const report = await collapse(root, store);
+      assert.equal(report.restored.some((candidate) => candidate.id === item.id), true);
+      assert.equal((await store.readArchive()).items.some((candidate) => candidate.id === item.id), true);
+      await store.applyArchive({ kind: "restore-complete", id: item.id });
+      assert.equal((await store.readArchive()).items.some((candidate) => candidate.id === item.id), false);
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

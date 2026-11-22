@@ -168,7 +168,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
     harness.resume();
-    return {
+    const session: LiveSession = {
       root,
       generation,
       markdownPath: paths.markdown,
@@ -184,6 +184,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         return reason;
       },
     };
+    return session;
   } catch (error) {
     if (harness !== undefined) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
     await database.close().catch(() => undefined);
@@ -428,34 +429,29 @@ export async function interruptRun(session: LiveSession): Promise<void> {
  * Restoring does not pin it: the next collapse sweeps it again unless the person
  * pins it, and it goes back into the archive with its grace starting again.
  *
- * The entry carries no model messages, and that is deliberate rather than a
- * shortcut. The context pi builds drops a tool result whose call is not present
- * and reorders results under their calls, so a restored result submitted as a
- * message would either vanish or answer a call that never ran. What the person
- * gets back is the item itself, in the live context, under the kind it had; and
- * if they want it in the head they pin it, which is the one action that puts an
- * ephemeral item in front of the agent (§3.1).
+ * Pi drops an orphan tool result and requires full assistant-message metadata.
+ * Legacy archive rows lack that metadata, so unsupported kinds must stay in the
+ * archive instead of being acknowledged as restored and silently losing text.
  */
 export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
   const ephemeral = item.ephemeral;
   if (ephemeral === undefined) return false;
-  const entity = ephemeral.data;
-  const callId =
-    entity !== null && typeof entity === "object" && typeof (entity as { callId?: unknown }).callId === "string"
-      ? (entity as { callId: string }).callId
-      : undefined;
+  if (ephemeral.kind !== "personMessage") return false;
   try {
-    await session.conversation.submit(
+    const submission = await session.conversation.submit(
       {
         type: "write",
+        // Repeating a transfer after a crash must not insert the item twice.
+        requestId: `carto.restore:${item.id}`,
         entry: {
           kind: "carto.restored",
-          ...(callId === undefined ? {} : { data: { callId } }),
+          data: { archiveId: item.id },
+          model: [{ role: "user", content: ephemeral.text, timestamp: Date.now() }],
         },
       },
       BACKGROUND_CONTEXT,
     );
-    return true;
+    return (await submission.wait(BACKGROUND_CONTEXT)).status === "done";
   } catch {
     // A conversation that will not take the write — it is closing, or busy in a
     // way that refuses one — leaves the item in the archive rather than losing
@@ -510,7 +506,11 @@ export async function collapseLiveSession(
   // An ephemeral item a mark restored comes home to the live context, which is
   // the store the collapse just built (§3.3): it goes back as the kind it was,
   // with no pin, so the next collapse sweeps it again unless the person pins it.
-  for (const item of report.restored) await restoreEphemeral(next, item);
+  for (const item of report.restored) {
+    if (item.ephemeral !== undefined && await restoreEphemeral(next, item)) {
+      await options.brain.applyArchive({ kind: "restore-complete", id: item.id });
+    }
+  }
   return { session: next, report, reason };
 }
 

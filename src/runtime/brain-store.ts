@@ -162,6 +162,8 @@ export type ArchiveWrite =
   | { kind: "pin"; id: string; pinned: "user" | "agent" | null }
   | { kind: "mark"; id: string; action: "restore" | "delete" | null; author: "user" | "agent" }
   | { kind: "restore"; id: string }
+  /** A restored ephemeral has been durably placed in its destination. */
+  | { kind: "restore-complete"; id: string }
   | { kind: "drop"; id: string };
 
 /**
@@ -297,7 +299,14 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           const back = writeBackOf(item);
           if (back !== undefined) brain = applyWrite(brain, back, change.now);
         }
-        const { archive: nextArchive, dropped } = dropExpired(applied.archive, collapse);
+        // The live context is a different database. Keep each ephemeral source
+        // until the destination confirms it has durably accepted the item.
+        const pending = swept.items
+          .filter((item) => item.layer === "ephemeral" && item.mark?.action === "restore")
+          .map((item) => ({ ...item }));
+        const { archive: nextArchive, dropped } = dropExpired(
+          { ...applied.archive, items: [...applied.archive.items, ...pending] }, collapse,
+        );
         await tx.run(UPSERT, JSON.stringify(brain));
         await writeArchiveRows(tx, nextArchive);
         // Every item a mark restored is reported, whoever's business it is to
@@ -324,26 +333,24 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           await writeArchiveRows(tx, marked.archive);
           return { archive: marked.archive, refused: false };
         }
-        // Applying now is allowed to either party (§4.1), and it is the mark's
-        // own application: the mark is placed and then applied in one step, so
-        // the rule for what a restore or a delete means lives in one place.
-        const action = write.kind === "drop" ? "delete" : "restore";
-        const marked = setArchiveMark(current, write.id, { action, author: "user" }, "user");
-        const applied = applyArchiveMarks(marked.archive);
-        await writeArchiveRows(tx, applied.archive);
-        const item = applied.restored[0];
-        if (item === undefined) return { archive: applied.archive, refused: marked.refused };
-        // A Brain record goes back as the type it was, in the same transaction
-        // that takes it out of the archive (§3.3). An ephemeral item goes back
-        // to the live context, which this store is not: the caller holds the
-        // session and writes it there, so it returns unwritten here and is
-        // never left in two places.
-        const back = writeBackOf(item);
-        if (back !== undefined) {
+        const item = current.items.find((candidate) => candidate.id === write.id);
+        if (item === undefined) return { archive: current, refused: false };
+        if (write.kind === "restore" && item.layer === "ephemeral") {
+          // The caller must place it in the live store before acknowledging it.
+          return { archive: current, item, refused: false };
+        }
+        if (write.kind === "restore-complete" && item.layer !== "ephemeral") {
+          return { archive: current, refused: true };
+        }
+        const archive = { ...current, items: current.items.filter((candidate) => candidate.id !== item.id) };
+        if (write.kind === "restore") {
+          const back = writeBackOf(item);
+          if (back === undefined) return { archive: current, item, refused: true };
           const brain = applyWrite(await readFrom(tx), back, now);
           await tx.run(UPSERT, JSON.stringify(brain));
         }
-        return { archive: applied.archive, item, refused: false };
+        await writeArchiveRows(tx, archive);
+        return { archive, item, refused: false };
       }),
 
     applyRecordAction: (change) =>

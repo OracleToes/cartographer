@@ -18,6 +18,7 @@ import {
   closeLiveSession,
   interruptRun,
   openLiveSession,
+  restoreEphemeral,
   sessionTranscript,
   submitInput,
   togglePause,
@@ -251,6 +252,25 @@ test("unknown handles are explicit errors, never guesses", async () => {
     /No Brain record here has the handle Q4/,
   );
   await cleanup();
+});
+
+test("ephemeral restore puts the actual text in model context, is idempotent, and rejects unsupported kinds", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  try {
+    const item = { id: "restore-test", layer: "ephemeral", ephemeral: { kind: "personMessage", text: "actual restored content" } };
+    assert.equal(await restoreEphemeral(session, item), true);
+    assert.equal(await restoreEphemeral(session, item), true);
+    const view = await session.conversation.context(BACKGROUND_CONTEXT);
+    const indices = view.entries.map((entry, index) => entry.kind === "carto.restored" ? index : -1).filter((index) => index >= 0);
+    assert.equal(indices.length, 1);
+    assert.equal(view.contributions[indices[0]][0].content, "actual restored content");
+    assert.equal(await restoreEphemeral(session, { ...item, id: "unsupported", ephemeral: { kind: "toolResult", text: "must not disappear" } }), false);
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
 });
 
 test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh context carries the Brain", async () => {
