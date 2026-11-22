@@ -174,7 +174,7 @@ test("TranscriptView mouse click folds and unfolds cards", () => {
       id: "tool-1",
       name: "read",
       args: '{"path": "src/index.ts"}',
-      output: "line 1\nline 2\nline 3\nline 4\nline 5",
+      output: Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"),
     },
   ]);
 
@@ -217,43 +217,40 @@ test("TranscriptView mouse click folds and unfolds cards", () => {
   assert.ok(rendered.length > initialLineCount);
   assert.ok(rendered.join("\n").includes("line 1"));
 
-  // The header deepens rather than toggling: open, then full, then back to open.
-  const clickHeader = () =>
-    transcript.handleMouse({
-      type: "click",
-      button: "left",
-      x: 5,
-      y: 0,
-      screenX: 5,
-      screenY: 0,
-      width: 80,
-      height: 10,
-      shift: false,
-      alt: false,
-      ctrl: false,
-    });
-  clickHeader();
-  assert.ok(plain(transcript.render(80).join("\n")).includes("· full"), "a second click on the header opens the card fully");
-  clickHeader();
-  assert.ok(!plain(transcript.render(80).join("\n")).includes("· full"), "and a third returns it to open");
-
-  // A click in the body closes the card, from any state.
-  const bodyClick = transcript.handleMouse({
-    type: "click",
-    button: "left",
-    x: 8,
-    y: 2,
-    screenX: 8,
-    screenY: 2,
-    width: 80,
-    height: 10,
-    shift: false,
-    alt: false,
-    ctrl: false,
+  const click = (y) => transcript.handleMouse({
+    type: "click", button: "left", x: 8, y, screenX: 8, screenY: y,
+    width: 80, height: 50, shift: false, alt: false, ctrl: false,
   });
-  assert.ok(bodyClick?.handled);
-  rendered = transcript.render(80);
-  assert.equal(rendered.length, initialLineCount, "a body click folds the card back to one line");
+  let shown = plain(rendered.join("\n"));
+  assert.match(shown, /16 lines more/);
+  assert.doesNotMatch(shown, /line 40\b/);
+
+  // Any body row expands a long card. The next body tap returns to preview.
+  assert.ok(click(2)?.handled);
+  shown = plain(transcript.render(80).join("\n"));
+  assert.match(shown, /line 40\b/);
+  assert.match(shown, /· full/);
+  assert.ok(click(2)?.handled);
+  shown = plain(transcript.render(80).join("\n"));
+  assert.match(shown, /16 lines more/);
+  assert.doesNotMatch(shown, /line 40\b/);
+
+  // The hidden-lines rule is another body row, not a separate sticky state.
+  const rule = transcript.render(80).findIndex((line) => plain(line).includes("lines more"));
+  click(rule);
+  assert.match(plain(transcript.render(80).join("\n")), /line 40\b/);
+  click(0);
+  assert.equal(transcript.render(80).length, initialLineCount, "header collapses even from full");
+  click(0);
+  shown = plain(transcript.render(80).join("\n"));
+  assert.match(shown, /16 lines more/, "reopening returns to preview");
+  assert.doesNotMatch(shown, /line 40\b/);
+
+  click(2);
+  transcript.toggleAllCards();
+  assert.equal(transcript.render(80).length, initialLineCount);
+  transcript.toggleAllCards();
+  assert.match(plain(transcript.render(80).join("\n")), /16 lines more/, "bulk fold also resets the full view");
 });
 
 test("a streaming card keeps its tail, and the rule that counts the hidden lines shows them", () => {
@@ -286,6 +283,32 @@ test("a streaming card keeps its tail, and the rule that counts the hidden lines
   shown = plain(transcript.render(80).join("\n"));
   assert.ok(!/\d+ lines earlier/.test(shown), "the rule is gone once nothing is hidden");
   assert.ok(shown.includes("line 1 ") || shown.includes("line 1\n") || /line 1\b/.test(shown), "the first line is on screen");
+  // Updates to the same streaming card keep the person's chosen view.
+  transcript.setLive([{ kind: "output", id: "live-1-0", live: true, text: [...body, "line 41"].join("\n") }]);
+  shown = plain(transcript.render(80).join("\n"));
+  assert.match(shown, /line 1\b/);
+  transcript.handleMouse({ type: "click", button: "left", x: 8, y: 2, screenX: 8, screenY: 2, width: 80, height: 50, shift: false, alt: false, ctrl: false });
+  shown = plain(transcript.render(80).join("\n"));
+  assert.match(shown, /33 lines earlier/);
+  assert.match(shown, /line 41\b/);
+  transcript.handleMouse({ type: "click", button: "left", x: 8, y: 0, screenX: 8, screenY: 0, width: 80, height: 50, shift: false, alt: false, ctrl: false });
+  assert.equal(transcript.render(80).length, 1, "the live card's header collapses it");
+  transcript.handleMouse({ type: "click", button: "left", x: 8, y: 0, screenX: 8, screenY: 0, width: 80, height: 50, shift: false, alt: false, ctrl: false });
+  assert.match(plain(transcript.render(80).join("\n")), /33 lines earlier/);
+});
+
+test("a short card stays open on a body click and collapses on its header", () => {
+  const transcript = new TranscriptView();
+  transcript.setEntries([{ kind: "output", id: "short", text: "short body" }]);
+  const click = (y) => transcript.handleMouse({ type: "click", button: "left", x: 8, y, screenX: 8, screenY: y, width: 80, height: 10, shift: false, alt: false, ctrl: false });
+  transcript.render(80);
+  click(0);
+  assert.match(plain(transcript.render(80).join("\n")), /short body/);
+  click(1);
+  assert.equal(transcript.render(80).length, 2, "a short body click does not fold or mark it full");
+  assert.doesNotMatch(plain(transcript.render(80).join("\n")), /· full/);
+  click(0);
+  assert.equal(transcript.render(80).length, 1);
 });
 
 test("every item in the prompt carries its own handle, and a bash result takes S", () => {

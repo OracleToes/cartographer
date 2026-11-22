@@ -697,8 +697,9 @@ where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
 Chat, in their own hues, never mistaken for Chat. A card streams while the run is
 in flight inside a limited-height window, and folds to a one-line header at the
-boundary. A click folds or unfolds a card, a toggle toggles every card in view,
-and the wheel over an open card scrolls its window. Chat remains the only channel
+boundary. A header click folds or opens a card; a click on a long card's body or
+hidden-lines indicator toggles between the preview and full content. A toggle
+folds or opens every card in view, and the wheel scrolls the transcript. Chat remains the only channel
 that addresses the person. When a collapse sweeps work out of the context, that
 work disappears from the transcript as well; the person's messages and the
 agent's Chat remain. Pinned work that survives the collapse remains visible.

@@ -20,12 +20,11 @@
  * - **Stop-reason lines** are a faint middot and a sentence attached to the
  *   current model work. UI notifications use pi's transient flash instead.
  *
- * **A click on the header deepens a card**: folded to open, open to full. **A
- * click on the body closes it.** A click on the `⋯ n lines …` rule shows
- * everything the window was hiding, which is what that line is for. A click on
- * a Chat block toggles its pin, `ctrl+e` folds every card in view, and the wheel
- * belongs to the page — the one scrolling owner (§8) — so scrolling up simply
- * stops following the tail.
+ * **A click on the header folds or opens a card.** When its body is too long
+ * for the preview, a click on the body or `⋯ n lines …` rule shows it in full;
+ * another body click returns to the preview. A click on a Chat block toggles its
+ * pin, `ctrl+e` folds every card in view, and the wheel belongs to the page —
+ * the one scrolling owner (§8) — so scrolling up simply stops following the tail.
  *
  * The three states are not decoration: open is a window on a body, so a very
  * long result stays readable inline without pushing the transcript off the
@@ -147,7 +146,7 @@ interface CardRange {
   id: string;
   start: number;
   end: number;
-  /** The header row: a click here deepens the card. */
+  /** The header row: a click here folds or opens the card. */
   header: number;
   /** The `⋯ n earlier lines` row, when the window is hiding some: a click here shows them. */
   more?: number;
@@ -271,8 +270,6 @@ export class TranscriptView implements Component {
   private queued: Array<{ text: string; mode: string }> = [];
   private liveCards: CardEntry[] = [];
   private views = new Map<string, CardView>();
-  /** Cards whose hidden head the person asked to see, by clicking the rule that counted it. */
-  private revealed = new Set<string>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
   private blockRanges: BlockRange[] = [];
@@ -308,7 +305,6 @@ export class TranscriptView implements Component {
     this.queued = [];
     this.liveCards = [];
     this.views.clear();
-    this.revealed.clear();
     this.wrapMemo.clear();
     this.cacheWidth = -1;
   }
@@ -361,7 +357,6 @@ export class TranscriptView implements Component {
   private pruneState(): void {
     const present = new Set(this.cardIds());
     for (const id of [...this.views.keys()]) if (!present.has(id)) this.views.delete(id);
-    for (const id of [...this.revealed]) if (!present.has(id)) this.revealed.delete(id);
     for (const id of [...this.wrapMemo.keys()]) if (!present.has(id)) this.wrapMemo.delete(id);
   }
 
@@ -439,8 +434,7 @@ export class TranscriptView implements Component {
 
   private cardHeader(card: CardEntry, width: number, view: CardView): string {
     const tint = kindTint(card);
-    // Three states, three glyphs: a caret opens, and a card already open says
-    // how it deepens rather than pretending to be closed.
+    // A caret opens or folds the card; the full glyph marks its deeper body.
     const glyph = view === "folded" ? "▸" : view === "open" ? "▾" : "⇣";
     const labelText = kindLabel(card);
     const label = tint(tokens.bold(labelText));
@@ -494,7 +488,7 @@ export class TranscriptView implements Component {
     // way the rule that counts the hidden lines is the control that shows them,
     // and `full` is the page with no window on it at all.
     const shown = card.live === true ? LIVE_TAIL : OPEN_WINDOW;
-    const windowed = view !== "full" && !this.revealed.has(card.id) && total > shown;
+    const windowed = view !== "full" && total > shown;
     if (windowed) {
       const hidden = total - shown;
       range.more = lines.length + start;
@@ -515,9 +509,9 @@ export class TranscriptView implements Component {
   }
 
   /**
-   * The click map: the header deepens a card (folded → open → full), the body
-   * closes it, the `⋯ n earlier lines` rule shows what it was hiding, and a
-   * click on a Chat block toggles its pin. The wheel stays the page's.
+   * The header folds or opens a card. The body (including the hidden-lines
+   * rule) toggles a long card between preview and full. A Chat block toggles
+   * its pin. The wheel stays the page's.
    */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
     const cardRange = this.rangeAt(event.y);
@@ -536,13 +530,17 @@ export class TranscriptView implements Component {
       if (cardRange === undefined) return undefined;
       const card = this.cardById(cardRange.id);
       if (card === undefined) return undefined;
-      if (cardRange.more !== undefined && event.y === cardRange.more) {
-        this.revealed.add(card.id);
-      } else if (event.y === cardRange.header) {
-        const view = this.viewOf(card);
-        this.views.set(card.id, view === "folded" ? "open" : view === "open" ? "full" : "open");
+      const view = this.viewOf(card);
+      if (event.y === cardRange.header) {
+        this.views.set(card.id, view === "folded" ? "open" : "folded");
+      } else if (view === "full") {
+        this.views.set(card.id, "open");
+      } else if (cardRange.more !== undefined) {
+        this.views.set(card.id, "full");
       } else {
-        this.views.set(card.id, "folded");
+        // A short preview already shows everything: there is no full view to
+        // expand to, and a body tap must not collapse it.
+        return { handled: true };
       }
       this.cacheWidth = -1;
       return { handled: true, render: true };
