@@ -1,19 +1,25 @@
 /**
- * The sidebar: the workspace index (§8), built like Posting's collection pane.
+ * The sidebar: where you are in the workspace (§8), built like Posting's
+ * collection pane.
  *
- * It runs the full height on the left, carries a gradient that fades toward the
- * page so the working area reads as the surface in front, groups its rows under
- * quiet headings, and puts a count on the right of each row. The active row is
- * tinted and gets a one-cell spine; nothing else in the pane is coloured.
+ * It occupies the full height on the left as one flat band, a step darker than
+ * the working surface, with a single seam on its right. Not a gradient: a fade
+ * made the pane read as a decoration and pulled the eye off its rows.
  *
- * Two groups, because the product has two: the **workspace** (the transcript and
- * the prompt itself) and the **brain** (the Atlas and the Ledger). The archive is
- * not a third group: it is a layer under the same UI (§3.3), so its toggle sits
- * at the bottom, apart from the books, and says which layer is showing.
+ * The type scale does the work, in three steps:
+ *
+ * 1. the product mark, in the accent, once;
+ * 2. two quiet group labels, upper-case and small;
+ * 3. rows in body ink with their figures right-aligned in a fixed column, so a
+ *    column of numbers can be read down rather than scanned along.
+ *
+ * The active row is a full-width tint with a two-cell accent spine; it is the
+ * only coloured row in the pane. Marks (pin, mark, stale) sit with the figure,
+ * because they are facts about the same thing the figure counts.
  */
-import { visibleWidth, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 
-import { padLine, sidebarRow, tokens } from "./tokens.js";
+import { bandLine, padLine, tokens } from "./tokens.js";
 
 export type BookKind = "chat" | "context" | "atlas" | "ledger";
 export type SidebarLayer = "context" | "archive";
@@ -48,13 +54,18 @@ const EMPTY: SidebarCounts = {
   archivePinned: 0,
 };
 
-export const sidebarWidth = 24;
+/**
+ * 28 cells: wide enough for `transcript` and its figure together with room to
+ * spare, because a pane that truncates its own row labels at 22 looks broken.
+ */
+export const sidebarWidth = 28;
+
+/** The right-hand column the figures line up in. */
+const FIGURE_GUTTER = 10;
 
 interface Row {
   kind: BookKind;
   label: string;
-  figure: string;
-  marks: string;
 }
 
 export class Sidebar implements Component {
@@ -105,100 +116,102 @@ export class Sidebar implements Component {
     if (kind === "chat") return String(this.counts.chat);
     if (kind === "context") {
       const tokens = this.counts.contextTokens;
-      if (tokens <= 0) return "0";
+      if (tokens <= 0) return "—";
       return tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(Math.round(tokens));
     }
     return String(kind === "atlas" ? this.counts.atlas : this.counts.ledger);
   }
 
   /** The quiet marks after a figure: pins, marks, stale. One glyph each, never a sentence. */
-  private marks(kind: BookKind): string {
-    const pinned = this.counts.pinned[kind] ?? 0;
-    const marked = this.counts.marked[kind] ?? 0;
-    const stale = this.counts.stale[kind] ?? 0;
+  private marksOf(kind: BookKind): string {
     const parts: string[] = [];
-    if (pinned > 0) parts.push(tokens.pin("⊙"));
-    if (marked > 0) parts.push(tokens.warn("◆"));
-    if (stale > 0) parts.push(tokens.warn("!"));
+    if ((this.counts.pinned[kind] ?? 0) > 0) parts.push(tokens.pin("⊙"));
+    if ((this.counts.marked[kind] ?? 0) > 0) parts.push(tokens.warn("◆"));
+    if ((this.counts.stale[kind] ?? 0) > 0) parts.push(tokens.warn("!"));
     return parts.join(" ");
   }
 
+  /** One row: spine, label, and the figure column. Always exactly `width` cells. */
+  private row(kind: BookKind, label: string, active: boolean, width: number): string {
+    const marks = this.marksOf(kind);
+    const right = `${this.figure(kind)}${marks.length > 0 ? ` ${marks}` : ""}`;
+    const spine = active ? tokens.accent("▌") : " ";
+    const name = active ? tokens.bold(tokens.text(label)) : tokens.text(label);
+    // Eight cells of figure column on the right, whatever the label's length;
+    // a column of numbers is read down, so it has to line up.
+    const room = Math.max(4, width - 2 - FIGURE_GUTTER);
+    const head = truncateToWidth(`${spine}  ${name}`, room, "…");
+    const rightInk = this.figureInk(active, right);
+    const gap = Math.max(1, width - 1 - visibleWidth(head) - visibleWidth(rightInk));
+    const line = padLine(`${head}${" ".repeat(gap)}${rightInk}`, width);
+    return active ? tokens.selectedBg(line) : bandLine(line, width);
+  }
+
+  /** Figures are quiet; the marks after them are not, because they ask for a look. */
+  private figureInk(active: boolean, right: string): string {
+    const [figure = "", ...rest] = right.split(" ");
+    const painted = active ? tokens.text(figure) : tokens.muted(figure);
+    return rest.length > 0 ? `${painted} ${rest.join(" ")}` : painted;
+  }
+
   render(width: number): string[] {
-    const rows: Row[] = [
-      { kind: "chat", label: "transcript", figure: this.figure("chat"), marks: this.marks("chat") },
-      { kind: "context", label: "prompt", figure: this.figure("context"), marks: this.marks("context") },
-      { kind: "atlas", label: "atlas", figure: this.figure("atlas"), marks: this.marks("atlas") },
-      { kind: "ledger", label: "ledger", figure: this.figure("ledger"), marks: this.marks("ledger") },
-    ];
     const lines: string[] = [];
-    const total = 18; // one gradient across the whole pane, not per group
-    let index = 0;
-    const blank = () => {
-      lines.push(sidebarRow(index++, total)(" ".repeat(width)));
+    this.hitRows = new Map();
+    this.hitIndex = new Map();
+    this.renderedRows = [];
+    const fill = (text: string): string => bandLine(text, width);
+    const blank = (): void => {
+      lines.push(fill(""));
     };
-    const heading = (text: string) => {
-      lines.push(sidebarRow(index++, total)(padLine(` ${tokens.faint(tokens.bold(text))}`, width)));
+    const book = (kind: BookKind, label: string): void => {
+      this.hitRows.set(lines.length, "book");
+      this.hitIndex.set(lines.length, this.renderedRows.length);
+      this.renderedRows.push({ kind });
+      // On the archive layer no book is current: the layer covers the workspace,
+      // so a lit book row would say you are somewhere you are not.
+      lines.push(this.row(kind, label, this.layer === "context" && this.activeItem === kind, width));
     };
 
+    // No second product mark: the header already says whose workspace this is,
+    // and a second one a few cells below it is just noise in the same corner.
     blank();
-    lines.push(
-      sidebarRow(index++, total)(
-        padLine(` ${tokens.bold(tokens.accent("carto"))}${tokens.faint("  workspace")}`, width),
-      ),
-    );
+    lines.push(fill(`   ${tokens.faint("WORKSPACE")}`));
+    lines.push(fill(""));
+    book("chat", "transcript");
+    book("context", "prompt");
+
     blank();
-    heading("WORKSPACE");
-    const rowFor = (row: Row) => {
-      const active = this.activeItem === row.kind;
-      const spine = active ? tokens.accent("▌") : " ";
-      const label = active ? tokens.bold(tokens.text(row.label)) : tokens.muted(row.label);
-      const figure = active ? tokens.text(row.figure) : tokens.faint(row.figure);
-      const marks = row.marks.length > 0 ? ` ${row.marks}` : "";
-      const right = `${figure}${marks}`;
-      const leftPart = `${spine} ${label}`;
-      const gap = Math.max(1, width - 1 - visibleWidth(leftPart) - visibleWidth(right));
-      const line = ` ${leftPart}${" ".repeat(gap)}${right}`;
-      const painted = active ? tokens.selectedBg(padLine(line, width)) : sidebarRow(index, total)(padLine(line, width));
-      index += 1;
-      return painted;
-    };
-    this.renderedRows = [];
-    const bookRows = rows.slice(0, 2);
-    for (const row of bookRows) {
-      this.hitRows.set(lines.length, "book");
-      this.hitIndex.set(lines.length, this.renderedRows.length);
-      this.renderedRows.push({ kind: row.kind });
-      lines.push(rowFor(row));
-    }
-    blank();
-    heading("BRAIN");
-    for (const row of rows.slice(2)) {
-      this.hitRows.set(lines.length, "book");
-      this.hitIndex.set(lines.length, this.renderedRows.length);
-      this.renderedRows.push({ kind: row.kind });
-      lines.push(rowFor(row));
-    }
+    lines.push(fill(`   ${tokens.faint("BRAIN")}`));
+    book("atlas", "atlas");
+    book("ledger", "ledger");
 
     if (this.counts.staleTotal > 0) {
       blank();
-      lines.push(sidebarRow(index++, total)(padLine(` ${tokens.warn(`! ${this.counts.staleTotal} stale`)}`, width)));
+      lines.push(fill(`   ${tokens.warn(`${this.counts.staleTotal} stale`)}`));
     }
 
+    // The layer sits at the foot of the pane, on the far side of a seam: it is
+    // not a fourth book, it is the other half of the same workspace (§3.3).
     blank();
+    lines.push(fill(`   ${tokens.faint("─".repeat(Math.max(0, width - 7)))}`));
     blank();
-    heading("LAYER");
-    const archiveActive = this.layer === "archive";
-    const layerLabel = archiveActive ? tokens.bold(tokens.warn("archive")) : tokens.muted("context");
-    const pinMarks = this.counts.archivePinned > 0 ? ` ${tokens.pin("⊙")}` : "";
-    const layerRight = archiveActive ? `${tokens.warn(String(this.counts.archive))}${pinMarks}` : "";
-    const layerLeft = `${archiveActive ? tokens.warn("▌") : " "} ${layerLabel}`;
-    const layerGap = Math.max(1, width - 1 - visibleWidth(layerLeft) - visibleWidth(layerRight));
-    const layerLine = ` ${layerLeft}${" ".repeat(layerGap)}${layerRight}`;
-    this.hitRows.set(lines.length, "layer");
-    lines.push(sidebarRow(index++, total)(padLine(layerLine, width)));
-    lines.push(sidebarRow(index++, total)(padLine(`   ${tokens.faint("^t swaps")}`, width)));
 
-    // The pane fills its height: the gradient keeps running past the last row.
+    const archiveActive = this.layer === "archive";
+    const label = archiveActive ? "archive" : "context";
+    const spine = archiveActive ? tokens.warn("▌") : " ";
+    const name = archiveActive ? tokens.bold(tokens.warn(label)) : tokens.text(label);
+    const figure = archiveActive ? String(this.counts.archive) : "—";
+    const pinMark = archiveActive && this.counts.archivePinned > 0 ? ` ${tokens.pin("⊙")}` : "";
+    const head = `${spine}  ${tokens.faint("layer")} ${name}`;
+    const right = `${tokens.muted(figure)}${pinMark}`;
+    const gap = Math.max(1, width - 1 - visibleWidth(head) - visibleWidth(right));
+    const layerLine = archiveActive
+      ? tokens.selectedBg(padLine(`${head}${" ".repeat(gap)}${right}`, width))
+      : fill(`${head}${" ".repeat(gap)}${right}`);
+    this.hitRows.set(lines.length, "layer");
+    lines.push(layerLine);
+    lines.push(fill(`     ${tokens.faint(archiveActive ? "^t back" : "^t swap")}`));
+
     return lines;
   }
 }

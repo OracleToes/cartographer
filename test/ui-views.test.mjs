@@ -4,7 +4,7 @@ import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { Registry } from "../dist/ui/commands.js";
-import { previewArchive, previewTranscript } from "../dist/ui/preview.js";
+import { previewArchive, previewPrompt, previewTranscript } from "../dist/ui/preview.js";
 import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
@@ -54,7 +54,7 @@ test("Sidebar renders the transcript, the prompt, and both books with counts", (
   assert.ok(rendered.includes("ledger"));
   assert.ok(rendered.includes("1.3k"), "the prompt's figure is the compact token count");
   assert.ok(rendered.includes("WORKSPACE") && rendered.includes("BRAIN"), "rows are grouped under quiet headings");
-  assert.ok(rendered.includes("LAYER"), "the archive layer toggle sits in the pane, apart from the books");
+  assert.ok(rendered.includes("layer"), "the archive layer toggle sits in the pane, apart from the books");
 
   // Check that every line has the exact requested visible width
   for (const line of lines) {
@@ -70,10 +70,10 @@ test("Sidebar mouse click switches view", () => {
   };
 
   // Rows are found where they rendered, not guessed: the pane's layout may change.
-  const lines = sidebar.render(22).map((line) => plain(line));
+  const lines = sidebar.render(28).map((line) => plain(line));
   const chatRow = lines.findIndex((line) => line.includes("transcript"));
   const promptRow = lines.findIndex((line) => line.includes("prompt"));
-  assert.ok(chatRow >= 0 && promptRow >= 0);
+  assert.ok(chatRow >= 0 && promptRow >= 0, "the rows render at the pane's own width");
 
   const click = (y) =>
     sidebar.handleMouse({
@@ -83,7 +83,7 @@ test("Sidebar mouse click switches view", () => {
       y,
       screenX: 5,
       screenY: y,
-      width: 22,
+      width: 28,
       height: 18,
       shift: false,
       alt: false,
@@ -166,123 +166,84 @@ test("TranscriptView mouse click folds and unfolds cards", () => {
   assert.equal(rendered.length, initialLineCount);
 });
 
-test("ContextView navigation, tool folding, and mouse interactions", () => {
+test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () => {
   const view = new ContextView();
   const brain = emptyBrain();
+  brain.handles = {
+    counters: { A: 1, L: 1, C: 1 },
+    entries: [
+      { kind: "atlas", id: "a1", handle: "A1", timestamp: 0 },
+      { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 },
+      { kind: "chat", id: "c1", handle: "C1", timestamp: 2 },
+    ],
+  };
+  brain.atlas.push({ id: "a1", title: "The Brain is the persistent record", text: "…", links: [], attachments: [], createdAt: 0, updatedAt: 0 });
+  brain.ledger.push({ id: "l1", kind: "goal", text: "Keep the prefill in one order", status: "open", answer: null, createdAt: 1, updatedAt: 1 });
+  brain.chat.push({ id: "c1", author: "agent", text: "The prompt view is the prefill now.", createdAt: 2, updatedAt: 2 });
   view.setData({
     brain,
-    systemPrompt: "You are Cartographer.",
-    tools: [
-      {
-        name: "chat",
-        description: "Post a message to chat",
-        parameters: { type: "object", properties: { text: { type: "string" } } },
-      },
-      {
-        name: "atlas_upsert",
-        description: "Upsert a node in Atlas",
-        parameters: { type: "object" },
-      },
-    ],
-    transcriptMessages: [
-      { id: "t-1", role: "user", text: "Hello cartographer" },
-      { id: "t-2", role: "assistant [chat]", text: "ping" },
-    ],
+    systemPrompt: "You are Carto.",
+    projectionText: "Atlas\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z",
+    tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
+    transcriptMessages: [{ id: 2, role: "user", text: "show me the prompt" }],
     toolWorkItems: [
-      { id: "w-1", kind: "toolCall", name: "read", args: "path: src/index.ts" },
+      { id: "3-0", kind: "reasoning", text: "the order is the thing to show" },
+      { id: "4-0", kind: "toolCall", name: "read", args: "path: src/ui/context-view.ts" },
+      { id: "5-0", kind: "toolResult", output: "export class ContextView" },
     ],
-    stateBlockText: "=== STATE BLOCK ===",
+    stateBlockText: "<carto-state>\n[EDIT MODE]\n</carto-state>",
   });
 
-  // Check initial rail render width consistency
-  let lines = view.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80, `Line should have visible width 80`);
+  let lines = view.render(90);
+  for (const line of lines) assert.equal(visibleWidth(line), 90, "every line is the pane's width");
+  let shown = plain(lines.join("\n"));
+
+  // The three regions of the prefill, in order (§5), not a rail of parts.
+  const head = shown.indexOf("HEAD");
+  const body = shown.indexOf("BODY");
+  const tail = shown.indexOf("TAIL");
+  assert.ok(head >= 0 && head < body && body < tail, "head, then body, then tail");
+
+  // Handles are on everything (§5.4), and each prefix means what the spec says.
+  for (const handle of ["H", "Y1", "A1", "L1", "C1", "U1", "X1", "B"]) {
+    assert.ok(new RegExp(`\\b${handle}\\b`).test(shown), `the ${handle} handle is rendered`);
   }
 
-  // Navigate rail down to tools
-  view.handleInput("j"); // to PROJECTION
-  view.handleInput("j"); // to TOOLS
+  // A leaf is never folded: the system prompt's body is shown, not its title.
+  assert.ok(shown.includes("You are Carto."), "a leaf renders whole");
 
-  // Open tools in content pane
-  view.handleInput("\r"); // enter -> focus shifts to content
-  lines = view.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80, `Line should have visible width 80`);
+  // Folding, and `tab` between the human and the real view of schema-shaped content.
+  view.handleInput("j"); // the system row (head's first entry)
+  lines = view.render(90);
+  view.handleInput("\t");
+  shown = plain(view.render(90).join("\n"));
+  assert.ok(shown.includes("as the model receives it"), "tab swaps to the real view");
+  view.handleInput("\t");
+
+  // A mark is a mark, not a deletion (§4.1): `d` reports it and `!` arms it.
+  const marks = [];
+  const collapses = [];
+  view.onDelete = (part, id, now) => marks.push({ part, id, now });
+  view.onCollapse = () => collapses.push(true);
+  // Walk down to the person's line: the head's tool entry is markable too, so
+  // the walk takes whatever it lands on until the marks name the transcript.
+  for (let step = 0; step < 20; step += 1) {
+    view.handleInput("j");
+    view.handleInput("d");
+    if (marks.some((mark) => mark.part === "transcript")) break;
   }
-
-  // Toggle first tool folding
-  view.handleInput(" "); // space -> collapses first tool
-  lines = view.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Navigate to second tool and collapse it
-  view.handleInput("j");
-  view.handleInput("\r"); // enter toggles too
-  lines = view.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Navigate back to rail
-  view.handleInput("h"); // back to rail
-
-  // Move to transcript and open
-  view.handleInput("j"); // transcript
-  view.handleInput("l"); // open content pane
-  view.handleInput("j"); // scroll content down
-  view.handleInput("k"); // scroll content up
-  view.handleInput("G"); // scroll to bottom
-  view.handleInput("g"); // scroll to top
-
-  lines = view.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Mouse wheel scroll in context view
-  const wheelRes = view.handleMouse({
-    type: "wheel",
-    button: "wheel-down",
-    wheelDelta: 1,
-    x: 40,
-    y: 5,
-    screenX: 40,
-    screenY: 5,
-    width: 80,
-    height: 20,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(wheelRes?.handled);
-
-  // Test Surgery callbacks: onDelete, onCollapse, and ! now modifier
-  let deletedItem = null;
-  let collapsed = false;
-  view.onDelete = (partId, itemId, now) => {
-    deletedItem = { partId, itemId, now };
-  };
-  view.onCollapse = () => {
-    collapsed = true;
-  };
-
-  // Move to transcript and delete with ! (now)
-  view.handleInput("h"); // back to rail
-  // selectedPartIndex is at transcript (3)
-  view.handleInput("l"); // focus content pane
-  view.handleInput("!"); // arm now
-  view.handleInput("d"); // delete message
-  assert.ok(deletedItem);
-  assert.equal(deletedItem.partId, "transcript");
-  assert.equal(deletedItem.itemId, "t-1", "the delete targets the selected transcript message, not a phantom");
-  assert.equal(deletedItem.now, true);
-
-  // Trigger collapse
+  const onPerson = marks.find((mark) => mark.part === "transcript");
+  assert.ok(onPerson !== undefined, "the person's line can be marked");
+  assert.equal(onPerson.id, 2, "the mark names the entry it is on, not a phantom");
+  for (const mark of marks) assert.equal(mark.now, false, "no `!` yet, so the marks wait for the collapse");
+  // `!` arms the next mark to be applied now rather than at the collapse.
+  marks.length = 0;
+  view.handleInput("!");
+  view.handleInput("d");
+  assert.ok(marks.length > 0 && marks.every((mark) => mark.now === true), "an armed mark applies now");
+  view.handleInput("!");
   view.handleInput("c");
-  assert.equal(collapsed, true);
+  assert.equal(collapses.length, 1, "`c` collapses");
 });
 
 test("AtlasView two-pane navigation, mouse interaction, and detail scrolling", () => {
@@ -418,7 +379,7 @@ test("TranscriptView displays tool name in card header when known", () => {
 
   const rendered = transcript.render(80);
   const headerLine = rendered[0];
-  assert.ok(headerLine.includes("tool read"));
+  assert.ok(headerLine.includes("read"), "a tool card is called by its tool's name");
   assert.ok(headerLine.includes("running"));
 });
 
@@ -471,7 +432,7 @@ test("an agent block in the transcript renders the pin badge and click toggles t
     { kind: "agent", text: "another agent statement", recordId: "c-b" },
   ]);
   const lines = transcript.render(120);
-  assert.match(lines.join("\n"), /pin·u/, "the pin badge renders on the agent block");
+  assert.match(plain(lines.join("\n")), /⊙ you/, "the pin renders on the agent block, and says who placed it");
   assert.ok(transcript.length >= 2, "two agent blocks rendered");
 
   // Click the first agent block (line 0 is its first line)
@@ -575,9 +536,10 @@ test("the command registry drives the footer, and a key only fires where it is a
 test("the drawn workspace is exact to its width, and the archive is a layer over it", () => {
   const width = 104;
   const transcript = previewTranscript(width);
+  const prompt = previewPrompt(width);
   const archive = previewArchive(width);
 
-  for (const [name, frame] of [["transcript", transcript], ["archive", archive]]) {
+  for (const [name, frame] of [["transcript", transcript], ["prompt", prompt], ["archive", archive]]) {
     for (const line of frame.split("\n")) {
       assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
     }
@@ -585,9 +547,9 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
 
   const shown = plain(transcript);
   assert.ok(shown.includes("cartographer"), "the header names the project");
-  assert.ok(shown.includes("WORKSPACE") && shown.includes("BRAIN") && shown.includes("LAYER"), "the sidebar's three groups");
+  assert.ok(shown.includes("WORKSPACE") && shown.includes("BRAIN") && shown.includes("layer"), "the sidebar's groups and its layer");
   assert.ok(shown.includes("you") && shown.includes("carto"), "the two voices");
-  assert.ok(shown.includes("thinking") && shown.includes("tool read"), "the agent's work is cards");
+  assert.ok(shown.includes("thinking") && shown.includes("read"), "the agent's work is cards, named by their tool");
   assert.ok(/\/ 32,768/.test(shown), "the context bar closes the frame");
 
   // The archive is the same UI over the other layer (§3.3), not a separate screen.

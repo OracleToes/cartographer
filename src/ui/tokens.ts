@@ -15,8 +15,8 @@
  * Colours are hex, converted once at first use (after the terminal is up).
  */
 import {
+  backgroundAnsi,
   getTerminalColorMode,
-  mixColors,
   parseColor,
   styleText,
   truncateToWidth,
@@ -50,14 +50,43 @@ const both = (fgHex: string, bgHex: string, extra: Omit<TextStyle, "fg" | "bg"> 
 
 const badge = (fgHex: string, bgHex: string) => both(fgHex, bgHex, { bold: true });
 
-/** A colour blended by `amount` (0 = first, 1 = second). The sidebar's gradient is this. */
-const blend = (fromHex: string, toHex: string, amount: number) =>
-  mixColors(parseColor(fromHex), parseColor(toHex), Math.max(0, Math.min(1, amount)));
+/**
+ * The canvas. Every frame the app draws is painted edge to edge, because a
+ * colour scheme that only inks the glyphs leaves the terminal's own background
+ * showing through, and the result reads as the terminal's look with some coloured
+ * text on top. The one exception is an overlay: a modal paints its own.
+ */
+export const page = (text: string): string => tokens.canvas(text);
 
-const blendBg = (fromHex: string, toHex: string, amount: number) => {
-  const color = blend(fromHex, toHex, amount);
-  return (text: string): string => styleText(text, { bg: color }, mode());
+/**
+ * A line of the page: padded to the pane's width and filled with the canvas,
+ * edge to edge. A child's own colour resets its background when it ends, so the
+ * canvas is re-armed after every reset it leaves behind — otherwise a coloured
+ * fragment would punch a hole in the page and the terminal's own background
+ * would show through the middle of a row.
+ */
+export const canvasLine = (line: string, width: number): string => fillLine(line, width, palette.background);
+
+/** Any band's line, filled to the width: the sidebar uses it for its own colour. */
+export const fillLine = (line: string, width: number, hex: string): string => {
+  const bg = backgroundAnsi(parseColor(hex), mode());
+  const padded = padLine(line, width).replaceAll("\u001b[49m", `\u001b[49m${bg}`);
+  return `${bg}${padded}\u001b[49m`;
 };
+
+/** A horizontal rule in the seam colour: a hairline, never a box. */
+export const ruleLine = (width: number): string => tokens.rule("─".repeat(Math.max(0, width)));
+
+/**
+ * The sidebar is a band: one flat colour, quieter than the working surface,
+ * with a single seam on its right. It was a gradient before, which made the
+ * pane read as a rounded decoration and pulled the eye off the rows it exists
+ * to carry.
+ */
+export const band = (text: string): string => tokens.sidebarBg(text);
+
+/** A line of the sidebar: its own colour, out to the pane's edge. */
+export const bandLine = (line: string, width: number): string => fillLine(line, width, palette.panel);
 
 export { visibleWidth, truncateToWidth };
 export function padLine(str: string, width: number): string {
@@ -65,9 +94,6 @@ export function padLine(str: string, width: number): string {
   if (w >= width) return truncateToWidth(str, width);
   return str + " ".repeat(width - w);
 }
-
-/** A horizontal rule in the theme's faintest ink; `─` reads as a seam, not a border. */
-export const ruleLine = (width: number): string => tokens.faint("─".repeat(Math.max(0, width)));
 
 /**
  * The palette. Raw values live here and nowhere else; every component above
@@ -88,6 +114,8 @@ const palette = {
   selectionQuiet: "#182231",
   /** Seams, borders, the editor's frame. */
   rule: "#26323f",
+  /** A band's far edge: one column lighter than the surface it separates from. */
+  seam: "#2c3948",
 
   /** Body text. */
   text: "#d7dee8",
@@ -153,6 +181,8 @@ export const tokens = {
 
   /** Seams and frames. */
   rule: style(palette.rule),
+  /** The lighter edge between two bands. */
+  seam: style(palette.seam),
 
   /** Surfaces, by role. */
   canvas: background(palette.background),
@@ -190,14 +220,11 @@ export const kindTint = {
 } as const;
 
 /**
- * The sidebar's gradient: Posting's most recognisable surface. Row `index` of
- * `total` blends from the panel colour toward the page, so the index fades as
- * it runs down and the working area reads as the thing in front.
+ * The sidebar is a band, not a gradient. Posting paints its pane one flat
+ * colour quieter than the working surface, with a single seam between them;
+ * a gradient that fades toward the page made the pane read as a rounded-off
+ * decoration and took the eye away from the rows it exists to carry.
  */
-export function sidebarRow(index: number, total: number): (text: string) => string {
-  const t = total <= 1 ? 0 : Math.min(1, index / (total - 1));
-  return blendBg(palette.panel, palette.background, t * 0.85);
-}
 
 /** A one-cell accent spine: the selected row's left edge, a card's kind, a quote. */
 export const spine = (tint: (text: string) => string): string => tint("▌");

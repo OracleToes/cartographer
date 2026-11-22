@@ -18,7 +18,7 @@
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { padLine, ruleLine, tokens } from "./tokens.js";
+import { canvasLine, padLine, tokens } from "./tokens.js";
 
 /** The archive is a layer (§3.3), not a screen: the same UI over a different layer. */
 export type Layer = "context" | "archive";
@@ -52,29 +52,30 @@ export class HeaderView implements Component {
   }
 
   render(width: number): string[] {
-    const stateWindow = this.state.session.state.contextWindow;
-    const window = stateWindow > 0 ? stateWindow.toLocaleString("en-US") : "window unknown";
+    // Three zones, so a long project name can never push the figures around:
+    // the mark and where you are on the left, the mode in the middle, the model
+    // and its capacity on the right. Each zone is cut to fit; nothing overlaps.
+    const view = this.state.layer === "archive" ? "archive" : VIEW_TITLES[this.state.view];
+    const capacity = this.state.session.state.contextWindow;
+    const window = capacity > 0 ? capacity.toLocaleString("en-US") : "window unknown";
 
-    // The mode and the layer are never truncated: they are the two facts a
-    // person must be able to read at a glance. Only the project name gives way.
-    const badges = [
-      this.state.session.state.readOnly ? tokens.warn(tokens.bold("READ ONLY")) : "",
-      this.state.layer === "archive" ? tokens.warn(tokens.bold("archive")) : "",
-    ].filter((part) => part.length > 0);
-    const badgeText = badges.length === 0 ? "" : `  ${badges.join(" ")}`;
-
+    const left = `${tokens.bold(tokens.accent("carto"))}${tokens.faint(" ▏ ")}${tokens.bold(tokens.text(this.state.project))}${tokens.faint(` · ${view} · ${this.state.session.generation.slice(-6)}`)}`;
+    // The view name already says `archive` when the other layer is showing, so
+    // the middle zone carries only the mode — the one state that changes what
+    // the agent may do.
+    const middle = this.state.session.state.readOnly ? tokens.warn(tokens.bold("READ ONLY")) : "";
     const status = this.state.running ? tokens.warn("working…") : tokens.faint("idle");
-    const rightText = `${tokens.muted(this.state.modelLabel)}${tokens.faint(" · ")}${tokens.muted(window)}${tokens.faint(" · ")}${status}`;
-    const rightWidth = visibleWidth(rightText);
+    const right = `${tokens.muted(this.state.modelLabel)}${tokens.faint(" · ")}${tokens.muted(window)}${tokens.faint(" · ")}${status}`;
 
-    const prefix = `${tokens.bold(tokens.accent("carto"))}${tokens.faint(" ▏ ")}`;
-    const tail = `${tokens.faint(` · ${VIEW_TITLES[this.state.view]} · ${this.state.session.generation.slice(-6)}`)}`;
-    const room = Math.max(4, width - rightWidth - visibleWidth(badgeText) - visibleWidth(prefix) - visibleWidth(tail) - 2);
-    const name = truncateToWidth(this.state.project, room, tokens.faint("…"));
-
-    const left = `${prefix}${tokens.bold(tokens.text(name))}${tail}${badgeText}`;
-    const pad = Math.max(1, width - visibleWidth(left) - rightWidth);
-    return [padLine(left + " ".repeat(pad) + rightText, width), ruleLine(width)];
+    const middleWidth = visibleWidth(middle);
+    const rightWidth = visibleWidth(right);
+    const room = Math.max(8, width - rightWidth - middleWidth - 4);
+    const clippedLeft = truncateToWidth(left, room, tokens.faint("…"));
+    const gapLeft = Math.max(1, width - rightWidth - middleWidth - visibleWidth(clippedLeft) - 2);
+    const beforeMiddle = middle.length === 0 ? "" : middle;
+    const leftPart = clippedLeft + " ".repeat(gapLeft) + beforeMiddle;
+    const pad = Math.max(1, width - visibleWidth(leftPart) - rightWidth);
+    return [canvasLine(leftPart + " ".repeat(pad) + right, width)];
   }
 }
 
@@ -105,6 +106,6 @@ export class FooterView implements Component {
     const hints = this.hints();
     // Posting's footer: the key in the accent, the verb in dim grey, two spaces between pairs.
     const rendered = hints.map((hint) => `${tokens.accent(hint.key)} ${tokens.faint(hint.label)}`);
-    return [ruleLine(width), padLine(truncateToWidth(rendered.join(tokens.faint("  ")), width, tokens.faint(" …")), width)];
+    return [canvasLine(truncateToWidth(rendered.join(tokens.faint("  ")), width, tokens.faint(" …")), width)];
   }
 }

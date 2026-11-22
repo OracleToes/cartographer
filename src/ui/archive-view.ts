@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { Archive, ArchivedItem } from "../domain/archive.js";
-import { padLine, tokens, visibleWidth } from "./tokens.js";
+import { canvasLine, padLine, tokens, visibleWidth } from "./tokens.js";
 
 export class ArchiveView implements Component, Focusable {
   focused = false;
@@ -97,28 +97,28 @@ export class ArchiveView implements Component, Focusable {
     const right = tokens.faint(`${this.items.length} item${this.items.length === 1 ? "" : "s"} `);
     const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(` ${left}${" ".repeat(gap)}${right}`, width)));
-    lines.push("");
+    lines.push(canvasLine("", width));
     if (this.items.length === 0) {
-      lines.push(`  ${tokens.muted("Nothing is archived.")}`);
-      lines.push(`  ${tokens.faint("A collapse sweeps what the Brain let go of; it waits one collapse, then it is gone.")}`);
+      lines.push(canvasLine(`  ${tokens.muted("Nothing is archived.")}`, width));
+      lines.push(canvasLine(`  ${tokens.faint("A collapse sweeps what the Brain let go of; it waits one collapse, then it is gone.")}`, width));
       return lines;
     }
-    lines.push(`  ${tokens.faint("swept by a collapse · waits one collapse · a pin keeps it")}`);
-    lines.push("");
+    lines.push(canvasLine(`  ${tokens.faint("swept by a collapse · waits one collapse · a pin keeps it")}`, width));
+    lines.push(canvasLine("", width));
     this.items.forEach((item, index) => {
       const selected = index === this.selectedIndex;
       const marker = selected ? tokens.warn("▸") : tokens.faint("▸");
       const pin = item.pinned === undefined ? "" : ` ${tokens.pin(`⊙ ${item.pinned === "user" ? "you" : "agent"}`)}`;
       const kind = item.record !== undefined ? item.record.kind : (item.ephemeral?.kind ?? "item");
       const head = `${marker} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}`;
-      lines.push(padLine(`  ${head}`, width));
+      lines.push(canvasLine(`  ${head}`, width));
       const summary = summaryOf(item);
       const body = wrapTextWithAnsi(summary, Math.max(16, inner - 6)).slice(0, 3);
       body.forEach((line, lineIndex) => {
         const lead = lineIndex === 0 ? `${tokens.rule("│")} ` : "  ";
-        lines.push(padLine(`    ${lead}${tokens.faint(line)}`, width));
+        lines.push(canvasLine(`    ${lead}${tokens.faint(line)}`, width));
       });
-      lines.push("");
+      lines.push(canvasLine("", width));
     });
     return lines;
   }

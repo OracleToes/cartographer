@@ -1,22 +1,33 @@
 /**
- * The Context view — the surgery view (§8).
- * Read-only accurate rendering of what the model reads, grouped by part
- * in the real order it appears in the context window:
+ * The prompt (§8): what the model reads, in the order it reads it.
  *
- * 1. SYSTEM (Rules & instructions: CARTO_INSTRUCTIONS)
- * 2. PROJECTION (The frozen projection snapshot: carto-context)
- * 3. TOOLS (Tool declarations with descriptions & JSON parameter schemas)
- * 4. TRANSCRIPT (Dialogue messages in chronological order)
- * 5. TOOL WORK (Reasoning, tool invocations, and tool results)
- * 6. STATE BLOCK (The trailing <carto-state> block at the request tail)
+ * This view is not a browser for the Brain and not a debug dump. It is the
+ * prefill itself — head, body, tail (§5) — with a fold tree over it:
  *
- * Two-pane keyboard-first navigation:
- * - h/l or left/right: switch focus between parts rail and content pane
- * - j/k in rail: select part in context-window order
- * - j/k in content pane: scroll content / navigate items
- * - enter/space: toggle tool card folds
- * - tab / r: toggle formatted cards vs raw wire bytes
- * - esc: from content pane focuses rail; from rail returns to Chat
+ * - **head** is fixed and clustered by type: the system prompt, the tool
+ *   definitions, then the Brain (atlas, ledger, chat) and the pinned material;
+ * - **body** is the live context in the order it occurred: the person's
+ *   messages, reasoning, tool calls, and their results, one entry at a time;
+ * - **tail** is the state block, which is always current (§5.6).
+ *
+ * Everything carries its generation-local handle (§5.4), because the handle is
+ * how the agent addresses the item and how the person talks about it. The
+ * numbers come from the Brain's table for records and from prompt order for
+ * everything ephemeral.
+ *
+ * **A leaf is never folded.** A tool call's arguments, a result, a line of
+ * system prompt: each is a leaf, and it renders whole. Only things that contain
+ * things — a tool's schema, a Brain entry with links and attachments, the state
+ * block's sections — fold. A collapsed entry keeps a one-line summary, so the
+ * prompt is scannable without being a list of headings.
+ *
+ * `tab` swaps between the **human** view and the **real** view for
+ * schema-shaped content: the same entry, as a person reads it and as the model
+ * receives it.
+ *
+ * Marks are made here and are not deletions (§4.1): `d` marks the entry under
+ * the cursor, `!` arms "now" so the next mark is applied by a rebuild instead of
+ * waiting for the collapse, `c` collapses.
  */
 import {
   matchesKey,
@@ -28,9 +39,10 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
-import type { ChatRecord, CartoBrain } from "../domain/records.js";
+import { handleOf } from "../domain/handles.js";
+import type { CartoBrain } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
-import { padLine, pinBadgeText, tokens } from "./tokens.js";
+import { canvasLine, padLine, tokens } from "./tokens.js";
 
 export interface ContextToolItem {
   name: string;
@@ -65,11 +77,87 @@ export interface ContextViewData {
   stateBlockText: string;
 }
 
-export interface ContextPartItem {
-  id: "system" | "projection" | "tools" | "transcript" | "tool-work" | "state-block";
-  name: string;
-  tokens: number;
-  rawText: string;
+/** What a node can be marked: the part of the product a mark on it would touch. */
+export type MarkTarget = { part: "transcript" | "tool-work" | "tools"; id: string | number };
+
+type NodeKind =
+  | "system"
+  | "tool"
+  | "atlas"
+  | "ledger"
+  | "chat"
+  | "person"
+  | "reasoning"
+  | "call"
+  | "result"
+  | "state";
+
+export interface PromptNode {
+  /** Stable within a redraw: the fold state is keyed on it. */
+  id: string;
+  /** The generation-local handle (§5.4): what the agent calls this item. */
+  handle: string;
+  kind: NodeKind;
+  /** The name it goes by: a tool's name, a record's title, `you`, `bash`. */
+  label: string;
+  /** What a folded entry says instead of its body. */
+  summary: string;
+  /** The body in the human view. */
+  body: string;
+  /** Schema-shaped content: the same entry as the model receives it. */
+  real?: string;
+  /** Never folded, whatever the kind says: a leaf. */
+  leaf?: boolean;
+  /** Whether it starts open. Model-shaped bodies start folded, prose starts open. */
+  open?: boolean;
+  /** Where a mark on this node lands. Absent for the parts of the prompt the person cannot remove. */
+  target?: MarkTarget;
+  /** The marked action already recorded on it, if any. */
+  marked?: string;
+}
+
+export interface PromptSection {
+  title: string;
+  subtitle: string;
+  nodes: PromptNode[];
+}
+
+const KIND_INK: Record<NodeKind, (text: string) => string> = {
+  system: tokens.muted,
+  tool: tokens.tool,
+  atlas: tokens.atlas,
+  ledger: tokens.ledger,
+  chat: tokens.chat,
+  person: tokens.person,
+  reasoning: tokens.reasoning,
+  call: tokens.tool,
+  result: tokens.output,
+  state: tokens.warn,
+};
+
+/** Cells the name column takes, so the summaries line up under each other. */
+const NAME_COLUMN = 14;
+
+const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * The frozen projection, as entries. The projection is one section of the
+ * system message, so the bytes are what the model reads; splitting it back into
+ * its entries is a read of those bytes, never a re-render of the Brain.
+ */
+function projectionEntries(text: string): Map<string, string[]> {
+  const entries = new Map<string, string[]>();
+  let current: string[] | undefined;
+  for (const line of text.split("\n")) {
+    const match = /^([ALC]\d+)\b/.exec(line);
+    if (match !== null && match[1] !== undefined) {
+      current = [line];
+      entries.set(match[1], current);
+    } else if (current !== undefined) {
+      current.push(line);
+    }
+  }
+  return entries;
 }
 
 export class ContextView implements Component, Focusable {
@@ -77,573 +165,363 @@ export class ContextView implements Component, Focusable {
   onBack?: () => void;
   onDelete?: (partId: string, itemId: string | number, now: boolean) => void;
   onCollapse?: () => void;
-  /** Fired on `p` over a transcript item that names a Brain chat record: toggle the pin marker. */
+  /** Fired on `p` over an entry that names a Brain chat record: toggle the pin marker. */
   onTogglePin?: (partId: string, itemId: string | number) => void;
 
-  private focusedPane: "rail" | "content" = "rail";
-  private selectedPartIndex = 0;
-  private scrollOffset = 0;
-  private selectedToolIndex = 0;
-  private selectedMessageIndex = 0;
-  private selectedWorkIndex = 0;
-  private nowArmed = false;
-  private itemExpanded = new Map<string, boolean>();
-  private toolExpanded = new Map<string, boolean>();
-  private toolRanges: Array<{ name: string; start: number; end: number }> = [];
-  private itemRanges: Array<{ id: string | number; start: number; end: number }> = [];
-  private showRaw = false;
-  private parts: ContextPartItem[] = [];
-  private totalTokens = 0;
   private data: ContextViewData | undefined;
+  private sections: PromptSection[] = [];
+  /** The flattened order the cursor walks: section boundaries included. */
+  private rows: Array<{ section: number } | { node: PromptNode; section: number }> = [];
+  private cursor = 0;
+  private nowArmed = false;
+  private showReal = false;
+  private folded = new Map<string, boolean>();
+  private hits: Array<{ start: number; end: number; index: number }> = [];
 
   setData(data: ContextViewData): void {
     this.data = data;
-    // The frozen projection is the model's own bytes; re-rendering the live
-    // Brain here would fabricate a projection mid-generation. When the bytes
-    // are unavailable (a crash remainder), the fallback is the same re-render
-    // pi itself performs — the view never invents a projection.
-    const projectionText = data.projectionText ?? projectContext(data.brain).text;
+    this.sections = this.build(data);
+    this.rows = [];
+    this.sections.forEach((section, index) => {
+      this.rows.push({ section: index });
+      for (const node of section.nodes) this.rows.push({ node, section: index });
+    });
+    // The cursor starts on an entry, never on a section heading: a heading is a
+    // label for what follows, not something a mark or a fold can land on.
+    const firstNode = this.rows.findIndex((row) => "node" in row);
+    this.cursor = firstNode === -1 ? 0 : firstNode;
+  }
 
-    const systemPromptText = data.systemPrompt;
-    const toolsRawText = JSON.stringify(data.tools, null, 2);
-    const transcriptRawText = JSON.stringify(data.transcriptMessages, null, 2);
-    const toolWorkRawText = JSON.stringify(data.toolWorkItems, null, 2);
-    const stateBlockText = data.stateBlockText;
+  /** Estimated size of everything the model reads, for the header. */
+  private totalTokens(): number {
+    if (this.data === undefined) return 0;
+    return (
+      estimateTokens(this.data.systemPrompt) +
+      estimateSerialized(this.data.tools) +
+      estimateTokens(this.data.projectionText ?? "") +
+      estimateSerialized(this.data.transcriptMessages) +
+      estimateSerialized(this.data.toolWorkItems) +
+      estimateTokens(this.data.stateBlockText)
+    );
+  }
 
-    const systemTokens = estimateTokens(systemPromptText);
-    const projTokens = estimateTokens(projectionText);
-    const toolsTokens = estimateSerialized(data.tools);
-    const transTokens = estimateSerialized(data.transcriptMessages);
-    const workTokens = estimateSerialized(data.toolWorkItems);
-    const stateTokens = estimateTokens(stateBlockText);
+  private build(data: ContextViewData): PromptSection[] {
+    const handles = data.brain.handles;
+    const projection = projectionEntries(data.projectionText ?? projectContext(data.brain).text);
 
-    this.totalTokens = systemTokens + projTokens + toolsTokens + transTokens + workTokens + stateTokens;
-
-    // Real order in the context window:
-    this.parts = [
+    // ── head ────────────────────────────────────────────────────────────────
+    const head: PromptNode[] = [
       {
         id: "system",
-        name: "SYSTEM",
-        tokens: systemTokens,
-        rawText: systemPromptText,
-      },
-      {
-        id: "projection",
-        name: "PROJECTION",
-        tokens: projTokens,
-        rawText: projectionText,
-      },
-      {
-        id: "tools",
-        name: "TOOLS",
-        tokens: toolsTokens,
-        rawText: toolsRawText,
-      },
-      {
-        id: "transcript",
-        name: "TRANSCRIPT",
-        tokens: transTokens,
-        rawText: transcriptRawText,
-      },
-      {
-        id: "tool-work",
-        name: "TOOL WORK",
-        tokens: workTokens,
-        rawText: toolWorkRawText,
-      },
-      {
-        id: "state-block",
-        name: "STATE BLOCK",
-        tokens: stateTokens,
-        rawText: stateBlockText,
+        handle: "H",
+        kind: "system",
+        label: "system prompt",
+        summary: oneLine(data.systemPrompt),
+        body: data.systemPrompt,
+        real: data.systemPrompt,
+        open: false,
+        leaf: false,
       },
     ];
 
-    if (this.selectedPartIndex >= this.parts.length) {
-      this.selectedPartIndex = 0;
+    data.tools.forEach((tool, index) => {
+      head.push({
+        id: `tool-${tool.name}`,
+        handle: `Y${index + 1}`,
+        kind: "tool",
+        label: tool.name,
+        summary: tool.description,
+        body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
+        real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
+        open: false,
+        target: { part: "tools", id: tool.name },
+      });
+    });
+
+    const record = (kind: "atlas" | "ledger" | "chat", id: string, handle: string | undefined, body: string): PromptNode => {
+      const bytes = handle === undefined ? undefined : projection.get(handle);
+      // The two views of one entry: what the person can read, and the bytes the
+      // model receives. A record written since the freeze is in the Brain but not
+      // yet in the projection; the real view says so rather than showing bytes
+      // that are not there.
+      const frozen = bytes === undefined || bytes.length === 0 ? undefined : bytes;
+      return {
+        id: `${kind}-${id}`,
+        handle: handle ?? "?",
+        kind,
+        // The handle's letter already says which book this is; the name column
+        // says it again in words so a row can be read without decoding letters.
+        label: kind,
+        summary: oneLine(body),
+        body,
+        real: frozen === undefined
+          ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
+          : frozen.join("\n"),
+        open: false,
+      };
+    };
+
+    for (const node of data.brain.atlas) {
+      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title));
     }
+    for (const entry of data.brain.ledger) {
+      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text));
+    }
+    for (const chat of data.brain.chat) {
+      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text)));
+    }
+
+    // ── body ────────────────────────────────────────────────────────────────
+    // The body is never sorted by kind: the person's messages, the reasoning, the
+    // calls and their results sit in the order the model receives them. The app
+    // hands two lists; their ids are the context entry numbers, so the merge is
+    // by that number and nothing else.
+    const candidates: Array<{ key: number; order: number; node: PromptNode }> = [];
+    let workCount = 0;
+    for (const item of data.toolWorkItems) {
+      workCount += 1;
+      const key = Number.parseInt(String(item.id), 10) || 0;
+      const suffix = Number.parseInt(String(item.id).split("-")[1] ?? "0", 10) || 0;
+      if (item.kind === "reasoning") {
+        candidates.push({
+          key,
+          order: suffix,
+          node: {
+            id: `work-${String(item.id)}`,
+            handle: `X${workCount}`,
+            kind: "reasoning",
+            label: "thinking",
+            summary: oneLine(item.text ?? ""),
+            body: item.text ?? "",
+            leaf: true,
+          },
+        });
+      } else if (item.kind === "toolCall") {
+        candidates.push({
+          key,
+          order: suffix,
+          node: {
+            id: `work-${String(item.id)}`,
+            handle: `X${workCount}`,
+            kind: "call",
+            label: item.name ?? "call",
+            summary: oneLine(item.args ?? ""),
+            body: item.args ?? "",
+            leaf: true,
+          },
+        });
+      } else {
+        candidates.push({
+          key,
+          order: suffix,
+          node: {
+            id: `work-${String(item.id)}`,
+            handle: `X${workCount}`,
+            kind: "result",
+            label: "result",
+            summary: oneLine(item.output ?? ""),
+            body: item.output ?? "",
+            leaf: true,
+          },
+        });
+      }
+    }
+    let personCount = 0;
+    for (const message of data.transcriptMessages) {
+      if (message.role !== "user") continue;
+      personCount += 1;
+      candidates.push({
+        key: Number.parseInt(String(message.id), 10) || 0,
+        // A person's message precedes the work its entry produced.
+        order: -1,
+        node: {
+          id: `msg-${String(message.id)}`,
+          handle: `U${personCount}`,
+          kind: "person",
+          label: "you",
+          summary: oneLine(message.text),
+          body: message.text,
+          leaf: true,
+          target: { part: "transcript", id: message.id },
+        },
+      });
+    }
+    const body = candidates.sort((left, right) => left.key - right.key || left.order - right.order).map((entry) => entry.node);
+
+    // ── tail ────────────────────────────────────────────────────────────────
+    const tail: PromptNode[] = [
+      {
+        id: "state-block",
+        handle: "B",
+        kind: "state",
+        label: "state block",
+        summary: "fullness, space, pending, marks, pins, stale, tree — always current",
+        body: data.stateBlockText,
+        real: data.stateBlockText,
+        open: false,
+        leaf: false,
+      },
+    ];
+
+    return [
+      { title: "head", subtitle: "fixed · clustered by type · one order", nodes: head },
+      { title: "body", subtitle: "the live context, in the order it occurred", nodes: body },
+      { title: "tail", subtitle: "the state block · always current", nodes: tail },
+    ];
+  }
+
+  /** Fold state: open unless the person closed it. A leaf is never folded. */
+  private isOpen(node: PromptNode): boolean {
+    if (node.leaf === true) return true;
+    return this.folded.get(node.id) ?? node.open === true;
+  }
+
+  private selectedNode(): PromptNode | undefined {
+    const row = this.rows[this.cursor];
+    return row !== undefined && "node" in row ? row.node : undefined;
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "tab") || data === "r") {
-      this.showRaw = !this.showRaw;
+    if (matchesKey(data, "tab") || matchesKey(data, "r")) {
+      this.showReal = !this.showReal;
       return;
     }
-
-    if (this.focusedPane === "rail") {
-      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-        this.onBack?.();
-        return;
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+      this.onBack?.();
+      return;
+    }
+    if (matchesKey(data, "j") || matchesKey(data, "down")) {
+      this.cursor = Math.min(this.rows.length - 1, this.cursor + 1);
+      return;
+    }
+    if (matchesKey(data, "k") || matchesKey(data, "up")) {
+      this.cursor = Math.max(0, this.cursor - 1);
+      return;
+    }
+    if (matchesKey(data, "g")) {
+      this.cursor = 0;
+      return;
+    }
+    if (data === "G") {
+      this.cursor = Math.max(0, this.rows.length - 1);
+      return;
+    }
+    if (matchesKey(data, "enter") || matchesKey(data, "space")) {
+      const node = this.selectedNode();
+      if (node !== undefined && node.leaf !== true) this.folded.set(node.id, !this.isOpen(node));
+      return;
+    }
+    if (data === "!") {
+      this.nowArmed = !this.nowArmed;
+      return;
+    }
+    if (matchesKey(data, "c")) {
+      this.onCollapse?.();
+      return;
+    }
+    if (matchesKey(data, "p")) {
+      const node = this.selectedNode();
+      if (node !== undefined && node.target?.part === "transcript") this.onTogglePin?.("transcript", node.target.id);
+      return;
+    }
+    if (matchesKey(data, "d")) {
+      const node = this.selectedNode();
+      if (node !== undefined && node.target !== undefined) {
+        this.onDelete?.(node.target.part, node.target.id, this.nowArmed);
+        this.nowArmed = false;
       }
-      if (matchesKey(data, "l") || matchesKey(data, "right") || matchesKey(data, "enter")) {
-        this.focusedPane = "content";
-        this.scrollOffset = 0;
-        return;
-      }
-      if (matchesKey(data, "j") || matchesKey(data, "down")) {
-        this.selectedPartIndex = Math.min(this.parts.length - 1, this.selectedPartIndex + 1);
-        this.scrollOffset = 0;
-        return;
-      }
-      if (matchesKey(data, "k") || matchesKey(data, "up")) {
-        this.selectedPartIndex = Math.max(0, this.selectedPartIndex - 1);
-        this.scrollOffset = 0;
-        return;
-      }
-      if (matchesKey(data, "g")) {
-        this.selectedPartIndex = 0;
-        this.scrollOffset = 0;
-        return;
-      }
-      if (data === "G") {
-        this.selectedPartIndex = Math.max(0, this.parts.length - 1);
-        this.scrollOffset = 0;
-        return;
-      }
-    } else {
-      // Content pane focused
-      if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
-        this.focusedPane = "rail";
-        return;
-      }
-      if (matchesKey(data, "p")) {
-        const selectedPart = this.parts[this.selectedPartIndex];
-        if (selectedPart?.id === "transcript" && this.data && !this.showRaw) {
-          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
-          if (msg !== undefined && this.chatRecordFor(msg.id) !== undefined) this.onTogglePin?.("transcript", msg.id);
-        }
-        return;
-      }
-      if (matchesKey(data, "!") || data === "!") {
-        this.nowArmed = !this.nowArmed;
-        return;
-      }
-      if (matchesKey(data, "c")) {
-        this.onCollapse?.();
-        return;
-      }
-      if (matchesKey(data, "d")) {
-        const selectedPart = this.parts[this.selectedPartIndex];
-        if (selectedPart?.id === "transcript" && this.data) {
-          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
-          if (msg) this.onDelete?.("transcript", msg.id, this.nowArmed);
-          this.nowArmed = false;
-          return;
-        }
-        if (selectedPart?.id === "tool-work" && this.data) {
-          const work = this.data.toolWorkItems[this.selectedWorkIndex];
-          if (work) this.onDelete?.("tool-work", work.id, this.nowArmed);
-          this.nowArmed = false;
-          return;
-        }
-        if (selectedPart?.id === "tools" && this.data) {
-          const tool = this.data.tools[this.selectedToolIndex];
-          if (tool) this.onDelete?.("tools", tool.name, this.nowArmed);
-          this.nowArmed = false;
-          return;
-        }
-        this.scrollOffset += 10;
-        return;
-      }
-
-      const selectedPart = this.parts[this.selectedPartIndex];
-      if (selectedPart?.id === "tools" && !this.showRaw && this.data) {
-        if (matchesKey(data, "j") || matchesKey(data, "down")) {
-          this.selectedToolIndex = Math.min(this.data.tools.length - 1, this.selectedToolIndex + 1);
-          return;
-        }
-        if (matchesKey(data, "k") || matchesKey(data, "up")) {
-          this.selectedToolIndex = Math.max(0, this.selectedToolIndex - 1);
-          return;
-        }
-        if (matchesKey(data, "enter") || matchesKey(data, "space")) {
-          const tool = this.data.tools[this.selectedToolIndex];
-          if (tool) {
-            const isOpen = this.toolExpanded.get(tool.name) ?? true;
-            this.toolExpanded.set(tool.name, !isOpen);
-          }
-          return;
-        }
-      }
-      if (selectedPart?.id === "transcript" && !this.showRaw && this.data) {
-        if (matchesKey(data, "j") || matchesKey(data, "down")) {
-          this.selectedMessageIndex = Math.min(this.data.transcriptMessages.length - 1, this.selectedMessageIndex + 1);
-          return;
-        }
-        if (matchesKey(data, "k") || matchesKey(data, "up")) {
-          this.selectedMessageIndex = Math.max(0, this.selectedMessageIndex - 1);
-          return;
-        }
-        if (matchesKey(data, "enter") || matchesKey(data, "space")) {
-          const msg = this.data.transcriptMessages[this.selectedMessageIndex];
-          if (msg) {
-            const idKey = String(msg.id);
-            const isOpen = this.itemExpanded.get(idKey) ?? true;
-            this.itemExpanded.set(idKey, !isOpen);
-          }
-          return;
-        }
-      }
-      if (selectedPart?.id === "tool-work" && !this.showRaw && this.data) {
-        if (matchesKey(data, "j") || matchesKey(data, "down")) {
-          this.selectedWorkIndex = Math.min(this.data.toolWorkItems.length - 1, this.selectedWorkIndex + 1);
-          return;
-        }
-        if (matchesKey(data, "k") || matchesKey(data, "up")) {
-          this.selectedWorkIndex = Math.max(0, this.selectedWorkIndex - 1);
-          return;
-        }
-        if (matchesKey(data, "enter") || matchesKey(data, "space")) {
-          const work = this.data.toolWorkItems[this.selectedWorkIndex];
-          if (work) {
-            const idKey = String(work.id);
-            const isOpen = this.itemExpanded.get(idKey) ?? true;
-            this.itemExpanded.set(idKey, !isOpen);
-          }
-          return;
-        }
-      }
-
-      // Line scrolling
-      if (matchesKey(data, "j") || matchesKey(data, "down")) {
-        this.scrollOffset += 1;
-        return;
-      }
-      if (matchesKey(data, "k") || matchesKey(data, "up")) {
-        this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-        return;
-      }
-      if (matchesKey(data, "pageDown")) {
-        this.scrollOffset += 10;
-        return;
-      }
-      if (matchesKey(data, "u") || matchesKey(data, "pageUp")) {
-        this.scrollOffset = Math.max(0, this.scrollOffset - 10);
-        return;
-      }
-      if (matchesKey(data, "g")) {
-        this.scrollOffset = 0;
-        return;
-      }
-      if (data === "G") {
-        this.scrollOffset = 9999;
-        return;
-      }
+      return;
     }
   }
 
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
-    if (event.type === "wheel" && event.wheelDelta) {
-      this.scrollOffset = Math.max(0, this.scrollOffset + (event.wheelDelta > 0 ? 3 : -3));
-      return { handled: true, render: true };
-    }
-    if (event.type === "press") {
-      return { handled: true, focus: true };
-    }
-    if (event.type === "click") {
-      const railWidth = Math.min(32, Math.floor(event.width * 0.35));
-      if (event.x < railWidth) {
-        // Clicked on rail
-        const railIdx = event.y - 2;
-        if (railIdx >= 0 && railIdx < this.parts.length) {
-          this.selectedPartIndex = railIdx;
-          this.focusedPane = "rail";
-          this.scrollOffset = 0;
-          return { handled: true, render: true };
-        }
-      } else {
-        // Clicked on content pane
-        this.focusedPane = "content";
-        const selectedPart = this.parts[this.selectedPartIndex];
-        if (selectedPart?.id === "tools" && !this.showRaw) {
-          const contentY = event.y - 2 + this.scrollOffset;
-          const hitTool = this.toolRanges.find((r) => contentY >= r.start && contentY < r.end);
-          if (hitTool) {
-            const current = this.toolExpanded.get(hitTool.name) ?? true;
-            this.toolExpanded.set(hitTool.name, !current);
-            return { handled: true, render: true };
-          }
-        }
-        return { handled: true, render: true };
-      }
-    }
-    return undefined;
+    if (event.type === "wheel") return undefined; // the scroll view owns the wheel
+    if (event.type === "press") return { handled: true, focus: true };
+    if (event.type !== "click") return undefined;
+    const hit = this.hits.find((range) => event.y >= range.start && event.y < range.end);
+    if (hit === undefined) return undefined;
+    this.cursor = hit.index;
+    const node = this.selectedNode();
+    if (node !== undefined && node.leaf !== true) this.folded.set(node.id, !this.isOpen(node));
+    return { handled: true, render: true, focus: true };
   }
 
   invalidate(): void {
     // Stateless.
   }
 
-  private renderToolsFormatted(tools: ContextToolItem[], width: number): string[] {
-    const lines: string[] = [];
-    this.toolRanges = [];
-    const title = ` Registered Tools (${tools.length}):`;
-    lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
-    lines.push(tokens.cardBg(" ".repeat(width)));
-
-    tools.forEach((tool, idx) => {
-      const start = lines.length;
-      const isSelected = this.focusedPane === "content" && idx === this.selectedToolIndex;
-      const isOpen = this.toolExpanded.get(tool.name) ?? true;
-      const foldGlyph = isOpen ? "▾" : "▸";
-      const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
-
-      const headerText = `${prefix}${tokens.bold(tokens.accent(`${foldGlyph} ${tool.name}`))}`;
-      lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
-
-      if (isOpen) {
-        const descWrapped = wrapTextWithAnsi(tool.description, Math.max(1, width - 8));
-        for (const dl of descWrapped) {
-          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(dl)}`, width)));
-        }
-        lines.push(tokens.cardBg(padLine(`       ${tokens.bold(tokens.tool("parameters schema:"))}`, width)));
-        const schemaLines = JSON.stringify(tool.parameters, null, 2).split("\n");
-        for (const sl of schemaLines) {
-          lines.push(tokens.cardBg(padLine(`         ${tokens.output(sl)}`, width)));
-        }
-      }
-      lines.push(tokens.cardBg(" ".repeat(width)));
-      const end = lines.length;
-      this.toolRanges.push({ name: tool.name, start, end });
-    });
-
-    return lines;
-  }
-
-  private chatRecordFor(itemId: string | number): ChatRecord | undefined {
-    if (!this.data) return undefined;
-    return this.data.brain.chat.find((record) => String(record.id) === String(itemId));
-  }
-
-  private renderTranscriptFormatted(messages: ContextDialogueMessage[], width: number): string[] {
-    const lines: string[] = [];
-    this.itemRanges = [];
-    const title = ` Dialogue Transcript (${messages.length} messages):`;
-    lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
-    lines.push(tokens.cardBg(" ".repeat(width)));
-
-    if (messages.length === 0) {
-      lines.push(tokens.cardBg(padLine(`   ${tokens.muted("(no conversation messages yet)")}`, width)));
-      lines.push(tokens.cardBg(" ".repeat(width)));
-      return lines;
-    }
-
-    messages.forEach((msg, idx) => {
-      const start = lines.length;
-      const isSelected = this.focusedPane === "content" && idx === this.selectedMessageIndex;
-      const idKey = String(msg.id);
-      const isOpen = this.itemExpanded.get(idKey) ?? true;
-      const foldGlyph = isOpen ? "▾" : "▸";
-      const isUser = msg.role === "user";
-      const who = isUser ? tokens.accent("you") : tokens.agent("carto");
-      const ts = msg.timestamp ? ` · ${new Date(msg.timestamp).toISOString()}` : "";
-      const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
-
-      const record = this.chatRecordFor(msg.id);
-      const pinStr = record !== undefined && record.pinned !== undefined ? ` ${pinBadgeText(record.pinned, "pin")}` : "";
-      const headerText = `${prefix}${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)} ${tokens.muted(foldGlyph)}${pinStr}`;
-      lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
-
-      if (isOpen) {
-        const bodyLines = wrapTextWithAnsi(msg.text, Math.max(1, width - 8));
-        for (const bl of bodyLines) {
-          lines.push(tokens.cardBg(padLine(`       ${bl}`, width)));
-        }
-      } else {
-        const preview = truncateToWidth(msg.text.replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
-        lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
-      }
-      lines.push(tokens.cardBg(" ".repeat(width)));
-      const end = lines.length;
-      this.itemRanges.push({ id: msg.id, start, end });
-    });
-    return lines;
-  }
-
-  private renderToolWorkFormatted(items: ContextWorkItem[], width: number): string[] {
-    const lines: string[] = [];
-    this.itemRanges = [];
-    const title = ` Tool Work & Reasoning (${items.length} items):`;
-    lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
-    lines.push(tokens.cardBg(" ".repeat(width)));
-
-    if (items.length === 0) {
-      lines.push(tokens.cardBg(padLine(`   ${tokens.muted("(no tool work or reasoning yet)")}`, width)));
-      lines.push(tokens.cardBg(" ".repeat(width)));
-      return lines;
-    }
-
-    items.forEach((item, idx) => {
-      const start = lines.length;
-      const isSelected = this.focusedPane === "content" && idx === this.selectedWorkIndex;
-      const idKey = String(item.id);
-      const isOpen = this.itemExpanded.get(idKey) ?? true;
-      const foldGlyph = isOpen ? "▾" : "▸";
-      const prefix = isSelected ? tokens.accent(" ▸ ") : "   ";
-
-      if (item.kind === "reasoning") {
-        const headerText = `${prefix}${tokens.bold(tokens.reasoning("▎ think"))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
-        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
-        if (isOpen) {
-          const textLines = wrapTextWithAnsi(item.text ?? "", Math.max(1, width - 8));
-          for (const tl of textLines) {
-            lines.push(tokens.cardBg(padLine(`       ${tokens.reasoning(tl)}`, width)));
-          }
-        } else {
-          const preview = truncateToWidth((item.text ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
-          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
-        }
-      } else if (item.kind === "toolCall") {
-        const headerText = `${prefix}${tokens.bold(tokens.tool(`▎ call: ${item.name}`))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
-        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
-        if (isOpen) {
-          const argLines = (item.args ?? "").split("\n");
-          for (const al of argLines) {
-            lines.push(tokens.cardBg(padLine(`       ${tokens.muted(al)}`, width)));
-          }
-        } else {
-          const preview = truncateToWidth((item.args ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
-          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
-        }
-      } else if (item.kind === "toolResult") {
-        const headerText = `${prefix}${tokens.bold(tokens.muted(`▎ result`))} ${tokens.muted(`[#${item.id}]`)} ${tokens.muted(foldGlyph)}`;
-        lines.push(isSelected ? tokens.selectedBg(padLine(headerText, width)) : tokens.cardBg(padLine(headerText, width)));
-        if (isOpen) {
-          const outLines = wrapTextWithAnsi(item.output ?? "", Math.max(1, width - 8));
-          for (const ol of outLines) {
-            lines.push(tokens.cardBg(padLine(`       ${tokens.output(ol)}`, width)));
-          }
-        } else {
-          const preview = truncateToWidth((item.output ?? "").replace(/\s+/g, " ").trim(), Math.max(1, width - 12), "…");
-          lines.push(tokens.cardBg(padLine(`       ${tokens.muted(preview)}`, width)));
-        }
-      }
-      lines.push(tokens.cardBg(" ".repeat(width)));
-      const end = lines.length;
-      this.itemRanges.push({ id: item.id, start, end });
-    });
-    return lines;
-  }
-
-  private renderRightPane(part: ContextPartItem, width: number, maxLines: number): string[] {
-    const lines: string[] = [];
-    const modeBadge = this.showRaw ? tokens.warn("[RAW BYTES]") : tokens.accent("[FORMATTED]");
-    const nowBadge = this.nowArmed ? ` ${tokens.danger("[NOW ARMED]")}` : "";
-    const focusTag = this.focusedPane === "content" ? tokens.bold(tokens.accent(" [FOCUSED]")) : "";
-    const headerText = ` ${tokens.bold(tokens.accent(part.name))} ${tokens.muted(`· ~${part.tokens.toLocaleString("en-US")} tokens`)}  ${modeBadge}${nowBadge}${focusTag}`;
-    lines.push(tokens.cardHeaderBg(padLine(headerText, width)));
-    lines.push(tokens.cardBg(" ".repeat(width)));
-
-    let contentLines: string[] = [];
-
-    if (!this.showRaw && this.data) {
-      if (part.id === "tools") {
-        contentLines = this.renderToolsFormatted(this.data.tools, width);
-      } else if (part.id === "transcript") {
-        contentLines = this.renderTranscriptFormatted(this.data.transcriptMessages, width);
-      } else if (part.id === "tool-work") {
-        contentLines = this.renderToolWorkFormatted(this.data.toolWorkItems, width);
-      }
-    }
-
-    if (contentLines.length === 0) {
-      const rawLines = part.rawText.split("\n");
-      for (const rawLine of rawLines) {
-        if (rawLine.trim().length === 0) {
-          contentLines.push(tokens.cardBg(" ".repeat(width)));
-          continue;
-        }
-        const wrapped = wrapTextWithAnsi(rawLine, Math.max(1, width - 4));
-        for (const wl of wrapped) {
-          contentLines.push(tokens.cardBg(padLine(`   ${wl}`, width)));
-        }
-      }
-      contentLines.push(tokens.cardBg(" ".repeat(width)));
-    }
-
-    // Viewport scrolling
-    if (this.scrollOffset > Math.max(0, contentLines.length - maxLines)) {
-      this.scrollOffset = Math.max(0, contentLines.length - maxLines);
-    }
-    const visibleChunk = contentLines.slice(this.scrollOffset, this.scrollOffset + maxLines);
-    lines.push(...visibleChunk);
-
-    if (contentLines.length > maxLines) {
-      const remaining = contentLines.length - (this.scrollOffset + visibleChunk.length);
-      const scrollIndicator = ` ⋯ ${this.scrollOffset > 0 ? `▲ ${this.scrollOffset} above ` : ""}${remaining > 0 ? `▼ ${remaining} more lines ` : ""}· j/k or d/u to scroll`;
-      lines.push(tokens.cardBg(padLine(tokens.muted(scrollIndicator), width)));
-    }
-
-    return lines;
-  }
-
   render(width: number): string[] {
     const lines: string[] = [];
+    this.hits = [];
+    const inner = Math.max(16, width - 2);
+    const ink = (text: string): string => ` ${text}`;
 
-    // Header banner
-    const headerLeft = ` ${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("·")} ${tokens.text("what the model reads")} ${tokens.faint(`· ~${this.totalTokens.toLocaleString("en-US")} tokens`)}`;
-    const headerRight = `${tokens.faint("enter folds · tab raw · d marks delete · ! applies now · c collapses ")}`;
-    const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
-    lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
-    lines.push(padLine("", width));
+    const left = `${tokens.bold(tokens.accent("PROMPT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.totalTokens().toLocaleString("en-US")} tokens`)}`;
+    const mode = this.showReal ? tokens.warn("as the model receives it") : tokens.muted("as a person reads it");
+    const armed = this.nowArmed ? ` ${tokens.danger("· next mark applies now")}` : "";
+    const right = `${mode}${armed}`;
+    const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(right));
+    lines.push(tokens.panel(padLine(` ${left}${" ".repeat(gap)}${right}`, width)));
+    lines.push(canvasLine("", width));
 
-    if (this.parts.length === 0) {
-      lines.push(`  ${tokens.muted("(Context is empty.)")}`);
+    if (this.data === undefined) {
+      lines.push(ink(tokens.muted("Nothing in the prompt yet.")));
       return lines;
     }
 
-    const selectedPart = this.parts[this.selectedPartIndex] ?? this.parts[0];
-    if (!selectedPart) return lines;
-
-    // Split layout (rail on left, content pane on right)
-    if (width >= 72) {
-      const railWidth = Math.min(32, Math.floor(width * 0.35));
-      const paneWidth = Math.max(30, width - railWidth - 2);
-      const maxRows = 28;
-
-      const railLines: string[] = [];
-      const railHeader = this.focusedPane === "rail"
-        ? ` ${tokens.bold(tokens.accent("PARTS RAIL (IN ORDER)"))}`
-        : ` ${tokens.bold(tokens.muted("PARTS RAIL (IN ORDER)"))}`;
-      railLines.push(tokens.sidebarBg(padLine(railHeader, railWidth)));
-      railLines.push(tokens.sidebarBg(" ".repeat(railWidth)));
-
-      this.parts.forEach((part, idx) => {
-        const isSelected = idx === this.selectedPartIndex;
-        const pct = this.totalTokens > 0 ? Math.round((part.tokens / this.totalTokens) * 100) : 0;
-        const prefix = isSelected ? tokens.accent("▸ ") : "  ";
-        const nameStr = part.name.padEnd(12);
-        const tokStr = `~${part.tokens.toLocaleString("en-US")}`.padStart(7);
-        const pctStr = `${pct}%`.padStart(4);
-
-        const row = `${prefix}${isSelected ? tokens.bold(tokens.accent(nameStr)) : tokens.muted(nameStr)} ${tokens.muted(tokStr)} ${tokens.muted(pctStr)}`;
-        const paddedRow = isSelected
-          ? (this.focusedPane === "rail" ? tokens.selectedBg(padLine(row, railWidth)) : tokens.activeRowBg(padLine(row, railWidth)))
-          : tokens.sidebarBg(padLine(row, railWidth));
-        railLines.push(paddedRow);
-      });
-
-      const paneLines = this.renderRightPane(selectedPart, paneWidth, maxRows);
-      const rowCount = Math.max(railLines.length, paneLines.length);
-
-      for (let r = 0; r < rowCount; r++) {
-        const left = railLines[r] ?? tokens.sidebarBg(" ".repeat(railWidth));
-        const right = paneLines[r] ?? tokens.cardBg(" ".repeat(paneWidth));
-        lines.push(`${left}  ${right}`);
+    let rowIndex = 0;
+    this.sections.forEach((section, sectionIndex) => {
+      lines.push(canvasLine("", width));
+      const heading = `${tokens.faint(section.title.toUpperCase())} ${tokens.faint(`· ${section.subtitle}`)}`;
+      lines.push(canvasLine(ink(heading), width));
+      rowIndex += 1; // the section heading row
+      for (const node of section.nodes) {
+        const index = rowIndex;
+        rowIndex += 1;
+        const start = lines.length;
+        lines.push(...this.renderNode(node, width, index === this.cursor));
+        this.hits.push({ start, end: lines.length, index });
       }
-    } else {
-      // Stacked layout
-      this.parts.forEach((part, idx) => {
-        const isSelected = idx === this.selectedPartIndex;
-        const prefix = isSelected ? tokens.accent("▸ ") : "  ";
-        const row = `${prefix}${tokens.bold(part.name)} ~${part.tokens.toLocaleString("en-US")} tok`;
-        lines.push(isSelected ? tokens.selectedBg(padLine(row, width)) : row);
-        if (isSelected) {
-          lines.push(...this.renderRightPane(part, width, 20));
-        }
-      });
+    });
+
+    return lines;
+  }
+
+  /** One entry: handle, kind, name; then its body when it is open. */
+  private renderNode(node: PromptNode, width: number, selected: boolean): string[] {
+    const open = this.isOpen(node);
+    const ink = KIND_INK[node.kind];
+    const cursor = selected ? tokens.accent("▌") : " ";
+    const glyph = node.leaf === true ? " " : open ? "▾" : "▸";
+    const handle = ink(node.handle.padEnd(3));
+    // One name column. The handle's prefix already says what kind of thing the
+    // entry is, so the column holds its name: `read`, `bash`, a record's title.
+    const name = selected ? tokens.bold(ink(node.label)) : ink(node.label);
+    const mark = node.marked === undefined ? "" : ` ${tokens.warn(`◆ ${node.marked}`)}`;
+    const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
+    const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
+    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}`;
+    const lines: string[] = [];
+
+    if (node.leaf === true || !open) {
+      const room = Math.max(8, width - visibleWidth(head) - 2);
+      const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "…", room, "…");
+      lines.push(canvasLine(`${head}${tokens.faint(preview)}`, width));
+      return lines;
     }
 
+    lines.push(canvasLine(head, width));
+    const body = this.showReal && node.real !== undefined ? node.real : node.body;
+    const bodyWidth = Math.max(8, width - 6);
+    for (const logical of body.split("\n")) {
+      if (logical.length === 0) {
+        lines.push(canvasLine("", width));
+        continue;
+      }
+      for (const line of wrapTextWithAnsi(logical, bodyWidth)) {
+        lines.push(canvasLine(`     ${tokens.rule("│")} ${ink(line)}`, width));
+      }
+    }
     return lines;
   }
 }

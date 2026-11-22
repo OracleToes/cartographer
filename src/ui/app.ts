@@ -71,7 +71,7 @@ import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
-import { tokens } from "./tokens.js";
+import { ruleLine, tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
@@ -229,6 +229,17 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
     });
   }
   return cards;
+}
+
+/** One hairline, exactly the width it is given: the seam under the header. */
+class Rule implements Component {
+  invalidate(): void {
+    // Stateless.
+  }
+
+  render(width: number): string[] {
+    return [ruleLine(width)];
+  }
 }
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
@@ -596,9 +607,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   // ── The screen ────────────────────────────────────────────────────────────
-  // One header, one working area, one context bar, one footer. The sidebar runs
-  // the whole height beside them, and its gradient reaches the top and bottom
-  // edges; the working area is the only thing between the header and the bar.
+  // Posting's map of a screen, in bands: one header row, the working area, the
+  // prompt (only where you type), the key bar, and the context bar along the
+  // very bottom of everything. The sidebar is the full height of the working
+  // bands beside them; its seam is drawn by the pane itself.
+  //
+  // Every band paints its own background, edge to edge. `VStack` sizes them by
+  // their contents and `Spacer` does not grow, so a layout that leaves a band
+  // to "fill" would show the terminal's own background through the gaps; each
+  // band here is given the height it renders at instead.
   const footer = new FooterView(() => footerHints());
   const workArea = new VStack([
     { component: transcriptScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
@@ -607,26 +624,24 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { component: contextScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" && state.layer === "context" },
     { component: archiveScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.layer === "archive" },
   ]);
-  const mainColumn = new VStack([
-    { component: header, basis: "auto" },
-    { component: workArea, basis: 0, grow: 1, minSize: 3 },
-    { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+  const headerBand = new VStack([{ component: header, basis: "auto" }, { component: new Rule(), basis: 1 }]);
+  const body = new HStack([
+    { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
+    {
+      component: new VStack([
+        { component: headerBand, basis: 2 },
+        { component: workArea, basis: 0, grow: 1, minSize: 3 },
+        { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+      ]),
+      basis: 0,
+      grow: 1,
+      minSize: 20,
+    },
   ]);
 
-  // The context bar is the bottom-most row of the application and spans all of
-  // it: the sidebar stops above it, so the picture of the context is never
-  // stolen by a pane. The key bar sits above the bar, where the eye finishes.
   tui.setLayoutRoot(
     new VStack([
-      {
-        component: new HStack([
-          { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-          { component: mainColumn, basis: 0, grow: 1, minSize: 20 },
-        ]),
-        basis: 0,
-        grow: 1,
-        minSize: 6,
-      },
+      { component: body, basis: 0, grow: 1, minSize: 6 },
       { component: footer, basis: 2 },
       { component: tokenBar, basis: 1 },
     ]),

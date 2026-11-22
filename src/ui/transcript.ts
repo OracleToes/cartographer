@@ -30,7 +30,7 @@
  */
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
-import { pinBadgeText, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
 
 type BlockRange = { id: string; start: number; end: number };
 
@@ -79,7 +79,11 @@ interface WrapMemo {
   lines: string[];
 }
 
-const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "thinking" : card.kind === "output" ? "text" : `tool ${card.name}`.trim());
+/**
+ * What a card is called. A tool card is its tool's name, because that is the
+ * name the person uses for it; the others say what kind of thing they are.
+ */
+const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "thinking" : card.kind === "output" ? "text" : card.name.length > 0 ? card.name : "tool");
 const kindTint = (card: CardEntry): ((text: string) => string) =>
   card.kind === "reasoning" ? tokens.reasoning : card.kind === "output" ? tokens.output : tokens.tool;
 
@@ -288,17 +292,25 @@ export class TranscriptView implements Component {
   private block(who: "you" | "carto", text: string, width: number, extra?: string): string[] {
     const tint = who === "you" ? tokens.person : tokens.agent;
     const label = who === "you" ? "you" : "carto";
+    const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
+    // The text is wrapped once, at the body's width, and a pin rides on the last
+    // line if there is room for it there. Wrapping it twice — narrower for the
+    // first line, wider for the rest — would move the column, which is worse.
     const body = Math.max(1, width - INSET - PREFIX_WIDTH);
-    const wrapped = wrapTextWithAnsi(text, body);
-    const indent = " ".repeat(PREFIX_WIDTH);
-    return wrapped.map((line, index) => {
-      if (index !== 0) return `${indent}${tokens.text(line)}`;
-      const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
-      // The marker rides at the end of the first line; the text gives it the room.
-      const room = Math.max(1, Math.max(1, width - INSET - PREFIX_WIDTH) - visibleWidth(marker));
-      const first = truncateToWidth(line, room, "…");
-      return `${tint(SPINE)} ${tint(tokens.bold(label.padEnd(LABEL_WIDTH)))}${tokens.text(first)}${marker}`;
-    });
+    const lines = wrapTextWithAnsi(text, body).map((line, index) =>
+      index === 0
+        ? `${tint(SPINE)} ${tint(tokens.bold(label.padEnd(LABEL_WIDTH)))}${tokens.text(line)}`
+        : `${" ".repeat(PREFIX_WIDTH)}${tokens.text(line)}`,
+    );
+    if (marker.length > 0) {
+      const room = Math.max(0, body - visibleWidth(wrapTextWithAnsi(text, body).at(-1) ?? ""));
+      if (room >= visibleWidth(marker) + 1) {
+        lines[lines.length - 1] = `${lines[lines.length - 1]}${marker}`;
+      } else {
+        lines.push(`${" ".repeat(PREFIX_WIDTH)}${marker.trimStart()}`);
+      }
+    }
+    return lines;
   }
 
   private wrapBody(card: CardEntry, width: number): string[] {
@@ -418,7 +430,7 @@ export class TranscriptView implements Component {
     this.ranges = [];
     this.blockRanges = [];
     if (total === 0) {
-      this.cacheLines = this.inset(this.emptyState(width));
+      this.cacheLines = this.inset(this.emptyState(width), width);
       this.cacheWidth = width;
       return this.cacheLines;
     }
@@ -443,7 +455,7 @@ export class TranscriptView implements Component {
         lines.push(...this.block("you", entry.text, width));
       } else if (entry.kind === "agent") {
         const start = lines.length;
-        const pin = entry.pinned !== undefined && entry.pinned !== null ? pinBadgeText(entry.pinned, "pin") : "";
+        const pin = entry.pinned === undefined ? "" : tokens.pin(`⊙ ${entry.pinned === "user" ? "you" : "agent"}`);
         lines.push(...this.block("carto", entry.text, width, pin.length > 0 ? pin : undefined));
         if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
       } else {
@@ -461,12 +473,16 @@ export class TranscriptView implements Component {
       lines.push(`  ${" ".repeat(PREFIX_WIDTH)}${tokens.faint(`· ${label}`)}`);
     }
     this.cacheWidth = width;
-    this.cacheLines = this.inset(lines);
+    this.cacheLines = this.inset(lines, width);
     return this.cacheLines;
   }
 
-  /** The body breathes: two cells of left margin, the same on every line. */
-  private inset(lines: string[]): string[] {
-    return lines.map((line) => (line.length === 0 ? line : `  ${line}`));
+  /**
+   * The body breathes: a left margin on every line, and the page's own colour
+   * run to the pane's right edge, so the transcript reads as a surface rather
+   * than as glyphs floating on whatever the terminal had.
+   */
+  private inset(lines: string[], width: number): string[] {
+    return lines.map((line) => canvasLine(line.length === 0 ? "" : `  ${line}`, width));
   }
 }

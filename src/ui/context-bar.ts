@@ -17,7 +17,7 @@
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { partTokens, rawPalette, tokens } from "./tokens.js";
+import { canvasLine, partTokens, rawPalette, tokens } from "./tokens.js";
 
 /** What the bar knows. The app mutates it in place and rebinds `session` at collapse. */
 export interface ContextBarState {
@@ -134,7 +134,7 @@ export class TokenBarView implements Component {
     const tint = serverLost ? tokens.faint : unknown ? tokens.muted : measured ? tokens.muted : tokens.faint;
     const right = tint(label);
     const gap = Math.max(1, width - barWidth - visibleWidth(right));
-    const line = truncateToWidth(`${cells.join("")}${" ".repeat(gap)}${right}`, width, "");
+    const line = canvasLine(truncateToWidth(`${cells.join("")}${" ".repeat(gap)}${right}`, width, ""), width);
     this.cacheLines = [line];
     this.cacheWidth = width;
     this.cacheKey = key;

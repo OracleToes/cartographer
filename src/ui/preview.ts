@@ -16,9 +16,12 @@ import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { Sidebar } from "./sidebar.js";
 import { TranscriptView } from "./transcript.js";
 import { ArchiveView } from "./archive-view.js";
+import { ContextView, type ContextViewData } from "./context-view.js";
 import { HelpPanel, type HelpExtra } from "./help-panel.js";
 import { Palette } from "./palette.js";
 import { tokens, visibleWidth } from "./tokens.js";
+import { sidebarWidth } from "./sidebar.js";
+import { emptyBrain } from "../domain/records.js";
 
 const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -122,14 +125,14 @@ export function previewTranscript(width = 110): string {
     parts: { system: 6_400, transcript: 4_200, toolWork: 1_900 },
   };
 
-  const mainWidth = width - 24;
+  const mainWidth = width - sidebarWidth;
   const headerLines = header.render(mainWidth);
-  const sidebarLines = sidebar.render(24);
+  const sidebarLines = sidebar.render(sidebarWidth);
   const transcriptLines = transcript.render(mainWidth);
-  // The header belongs to the working column, and the sidebar runs beside it
-  // from the very top: the pane is the height of the screen, not of the books.
-  const column = [...headerLines, ...transcriptLines];
-  const rows = beside(sidebarLines, 24, column, mainWidth);
+  // The bands, in the order the app stacks them: header, seam, working area,
+  // prompt, key bar, context bar. The sidebar runs beside all of them.
+  const column = [...headerLines, tokens.rule("─".repeat(mainWidth)), ...transcriptLines];
+  const rows = beside(sidebarLines, sidebarWidth, column, mainWidth);
   return [
     ...rows,
     frame(footer.render(width), width),
@@ -222,9 +225,10 @@ export function previewArchive(width = 110): string {
     parts: { system: 6_400, transcript: 1_800, toolWork: 900 },
   };
 
-  const sidebarLines = sidebar.render(24);
-  const archiveLines = [...header.render(width - 24), "", ...archive.render(width - 24)];
-  const rows = beside(sidebarLines, 24, archiveLines, width - 24);
+  const sidebarLines = sidebar.render(sidebarWidth);
+  const mainWidth = width - sidebarWidth;
+  const archiveLines = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...archive.render(mainWidth)];
+  const rows = beside(sidebarLines, sidebarWidth, archiveLines, mainWidth);
   const footer = new FooterView(() => [
     { key: "↑↓", label: "move" },
     { key: "p", label: "pin" },
@@ -232,6 +236,77 @@ export function previewArchive(width = 110): string {
     { key: "x", label: "delete for good" },
     { key: "^t", label: "context layer" },
   ]);
+  return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
+}
+
+/** The prompt, over a small but complete Brain: all three sections, real handles. */
+export function previewPrompt(width = 110): string {
+  const brain = emptyBrain();
+  brain.handles = {
+    counters: { A: 2, L: 1, C: 1 },
+    entries: [
+      { kind: "atlas", id: "a1", handle: "A1", timestamp: 0 },
+      { kind: "atlas", id: "a2", handle: "A2", timestamp: 1 },
+      { kind: "ledger", id: "l1", handle: "L1", timestamp: 2 },
+      { kind: "chat", id: "c1", handle: "C1", timestamp: 3 },
+    ],
+  };
+  brain.atlas.push(
+    { id: "a1", title: "The Brain is the persistent record", text: "The context is rebuilt from it at every collapse.", links: [], attachments: [{ kind: "file", path: "src/domain/brain.ts" }], createdAt: 0, updatedAt: 0 },
+    { id: "a2", title: "The context bar is the server's own capacity", text: "Not a budget: a picture.", links: [], attachments: [], createdAt: 1, updatedAt: 1 },
+  );
+  brain.ledger.push({ id: "l1", kind: "goal", text: "Rebuild the workspace UI in Posting's idiom", status: "open", answer: null, createdAt: 2, updatedAt: 2 });
+  brain.chat.push({ id: "c1", author: "agent", text: "The prompt view is the prefill now: head, body, tail.", createdAt: 3, updatedAt: 3 });
+  void 0;
+  const data: ContextViewData = {
+    brain,
+    systemPrompt: "You are Carto, the long-lived working attention on one project.\nPlain model text is not person-facing.",
+    projectionText: "Atlas\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z\n  The context is rebuilt from it at every collapse.\n  attach: src/domain/brain.ts\nA2 The context bar is the server's own capacity — 1970-01-01T00:00:00.001Z\n  Not a budget: a picture.\n\nLedger\nL1 [goal · open] Rebuild the workspace UI in Posting's idiom — 1970-01-01T00:00:00.002Z",
+    tools: [
+      { name: "chat", description: "Declare something person-facing. Plain model text is not Chat.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+      { name: "read", description: "Read a file at a handle, or a path after the handle.", parameters: { type: "object", properties: { path: { type: "string" } } } },
+    ],
+    transcriptMessages: [
+      { id: 2, role: "user", text: "the prompt view is the prefill now, not a rail of six parts" },
+      { id: 6, role: "assistant [chat]", text: "Both sections read in prompt order." },
+    ],
+    toolWorkItems: [
+      { id: "3-0", kind: "reasoning", text: "The rail was a table of contents over a view that is already ordered; the order is the thing to show." },
+      { id: "4-0", kind: "toolCall", name: "read", args: "path: src/ui/context-view.ts" },
+      { id: "5-0", kind: "toolResult", output: "export class ContextView implements Component, Focusable {" },
+    ],
+    stateBlockText: "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens\npending: none\nmarks: none\npinned: none\n</carto-state>",
+  };
+  const view = new ContextView();
+  view.setData(data);
+  const header = new HeaderView({
+    project: "cartographer",
+    modelLabel: "llama-swap/ByteShape",
+    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false } },
+    view: "context",
+    layer: "context",
+    running: false,
+    windowUnknown: false,
+  });
+  const sidebar = new Sidebar();
+  sidebar.setCounts({ chat: 1, contextTokens: 14_220, atlas: 2, ledger: 1, pinned: {}, marked: {}, stale: {}, staleTotal: 0, archive: 0, archivePinned: 0 });
+  sidebar.setActiveBook("context");
+  const footer = new FooterView(() => [
+    { key: "↑↓", label: "move" },
+    { key: "⏎", label: "fold" },
+    { key: "⇥", label: "raw" },
+    { key: "d", label: "mark delete" },
+    { key: "!", label: "apply now" },
+    { key: "c", label: "collapse" },
+    { key: "esc", label: "chat" },
+  ]);
+  const barState: ContextBarState = {
+    session: { state: { contextWindow: 32_768, lastReportedInput: 13_100, toolWorkAtLastReport: 0 } },
+    parts: { system: 7_200, transcript: 3_400, toolWork: 2_600 },
+  };
+  const mainWidth = width - sidebarWidth;
+  const column = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...view.render(mainWidth)];
+  const rows = beside(sidebar.render(sidebarWidth), sidebarWidth, column, mainWidth);
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
 }
 
@@ -256,7 +331,7 @@ export function previewPalette(width = 64): string {
   return frame(
     palette
       .render(width)
-      .map((line) => line.replace(/\x1b_pi:[a-z]+\x07/g, ""))
+      .map((line) => line.replace(/\x1b_pi:[a-z/]+\x07/g, ""))
       .map((line) => line.replace(/\x1b\[[0-9;]*m/g, (escape) => escape)),
     width,
   );
@@ -278,6 +353,7 @@ function beside(left: string[], leftWidth: number, right: string[], rightWidth: 
 /** Every preview, for `npm run ui` and for the tests. */
 export const previews = (width = 110): Record<string, string> => ({
   transcript: previewTranscript(width),
+  prompt: previewPrompt(width),
   archive: previewArchive(width),
   help: previewHelp(88),
   palette: previewPalette(64),
