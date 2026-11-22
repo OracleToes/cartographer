@@ -15,7 +15,8 @@
  *
  *   <carto-state>
  *   [EDIT MODE]
- *   context: ~12,410 / 32,768 tokens · the provider counted 9,841; tool work since +2,569
+ *   context: ~12,410 / 32,768 tokens · the provider counted 9,841 input, tool work since +2,569
+ *   context fill: ~37%
  *   space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
  *   since the rebuild:
  *     A3 · created
@@ -70,6 +71,8 @@ export interface StateBlockInput {
   contextWindow: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
+  /** Output of that response also occupies the context. */
+  lastReportedOutput?: number | undefined;
   /** Estimated tokens the system message and tool declarations occupy. */
   systemTokens: number;
   /** Estimated transcript tokens in the payload. */
@@ -145,18 +148,37 @@ const treeLabel = (root: string, projectRoot: string | undefined): string => {
   return rest === "" ? "." : rest;
 };
 
+/** The estimate that the block, the percentage and the collapse warning share. */
+export function estimatedContextTokens(input: StateBlockInput): number {
+  return input.lastReportedInput === undefined
+    ? input.systemTokens + input.transcriptTokens + input.toolWorkTokens
+    : input.lastReportedInput + (input.lastReportedOutput ?? 0) + input.toolWorkSince;
+}
+
+/** Estimated percentage of a known window; undefined while the window is unknown. */
+export function contextFillPercent(input: StateBlockInput): number | undefined {
+  return input.contextWindow > 0 ? estimatedContextTokens(input) / input.contextWindow * 100 : undefined;
+}
+
+/** The fill at which the block asks the agent to collapse. */
+export const COLLAPSE_WARNING_PERCENT = 75;
+
 export function renderStateBlock(input: StateBlockInput): string {
   const reported = input.lastReportedInput;
+  const output = input.lastReportedOutput ?? 0;
+  const estimated = estimatedContextTokens(input);
+  const percentage = contextFillPercent(input);
   // The provider's own count is the only number here that is not an estimate,
   // and a window nobody advertised is unknown rather than a made-up figure.
   const fullness =
     input.contextWindow <= 0
       ? reported === undefined
         ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} tokens · the window is unknown until the server advertises one`
-        : `context: ~${thousands(reported + input.toolWorkSince)} tokens · the provider counted ${thousands(reported)}, tool work since +${thousands(input.toolWorkSince)} · the window is unknown`
+        : `context: ~${thousands(estimated)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)} · the window is unknown`
       : reported === undefined
-        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
-        : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)}, tool work since +${thousands(input.toolWorkSince)}`;
+        ? `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
+        : `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)}`;
+  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= COLLAPSE_WARNING_PERCENT ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
@@ -188,7 +210,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   // thing the block renders, so the agent can point at what it is looking at.
   const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
-  return [STATE_BLOCK_OPEN, mode, fullness, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
+  return [STATE_BLOCK_OPEN, mode, fullness, ...percentageLine, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

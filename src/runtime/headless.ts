@@ -16,7 +16,10 @@
  * The only words the person sees are the agent's `chat` tool calls: plain
  * model text never reaches the person, and a turn with nothing to say ends
  * with nothing to print. When the agent asks to collapse (the collapse tool),
- * the driver performs the ceremony at once and says what happened.
+ * or the model's limits force one, the driver performs the ceremony at once,
+ * says what happened, carries any unanswered message of the person's into the
+ * rebuilt context, and the agent goes on by itself — until the bound on
+ * automatic collapse says the rebuild got nowhere, which it reports and stops.
  *
  * If `capacity` is given, the window is re-discovered after every settled run;
  * the active window follows the provider's catalog — the configured pin
@@ -27,6 +30,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
 
 import {
   closeLiveSession,
@@ -98,13 +102,23 @@ export async function applyCapacityRefresh(
   session.state.contextWindow = next;
 }
 
-async function runCollapse(session: LiveSession, options: HeadlessOptions, output: Writable, reason: string): Promise<LiveSession> {
+async function runCollapse(
+  session: LiveSession,
+  options: HeadlessOptions,
+  output: Writable,
+  reason: string,
+  automatic = false,
+): Promise<LiveSession> {
   const previousGeneration = session.generation;
-  const outcome = await collapseLiveSession(session, options, reason);
+  const outcome = await collapseLiveSession(session, options, reason, {}, { automatic });
   const swept = outcome.report.swept === undefined ? "" : `; swept ${outcome.report.swept}`;
   const archived = outcome.report.archived.length === 0 ? "" : `; archived ${outcome.report.archived.length}`;
   const dropped = outcome.report.dropped.length === 0 ? "" : `; dropped ${outcome.report.dropped.length} past grace`;
   writeLine(output, `context collapsed and rebuilt from the Brain (${previousGeneration} → ${outcome.report.generation}${swept}${archived}${dropped}).`);
+  if (automatic) {
+    const carried = outcome.carried === 0 ? "" : `; ${outcome.carried} unanswered message(s) carried over`;
+    writeLine(output, `(${reason}${carried}${outcome.resumed ? " — the agent goes on" : " — paused, so it waits"})`);
+  }
   return outcome.session;
 }
 
@@ -128,6 +142,69 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   // to type. Piped use stays non-terminal.
   const rl = createInterface({ input: options.input, terminal: inputIsTTY });
   let linesSeen = 0;
+
+  // Everything that touches the session runs one at a time: a line, and the
+  // collapse a run ended in. A line that arrives during a collapse waits in the
+  // reader and is the next thing the rebuilt agent is given.
+  let queue: Promise<unknown> = Promise.resolve();
+  const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = queue.then(work, work);
+    queue = run.catch(() => undefined);
+    return run;
+  };
+
+  /**
+   * Let the current chain of runs end, say what the agent said, and carry out
+   * the collapse it ended in — the agent's own, or one forced by the model's
+   * limits — then keep going with the run that collapse starts, until nothing
+   * more is asked or the bound on automatic collapse says stop.
+   */
+  const settle = async (): Promise<void> => {
+    for (;;) {
+      await waitForRunEnd(session);
+      // Silence is a real answer: an agent with nothing to say ends its turn
+      // without a chat call, and that needs no remark from the driver.
+      for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+      const verdict = session.reviewCollapseRequest();
+      if (verdict.kind === "none") break;
+      if (verdict.kind === "stop") {
+        writeLine(error, `(${verdict.explanation})`);
+        break;
+      }
+      try {
+        session = await runCollapse(session, options, output, verdict.reason, true);
+      } catch (err) {
+        writeLine(error, `(the collapse failed: ${err instanceof Error ? err.message : String(err)})`);
+        break;
+      }
+      await watchSession();
+    }
+    if (options.refreshCapacity === true) {
+      await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
+    }
+  };
+
+  // The agent also runs without a line: a timed rest wakes it. Watching the
+  // live run is how its chat is heard and its collapse is carried out then.
+  let watch: { stop(): Promise<unknown> } | undefined;
+  const watchSession = async (): Promise<void> => {
+    const previous = watch;
+    watch = undefined;
+    await previous?.stop().catch(() => undefined);
+    const mine = session;
+    const next = await mine.harness.watchDoc(LiveDoc, mine.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+    if (next === undefined) return;
+    watch = next;
+    next.start(async (call) => {
+      if (call.kind !== "value" || call.value.run !== undefined) return;
+      // Only an idle moment: a line in progress settles its own runs.
+      void exclusive(async () => {
+        if (mine === session) await settle();
+      }).catch((err: unknown) => writeLine(error, `(the run failed: ${err instanceof Error ? err.message : String(err)})`));
+    });
+  };
+  await watchSession();
+
   try {
     for await (const raw of rl) {
       linesSeen += 1;
@@ -145,45 +222,49 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
           writeLine(error, "(/pause, /pause on, or /pause off)");
           continue;
         }
-        writeLine(output, (await togglePause(session, to)).line);
+        // Not behind the lock: a pause must land while the agent is working.
+        try {
+          writeLine(output, (await togglePause(session, to)).line);
+        } catch (err) {
+          writeLine(error, `(the pause failed: ${err instanceof Error ? err.message : String(err)})`);
+        }
         continue;
       }
       if (line === "/collapse") {
-        session = await runCollapse(session, options, output, "person requested (/collapse)");
-        for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+        await exclusive(async () => {
+          session = await runCollapse(session, options, output, "person requested (/collapse)");
+          await watchSession();
+          for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+        });
         continue;
       }
 
-      // A line written while the agent is held in its stream lets go of that
-      // stream first (§9): the held reply ends here, and this line is the next
-      // thing the agent reads.
-      if (session.freeze.frozen()) {
-        session.freeze.abandon();
-        writeLine(output, "(the held reply ends here — your line is the next thing)");
-      }
-      try {
-        const submission = await submitInput(session, line);
-        const settled = await submission.wait(BACKGROUND_CONTEXT);
-        await waitForRunEnd(session);
-        if (settled.status !== "done") {
-          writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
+      await exclusive(async () => {
+        // A line written while the agent is held in its stream lets go of that
+        // stream first (§9): the held reply ends here, and this line is the next
+        // thing the agent reads.
+        if (session.freeze.frozen()) {
+          session.freeze.abandon();
+          writeLine(output, "(the held reply ends here — your line is the next thing)");
         }
-      } catch (err) {
-        writeLine(error, `(the run failed: ${err instanceof Error ? err.message : String(err)})`);
-      }
-      // Silence is a real answer: an agent with nothing to say ends its turn
-      // without a chat call, and that needs no remark from the driver.
-      for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
-
-      const reason = session.takeCollapseRequest();
-      if (reason !== null) {
-        session = await runCollapse(session, options, output, reason);
-      }
-      if (options.refreshCapacity === true) {
-        await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
-      }
+        try {
+          const submission = await submitInput(session, line);
+          const settled = await submission.wait(BACKGROUND_CONTEXT);
+          await waitForRunEnd(session);
+          // A run that ended because the context ran out is not "nothing left
+          // to do": the collapse that follows is the answer.
+          if (settled.status !== "done" && session.state.collapseRequested === null) {
+            writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
+          }
+        } catch (err) {
+          writeLine(error, `(the run failed: ${err instanceof Error ? err.message : String(err)})`);
+        }
+        await settle();
+      });
     }
   } finally {
+    await queue;
+    await watch?.stop().catch(() => undefined);
     await closeLiveSession(session);
   }
   if (linesSeen === 0 && !inputIsTTY) {

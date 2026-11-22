@@ -108,6 +108,10 @@ interface TuiState {
   sealed: TranscriptEntry[];
   inFlight: number;
   collapsing: boolean;
+  /** Why the agent stopped collapsing by itself; shown in the transcript until the person speaks. */
+  notes: string[];
+  /** Counts collapses, so a submission one withdrew does not report itself as a failure. */
+  collapseEpoch: number;
   sidebarVisible: boolean;
   overlayOpen: boolean;
   overlayHandle: OverlayHandle | undefined;
@@ -387,6 +391,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sealed: [],
     inFlight: 0,
     collapsing: false,
+    notes: [],
+    collapseEpoch: 0,
     sidebarVisible: true,
     overlayOpen: false,
     overlayHandle: undefined,
@@ -1411,6 +1417,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         JSON.stringify(stops),
         JSON.stringify(agent),
         state.pending.map((item) => item.text).join("\u0001"),
+        state.notes.join("\u0002"),
         String(Math.round(parts.systemTokens)),
         String(Math.round(parts.transcriptTokens)),
         String(Math.round(parts.toolWorkTokens)),
@@ -1419,7 +1426,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       ].join("|");
       if (sig !== state.sig) {
         state.sig = sig;
-        const live = [...person, ...cards, ...stops, ...agent];
+        const notes = state.notes.map((text, index) => ({
+          key: Number.MAX_SAFE_INTEGER - state.notes.length + index,
+          entry: { kind: "status", text, tone: "warn" } as TranscriptEntry,
+        }));
+        const live = [...person, ...cards, ...stops, ...agent, ...notes];
         live.sort((left, right) => left.key - right.key);
         transcript.setEntries(
           [...sealed, ...live.map((item) => item.entry)],
@@ -1480,15 +1491,56 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         });
       }
       hadLive = hasLive;
+      // The agent runs without a line from the person — a rest wakes it — so a
+      // collapse it asked for is carried out here, when its run has ended.
+      if (live.run === undefined && state.session.state.collapseRequested !== null) {
+        void serviceCollapseRequest().catch(() => undefined);
+      }
     });
   };
 
-  const runCollapse = async (reason: string) => {
-    if (state.collapsing) return;
+  // Submissions and collapses take turns. A message that arrives while the
+  // context is being rebuilt waits for the new session instead of landing in the
+  // one being closed, and is the next thing the rebuilt agent reads.
+  let admission: Promise<unknown> = Promise.resolve();
+  const admitting = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = admission.then(work, work);
+    admission = run.catch(() => undefined);
+    return run;
+  };
+
+  const runCollapse = (reason: string, automatic = false): Promise<void> => {
+    if (state.collapsing) return Promise.resolve();
     state.collapsing = true;
+    return admitting(() => collapseNow(reason, automatic));
+  };
+
+  /**
+   * Take the collapse the agent asked for, or the model's limits forced, and
+   * carry it out — or, when the last automatic collapse got nowhere, say so and
+   * stop. Called from every place a run can end, because a run can end with no
+   * line of the person's behind it.
+   */
+  const serviceCollapseRequest = async (): Promise<void> => {
+    if (state.collapsing || shutdownRequested) return;
+    const verdict = state.session.reviewCollapseRequest();
+    if (verdict.kind === "none") return;
+    if (verdict.kind === "stop") {
+      state.notes.push(verdict.explanation);
+      pushStatus("collapse stopped: it would only repeat itself — see the transcript");
+      await rebuildTranscript();
+      tui.requestRender();
+      return;
+    }
+    await runCollapse(verdict.reason, true);
+  };
+
+  const collapseNow = async (reason: string, automatic: boolean) => {
     const previous = state.session.generation;
     pushStatus(`collapsing context at ${suffix(previous)}: ${reason}…`);
-    if (state.pending.length > 0) {
+    // The person's collapse drops what is queued. An automatic one carries it:
+    // the queue is read from the store, and what has not landed is re-sent.
+    if (!automatic && state.pending.length > 0) {
       pushStatus(`${state.pending.length} queued message(s) dropped by the collapse`);
       state.pending = [];
     }
@@ -1498,8 +1550,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.liveWatch = undefined;
     try {
       // A queued edit can be waiting for a run boundary. Interrupt first so
-      // collapse does not deadlock waiting for that edit to land.
-      await interruptRun(state.session);
+      // collapse does not deadlock waiting for that edit to land. An automatic
+      // collapse comes after the run ended, and must read the queue before
+      // anything withdraws it.
+      if (!automatic) await interruptRun(state.session);
       await contextActionQueue;
       // Drain any refresh already underway, then take a fresh landed view after
       // the run and queued edits have settled. Delayed watcher callbacks cannot
@@ -1507,7 +1561,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await rebuildTranscript(true);
       transcript.setLive([]);
       oldTranscript = transcript.snapshot();
-      const outcome = await collapseLiveSession(state.session, options, reason);
+      const outcome = await collapseLiveSession(state.session, options, reason, {}, { automatic });
+      state.collapseEpoch += 1;
       state.session = outcome.session;
       state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
       headerState.session = outcome.session;
@@ -1515,6 +1570,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       bindTelemetry(outcome.session);
       void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
+      if (automatic) {
+        const carried = outcome.carried === 0 ? "" : ` · ${outcome.carried} queued message(s) carried over`;
+        pushStatus(`${reason}${carried}${outcome.resumed ? " · the agent goes on" : " · paused, so it waits"}`);
+      }
       // What the archive did is the person's business, so it is said. Nothing
       // here reaches the agent: the archive is not in any of its views (§3.3).
       if (outcome.report.restored.length > 0) pushStatus(`${outcome.report.restored.length} item(s) came back out of the archive`);
@@ -1523,6 +1582,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await refreshSidebar();
       await refreshArchive();
     } catch (error) {
+      state.collapseEpoch += 1;
       pushStatus(`collapse failed: ${errorText(error)}`);
       // The ceremony closes the old session before touching generation files.
       // Reopen through journal recovery rather than continuing with a closed
@@ -1551,6 +1611,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       headerState.running = state.running;
       await rebuildTranscript();
       tui.requestRender();
+      // A run that started during the rebuild may already have asked again.
+      if (state.session.state.collapseRequested !== null) void serviceCollapseRequest().catch(() => undefined);
     }
   };
 
@@ -1567,27 +1629,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const runSubmission = async (message: string) => {
-    if (state.collapsing) {
-      pushStatus("collapsing — hold on");
-      await rebuildTranscript();
-      return;
-    }
+    // A collapse in progress is no reason to refuse the message: it is admitted
+    // as soon as the new session exists.
+    const epoch = state.collapseEpoch;
+    state.notes = [];
     state.inFlight += 1;
     state.running = true;
     headerState.running = true;
     tui.requestRender();
     try {
-      if (state.sendMode === "now") await interruptRun(state.session);
       const whenBusy = state.sendMode === "after run" ? "followUp" : "steer";
-      const submission = await submitInput(state.session, message, whenBusy);
+      const submission = await admitting(async () => {
+        if (state.sendMode === "now") await interruptRun(state.session);
+        return submitInput(state.session, message, whenBusy);
+      });
       await rebuildTranscript();
       const settled = await submission.wait(BACKGROUND_CONTEXT);
       await waitForRunEnd(state.session);
-      if (settled.status !== "done") {
+      // A collapse that withdrew or outlived this run says what happened itself.
+      if (settled.status !== "done" && epoch === state.collapseEpoch && !state.collapsing && state.session.state.collapseRequested === null) {
         pushStatus(`the run ended with status "${settled.status}"`);
       }
     } catch (error) {
-      pushStatus(`the run failed: ${errorText(error)}`);
+      if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
     }
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
@@ -1596,8 +1660,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // read below would raise against a harness that is already gone.
     if (shutdownRequested) return;
     await rebuildTranscript();
-    const reason = state.session.takeCollapseRequest();
-    if (reason !== null) await runCollapse(reason);
+    await serviceCollapseRequest();
     // A timed sleep no longer needs anything here: the rest is a durable task
     // (§10), so the next turn begins from the store, even after a restart, and
     // the watch on the live generation shows it when it happens.

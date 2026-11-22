@@ -16,17 +16,21 @@ import { statSync } from "node:fs";
 import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, runEndTask, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
+import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai/utils/overflow";
 
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain } from "../domain/records.js";
 import {
+  COLLAPSE_WARNING_PERCENT,
   STATE_BLOCK_MARKER,
   appendStateBlock,
+  contextFillPercent,
   estimateSerialized,
   renderStateBlock,
   splitContextMessages,
   stripStateBlocks,
   type MarkLine,
+  type StateBlockInput,
 } from "../domain/state-block.js";
 import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
@@ -52,7 +56,7 @@ export function cartoInstructions(person: string): string {
     "You do not see the world change. Nothing tells you that a file was edited or a record was moved while you were away, so read before you write about a file, and when the state block calls something stale, believe it: the file moved on after your note was written, or after you read it. A pinned file is the exception and the reason to pin one: it is read again at every collapse, so the head holds the file as it now stands, where a pinned reading of it holds the bytes of that reading until it is called stale.",
     "Every request ends with a state block between `<carto-state>` and `</carto-state>`: the mode, how full the context is, what was written since the rebuild, what has gone stale, the project tree, the pins, the marks. It arrives as a turn because a turn is how you start. There is no nudge and no “you are not done” — you read the state and act on it, or you stop.",
     `A turn ends when your reply carries no tool call. If there is work, do it. If there is nothing to do and nothing to say, \`sleep\` — that is the honest end of a turn and the only way you stop. Do not greet, do not announce that you are idle, and do not answer a state block as though ${person} had spoken.`,
-    `The context may collapse at any time, yours or ${person}'s, and it is rebuilt from the Brain alone. Nothing outside the Brain survives it. Collapse when it is appropriate: when a piece of work is finished and the Brain holds its result, or before a long piece of work, after pinning what you will need, so you begin inside a context built for the problem rather than one you accumulated on the way to it.`,
+    `The context may collapse at any time, yours or ${person}'s, and it is rebuilt from the Brain alone. Nothing outside the Brain survives it. Collapse when it is appropriate: when a piece of work is finished and the Brain holds its result, or before a long piece of work, after pinning what you will need, so you begin inside a context built for the problem rather than one you accumulated on the way to it. When the state block says [COLLAPSE NEEDED], prepare the Brain for continuation and collapse before the context fills.`,
     "A step is small against the plan and not against the file: one function, one chunk, or the least scaffolding the next step needs, so each can be run and judged. Nothing refuses a large change; the plan is what lets you choose its size.",
     `Carto is in edit mode or read only mode. Edit mode is the default and you change the project as you work. In read only mode ${person} has decided you make no destructive change: \`create\` and \`edit\` refuse, and the state block says so. There is nothing to propose, queue, or ask permission for — read, answer, and say what you would change when you are asked.`,
     "`.brain` holds Carto's own storage. You never read, list, or write it and no tool will. Whatever you let go of — swept at a collapse, or deleted — is gone for good, and nothing you can reach will bring it back.",
@@ -73,10 +77,42 @@ export interface LiveSessionState extends ToolSession, ModelTelemetry {
   paused: boolean;
   lastReportedInput: number | undefined;
   lastReportedOutput?: number | undefined;
+  /**
+   * The most one response was meant to write: pi's `maxTokens` for the model,
+   * before any clamping to the context. 0 when it is not known. A `length`
+   * stop below it may be the context talking; one at it is an ordinary limit.
+   */
+  desiredMaxOutput: number;
+  /** What this generation has done; the bound on automatic collapse is judged on it. */
+  work: GenerationWork;
+  /**
+   * This generation was itself born of an automatic collapse. If it ends in
+   * another collapse request having done no work, collapsing again would only
+   * repeat itself, so the host stops and says so instead.
+   */
+  rebuiltAutomatically: boolean;
   /** Tool-work estimate as of the last provider report. */
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
   toolWorkAtLastRequest: number;
+}
+
+/** What one generation has done, counted from the hooks, for the bound on automatic collapse. */
+export interface GenerationWork {
+  /** Requests sent. */
+  requests: number;
+  /** Fill of the first request, in percent; undefined while the window is unknown. */
+  startFill: number | undefined;
+  /** Responses that were steps of work: a stop or tool use that was not just the collapse call. */
+  steps: number;
+}
+
+export const newGenerationWork = (): GenerationWork => ({ requests: 0, startFill: undefined, steps: 0 });
+
+/** Whether a generation that asks to collapse again has done anything the last collapse made room for. */
+export function generationProgressed(work: GenerationWork): boolean {
+  if (work.steps === 0) return false;
+  return !(work.startFill !== undefined && work.startFill >= COLLAPSE_WARNING_PERCENT);
 }
 
 export interface CartoExtensionOptions {
@@ -204,6 +240,7 @@ export function staleHandles(brain: CartoBrain, root: string): string[] {
 export async function renderLiveStateBlock(
   options: CartoExtensionOptions,
   visibleMessages: readonly import("../domain/state-block.js").MessageLike[],
+  observe?: (input: StateBlockInput) => void,
 ): Promise<string> {
   const brain = await options.brain.read();
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
@@ -266,10 +303,11 @@ export async function renderLiveStateBlock(
   collectMarks("atlas", brain.atlas);
   collectMarks("ledger", brain.ledger);
   collectMarks("chat", brain.chat);
-  return renderStateBlock({
+  const input: StateBlockInput = {
     person: options.session.person,
     contextWindow: options.session.contextWindow,
     lastReportedInput: options.session.lastReportedInput,
+    lastReportedOutput: options.session.lastReportedOutput,
     systemTokens,
     transcriptTokens,
     toolWorkTokens,
@@ -290,7 +328,9 @@ export async function renderLiveStateBlock(
     mode: options.session.readOnly ? "read only" : "edit",
     projectRoot: options.root,
     tree,
-  });
+  };
+  observe?.(input);
+  return renderStateBlock(input);
 }
 
 /**
@@ -342,7 +382,11 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       hook(GenerationTask, {
         beforeRequest: async (request) => {
           const visible = stripStateBlocks(request.messages);
-          const block = await renderLiveStateBlock(options, visible);
+          const block = await renderLiveStateBlock(options, visible, (input) => {
+            const work = options.session.work;
+            if (work.requests === 0) work.startFill = contextFillPercent(input);
+            work.requests += 1;
+          });
           return { messages: asPiMessages(appendStateBlock(visible, block, now())) };
         },
         afterResponse: (message) => {
@@ -355,8 +399,32 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             options.session.toolWorkAtLastReport = options.session.toolWorkAtLastRequest + splitContextMessages([message]).toolWorkTokens;
           }
           options.session.onTelemetry?.();
+          const session = options.session;
+          const worked = (message.stopReason === "stop" || message.stopReason === "toolUse")
+            && !message.content.some((part) => part.type === "toolCall" && part.name === "collapse");
+          if (worked) session.work.steps += 1;
+          // pi never retries an overflow with compaction off, and it fails the
+          // run before `onYield`. The provider's own error is the signal, so the
+          // collapse is asked for here, where the failure is still seen.
+          if (isContextOverflow(message, session.contextWindow > 0 ? session.contextWindow : undefined)) {
+            session.collapseRequested ??= `the context overflowed${message.errorMessage === undefined ? "" : `: ${message.errorMessage}`}`;
+          }
         },
-        onYield: () => ({ continue: STATE_BLOCK_MARKER }),
+        onYield: (message) => {
+          const session = options.session;
+          // A collapse already asked for ends the run; the host rebuilds and resumes.
+          if (session.collapseRequested !== null) return undefined;
+          // A `length` stop below the output limit pi meant to allow is the one
+          // pi says may be context pressure: one collapse is the bounded retry,
+          // and the host stops if the rebuilt context does no better. A stop at
+          // the limit is ordinary — the model simply wrote that much — and goes
+          // on as any answer does.
+          if (message.stopReason === "length" && isRecoverableLength(message, session.desiredMaxOutput)) {
+            session.collapseRequested = `a response stopped at its length limit with room left in its output (${message.usage.output} of ${session.desiredMaxOutput} tokens)`;
+            return undefined;
+          }
+          return { continue: STATE_BLOCK_MARKER };
+        },
         afterRun: async (run, api, context) => {
           if (run.reason !== "terminate") return;
           const answer = (await api.entry(run.answer, context))?.model?.[0];

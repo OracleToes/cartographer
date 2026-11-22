@@ -260,10 +260,38 @@ about the project, the agent pins what it needs to know, arranges its context so
 nothing in it is a distraction, collapses, and then begins — so it works inside a
 context built for the problem rather than one it accumulated on the way there.
 
-Nothing enforces this, and the spec has no trigger, threshold, or counter for it.
-It is a thing the prompt asks for and the person shares: either side may collapse
-at any moment, and knowing that is what keeps the agent's Brain worth rebuilding
-from.
+Either side may collapse at any moment. At an estimated 75% context fill, the
+state block warns the agent to prepare the Brain and collapse before it runs out
+of room. The percentage is an estimate, not a guarantee of available output.
+
+**The agent keeps itself small, and nobody un-sticks it.** The agent is long
+running, so a collapse it asks for, or one the model's limits force, is carried
+out and the agent goes on by itself: the context is rebuilt from the Brain and
+the new generation starts on a state block, with no message from the person.
+This holds for every host and for a run that nothing of the person's started,
+such as a timed rest waking.
+
+- **The warning.** At an estimated 75% of a known window the state block says
+  `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
+  you need to continue to the Brain, mark what is obsolete, then collapse. An
+  unknown window is reported as unknown; no percentage is invented.
+- **Limits are the other trigger.** Carto uses the signals pi already provides
+  and adds no threshold of its own. A recognised provider overflow error, and a
+  `length` stop that pi's own check calls recoverable — the response ended below
+  the output limit that was intended, so the cause may be the context — ask for
+  one collapse. A `length` stop is not proof the context is full; a response that
+  ended at the intended limit is an ordinary stop and continues as any answer.
+- **Bounded.** A generation that was itself rebuilt automatically and then asks
+  to collapse again having done no work, or having started already at the warning
+  fill, is not collapsed a third time. The host says plainly that the rebuild got
+  nowhere (the head may be too large for the window) and waits for the person.
+- **Nothing the person said is lost.** Messages queued when the collapse runs,
+  and a message whose run the model's limit killed before it was answered, are
+  carried into the new generation and are what it starts on. A message sent while
+  the rebuild is under way waits for the new session. A paused agent is not
+  restarted, but the person's own messages are still delivered.
+- **The cost is accepted.** A collapse forced by a limit loses whatever the agent
+  had not written to the Brain. Nothing removes unmarked Brain records.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -364,8 +392,10 @@ listed by type. They appear where they actually are.
 The last thing in the prefill is the **state block**. It is the agent's
 dashboard about its Brain and the project, and it reports:
 
-- **Context fullness** — the server's own count for the last request, plus what
-  tool calls have added since.
+- **Context fullness** — the server's input and output count for the last
+  response, plus estimated tool work added since. When the window is known,
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
+  unknown, do not invent a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
 - **Pending changes** — one line per Brain write since the last collapse, named

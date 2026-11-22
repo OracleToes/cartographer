@@ -42,7 +42,9 @@ test("the block carries the confirmed contents and the delimiters", () => {
   const block = renderStateBlock(input());
   assert.match(block, /^<carto-state>\n/);
   assert.match(block, /\n<\/carto-state>$/);
-  assert.match(block, /context: ~12,410 \/ 32,768 tokens · the provider counted 9,841, tool work since \+2,569/);
+  assert.match(block, /context: ~12,410 \/ 32,768 tokens · the provider counted 9,841 input, tool work since \+2,569/);
+  assert.match(block, /context fill: ~37%/);
+  assert.doesNotMatch(block, /\[COLLAPSE NEEDED\]/);
   assert.match(block, /space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   // A pending line adds the write; the handle's letter already says the book.
   assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to OracleToes/);
@@ -79,12 +81,26 @@ test("empty pending, marks, and stale say none; missing provider report is expli
 
 test("an unknown window renders as unknown, never as a number; a pin or advertisement renders normally", () => {
   const unknown = renderStateBlock(input({ contextWindow: 0 }));
-  assert.match(unknown, /context: ~12,410 tokens · the provider counted 9,841, tool work since \+2,569 · the window is unknown/);
+  assert.match(unknown, /context: ~12,410 tokens · the provider counted 9,841 input, tool work since \+2,569 · the window is unknown/);
+  assert.doesNotMatch(unknown, /context fill:|\[COLLAPSE NEEDED\]/);
   assert.doesNotMatch(unknown, /32,768|0 tokens \//);
   const unknownUnreported = renderStateBlock(input({ contextWindow: 0, lastReportedInput: undefined }));
   assert.match(unknownUnreported, /context: ~[\d,]+ tokens · the window is unknown until the server advertises one/);
   const known = renderStateBlock(input({ contextWindow: 131_072 }));
   assert.match(known, /context: ~12,410 \/ 131,072 tokens/);
+});
+
+test("fullness warns at 75 percent, including the last response's output", () => {
+  const base = { contextWindow: 1000, lastReportedInput: 700, toolWorkSince: 25 };
+  const below = renderStateBlock(input({ ...base, lastReportedOutput: 24 }));
+  assert.match(below, /context fill: ~74%/);
+  assert.doesNotMatch(below, /\[COLLAPSE NEEDED\]/);
+  const warning = renderStateBlock(input({ ...base, lastReportedOutput: 25 }));
+  assert.match(warning, /context: ~750 \/ 1,000 tokens · the provider counted 700 input, 25 output/);
+  assert.match(warning, /context fill: ~75% · \[COLLAPSE NEEDED\]/);
+  assert.match(warning, /Write down what you need to continue/);
+  const estimated = renderStateBlock(input({ contextWindow: 1000, lastReportedInput: undefined, systemTokens: 250, transcriptTokens: 250, toolWorkTokens: 250 }));
+  assert.match(estimated, /context fill: ~75% · \[COLLAPSE NEEDED\]/);
 });
 
 test("marker messages are dropped from payloads; everything else survives", () => {

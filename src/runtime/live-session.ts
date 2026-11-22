@@ -20,12 +20,14 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import {
   createRegistry,
   Harness,
+  InboxDoc,
   LiveDoc,
   type Conversation,
   type HarnessOptions,
   type ModelRef,
   type Cursor,
   type TaskId,
+  type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -33,7 +35,7 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
 import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
-import { createCartoExtension, cartoInstructions, type LiveSessionState } from "./carto-extension.js";
+import { createCartoExtension, cartoInstructions, generationProgressed, newGenerationWork, type LiveSessionState } from "./carto-extension.js";
 import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
 import {
@@ -51,7 +53,7 @@ import { writeSnapshot } from "./projection-files.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
-import { splitContextMessages } from "../domain/state-block.js";
+import { STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 
 export interface LiveSessionOptions {
   /**
@@ -92,6 +94,25 @@ export interface LiveSession {
   readonly freeze: StreamFreeze;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
+  /**
+   * Take the requested collapse and judge it: nothing was asked, or collapse
+   * (the host passes the verdict to `collapseLiveSession`), or stop and explain
+   * because collapsing again would only repeat the last one.
+   */
+  reviewCollapseRequest(): CollapseVerdict;
+}
+
+/** What a requested collapse comes to once the bound on automatic collapse has judged it. */
+export type CollapseVerdict =
+  | { readonly kind: "none" }
+  | { readonly kind: "collapse"; readonly reason: string }
+  | { readonly kind: "stop"; readonly reason: string; readonly explanation: string };
+
+/** The words a host shows when it declines to collapse a second time in a row. */
+export function stalledCollapseExplanation(reason: string): string {
+  return `Collapse stopped: the context was rebuilt from the Brain, then ended again (${reason}) before the agent got any work done, so another collapse would only repeat that. ` +
+    "The Brain's head may be too large for the window, or the model cannot answer in what is left. " +
+    "Mark records for archive or deletion, unpin what is not needed, or raise the context window, then send a message or collapse by hand.";
 }
 
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
@@ -132,6 +153,9 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     readOnly: false,
     generation,
     lastReportedInput: undefined,
+    desiredMaxOutput: options.models.getModel(modelRef.provider, modelRef.modelId)?.maxTokens ?? 0,
+    work: newGenerationWork(),
+    rebuiltAutomatically: false,
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
   };
@@ -205,6 +229,17 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         state.collapseRequested = null;
         return reason;
       },
+      reviewCollapseRequest() {
+        const reason = state.collapseRequested;
+        state.collapseRequested = null;
+        if (reason === null) return { kind: "none" };
+        // A generation that was itself rebuilt automatically and did nothing
+        // before asking again is the loop this bound exists to break.
+        if (state.rebuiltAutomatically && !generationProgressed(state.work)) {
+          return { kind: "stop", reason, explanation: stalledCollapseExplanation(reason) };
+        }
+        return { kind: "collapse", reason };
+      },
     };
     // Only restores already committed by a collapse are retried here. Ordinary
     // archive marks still wait for collapse. An active run can defer recovery;
@@ -251,7 +286,15 @@ export async function waitForRunEnd(session: LiveSession): Promise<void> {
 }
 
 /** Submit a person message; the submission settles when its run answers. */
-export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
+export async function submitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp" = "followUp") {
+  // The person has spoken: whatever the agent was caught in, this is a new
+  // direction, so a collapse after it is not judged against the stall before it.
+  session.state.rebuiltAutomatically = false;
+  return admitInput(session, text, whenBusy);
+}
+
+/** Admit an input without treating it as the person's new word; the one path every input takes. */
+async function admitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp") {
   // Admit the message and invalidate the rest in one commit. Whichever of a
   // wake or this message reaches the session line first wins; a crash cannot
   // leave an admitted message alongside an eligible old wake.
@@ -592,6 +635,54 @@ export interface CollapseOutcome {
   readonly report: CollapseReport;
   /** Why the collapse happened: the agent's reason, or the person's act. */
   readonly reason: string;
+  /** Person messages carried into the new generation instead of being lost with the old store. */
+  readonly carried: number;
+  /** The new generation was started on its own: the carried messages, or a state block. */
+  readonly resumed: boolean;
+}
+
+/** How a collapse the agent or the model's limits asked for carries on afterwards. */
+export interface CollapseFollow {
+  /**
+   * The collapse was not the person's act: the person's messages that never
+   * got an answer go with it into the new generation, and the new generation
+   * starts on its own, so nobody has to un-stick the agent.
+   */
+  readonly automatic?: boolean;
+}
+
+/** The text of a user input, for the places that need to show or compare it. */
+const inputText = (content: UserInput): string =>
+  typeof content === "string"
+    ? content
+    : content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("");
+
+/**
+ * The person's messages a collapse would otherwise lose: those still queued in
+ * the old store, and those of a run that failed — pi settles them unanswered and
+ * the sweep archives them, so the rebuilt agent would never see what it was asked.
+ */
+async function unansweredInputs(session: LiveSession): Promise<Array<{ content: UserInput; whenBusy: "steer" | "followUp" }>> {
+  const carried: Array<{ content: UserInput; whenBusy: "steer" | "followUp" }> = [];
+  const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+  const failure = live?.runFailure;
+  if (failure !== undefined && failure.reason === "model_error") {
+    const view = await session.conversation.context(BACKGROUND_CONTEXT);
+    for (const id of failure.inputs) {
+      const submission = await session.harness.submission(id, BACKGROUND_CONTEXT);
+      const record = submission === undefined ? undefined : await submission.status(BACKGROUND_CONTEXT);
+      if (record === undefined || record.type !== "input" || record.entry === undefined) continue;
+      const message = view.entries.find((entry) => entry.id === record.entry)?.model?.[0];
+      if (message?.role !== "user" || inputText(message.content).trim() === STATE_BLOCK_MARKER) continue;
+      carried.push({ content: message.content, whenBusy: "followUp" });
+    }
+  }
+  const inbox = await session.harness.snapshot(InboxDoc, session.conversation.id, BACKGROUND_CONTEXT);
+  for (const item of inbox?.items ?? []) {
+    if (item.mode === "write") continue;
+    carried.push({ content: item.content as unknown as UserInput, whenBusy: item.mode });
+  }
+  return carried;
 }
 
 /**
@@ -601,14 +692,26 @@ export interface CollapseOutcome {
  * archive's expired items dropped, VACUUM — and reopen on the new generation.
  * The person's path passes any reason (or none); no boundary, no warning. The
  * caller shows the plain report afterwards.
+ *
+ * An automatic collapse (the agent's, or one the model's limits forced) goes on
+ * by itself: the person's unanswered messages are carried into the new
+ * generation, and it starts on a state block when there are none. What the
+ * agent had not written to the Brain is gone, as the person agreed.
  */
 export async function collapseLiveSession(
   session: LiveSession,
   options: LiveSessionOptions,
   reason: string,
   ceremony: CollapseOptions = {},
+  follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
-  await interruptRun(session);
+  const automatic = follow.automatic === true;
+  // Read before anything is withdrawn: aborting settles queued inputs, and the
+  // sweep removes the store that holds the rest.
+  const carry = automatic ? await unansweredInputs(session) : [];
+  const paused = session.state.paused;
+  if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT);
+  else await interruptRun(session);
   await closeLiveSession(session);
   // The Brain moves the marked records itself; what the new generation's frozen
   // prefill is built from is the Brain as it stands after that move (§3.3).
@@ -618,6 +721,14 @@ export async function collapseLiveSession(
   const next = await openLiveSession(options);
   // Opening retries committed ephemeral restores and acknowledges each one
   // only after placement. Do not submit the report's items a second time.
-  return { session: next, report, reason };
+  if (!automatic) return { session: next, report, reason, carried: 0, resumed: false };
+  next.state.rebuiltAutomatically = true;
+  // A pause is the person's, and it outlives a collapse: nothing starts of its own.
+  next.state.paused = paused;
+  // The person's own words are never held back by a pause, which only stops
+  // the agent starting on its own; a state block is that, so it waits.
+  if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
+  for (const input of carry) await admitInput(next, input.content, input.whenBusy);
+  return { session: next, report, reason, carried: carry.length, resumed: carry.length > 0 || !paused };
 }
 
