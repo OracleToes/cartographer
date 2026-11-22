@@ -29,7 +29,6 @@ import {
   collapseLiveSession,
   openLiveSession,
   readTreeNext,
-  restThenResume,
   submitInput,
   type LiveSession,
   type LiveSessionOptions,
@@ -159,8 +158,6 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       // `tree` ended the turn to read the tree it just set (§6.3): start that
       // turn now, then settle into whatever the rest of the run asks for.
       await readTreeNext(session);
-      // A timed sleep: the agent rests, then starts again on its own (§10).
-      await restThenResume(session);
       if (options.refreshCapacity === true) {
         await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
       }

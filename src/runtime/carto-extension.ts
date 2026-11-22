@@ -31,6 +31,7 @@ import {
 import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
 import { lexicalProjectPath } from "./workspace.js";
+import { SleepTask } from "./sleep-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 
@@ -62,10 +63,6 @@ export interface LiveSessionState extends ToolSession {
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
   toolWorkAtLastRequest: number;
-  /** Set by a timed `sleep`: the rest the host is to wait out (§10). */
-  sleepSeconds: number | undefined;
-  /** Set when the person's message ended a rest early, so the host starts no run of its own. */
-  restEndedByPerson: boolean;
 }
 
 export interface CartoExtensionOptions {
@@ -302,6 +299,9 @@ export function createCartoExtension(options: CartoExtensionOptions) {
   const now = () => options.now?.() ?? Date.now();
   return defineExtension({
     name: "carto",
+    // A rest is durable, so its task is part of what this extension installs;
+    // `sleep` creates one and the harness runs it (§10).
+    tasks: [SleepTask],
     sections: [
       /**
        * The frozen projection for this generation: written once at creation,

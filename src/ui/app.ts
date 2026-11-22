@@ -47,7 +47,6 @@ import {
   openLiveSession,
   sessionTranscript,
   readTreeNext,
-  restThenResume,
   submitInput,
   type LiveSession,
   type LiveSessionOptions,
@@ -1353,18 +1352,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         tui.requestRender();
       }
     }
-    // A timed sleep: the agent rests, then starts again on its own (§10).
-    state.running = true;
-    headerState.running = true;
-    tui.requestRender();
-    try {
-      await restThenResume(state.session);
-    } finally {
-      state.running = false;
-      headerState.running = false;
-      await rebuildTranscript();
-      tui.requestRender();
-    }
+    // A timed sleep no longer needs anything here: the rest is a durable task
+    // (§10), so the next turn begins from the store, even after a restart, and
+    // the watch on the live generation shows it when it happens.
     if (options.refreshCapacity === true) await refreshAdvertisedWindow();
     await refreshSidebar();
     tui.requestRender();

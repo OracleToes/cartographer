@@ -198,6 +198,19 @@ the call's task (`sleepUntil`), so the time is in the store, not in a timer.
 The host's resume path is the one it already has — the state block as the next
 turn (§5.7) — so a woken rest and a resumed one are the same event.
 
+**Status: done.** The wait is a durable task of the conversation
+(`carto.sleep`): `sleep` creates it, it commits a real sleep on itself, and its
+wake admits the state block as the next turn. It belongs to the conversation and
+not to the run, so the agent really rests — the conversation is free, and the
+person's message ends the rest and gets its own turn instead of queueing behind
+a three-minute wait.
+
+Two things were tried and are wrong, recorded so they are not tried again:
+a tool cannot sleep its own task (a tool's `api.commit` runs the change and then
+returns `undefined` to the task, so the sleep is never stored), and an `afterRun`
+task is always a child of the run (the generation waits on it, so the
+conversation stays busy and the person's message queues).
+
 **Test.** A rest started before a reopen still ends, and the agent starts again
 from the state block.
 

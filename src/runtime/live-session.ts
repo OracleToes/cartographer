@@ -44,6 +44,12 @@ import {
 import { writeSnapshot } from "./projection-files.js";
 
 export interface LiveSessionOptions {
+  /**
+   * How the harness arms its timers. Default `setTimeout`; a test passes fake
+   * timers so a durable rest can be woken without waiting the real seconds out,
+   * which is the only way to prove the wait lives in the store (§10).
+   */
+  setTimer?: (callback: () => void, delayMs: number) => () => void;
   /** Absolute project root. */
   root: string;
   /** The open Brain. The session reads and applies through it; the caller owns its lifecycle. */
@@ -68,8 +74,6 @@ export interface LiveSession {
   readonly state: LiveSessionState;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
-  /** Bring a timed sleep's wait forward (a host shutting down, or a delivered message). */
-  endRest: (() => void) | undefined;
   /**
    * Take the `tree` tool's request to start the next turn at once, so the agent
    * reads the tree it just set (§6.3). Cleared when read, like a collapse.
@@ -110,9 +114,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
-    sleepSeconds: undefined,
     treeReadNext: false,
-    restEndedByPerson: false,
     readOnly: false,
     generation,
     lastReportedInput: undefined,
@@ -136,6 +138,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       models: options.models,
       registry,
       now,
+      ...(options.setTimer === undefined ? {} : { setTimer: options.setTimer }),
       // The environment the built-in bash runs through: one per conversation,
       // cwd at the project root. No policy of ours is attached to it.
       env: () => new NodeExecutionEnv({ cwd: root }),
@@ -173,7 +176,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         state.treeReadNext = false;
         return wanted;
       },
-      endRest: undefined,
     };
   } catch (error) {
     if (harness !== undefined) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
@@ -184,64 +186,34 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 
 /** Submit a person message; the submission settles when the run ends (including any continuations). */
 export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
-  // A message ends a rest early (§10); the message starts its own run.
-  session.state.restEndedByPerson = true;
-  session.endRest?.();
+  // A message from the person ends a rest early (§10) and starts its own turn.
+  // The rest is told, so when its time does come it starts nothing of its own:
+  // one message, one turn.
   return session.conversation.submit({ type: "input", content: text, whenBusy }, BACKGROUND_CONTEXT);
 }
 
 /**
- * Start the next run after a timed `sleep` (§10).
+ * Start the next turn with the state block, as the state asks for one.
  *
- * The agent rests, then starts again by receiving the state block, exactly as
- * it would after any turn that carried no tool call. The submitted message is
- * the block's own marker: `beforeRequest` replaces it with the freshly
- * rendered block, so what starts the run is the state, not a word from the
- * person.
+ * The submitted message is the block's own marker: `beforeRequest` replaces it
+ * with the freshly rendered block, so what starts the run is the state, not a
+ * word from the person. `tree` uses this when it ends its turn to read the tree
+ * it just set (§6.3); a woken rest reaches the same place through `SleepTask`.
  */
 export async function resumeAfterRest(session: LiveSession) {
-  session.state.restEndedByPerson = false;
   return session.conversation.submit({ type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" }, BACKGROUND_CONTEXT);
 }
 
 /**
- * Wait out a timed `sleep`, then start the next run. A rest with no time, or
- * with nothing to rest for, does nothing. A person's message ends the wait
- * early and starts its own run, so this returns without starting one.
- */
-export async function restThenResume(session: LiveSession): Promise<{ status: string } | undefined> {
-  const seconds = session.state.sleepSeconds;
-  if (seconds === undefined) return undefined;
-  session.state.sleepSeconds = undefined;
-  session.state.restEndedByPerson = false;
-  await new Promise<void>((wake) => {
-    const timer = setTimeout(wake, seconds * 1000);
-    session.endRest = () => {
-      clearTimeout(timer);
-      wake();
-    };
-  });
-  session.endRest = undefined;
-  if (session.state.restEndedByPerson) return undefined;
-  const submission = await resumeAfterRest(session);
-  return submission.wait(BACKGROUND_CONTEXT);
-}
-
-/**
  * Start the next turn now, with the state block, because the agent asked to read
- * the tree (§6.3). This is the same continuation a rest uses, without the wait:
- * `tree` ends its turn so the very next thing the agent reads is the tree it
- * just set, not the one it had before.
+ * the tree (§6.3). `tree` ends its turn so the very next thing the agent reads is
+ * the tree it just set, not the one it had before; this is the same continuation
+ * a woken rest takes, without the wait.
  */
 export async function readTreeNext(session: LiveSession): Promise<{ status: string } | undefined> {
   if (!session.takeTreeReadRequest()) return undefined;
   const submission = await resumeAfterRest(session);
   return submission.wait(BACKGROUND_CONTEXT);
-}
-
-/** Bring the wait forward, for a host that is shutting down. */
-export function endRest(session: LiveSession): void {
-  session.endRest?.();
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */

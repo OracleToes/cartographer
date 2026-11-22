@@ -23,6 +23,7 @@ import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
+import { SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -32,8 +33,7 @@ export interface ToolSession {
   tree: { anchor: string; depth: number };
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
-  /** Set by a timed `sleep`: whole seconds to rest before the host starts the next run. Cleared when read. */
-  sleepSeconds: number | undefined;
+
   /**
    * Set by `tree`: the turn has ended and the host starts the next one at once,
    * so the agent reads the tree it just asked for (§6.3). Cleared when read.
@@ -508,11 +508,28 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         "End the turn and rest — the honest way to stop. With no argument you stay stopped until the person messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from the person brings you back sooner. Nothing is said to the person by this call.",
       parameters: obj({ seconds: opt(int({ minimum: 1, description: "Whole seconds to rest before starting again. Omit to rest until the person messages you." })) }),
       replay: "safe",
-      execute: async (args) => {
+      execute: async (args, api, context) => {
         if (args.seconds === undefined) {
+          // No time: stop, and stay stopped until the person says something. A
+          // turn from the person is the only thing that starts the next run, so
+          // nothing is stored and nothing is pending (§10).
           return { output: [{ type: "text" as const, text: "Resting until the person messages you." }], control: { terminate: true } };
         }
-        session.sleepSeconds = args.seconds;
+        // A timed rest is durable (§10): the seconds are kept on the session for
+        // the run's end to turn into a sleep in the store, so a restart during a
+        // rest does not lose it. The turn ends here; the state block is what the
+        // agent reads when the rest is over.
+        // A timed rest is a task of the conversation (§10), so the wait is in
+        // the store and not in this process, and the conversation is free while
+        // it sleeps — a message from the person ends the rest and starts its own
+        // turn. The run ends here either way: the state block is what the agent
+        // reads when the rest is over.
+        await api.createTask(
+          SleepTask,
+          { seconds: args.seconds },
+          { ownership: { kind: "conversation" } },
+          context,
+        );
         return {
           output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },

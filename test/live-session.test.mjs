@@ -34,6 +34,8 @@ const fauxSetup = () => {
   return { faux, models, captured, factory, ref: { provider: "faux-test", modelId: "faux-model" } };
 };
 
+
+
 const blockOf = (messages) => messages.find((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("<carto-state>"));
 const flatten = (messages) => JSON.stringify(messages);
 
@@ -458,6 +460,127 @@ test("no product tool carries a bound its own description does not state", async
       }
     }
   } finally {
+    await cleanup();
+  }
+});
+
+test("a timed rest is durable: it sleeps in the store, survives a reopen, and the agent goes on", async () => {
+  const { root, brain, cleanup } = await fixture();
+  // A clock the test moves and timers it fires, so a rest of ten seconds costs
+  // nothing and the wait cannot be mistaken for a real timer (§10).
+  let clock = 1_700_000_000_000;
+  const clockNow = () => clock;
+  const timers = [];
+  const setTimer = (callback, delayMs) => {
+    const timer = { due: clockNow() + delayMs, callback };
+    timers.push(timer);
+    return () => {
+      const at = timers.indexOf(timer);
+      if (at >= 0) timers.splice(at, 1);
+    };
+  };
+  const fireDue = async () => {
+    for (;;) {
+      const due = timers.filter((timer) => timer.due <= clock).sort((left, right) => left.due - right.due)[0];
+      if (due === undefined) return;
+      timers.splice(timers.indexOf(due), 1);
+      due.callback();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 10 }, { id: "call-rest" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-done" })], { stopReason: "toolUse" })),
+  ]);
+  let session = await openLiveSession({ root, brain, models, model: ref, now: clockNow, setTimer });
+  try {
+    const submission = await submitInput(session, "rest for a while");
+    await submission.wait(BACKGROUND_CONTEXT);
+
+    // §10: the wait is durable, so it is a sleeping task in the store, and the
+    // run never reached the model again while it rested.
+    // The after-run hook asks for the rest once the run's inputs have settled, so
+    // this waits for it rather than reading a half-finished run end.
+    const asleep = async () => {
+      const deadline = Date.now() + 1000;
+      for (;;) {
+        const tasks = (await session.harness.inspect(BACKGROUND_CONTEXT)).tasks;
+        const rest = tasks.filter((task) => task.state.kind === "sleeping" && task.record.kind === "carto.sleep");
+        if (rest.length > 0 || Date.now() > deadline) return rest;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    assert.equal((await asleep()).length, 1, "the rest is a sleep in the store");
+    assert.equal(captured.length, 1, "and the agent did not act again while it rested");
+    const due = (await asleep())[0].state.until;
+    assert.equal(due, clock + 10_000, "for as long as the call asked");
+
+    // The host goes away and comes back mid-rest.
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, now: clockNow, setTimer });
+    assert.equal((await asleep()).length, 1, "the rest survives the reopen");
+
+    // The clock passes the rest and the host's timer fires: the rest ends, and
+    // nothing is left pending.
+    clock = due + 1;
+    session.harness.resume();
+    await fireDue();
+    await session.conversation.waitForIdle(BACKGROUND_CONTEXT);
+    const deadline = Date.now() + 2000;
+    while (captured.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(captured.length, 2, "the rest ended and the agent went on, by itself");
+    assert.match(blockOf(captured[1]).content, /<carto-state>/, "starting from the state block, as any turn does");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+
+
+test("a message ends a rest early, and the rest does not then start a second turn", async () => {
+  const { root, brain, cleanup } = await fixture();
+  let clock = 1_700_000_000_000;
+  const timers = [];
+  const setTimer = (callback, delayMs) => {
+    const timer = { due: clock + delayMs, callback };
+    timers.push(timer);
+    return () => {
+      const at = timers.indexOf(timer);
+      if (at >= 0) timers.splice(at, 1);
+    };
+  };
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 600 }, { id: "call-rest" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-after" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
+  try {
+    await (await submitInput(session, "rest for ten minutes")).wait(BACKGROUND_CONTEXT);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(captured.length, 1);
+
+    // The rest holds nothing: the conversation is free while the agent sleeps,
+    // so the person's message is a turn of its own rather than a queued one.
+    const queued = (await session.harness.inspect(BACKGROUND_CONTEXT)).submissions;
+    assert.equal(queued.length, 0, "nothing is waiting on the rest");
+
+    const reply = await submitInput(session, "never mind, do this instead");
+    assert.equal((await reply.wait(BACKGROUND_CONTEXT)).status, "done", "the message got its turn at once");
+    assert.equal(captured.length, 2, "and the agent answered it");
+
+    // The rest's time comes and passes: it must start nothing.
+    clock += 601_000;
+    session.harness.resume();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (const timer of timers.filter((candidate) => candidate.due <= clock)) timer.callback();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(captured.length, 2, "and the rest ended quietly, with no second start");
+  } finally {
+    await closeLiveSession(session);
     await cleanup();
   }
 });
