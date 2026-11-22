@@ -350,7 +350,7 @@ export class ContextView implements Component, Focusable {
         // having happened.
         ...(mark === undefined
           ? {}
-          : { marked: `${mark.action} · ${mark.author === "user" ? (data.person ?? "you") : "agent"} · on collapse` }),
+          : { marked: `${mark.action} on collapse · ${mark.author === "user" ? (data.person ?? "you") : "agent"}` }),
       };
     };
 

@@ -317,8 +317,8 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   assert.ok(!shown.includes("│"), "every entry starts closed");
   assert.ok(shown.includes("You are Carto."), "a closed row carries its one-line summary");
   // Any mark on a Brain record is visible on its closed row (§4.1).
-  assert.ok(shown.includes("archive · you"), "a user archive mark is shown on the row");
-  assert.ok(shown.includes("delete · agent"), "an agent delete mark is shown on the row");
+  assert.ok(shown.includes("archive on collapse · you"), "a user archive mark is shown on the row");
+  assert.ok(shown.includes("delete on collapse · agent"), "an agent delete mark is shown on the row");
 
   // The open body is a paragraph, not a preview: at the width it is drawn at,
   // nothing is clipped and no line carries an ellipsis for want of room.
@@ -830,6 +830,26 @@ test("the archive keeps a restored item's type and the author of its pin", () =>
   assert.ok(frame.includes("you"), "a pin says who placed it");
   assert.ok(frame.includes("restore"), "restoring is on the layer, in the footer");
   assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
+});
+
+test("a Brain delete mark appears on the Context row until withdrawn", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(brain, { kind: "chat.record", record: { id: "c1", author: "agent", text: "remember this", createdAt: 1, updatedAt: 1 } }, 1);
+  const view = new ContextView();
+  const refresh = () => view.setData({ brain, systemPrompt: "system", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "state" });
+  refresh();
+  view.handleInput("j");
+  view.onDelete = (part, id, now) => {
+    assert.deepEqual({ part, id, now }, { part: "chat", id: "c1", now: false });
+    brain = applyWrite(brain, { kind: "mark.set", target: "chat", id, action: "delete", author: "user" }, 2);
+    refresh();
+  };
+  view.handleInput("d");
+  assert.match(plain(view.render(40).join("\n")), /delete on collapse · you/);
+  assert.equal(brain.chat.length, 1, "the mark does not delete the record yet");
+  brain = applyWrite(brain, { kind: "mark.clear", target: "chat", id: "c1", author: "user" }, 3);
+  refresh();
+  assert.doesNotMatch(plain(view.render(40).join("\n")), /delete on collapse/);
 });
 
 test("the context cursor wraps between entries and survives refreshes and deletions", () => {
