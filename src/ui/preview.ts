@@ -237,8 +237,11 @@ export function previewArchive(width = 110): string {
   const footer = new FooterView(() => [
     { key: "↑↓", label: "move" },
     { key: "p", label: "pin" },
-    { key: "r", label: "restore" },
-    { key: "d", label: "delete for good" },
+    // A mark, not the act: restore and delete both wait for the collapse unless
+    // the person applies them now (`!`, then the key), and the footer says so (§4.1).
+    { key: "r", label: "mark for restore" },
+    { key: "d", label: "mark for delete" },
+    { key: "!", label: "apply now" },
     { key: "^t", label: "context layer" },
   ]);
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");

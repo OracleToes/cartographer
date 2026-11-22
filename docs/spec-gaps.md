@@ -255,6 +255,9 @@ changes only what follows it; no collapse counter moves.
 
 ## Stage 8 — pause: blocked
 
+**Status: blocked.** Unchanged, and still a question for the person, not a
+silently dropped stage.
+
 **Spec.** §9: "**Pause** stops the run where it is without breaking the stream of
 generation… Nothing is committed or discarded by a pause, and the agent is not
 told it happened."
@@ -277,6 +280,21 @@ not mine, so this stage stays `blocked` until they say which. Nothing is faked i
 the meantime: the app does not offer a pause that secretly interrupts.
 
 **Test.** None. A test here would only assert a faked pause.
+
+## Where this stands
+
+Stages 1 to 7 are done: each one's code does what its section says, and each one
+has a test that fails if it stops doing it. Stage 8 is blocked on a question
+about the dependency, above.
+
+Two things moved between stages, and the plan says so where they landed rather
+than here: `F`/`D` handles on tree rows (stage 3's job) had to be built in stage
+2, because a pin on a file cannot name a file without them; and `T1` on the tree
+line came with the same change.
+
+Two design decisions were reached by trying the wrong thing first, and both are
+recorded where they belong: a tool cannot sleep its own task, and an `afterRun`
+task always belongs to the run (stage 6).
 
 ## Not in this plan
 
