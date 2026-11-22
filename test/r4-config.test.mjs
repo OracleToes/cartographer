@@ -5,7 +5,7 @@
  * CLI against a fresh CARTO_HOME that never reaches the network.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -354,16 +354,20 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
 // ---------- the CLI, end to end without a server ----------
 
 const cliEnv = (home) => ({ ...process.env, CARTO_HOME: home });
-const runCli = (args, { home, input } = {}) => {
-  const child = execFileSync(process.execPath, ["bin/carto.mjs", ...args], {
+const runCli = (args, { home, input } = {}) => new Promise((resolve, reject) => {
+  const child = execFile(process.execPath, ["bin/carto.mjs", ...args], {
     cwd: join(process.cwd()),
     env: cliEnv(home ?? tempDir()),
-    input: input ?? "",
     encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
+  }, (error, stdout, stderr) => {
+    if (error) {
+      error.status = error.code;
+      error.stderr = stderr;
+      reject(error);
+    } else resolve(stdout);
   });
-  return child;
-};
+  child.stdin.end(input ?? "");
+});
 const projectRoot = () => {
   const root = tempDir();
   mkdirSync(join(root, "src"), { recursive: true });
@@ -374,22 +378,22 @@ const projectRoot = () => {
 // CARTO_HOME, so they share no state: run them at once rather than paying four
 // process spawns one after another, which the suite's budget cannot afford.
 describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
-  test("--help exits 0 and names the config file and the workspace TUI", () => {
+  test("--help exits 0 and names the config file and the workspace TUI", async () => {
     // The line driver is no longer "the interface"; help must say plainly what
     // boots by default and how to force the driver.
-    const help = runCli(["--help"]);
+    const help = await runCli(["--help"]);
     assert.match(help, /~\/\.carto\/config\.json/);
     assert.match(help, /workspace TUI/);
     assert.match(help, /--headless/);
     assert.match(help, /--model llama-swap\/ByteShape/);
   });
 
-  test("no config and no --model: exit 1 and the one-liner that creates it", () => {
+  test("no config and no --model: exit 1 and the one-liner that creates it", async () => {
     const home = tempDir();
     try {
       let failed = null;
       try {
-        runCli([], { home });
+        await runCli([], { home });
       } catch (error) {
         failed = error;
       }
@@ -401,11 +405,11 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     }
   });
 
-  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
+  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", async () => {
     const home = tempDir();
     const root = projectRoot();
     try {
-      const first = runCli(
+      const first = await runCli(
         ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
         { home, input: "" },
       );
@@ -413,7 +417,7 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
-      const second = runCli(["--root", root], { home, input: "" });
+      const second = await runCli(["--root", root], { home, input: "" });
       assert.match(second, /carto · llama-swap\/ByteShape/);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -421,13 +425,13 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     }
   });
 
-  test("an unsupported provider fails plainly, before any request is made", () => {
+  test("an unsupported provider fails plainly, before any request is made", async () => {
     const home = tempDir();
     const root = projectRoot();
     try {
       let failed = null;
       try {
-        runCli(["--model", "openrouter/some-model", "--root", root], { home });
+        await runCli(["--model", "openrouter/some-model", "--root", root], { home });
       } catch (error) {
         failed = error;
       }

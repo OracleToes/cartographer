@@ -8,13 +8,9 @@
 
 import { parseArgs } from "node:util";
 
-import { openBrain } from "./runtime/brain-store.js";
 import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
 import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
 import { personName } from "./domain/person.js";
-import { configuredModels } from "./runtime/llama-swap-model.js";
-import { runHeadless } from "./runtime/headless.js";
-import { runTui } from "./ui/app.js";
 
 const STATUS = "carto opens the workspace TUI on a terminal; --headless runs the line driver instead.";
 
@@ -103,18 +99,22 @@ try {
   // descriptions and the state block all name the same person.
   const person = personName(config.userName);
 
+  // Help and configuration errors do not need the durable runtime, model
+  // providers, or terminal UI. Load those only once a session is requested.
+  const { openBrain } = await import("./runtime/brain-store.js");
   const root = resolveProjectRoot(values.root);
   const brain = await openBrain(brainDatabasePath(root));
   if (created) {
     process.stderr.write(`carto: wrote ${configPath} (model ${config.model})\n`);
   }
 
+  const { configuredModels } = await import("./runtime/llama-swap-model.js");
   const models = configuredModels(config, model);
   const refreshCapacity = config.llamaSwapEndpoint === undefined ? undefined : true;
 
   const stdinIsTty = (process.stdin as { isTTY?: boolean }).isTTY === true;
   const code = values.headless === true || !stdinIsTty
-    ? await runHeadless({
+    ? await (await import("./runtime/headless.js")).runHeadless({
         root,
         brain,
         models,
@@ -125,7 +125,7 @@ try {
         person,
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
-    : await runTui({
+    : await (await import("./ui/app.js")).runTui({
         root,
         brain,
         models,
