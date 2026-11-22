@@ -323,6 +323,7 @@ export function previewContext(width = 110): string {
     { key: "↑↓", label: "move" },
     { key: "⏎", label: "fold" },
     { key: "⇥", label: "raw" },
+    { key: "a", label: "mark archive" },
     { key: "d", label: "mark delete" },
     { key: "!", label: "apply now" },
     { key: "c", label: "collapse" },

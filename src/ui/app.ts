@@ -41,12 +41,13 @@ import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 
 import {
+  applyOmitNow,
+  applyRecordActionNow,
   closeLiveSession,
   collapseLiveSession,
   interruptRun,
   openLiveSession,
   sessionTranscript,
-  applyOmitNow,
   readTreeNext,
   submitInput,
   togglePause,
@@ -911,6 +912,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   contextView.onTogglePin = (partId: string, itemId: string | number) => {
     void (async () => {
       const brainState = await brain.read();
+      if (partId === "atlas" || partId === "ledger" || partId === "chat") {
+        await togglePin(partId, String(itemId));
+        return;
+      }
       if (partId === "transcript") {
         const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
         if (chatRecord === undefined) return;
@@ -941,11 +946,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   /**
-   * Context surgery (§4.1): `d` marks one entry for delete, `!` arms apply-now,
-   * and `c` collapses. A mark is not a deletion — the entry stays visible until
-   * a collapse sweeps it — and apply-now is a rebuild, not a patch.
+   * Context surgery (§4.1): `a` marks one entry for archive, `d` marks it for
+   * delete, `!` arms apply-now, `u` withdraws a mark, and `c` collapses. A mark
+   * is not the act — the entry stays visible until a collapse applies it — and
+   * apply-now is the act, done at once.
    */
-  contextView.onDelete = async (partId, itemId, now) => {
+  const markRecord = async (partId: string, itemId: string | number, action: "archive" | "delete", now: boolean) => {
     // A mark on a Brain record, whichever view the person pointed at it from
     // (§4.1). A chat record arrives from the transcript; the rest arrive by the
     // id the Context view drew them under.
@@ -959,32 +965,59 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             ? ({ kind: "atlas", id: String(itemId) } as const)
             : undefined;
     if (found !== undefined) {
-      await brain.apply({ kind: "mark.set", target: found.kind, id: found.id, action: "delete", author: "user" }, Date.now());
-      pushStatus(`marked ${found.kind} record for delete${now ? " now" : " at the next collapse"}`);
-    } else if (partId !== "transcript" && partId !== "tools" && partId !== "ephemera") {
-      pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
-    }
-    if (now) {
-      // §4.1: applying now is a rebuild at this point, not a collapse. The entry
-      // leaves the model's view and nothing else moves — no sweep, no rotation,
-      // no grace spent. The record's own entry is what the write omits.
-      const applied = await applyOmitNow(state.session, String(itemId));
-      pushStatus(
-        applied
-          ? "applied now: the entry is out of the model's view, and the store still holds it"
-          : "nothing in the live context matches that entry, so there is nothing to omit",
-      );
+      if (!now) {
+        await brain.apply({ kind: "mark.set", target: found.kind, id: found.id, action, author: "user" }, Date.now());
+        pushStatus(`marked ${found.kind} record for ${action} at the next collapse`);
+      } else {
+        // §4.1: applying now is the mark's own application, done at once. A
+        // Brain record leaves the Brain here — into the archive, or out of
+        // existence — and the head is re-frozen from the Brain as it now stands.
+        // That rebuild is the cost the section names: the bytes before the
+        // changed entry are untouched, and everything after them is paid for
+        // again. Nothing is swept, no grace is spent, and the generation does
+        // not move, because this is not a collapse.
+        const applied = await applyRecordActionNow(state.session, brain, options.root, found.kind, found.id, action);
+        pushStatus(
+          applied
+            ? `${action === "archive" ? "archived" : "deleted"} the ${found.kind} record now, and rebuilt the head from the change`
+            : `that ${found.kind} record is already gone`,
+        );
+      }
       await rebuildTranscript();
       await syncContextView(await brain.read());
       await refreshSidebar();
       tui.requestRender();
       return;
     }
-    await rebuildTranscript();
-    await syncContextView(await brain.read());
-    await refreshSidebar();
+    if (partId === "transcript" || partId === "tool-work") {
+      // An item in the live context is not a Brain record, so it carries no
+      // mark: the collapse sweeps it (§3.1). What the person can do at once is
+      // take it out of the model's view — the delete the append-only store
+      // allows, with the text gone from the view before it is gone from disk
+      // (§3.4).
+      if (action === "archive") {
+        pushStatus("an item in the live context carries no archive mark: it is swept at the next collapse, and `!d` takes it out of the model's view now");
+      } else if (now) {
+        const applied = await applyOmitNow(state.session, String(itemId));
+        pushStatus(
+          applied
+            ? "applied now: the entry is out of the model's view, and the store still holds it"
+            : "nothing in the live context matches that entry, so there is nothing to omit",
+        );
+      } else {
+        pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
+      }
+      await rebuildTranscript();
+      await syncContextView(await brain.read());
+      await refreshSidebar();
+      tui.requestRender();
+      return;
+    }
+    pushStatus("that entry is the prompt's to describe, not a record to mark");
     tui.requestRender();
   };
+  contextView.onDelete = (partId, itemId, now) => void markRecord(partId, itemId, "delete", now);
+  contextView.onArchive = (partId, itemId, now) => void markRecord(partId, itemId, "archive", now);
 
   /**
    * Withdraw a mark on a Brain record, or leave the record alone if the mark is
@@ -1797,6 +1830,51 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // The Context view matches the key itself, because it knows where the
       // cursor is; the palette comes here, so it does the same act.
       run: () => contextView.pinSelected(),
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    // The two marks the agent's `mark` tool can place, and the act that applies
+    // either of them at once (§4.1). They are declared here for the same reason
+    // the archive's are: the footer, `f1` and the palette all read one list, so
+    // the person can find every operation the agent has.
+    {
+      id: "context-mark-archive",
+      group: "the context",
+      label: "mark for archive",
+      hint: "the next collapse moves it to the archive; `!` first applies it now",
+      key: "a",
+      run: () => contextView.markSelected("archive"),
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
+      id: "context-mark-delete",
+      group: "the context",
+      label: "mark for delete",
+      hint: "the next collapse removes it for good; `!` first applies it now",
+      key: "d",
+      run: () => contextView.markSelected("delete"),
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
+      id: "context-apply-now",
+      group: "the context",
+      label: "apply now",
+      hint: "the next mark is applied at once, rebuilding in place",
+      key: "!",
+      run: () => {
+        contextView.toggleApplyNow();
+        tui.requestRender();
+      },
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
+      id: "context-withdraw",
+      group: "the context",
+      label: "withdraw the mark",
+      key: "u",
+      // A withdrawal is the quiet half of the pair: `f1` and the palette carry
+      // it, and the footer spends its width on the marks themselves.
+      quiet: true,
+      run: () => contextView.withdrawSelected(),
       available: () => state.view === "context" && state.layer === "context",
     },
     {

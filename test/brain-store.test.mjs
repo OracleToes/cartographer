@@ -51,6 +51,41 @@ test("delete is single-step and stays deleted across reopening", async () => {
   }
 });
 
+test("applying a record's mark now moves it to the archive or deletes it, in one step", async () => {
+  // §4.1: applying an action now is the mark's own application. An archived
+  // record leaves the Brain and is in the archive — moved, not copied — and a
+  // deleted one leaves the Brain and goes nowhere. A record that is not there
+  // changes nothing: the person may have acted on it a moment ago.
+  const { path, cleanup } = tempBrain();
+  try {
+    const store = await openBrain(path);
+    await store.apply({ kind: "chat.record", record: chat("c1", "keep me in the archive", at(1)) }, at(1));
+    await store.apply({ kind: "chat.record", record: chat("c2", "gone for good", at(2)) }, at(2));
+
+    const archived = await store.applyRecordAction({ kind: "chat", id: "c1", action: "archive", generation: "gen-now", now: at(3) });
+    assert.equal(archived.found, true);
+    assert.equal(archived.brain.chat.length, 1, "the archived record is not in the Brain any more");
+    const items = (await store.readArchive()).items;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].record?.kind, "chat");
+    assert.equal(items[0].record?.value.text, "keep me in the archive");
+    assert.equal(items[0].sweptAtGeneration, "gen-now");
+
+    const deleted = await store.applyRecordAction({ kind: "chat", id: "c2", action: "delete", generation: "gen-now", now: at(4) });
+    assert.equal(deleted.found, true);
+    assert.equal(deleted.brain.chat.length, 0, "a deleted record is gone, not archived");
+    assert.equal((await store.readArchive()).items.length, 1, "a delete archives nothing");
+
+    const missing = await store.applyRecordAction({ kind: "chat", id: "c2", action: "archive", generation: "gen-now", now: at(5) });
+    assert.equal(missing.found, false);
+    assert.equal((await store.readArchive()).items.length, 1, "and a record that is not there changes nothing");
+
+    await store.close();
+  } finally {
+    cleanup();
+  }
+});
+
 test("a corrupt Brain document throws; it never reads as empty", async () => {
   const { path, cleanup } = tempBrain();
   try {

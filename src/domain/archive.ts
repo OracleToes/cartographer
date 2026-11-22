@@ -94,6 +94,18 @@ export function emptyArchive(): Archive {
   return { version: 1, items: [] };
 }
 
+/**
+ * A record as it stood in the Brain, minus the mark it was carrying: the mark
+ * is what is being applied, and an archived record is a record, not a decision
+ * about one (§4.1). The key goes rather than sitting at `undefined`, so nothing
+ * reads a mark that is no longer there.
+ */
+export function withoutMark<T extends { mark?: unknown }>(record: T): Omit<T, "mark"> {
+  const copy: Record<string, unknown> = { ...record };
+  delete copy.mark;
+  return copy as Omit<T, "mark">;
+}
+
 /** An item on its way in, before the sweep stamps it with its collapse. */
 export type IncomingItem = Omit<ArchivedItem, "sweptAtGeneration" | "sweptAtCollapse" | "sweptAt">;
 

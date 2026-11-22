@@ -278,7 +278,9 @@ the agent, the Brain is simply itself.
 Each action can also be **applied now**. Applying an action now changes the
 context immediately, which forces a rebuild at that point: the prefill runs
 again from the changed entry through the tail. The head is untouched, so
-applying an action now costs the body and the tail, never the head.
+applying an action now costs the body and the tail, never the head. A Brain
+record is in the head, so applying an action on one now rebuilds the head from
+that entry: the bytes before it are untouched, and the rest is paid for again.
 
 Marks are visible in the state block. A mark also carries its author, and only
 the person may withdraw a mark the agent placed.
@@ -660,10 +662,11 @@ Neither the spec nor the runtime supplies a size limit to enforce in its place.
 ## 8. Workspace
 
 **The Context view is the real prompt**, in the order the model sees it, with a
-fold tree. Functions, schemas, and records are collapsible; a leaf is never
-folded. Each tool gets one collapsible entry in its own sub-tree. Schema-shaped
-content has a human-readable view and a real view. A row that trails off is
-readable in full somewhere.
+fold tree. Every entry is collapsible, and every entry starts collapsed: a row
+is its handle, its name, and a one-line summary until it is opened. Each tool
+gets one collapsible entry in its own sub-tree. Schema-shaped content has a
+human-readable view and a real view. A row that trails off is readable in full
+somewhere.
 
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
