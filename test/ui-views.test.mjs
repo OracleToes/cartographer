@@ -157,23 +157,75 @@ test("TranscriptView mouse click folds and unfolds cards", () => {
   assert.ok(rendered.length > initialLineCount);
   assert.ok(rendered.join("\n").includes("line 1"));
 
-  // Click again to fold
-  transcript.handleMouse({
+  // The header deepens rather than toggling: open, then full, then back to open.
+  const clickHeader = () =>
+    transcript.handleMouse({
+      type: "click",
+      button: "left",
+      x: 5,
+      y: 0,
+      screenX: 5,
+      screenY: 0,
+      width: 80,
+      height: 10,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+  clickHeader();
+  assert.ok(plain(transcript.render(80).join("\n")).includes("· full"), "a second click on the header opens the card fully");
+  clickHeader();
+  assert.ok(!plain(transcript.render(80).join("\n")).includes("· full"), "and a third returns it to open");
+
+  // A click in the body closes the card, from any state.
+  const bodyClick = transcript.handleMouse({
     type: "click",
     button: "left",
-    x: 5,
-    y: 0,
-    screenX: 5,
-    screenY: 0,
+    x: 8,
+    y: 2,
+    screenX: 8,
+    screenY: 2,
     width: 80,
     height: 10,
     shift: false,
     alt: false,
     ctrl: false,
   });
-
+  assert.ok(bodyClick?.handled);
   rendered = transcript.render(80);
-  assert.equal(rendered.length, initialLineCount);
+  assert.equal(rendered.length, initialLineCount, "a body click folds the card back to one line");
+});
+
+test("a streaming card keeps its tail, and the rule that counts the hidden lines shows them", () => {
+  const transcript = new TranscriptView();
+  const body = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`);
+  transcript.setLive([{ kind: "output", id: "live-1-0", live: true, text: body.join("\n") }]);
+
+  let shown = plain(transcript.render(80).join("\n"));
+  assert.ok(shown.includes("⋯ 32 lines earlier"), "the window says exactly what it is hiding");
+  assert.ok(shown.includes("line 40"), "the newest line is on screen");
+  assert.ok(!shown.includes("line 1\n"), "and the oldest is not");
+
+  // The rule is the control: one click on it and the whole card is there.
+  const ruleRow = transcript.render(80).findIndex((line) => plain(line).includes("lines earlier"));
+  assert.ok(ruleRow > 0);
+  const res = transcript.handleMouse({
+    type: "click",
+    button: "left",
+    x: 8,
+    y: ruleRow,
+    screenX: 8,
+    screenY: ruleRow,
+    width: 80,
+    height: 50,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(res?.handled);
+  shown = plain(transcript.render(80).join("\n"));
+  assert.ok(!/\d+ lines earlier/.test(shown), "the rule is gone once nothing is hidden");
+  assert.ok(shown.includes("line 1 ") || shown.includes("line 1\n") || /line 1\b/.test(shown), "the first line is on screen");
 });
 
 test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () => {

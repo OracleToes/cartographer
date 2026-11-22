@@ -11,15 +11,25 @@
  *   only channel that addresses the person (§2.3), so it is the only thing on
  *   screen at full weight other than the person's own words.
  * - Everything else — reasoning, plain model text, tool calls and their results
- *   — is a **card**: one line when folded, a guttered body when open, in its own
- *   hue and quieter than Chat. A card that is streaming stays open inside a
- *   bounded window; the moment the round lands it folds to its header.
+ *   — is a **card**, and a card has three states: one line folded, open, and
+ *   full. Open is a body with a window on it; full is the whole body and no
+ *   window. It is in its own hue and quieter than Chat. A card that is
+ *   streaming stays open on the last lines of what is arriving — a card you are
+ *   watching is the end of it — and the moment the round lands it folds to its
+ *   header.
  * - **Status lines** are a faint middot and a sentence: quiet facts about the
  *   session, never the agent's voice.
  *
- * A click folds or unfolds a card, a click on a Chat block toggles its pin,
- * `ctrl+e` folds every card in view, and the wheel belongs to the page — the
- * one scrolling owner (§8) — so scrolling up simply stops following the tail.
+ * **A click on the header deepens a card**: folded to open, open to full. **A
+ * click on the body closes it.** A click on the `⋯ n lines …` rule shows
+ * everything the window was hiding, which is what that line is for. A click on
+ * a Chat block toggles its pin, `ctrl+e` folds every card in view, and the wheel
+ * belongs to the page — the one scrolling owner (§8) — so scrolling up simply
+ * stops following the tail.
+ *
+ * The three states are not decoration: open is a window on a body, so a very
+ * long result stays readable inline without pushing the transcript off the
+ * screen, and full is the same card with nothing held back.
  *
  * Order is the context's order, not arrival order: a person's line appears
  * where it actually landed, and a line that is submitted but not yet placed sits
@@ -65,13 +75,32 @@ const PREFIX_WIDTH = LABEL_WIDTH + 2;
 const INSET = 2;
 const SPINE = "▌";
 const GUTTER = "│ ";
+/** How many lines of a streaming card are on screen while it is arriving. */
 const LIVE_TAIL = 8;
+/**
+ * How much of an open card is on screen before it asks to be opened fully. A
+ * card that is open is read, not skimmed, so the window is generous; past it
+ * the card is a window on a body, and `full` is the page.
+ */
+const OPEN_WINDOW = 24;
 
+/** Where a card drew, and which of its rows is the header and which the hidden-lines rule. */
 interface CardRange {
   id: string;
   start: number;
   end: number;
+  /** The header row: a click here deepens the card. */
+  header: number;
+  /** The `⋯ n earlier lines` row, when the window is hiding some: a click here shows them. */
+  more?: number;
 }
+
+/**
+ * How much of a card is on screen. A fold is one line; openness is not a
+ * boolean, because a long result needs a page and a short one does not, and
+ * neither needs to throw the transcript's order away.
+ */
+type CardView = "folded" | "open" | "full";
 
 interface WrapMemo {
   width: number;
@@ -183,7 +212,9 @@ export class TranscriptView implements Component {
   private items: TranscriptEntry[] = [];
   private queued: Array<{ text: string; mode: string }> = [];
   private liveCards: CardEntry[] = [];
-  private expanded = new Map<string, boolean>();
+  private views = new Map<string, CardView>();
+  /** Cards whose hidden head the person asked to see, by clicking the rule that counted it. */
+  private revealed = new Set<string>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
   private blockRanges: BlockRange[] = [];
@@ -218,7 +249,8 @@ export class TranscriptView implements Component {
     this.items = [];
     this.queued = [];
     this.liveCards = [];
-    this.expanded.clear();
+    this.views.clear();
+    this.revealed.clear();
     this.wrapMemo.clear();
     this.cacheWidth = -1;
   }
@@ -231,15 +263,19 @@ export class TranscriptView implements Component {
     this.cacheWidth = -1;
   }
 
-  /** Expand every card, or collapse every card when any is open. */
+  /**
+   * Every card deepens one step, or every card folds when any of them is more
+   * than folded. One key for "show me the working", pressed again to put it
+   * back.
+   */
   toggleAllCards(): void {
     const ids = this.cardIds();
     if (ids.length === 0) return;
     const anyOpen = ids.some((id) => {
       const card = this.cardById(id);
-      return card !== undefined && this.isExpanded(card);
+      return card !== undefined && this.viewOf(card) !== "folded";
     });
-    for (const id of ids) this.expanded.set(id, !anyOpen);
+    for (const id of ids) this.views.set(id, anyOpen ? "folded" : "open");
     this.cacheWidth = -1;
   }
 
@@ -255,13 +291,19 @@ export class TranscriptView implements Component {
     return this.liveCards.find((card) => card.id === id);
   }
 
-  private isExpanded(card: CardEntry): boolean {
-    return this.expanded.get(card.id) ?? card.live === true;
+  /**
+   * The state a card is in. A card in flight opens by itself — you are watching
+   * it arrive — and a card that has landed starts folded, because the transcript
+   * is read for what it said, not for every argument it passed.
+   */
+  private viewOf(card: CardEntry): CardView {
+    return this.views.get(card.id) ?? (card.live === true ? "open" : "folded");
   }
 
   private pruneState(): void {
     const present = new Set(this.cardIds());
-    for (const id of [...this.expanded.keys()]) if (!present.has(id)) this.expanded.delete(id);
+    for (const id of [...this.views.keys()]) if (!present.has(id)) this.views.delete(id);
+    for (const id of [...this.revealed]) if (!present.has(id)) this.revealed.delete(id);
     for (const id of [...this.wrapMemo.keys()]) if (!present.has(id)) this.wrapMemo.delete(id);
   }
 
@@ -331,9 +373,11 @@ export class TranscriptView implements Component {
     return lines;
   }
 
-  private cardHeader(card: CardEntry, width: number, expanded: boolean): string {
+  private cardHeader(card: CardEntry, width: number, view: CardView): string {
     const tint = kindTint(card);
-    const glyph = expanded ? "▾" : "▸";
+    // Three states, three glyphs: a caret opens, and a card already open says
+    // how it deepens rather than pretending to be closed.
+    const glyph = view === "folded" ? "▸" : view === "open" ? "▾" : "⇣";
     const labelText = kindLabel(card);
     const label = tint(tokens.bold(labelText));
     const gap = " ".repeat(Math.max(1, 6 - labelText.length)); // the label column: thinking/text/tool …
@@ -344,9 +388,10 @@ export class TranscriptView implements Component {
     else if (card.status === "running") marks.push(tokens.faint("· running"));
     else if (card.status === "pending") marks.push(tokens.faint("· queued"));
 
-    if (expanded) {
+    if (view !== "folded") {
       const tail = marks.length > 0 ? ` ${marks.join(" ")}` : "";
-      return `${keyPrefix}${tail}`;
+      const depth = view === "full" ? ` ${tokens.faint("· full")}` : "";
+      return `${keyPrefix}${depth}${tail}`;
     }
     const summary = card.kind === "tool"
       ? (card.args.trim().length > 0 ? oneLine(card.args) : "")
@@ -357,30 +402,56 @@ export class TranscriptView implements Component {
     return `${keyPrefix}${gap}${tokens.muted(preview)}${tail}`;
   }
 
-  private renderCard(card: CardEntry, width: number): string[] {
-    const expanded = this.isExpanded(card);
-    const lines = [this.cardHeader(card, width, expanded)];
-    if (!expanded) return lines;
+  /**
+   * One card, and where each of its rows landed. A card in flight keeps a
+   * window on the end of what is arriving; the rule that counts the hidden
+   * lines is the control that shows them, so the count is never a dead end.
+   */
+  private renderCard(card: CardEntry, width: number, start: number): { lines: string[]; range: CardRange } {
+    const view = this.viewOf(card);
+    const lines = [this.cardHeader(card, width, view)];
+    const range: CardRange = { id: card.id, start, end: start, header: start };
+    if (view === "folded") {
+      range.end = start + 1;
+      return { lines, range };
+    }
     const body = this.wrapBody(card, width);
     const total = body.length;
     const indent = " ".repeat(PREFIX_WIDTH - 2);
     const gutter = tokens.rule(GUTTER);
     const paint = (line: string): string =>
       card.kind === "reasoning" ? tokens.reasoning(line) : card.kind === "output" ? tokens.output(line) : tokens.text(line);
-    if (card.live === true && total > LIVE_TAIL) {
-      lines.push(`${indent}${gutter}${tokens.faint(`⋯ ${total - LIVE_TAIL} earlier lines`)}`);
-      for (const line of body.slice(total - LIVE_TAIL)) lines.push(`${indent}${gutter}${paint(line)}`);
-      return lines;
+    // A card in flight keeps a window on the end of what is arriving — that is
+    // where the words are. A card that has landed is read from its start, and
+    // past the open window it keeps a head and asks to be opened fully. Either
+    // way the rule that counts the hidden lines is the control that shows them,
+    // and `full` is the page with no window on it at all.
+    const shown = card.live === true ? LIVE_TAIL : OPEN_WINDOW;
+    const windowed = view !== "full" && !this.revealed.has(card.id) && total > shown;
+    if (windowed) {
+      const hidden = total - shown;
+      range.more = lines.length + start;
+      lines.push(
+        `${indent}${gutter}${tokens.faint(`⋯ ${hidden} line${hidden === 1 ? "" : "s"} ${card.live === true ? "earlier" : "more"} · click to show`)}`,
+      );
+      const kept = card.live === true ? body.slice(total - shown) : body.slice(0, shown);
+      for (const line of kept) lines.push(`${indent}${gutter}${paint(line)}`);
+    } else {
+      for (const line of body) lines.push(`${indent}${gutter}${paint(line)}`);
     }
-    for (const line of body) lines.push(`${indent}${gutter}${paint(line)}`);
-    return lines;
+    range.end = start + lines.length;
+    return { lines, range };
   }
 
   private rangeAt(y: number): CardRange | undefined {
     return this.ranges.find((range) => y >= range.start && y < range.end);
   }
 
-  /** A click folds or unfolds a card; a click on a Chat block toggles its pin. The wheel is the page's. */
+  /**
+   * The click map: the header deepens a card (folded → open → full), the body
+   * closes it, the `⋯ n earlier lines` rule shows what it was hiding, and a
+   * click on a Chat block toggles its pin. The wheel stays the page's.
+   */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
     const cardRange = this.rangeAt(event.y);
     const block = this.blockRanges.find((range) => event.y >= range.start && event.y < range.end);
@@ -388,6 +459,8 @@ export class TranscriptView implements Component {
 
     if (event.type === "press") return { handled: true };
     if (event.type === "click") {
+      // A Chat block over a card: Chat is what the person is reading, so it
+      // keeps the click.
       if (block !== undefined) {
         this.onTogglePin?.(block.id);
         this.cacheWidth = -1;
@@ -396,7 +469,14 @@ export class TranscriptView implements Component {
       if (cardRange === undefined) return undefined;
       const card = this.cardById(cardRange.id);
       if (card === undefined) return undefined;
-      this.expanded.set(card.id, !this.isExpanded(card));
+      if (cardRange.more !== undefined && event.y === cardRange.more) {
+        this.revealed.add(card.id);
+      } else if (event.y === cardRange.header) {
+        const view = this.viewOf(card);
+        this.views.set(card.id, view === "folded" ? "open" : view === "open" ? "full" : "open");
+      } else {
+        this.views.set(card.id, "folded");
+      }
       this.cacheWidth = -1;
       return { handled: true, render: true };
     }
@@ -442,8 +522,9 @@ export class TranscriptView implements Component {
     const pushCard = (card: CardEntry) => {
       gap();
       const start = lines.length;
-      lines.push(...this.renderCard(card, width));
-      this.ranges.push({ id: card.id, start, end: lines.length });
+      const drawn = this.renderCard(card, width, start);
+      lines.push(...drawn.lines);
+      this.ranges.push(drawn.range);
     };
     for (const entry of this.items) {
       if (isCard(entry)) {
