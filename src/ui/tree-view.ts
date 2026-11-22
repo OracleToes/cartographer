@@ -105,6 +105,12 @@ function gitStatuses(root: string, paths: readonly string[]): Map<string, string
 export class TreeView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /**
+   * Called with the drawn line of the selected row after each render. The view
+   * does not scroll itself, and a ScrollView does not follow a child's cursor:
+   * the app uses this to keep the cursor in view (§9).
+   */
+  onCursorLine?: (line: number) => void;
 
   private data: TreeViewData | undefined;
   private projection: TreeProjection | undefined;
@@ -125,6 +131,8 @@ export class TreeView implements Component, Focusable {
   private staleNotes = new Set<string>();
   /** Where each rendered row landed, so a click never has to guess. */
   private hits: Array<{ start: number; end: number; index: number }> = [];
+  /** Where the selected row was drawn in the last frame: the ScrollView has none of its own. */
+  private cursorLine = 0;
   setData(data: TreeViewData): void {
     this.data = data;
     this.projection = projectTreeView(data.root, data.anchor.anchor, data.anchor.depth, data.brain);
@@ -400,7 +408,9 @@ export class TreeView implements Component, Focusable {
   private renderRow(row: Row, width: number, selected: boolean): string[] {
     const cursor = selected ? tokens.accent("▌") : " ";
     const handle = this.projection?.handles.get(row.entry.path);
-    const handleText = handle === undefined ? "" : handle.padEnd(3);
+    // One cell between the handle and the name, so `F9` and `F10` line up: a
+    // column that shifts at the tenth file is a column you cannot read down.
+    const handleText = handle === undefined ? "" : `${handle.padEnd(3)} `;
     const branch = this.branch(row.last);
     const glyph = row.entry.directory ? (row.folded ? "▸" : "▾") : "·";
     const name = row.entry.directory ? `${row.entry.name}/` : row.entry.name;
@@ -422,7 +432,7 @@ export class TreeView implements Component, Focusable {
     // read down rather than scanned along — the sidebar's rule, applied here.
     const size = tokens.muted(formatSize(row.entry.size).padStart(6));
     const left = ` ${cursor} ${tokens.faint(branch)}${tokens.faint(glyph)} ${tokens.muted(handleText)}${painted}`;
-    const head = truncateToWidth(left, Math.max(8, width - 9), "…");
+    const head = truncateToWidth(left, Math.max(8, width - 10), "…");
     const tail = `${marks.length > 0 ? `${marks.join(" ")} ` : ""}${size}`;
     const gap = Math.max(1, width - visibleWidth(head) - visibleWidth(tail) - 1);
     const line = padLine(`${head}${" ".repeat(gap)}${tail}`, width);
@@ -516,7 +526,7 @@ export class TreeView implements Component, Focusable {
     const anchor = `${tokens.text(this.anchorLabel())} ${tokens.faint(`depth ${this.projection?.depth ?? 1}`)}`;
     const files = this.rows.filter((row) => !row.entry.directory).length;
     const folders = this.rows.filter((row) => row.entry.directory).length;
-    const figure = `${tokens.faint(`${folders} dirs · ${files} files`)}`;
+    const figure = `${tokens.faint(`${folders} ${folders === 1 ? "dir" : "dirs"} · ${files} ${files === 1 ? "file" : "files"}`)}`;
     const filter = this.filtering
       ? ` ${tokens.accent(`/${this.filterText}█`)}`
       : this.filterText.length > 0
@@ -531,6 +541,7 @@ export class TreeView implements Component, Focusable {
 
     if (this.projection === undefined || this.data === undefined) {
       lines.push(`  ${tokens.muted("No project tree yet.")}`);
+      this.onCursorLine?.(0);
       return lines;
     }
     if (this.rows.length === 0) {
@@ -543,6 +554,8 @@ export class TreeView implements Component, Focusable {
               : "This directory is empty, or everything in it is ignored.",
         )}`,
       );
+      this.cursorLine = 0;
+      this.onCursorLine?.(0);
       return lines;
     }
 
@@ -555,9 +568,11 @@ export class TreeView implements Component, Focusable {
       const listWidth = Math.min(46, Math.floor(width * 0.46));
       const detailWidth = Math.max(24, width - listWidth - 2);
       const listLines: string[] = [];
+      const listStart = lines.length;
       this.rows.forEach((row, index) => {
         const start = lines.length + listLines.length;
         const rendered = this.renderRow(row, listWidth, index === this.selectedIndex);
+        if (index === this.selectedIndex) this.cursorLine = listStart + listLines.length;
         listLines.push(...rendered);
         this.hits.push({ start, end: start + rendered.length, index });
       });
@@ -569,19 +584,26 @@ export class TreeView implements Component, Focusable {
         const rightCell = detail[row] ?? padLine("", detailWidth);
         lines.push(`${padLine(leftCell, listWidth)}${tokens.seam("│")}${padLine(rightCell, detailWidth)}`);
       }
+      this.onCursorLine?.(this.cursorLine);
       return lines;
     }
 
+    // One pane: what the cursor is on, then the tree. The details go above the
+    // list because below it they are past the end of a real directory — the row
+    // you selected, and the facts about it, should not be at opposite ends of
+    // the pane. The tree is the thing with a cursor, so it scrolls.
+    if (selected !== undefined) {
+      lines.push(...this.renderDetail(selected.entry, width));
+      lines.push(padLine("", width));
+    }
     for (const [index, row] of this.rows.entries()) {
       const start = lines.length;
       const rendered = this.renderRow(row, width, index === this.selectedIndex);
+      if (index === this.selectedIndex) this.cursorLine = start;
       lines.push(...rendered);
       this.hits.push({ start, end: start + rendered.length, index });
     }
-    if (selected !== undefined && !selected.entry.directory) {
-      lines.push(padLine("", width));
-      lines.push(...this.renderDetail(selected.entry, width));
-    }
+    this.onCursorLine?.(this.cursorLine);
     return lines;
   }
 }

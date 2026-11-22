@@ -451,6 +451,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
   const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
   const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
+  // A ScrollView does not follow a child's cursor, and the tree is taller than
+  // the pane in any real project: keep the selected row in view, with a row of
+  // context on either side rather than the cursor pinned to an edge.
+  treeView.onCursorLine = (line) => {
+    const viewport = treeScroll.viewportHeight;
+    if (viewport <= 0) return;
+    const top = treeScroll.scrollTop;
+    if (line < top + 1) treeScroll.scrollTo(line - 1);
+    else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
+  };
   const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
 
   sidebar.onSelect = (book) => void switchToView(book);
