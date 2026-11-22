@@ -19,7 +19,7 @@ Carto has three defining properties:
 1. **Context gardening.** A full suite of context engineering and surgery over
    the agent's own working context.
 2. **Ephemeral context around a persistent Brain.** The working context is
-   disposable; the Brain is the memory.
+   disposable; the Brain is what the agent brings forward.
 3. **Scoped tasking.** The agent works in small, atomic steps.
 
 The governing idea is that a model only needs what it needs to act now. Carto
@@ -72,9 +72,10 @@ the Atlas contains.
 The Atlas is not scored. Attention is a consequence of a small context, not a
 value the system computes.
 
-The Brain stands in for memory: Atlas and Ledger tell the agent its own state,
-what it understands and what it is working on. The agent follows its Brain rather
-than re-deriving what it already decided.
+The Brain is the agent's attention, not its history. Atlas and Ledger tell it
+what it is focused on and what it is working on, and it follows them rather than
+re-deriving what it already decided. Nothing in the Brain is kept because it
+happened; it is kept because it is still what the agent is acting on.
 
 The Atlas tools do not validate connectivity.
 
@@ -238,11 +239,22 @@ by a collapse; only a delete deletes.
 The system prompt carries one standing line: the context may collapse at any time,
 and a collapse rebuilds the agent's context from the Brain.
 
-The agent is expected to keep its brain up-to-date, because it does not want to
-forget: a collapse rebuilds its context and everything it did not write down is
-gone. That is also why the agent rarely collapses on its own. Knowing the person
-may collapse at any moment is what keeps its record of intent, progress, and
-understanding current.
+A collapse rebuilds the context, and everything unrecorded is gone.
+
+**The agent collapses when it is appropriate**, and what makes it appropriate is
+that it has finished a piece of work and put what it needs into its Brain. A
+short run ends that way: the work is done, the Brain is current, and a collapse
+carries the result forward cleanly.
+
+A long piece of work collapses *before* it starts. If a problem needs a lot known
+about the project, the agent pins what it needs to know, arranges its context so
+nothing in it is a distraction, collapses, and then begins — so it works inside a
+context built for the problem rather than one it accumulated on the way there.
+
+Nothing enforces this, and the spec has no trigger, threshold, or counter for it.
+It is a thing the prompt asks for and the person shares: either side may collapse
+at any moment, and knowing that is what keeps the agent's Brain worth rebuilding
+from.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -470,7 +482,7 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 ## 6. Project files
 
-Carto inspects and edits paths that resolve inside the selected project root. A
+Carto reads and edits paths that resolve inside the selected project root. A
 symlink that resolves outside the root is rejected.
 
 The agent's ideal edit is small, atomic, and scoped: one function, one value
@@ -728,10 +740,6 @@ sent.
 
 **Cancel** is an interrupt plus dropping what was queued.
 
-**Interrupt is immediate, not polite. It does not wait for a boundary.** The
-stream stops when the person says so. The three verbs above are what the person
-can do during a run; none of them is a request to stop gracefully.
-
 ## 10. Sleep
 
 `sleep` is a tool call that ends the current turn with nothing to say, and it is
@@ -744,8 +752,8 @@ the only way the agent stops working.
 
 Resuming is always the same thing: the agent receives the state block as its next
 turn and acts on what it says. A timed sleep is not a different kind of event with
-different handling — the agent wakes by receiving the state block, exactly as it
-would after any turn that carried no tool call.
+different handling — the agent starts again by receiving the state block, exactly
+as it would after any turn that carried no tool call.
 
 A message from the person ends a rest early, whether the rest had a time or not,
 and starts the same way. A rest that is over is over: there is nothing left
@@ -764,7 +772,7 @@ projectContext(brain, liveInput) -> projection
 ```
 
 Neither reads the filesystem, reads a clock, calls a model, renders, or writes
-storage. Runtime adapters supply time, commits, file inspection, cleanup, and UI
+storage. Runtime adapters supply time, commits, filesystem access, cleanup, and UI
 effects.
 
 **Procedural first.** Modules of functions that take what they need and return
