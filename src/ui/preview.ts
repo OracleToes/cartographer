@@ -73,7 +73,7 @@ export function previewTranscript(width = 110): string {
   const header = new HeaderView({
     project: "cartographer",
     modelLabel: "llama-swap/ByteShape",
-    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false } },
+    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false, paused: false } },
     view: "chat",
     layer: "context",
     running: true,
@@ -146,7 +146,7 @@ export function previewArchive(width = 110): string {
   const header = new HeaderView({
     project: "cartographer",
     modelLabel: "llama-swap/ByteShape",
-    session: { generation: "gen-9d40c1", state: { contextWindow: 32_768, readOnly: false } },
+    session: { generation: "gen-9d40c1", state: { contextWindow: 32_768, readOnly: false, paused: false } },
     view: "chat",
     layer: "archive",
     running: false,
@@ -299,7 +299,7 @@ export function previewContext(width = 110): string {
   const header = new HeaderView({
     project: "cartographer",
     modelLabel: "llama-swap/ByteShape",
-    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false } },
+    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false, paused: false } },
     view: "context",
     layer: "context",
     running: false,

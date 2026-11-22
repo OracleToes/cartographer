@@ -49,6 +49,7 @@ import {
   applyOmitNow,
   readTreeNext,
   submitInput,
+  togglePause,
   type LiveSession,
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
@@ -1423,7 +1424,37 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return result;
   };
 
+  /**
+   * Pause or unpause the run (§9). The one implementation is in the runtime,
+   * because the headless driver answers the same act; this only says what
+   * happened and redraws.
+   */
+  const runPause = async () => {
+    try {
+      const outcome = await togglePause(state.session);
+      pushStatus(outcome.line);
+      if (outcome.paused) {
+        // The pause is a statement about the run, not a message to the agent:
+        // nothing is written to the context and the agent is never told.
+        tui.flash(outcome.line, 2_400);
+      }
+    } catch (error) {
+      pushStatus(`pause failed: ${errorText(error)}`);
+    }
+    await rebuildTranscript();
+    tui.requestRender();
+  };
+
   const submitMessage = (message: string) => {
+    // A line written while the agent is held in its stream lets go of that
+    // stream first (§9): the held reply ends here, and this line is the next
+    // thing the agent reads. Sending while merely paused is not this — nothing
+    // is held, so there is nothing to let go, and the run continues (§9: "send
+    // while paused behaves as if the run had not been paused").
+    if (state.session.freeze.frozen()) {
+      state.session.freeze.abandon();
+      pushStatus("the held reply ends here — your line is the next thing");
+    }
     state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
     void rebuildTranscript();
     void runSubmission(message);
@@ -1489,6 +1520,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         ).then(() => rebuildTranscript());
       },
       available: () => state.running,
+    },
+    {
+      id: "pause",
+      group: "the run",
+      // The label says what pressing it does, so the palette reads as an act
+      // and the footer reads as one line (§9).
+      label: state.session.state.paused ? "let the run go on" : "pause the run",
+      hint: "holds the reply where it is; a line you send ends it",
+      key: "ctrl+v",
+      run: () => void runPause(),
+      available: () => true,
     },
     {
       id: "send-mode",
@@ -1692,6 +1734,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { group: "type it", key: "/copy", label: "copy the transcript" },
     { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
     { group: "type it", key: "/help", label: "the command list in the transcript" },
+    { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 
   const showHelp = () => {

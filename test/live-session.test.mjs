@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -18,7 +19,9 @@ import {
   readTreeNext,
   sessionTranscript,
   submitInput,
+  togglePause,
 } from "../dist/runtime/live-session.js";
+import { configuredModels } from "../dist/runtime/llama-swap-model.js";
 import { generationPaths } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
@@ -627,6 +630,174 @@ test("applying a deletion now rebuilds the context in place: no collapse, no swe
     // the same one, so the head prefix is untouched (§4.1, §5.6).
     assert.equal(session.state.generation, generation, "no rotation");
     assert.equal(existsSync(generationPaths(root, generation).markdown), true, "the same generation's snapshot is the one in use");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+// ---------- §9: the pause holds the reply, it does not interrupt it ----------
+//
+// The gate lives at the provider's response body, so the only honest way to test
+// it is over a real socket: a stand-in server writes half a reply, the pause
+// lands, and the same HTTP response has to finish the sentence afterwards. The
+// faux provider never calls `fetch`, so it cannot show any of this.
+
+/** One chat-completions frame; `finish` closes the reply the way the server does. */
+const frame = (delta, finish = null) =>
+  `data: ${JSON.stringify({ id: "chat-1", object: "chat.completion.chunk", created: 1, model: "ByteShape", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const sse = (pieces, { finish = true } = {}) => {
+  const body = pieces.map((piece) => frame({ content: piece })).join("");
+  return finish ? `${body}${frame({}, "stop")}data: [DONE]\n\n` : body;
+};
+
+/**
+ * A llama-swap stand-in. The first request is a reply that stops mid-sentence:
+ * it writes `before` and waits to be released before writing `after`, so the
+ * pause has a live body to hold. Later requests — the turns the harness starts
+ * on its own — answer with `sleep`, which is how a turn honestly ends (§10);
+ * without that a stand-in that never calls a tool answers forever.
+ */
+const pausedServer = async (before, after) => {
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const seen = [];
+  const server = createServer((request, response) => {
+    if (request.method !== "POST") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    const number = seen.length + 1;
+    request.resume();
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    if (number > 1) {
+      // A turn that ends: one tool call and a finish.
+      const call = { tool_calls: [{ index: 0, id: `call-${number}`, type: "function", function: { name: "sleep", arguments: "{}" } }] };
+      response.write(frame({ role: "assistant", content: "" }));
+      response.write(frame(call));
+      response.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+      seen.push(`turn ${number}: sleep`);
+      return;
+    }
+    seen.push("turn 1: the paused reply");
+    // The opening frame, the first half of the sentence, and then the wait: the
+    // reply is open and unfinished, which is what a pause needs to find.
+    response.write(frame({ role: "assistant", content: "" }));
+    response.write(sse(before, { finish: false }));
+    void held.then(() => response.end(sse(after)));
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  return {
+    endpoint: `http://127.0.0.1:${server.address().port}/v1`,
+    release: () => release(),
+    requests: () => seen.length,
+    // Keep-alive sockets from the client would otherwise hold close() open.
+    close: () => new Promise((done) => {
+      server.closeAllConnections();
+      server.close(done);
+    }),
+  };
+};
+
+const waitUntil = async (predicate, label) => {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+};
+
+test("a pause holds the reply mid-sentence and the same response finishes it: nothing is re-requested", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const stand = await pausedServer(["The answer is "], ["forty-two."]);
+  const config = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: stand.endpoint };
+  const models = configuredModels(config, { provider: "llama-swap", modelId: "ByteShape" });
+  const ref = { provider: "llama-swap", modelId: "ByteShape" };
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const submission = await submitInput(session, "what is the answer?");
+    // The response body is open: this is the moment ^v finds something to hold.
+    await waitUntil(() => session.freeze.live(), "the response body");
+
+    const paused = await togglePause(session);
+    assert.equal(paused.held, true, "a live body is held, not interrupted");
+    assert.equal(session.freeze.frozen(), true);
+    assert.equal(session.state.paused, true);
+
+    // §9: the pause commits and discards nothing. The reply's second half has
+    // not been written yet, and while the gate is shut it must not reach the
+    // context even once the server sends it.
+    stand.release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const heldEntries = await sessionTranscript(session);
+    assert.equal(
+      JSON.stringify(heldEntries).includes("forty-two"),
+      false,
+      "while paused the reply has not gone on, even though the server has already sent the rest",
+    );
+
+    const resumed = await togglePause(session);
+    assert.equal(resumed.resumed, true, "the held stream let go");
+    assert.equal(session.state.paused, false);
+
+    // With no tool call in the reply the run would end here, so the stand-in
+    // answers a second turn too — but it must be the SAME request that carries
+    // the second half of the sentence to the context.
+    await submission.wait(BACKGROUND_CONTEXT);
+    const entries = await sessionTranscript(session);
+    const context = JSON.stringify(entries);
+    assert.ok(context.includes("The answer is "), "the first half is in the context");
+    assert.ok(context.includes("forty-two."), "and the same response carried the second half");
+    assert.equal(stand.requests(), 2, "two requests in all: the paused one, and the turn that ended the run");
+    assert.ok(!JSON.stringify(entries).includes("The answer is The answer is"), "the reply was not replayed");
+  } finally {
+    await closeLiveSession(session);
+    await stand.close();
+    await cleanup();
+  }
+});
+
+test("pausing while nothing is in flight lands on the next round, and unpausing lets go", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-chat" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-stop" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    // §9 in the small: the flag, the same-state answer, and the words. No run
+    // is in flight here, so the pause says the agent starts nothing of its own.
+    const paused = await togglePause(session);
+    assert.equal(paused.paused, true);
+    assert.equal(paused.changed, true);
+    assert.equal(paused.held, false, "no body was in flight to hold");
+    assert.match(paused.line, /starts nothing of its own/);
+    assert.equal(session.state.paused, true);
+
+    const again = await togglePause(session, true);
+    assert.equal(again.changed, false, "asking for the state it is already in changes nothing");
+    assert.match(again.line, /already paused/);
+
+    const resumed = await togglePause(session, false);
+    assert.equal(resumed.resumed, false, "there was no held body");
+    assert.match(resumed.line, /on again/);
+    assert.equal(session.state.paused, false);
+
+    // The pause is not told to the agent (§9). Nothing was written to the
+    // context by pausing: the store holds only what the turn below writes.
+    const before = await sessionTranscript(session);
+    await togglePause(session, true);
+    await togglePause(session, false);
+    const after = await sessionTranscript(session);
+    assert.deepEqual(
+      after.map((entry) => String(entry.id)),
+      before.map((entry) => String(entry.id)),
+      "a pause and an unpause write nothing to the context, so the agent is never told it happened",
+    );
   } finally {
     await closeLiveSession(session);
     await cleanup();

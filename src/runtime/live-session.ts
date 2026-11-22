@@ -42,6 +42,7 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
+import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 
 export interface LiveSessionOptions {
   /**
@@ -72,6 +73,8 @@ export interface LiveSession {
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
   /** The mutable present; named fields, no hidden state (§5.3). */
   readonly state: LiveSessionState;
+  /** The gate every model response body passes through: `^v` holds it (§9). */
+  readonly freeze: StreamFreeze;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
   /**
@@ -111,6 +114,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
     contextWindow,
+    paused: false,
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
@@ -121,6 +125,11 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
   };
+
+  // One gate per session, around every model call the session makes (§9).
+  // Opened before the harness, so the first request it makes is already gated.
+  const freeze = createStreamFreeze();
+  const gatedModels = freeze.gate(options.models);
 
   let harness: Harness | undefined;
   try {
@@ -135,7 +144,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       }),
     );
     harness = await Harness.open(storage, {
-      models: options.models,
+      models: gatedModels,
       registry,
       now,
       ...(options.setTimer === undefined ? {} : { setTimer: options.setTimer }),
@@ -166,6 +175,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       conversation,
       database,
       state,
+      freeze,
       takeCollapseRequest() {
         const reason = state.collapseRequested;
         state.collapseRequested = null;
@@ -209,8 +219,12 @@ export async function resumeAfterRest(session: LiveSession) {
  * the tree (§6.3). `tree` ends its turn so the very next thing the agent reads is
  * the tree it just set, not the one it had before; this is the same continuation
  * a woken rest takes, without the wait.
+ *
+ * Paused, it starts nothing (§9): the request is left where it is, and the tree
+ * is read when the person lets the run go on.
  */
 export async function readTreeNext(session: LiveSession): Promise<{ status: string } | undefined> {
+  if (session.state.paused) return undefined;
   if (!session.takeTreeReadRequest()) return undefined;
   const submission = await resumeAfterRest(session);
   return submission.wait(BACKGROUND_CONTEXT);
@@ -241,6 +255,98 @@ export async function applyOmitNow(session: LiveSession, entryId: string): Promi
     BACKGROUND_CONTEXT,
   );
   return true;
+}
+
+/**
+ * What a pause did, in the words the person is shown (§9).
+ *
+ * `held` and `interrupted` are both real pauses: the first caught a live
+ * response body and is still holding it, the second caught the run between
+ * requests, so nothing is being read and nothing new may start. An `interrupted`
+ * pause did cost the work in flight — that is the price of pausing between
+ * requests rather than mid-reply, and it is said plainly rather than hidden.
+ */
+export interface PauseOutcome {
+  /** Whether the agent is paused now. */
+  readonly paused: boolean;
+  /** False when the request changed nothing: the agent was already in that state. */
+  readonly changed: boolean;
+  /** The run is held mid-reply, and this same reply continues when it lets go. */
+  readonly held: boolean;
+  /** The run was caught between requests, so its work in flight was interrupted. */
+  readonly interrupted: boolean;
+  /** An unpause let a held reply go on, rather than merely letting the agent run again. */
+  readonly resumed: boolean;
+  /** One line, plain, for the transcript and the headless driver. */
+  readonly line: string;
+}
+
+/**
+ * Pause or unpause the agent (§9).
+ *
+ * Pausing is not an interrupt. When a response body is in flight the gate holds
+ * it and the same reply goes on later, token for token; nothing is committed or
+ * discarded, and the agent is not told. When nothing is in flight there is no
+ * stream to hold, so the pause lands on the round of tool calls: the run is
+ * interrupted where it stands, and nothing starts of its own accord while the
+ * pause lasts.
+ *
+ * Unpausing lets the held body go on. The agent rested while paused is a
+ * durable task, so its own timer is what wakes it; nothing here starts work
+ * the agent did not ask for.
+ */
+export async function togglePause(session: LiveSession, to?: boolean): Promise<PauseOutcome> {
+  const paused = session.state.paused;
+  const want = to ?? !paused;
+  if (want === paused) {
+    return {
+      paused,
+      changed: false,
+      held: false,
+      interrupted: false,
+      resumed: false,
+      line: paused ? "the agent is already paused" : "nothing is paused",
+    };
+  }
+  session.state.paused = want;
+  if (want) {
+    if (session.freeze.freeze()) {
+      return {
+        paused: true,
+        changed: true,
+        held: true,
+        interrupted: false,
+        resumed: false,
+        line: "paused: the agent is held in its stream, mid-sentence · ^v lets it continue · a line or command you send ends it",
+      };
+    }
+    // Nothing to hold: the pause lands on the round of tool calls instead. The
+    // run is read from the store, which is where a run exists — the same source
+    // the interrupt uses — so the host keeps no second answer to "is it working".
+    session.freeze.abandon();
+    const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+    const interrupted = live?.run !== undefined;
+    if (interrupted) await interruptRun(session);
+    return {
+      paused: true,
+      changed: true,
+      held: false,
+      interrupted,
+      resumed: false,
+      line: interrupted
+        ? "paused: the agent is interrupted where it stands · ^v lets it go on"
+        : "paused: the agent starts nothing of its own · ^v lets it go on",
+    };
+  }
+  const resumed = session.freeze.resume();
+  return {
+    paused: false,
+    changed: true,
+    held: false,
+    interrupted: false,
+    resumed,
+    line: resumed ? "on again — the agent goes on with its stream" : "on again — the agent may work again",
+  };
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */

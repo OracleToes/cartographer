@@ -5,6 +5,10 @@
  * Line semantics:
  *   /collapse  — the person collapses the context on the spot: run the
  *                ceremony, print the plain report, keep going.
+ *   /pause     — /pause holds the run where it is and /pause off lets it go on
+ *                (§9): nothing is committed or discarded, and the agent is not
+ *                told. A line typed while the agent is held lets the held reply
+ *                go and is the next thing the agent reads.
  *   /help      — the commands.
  *   /quit      — end the session (also on stdin EOF).
  *   anything else — a person message to the agent.
@@ -30,6 +34,7 @@ import {
   openLiveSession,
   readTreeNext,
   submitInput,
+  togglePause,
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
@@ -52,6 +57,7 @@ export interface HeadlessOptions extends LiveSessionOptions {
 const HELP = [
   "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
   "  /collapse  collapse the context now — the Brain rebuilds it",
+  "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /help      see this",
   "  /quit      end the session",
 ].join("\n");
@@ -132,12 +138,29 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         writeLine(output, HELP);
         continue;
       }
+      if (line === "/pause" || line.startsWith("/pause ")) {
+        const argument = line.slice("/pause".length).trim();
+        const to = argument === "on" ? true : argument === "off" ? false : argument === "" ? undefined : null;
+        if (to === null) {
+          writeLine(error, "(/pause, /pause on, or /pause off)");
+          continue;
+        }
+        writeLine(output, (await togglePause(session, to)).line);
+        continue;
+      }
       if (line === "/collapse") {
         session = await runCollapse(session, options, output, "person requested (/collapse)");
         for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
         continue;
       }
 
+      // A line written while the agent is held in its stream lets go of that
+      // stream first (§9): the held reply ends here, and this line is the next
+      // thing the agent reads.
+      if (session.freeze.frozen()) {
+        session.freeze.abandon();
+        writeLine(output, "(the held reply ends here — your line is the next thing)");
+      }
       try {
         const submission = await submitInput(session, line);
         const settled = await submission.wait(BACKGROUND_CONTEXT);

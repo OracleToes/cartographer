@@ -58,6 +58,13 @@ export const CARTO_INSTRUCTIONS = [
 export interface LiveSessionState extends ToolSession {
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
   contextWindow: number;
+  /**
+   * The person has paused the agent (§9). Pausing is not an interrupt and is
+   * never told to the agent, so nothing in the block mentions it; the flag is
+   * here because the UI and the driver read the one state, and here is where
+   * this session's state lives.
+   */
+  paused: boolean;
   lastReportedInput: number | undefined;
   /** Tool-work estimate as of the last provider report. */
   toolWorkAtLastReport: number;

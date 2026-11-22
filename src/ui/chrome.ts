@@ -28,7 +28,7 @@ export type SendMode = "steer" | "after run" | "now";
 
 export interface HeaderState {
   project: string;
-  readonly session: { generation: string; state: { contextWindow: number; readOnly: boolean } };
+  readonly session: { generation: string; state: { contextWindow: number; readOnly: boolean; paused: boolean } };
   modelLabel: string;
   view: ViewMode;
   layer: Layer;
@@ -61,10 +61,20 @@ export class HeaderView implements Component {
 
     const left = `${tokens.bold(tokens.accent("carto"))}${tokens.faint(" ▏ ")}${tokens.bold(tokens.text(this.state.project))}${tokens.faint(` · ${view} · ${this.state.session.generation.slice(-6)}`)}`;
     // The view name already says `archive` when the other layer is showing, so
-    // the middle zone carries only the mode — the one state that changes what
-    // the agent may do.
-    const middle = this.state.session.state.readOnly ? tokens.warn(tokens.bold("READ ONLY")) : "";
-    const status = this.state.running ? tokens.warn("working…") : tokens.faint("idle");
+    // the middle zone carries the states that change what the agent may do: the
+    // mode, and the pause (§9). A pause holds the run where it is, so the header
+    // says so rather than leaving `working…` to imply progress that is not
+    // happening. Both fit; neither is invented when it does not apply.
+    const paused = this.state.session.state.paused;
+    const middle = [
+      this.state.session.state.readOnly ? tokens.warn(tokens.bold("READ ONLY")) : "",
+      paused ? tokens.accent(tokens.bold("PAUSED")) : "",
+    ].filter((part) => part !== "").join(" ");
+    const status = paused
+      ? tokens.accent(this.state.running ? "held" : "paused")
+      : this.state.running
+        ? tokens.warn("working…")
+        : tokens.faint("idle");
     const right = `${tokens.muted(this.state.modelLabel)}${tokens.faint(" · ")}${tokens.muted(window)}${tokens.faint(" · ")}${status}`;
 
     const middleWidth = visibleWidth(middle);

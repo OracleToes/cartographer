@@ -253,39 +253,80 @@ collapse, which is what §5.1 says.
 **Test.** An apply-now on a body entry leaves the head prefix byte-identical and
 changes only what follows it; no collapse counter moves.
 
-## Stage 8 — pause: blocked
+## Stage 8 — pause
 
-**Status: blocked.** Unchanged, and still a question for the person, not a
-silently dropped stage.
+**Status: done.** It was recorded here as blocked, on the reading that a run is a
+pi-durable task and pi-durable cannot suspend one. That reading was right about
+pi-durable and wrong about where the freeze goes: the stream is not held above
+the harness, it is held *below* it, at the response body of the provider request
+the harness's run is waiting on. The person's word settled it — pause is
+buildable, and hand-rolling it is fine.
 
 **Spec.** §9: "**Pause** stops the run where it is without breaking the stream of
-generation… Nothing is committed or discarded by a pause, and the agent is not
-told it happened."
+generation. The person types in the input box normally, unpauses, and the run
+continues unaffected. Nothing is committed or discarded by a pause, and the agent
+is not told it happened."
 
-**What the code does.** There is no pause. The only run control is interrupt,
-which §9 names as the one action that costs work.
+**Where the freeze sits.** `src/runtime/stream-freeze.ts`. pi-ai starts the
+network read when it calls the provider and buffers parsed events in memory, so
+refusing to pull from the provider's *event* stream only buffers the whole reply
+— the model would run to the end and the "pause" would be a delay in showing it.
+The gate therefore goes around the HTTP body: `gateModels` copies the `Models`
+registry the harness is given, and for `stream`/`streamSimple` passes a wrapped
+`fetch` (pi's own `ProviderRequestOptions.fetch`, so the request is untouched).
+The wrapped body is a `ReadableStream` whose `pull()` parks while the gate is
+frozen. Parked, nothing reads the upstream socket; the kernel's buffers fill, TCP
+pushes back, and the server stops mid-token. Opening the gate resumes the same
+`pull()` on the same response — no second request, nothing replayed. That is the
+whole mechanism, and it is why §9's "without breaking the stream" is satisfied
+rather than worked around.
 
-**Why it is blocked.** A run is a pi-durable task, and pi-durable exposes no way
-to suspend one. `HarnessInspection.scheduling` reports `"paused"`, but the only
-transition into it is *before* `Harness.resume()`, which is the host opening the
-session; there is no call that pauses a running run and no call that resumes one
-in place. `abortTask` marks an abort, which is an interrupt. Generation and its
-stream live inside the provider request the harness owns, so there is nothing on
-this side to hold that would not also break the stream — which is precisely what
-§9 says a pause must not do.
+The gate is per session, not per conversation and not on the provider object: the
+provider registry is shared and outlives a session (collapse reopens on the same
+`Models`), so wrapping it would double-wrap and outlive the freeze. Gating the
+harness's view of the registry covers the agent, its tasks, and its hooks at once.
 
-**What that leaves.** Either the section's pause is not buildable on this
-dependency, or the dependency needs the capability. Both are the person's call,
-not mine, so this stage stays `blocked` until they say which. Nothing is faked in
-the meantime: the app does not offer a pause that secretly interrupts.
+**The two pauses.** `togglePause(session, to?)` in `live-session.ts`:
 
-**Test.** None. A test here would only assert a faked pause.
+- a body is in flight ⇒ it is held. "Paused the agent in its stream; ^v lets it
+  continue; a line or command you send ends it." Nothing committed, nothing
+  discarded, and the agent is not told.
+- nothing is in flight ⇒ there is nothing to hold, so the pause lands on the
+  round of tool calls: the run is interrupted where it stands, and the line says
+  so plainly ("interrupted where it stands") rather than pretending a stream was
+  held. This is the honest cost, and it is the same act the person asked for.
+
+Unpausing resumes a held body. Asking for the state it is already in changes
+nothing and says so. `abandon` — letting go of every body so the run ends
+aborted — is *not* a pause: it is what a line or a command sent while the agent
+is held does (§9's steer ends the held reply and becomes the next thing read),
+and what `^x` and a collapse do.
+
+**Nothing starts while paused.** `readTreeNext` returns without taking its
+request (§6.3's continuation), so no turn of the agent's own begins; the request
+survives and the tree is read when the run is let go.
+
+**Wired.** `^v` in the `the run` group beside `^x stop the run`, labelled "pause
+the run" / "let the run go on" so the palette reads as an act; the header's middle
+zone says `PAUSED` and the status becomes `held` instead of `working…`; `/pause`,
+`/pause on`, `/pause off` in the headless driver and in the `f1` panel. Pausing is
+not named to the agent anywhere — not in the state block, not in the instructions
+— because §9 says it is not told.
+
+**Test.** `test/live-session.test.mjs`, "a pause holds the reply mid-sentence and
+the same response finishes it": a real HTTP stand-in writes half a sentence, the
+test pauses, lets the server finish while the gate is still shut, unpauses, and
+asserts the second half arrives **and that exactly one request was made** — that
+last assertion is the test. A second test covers the no-body branch, the
+same-state answer, and that a pause and unpause write nothing to the context.
 
 ## Where this stands
 
-Stages 1 to 7 are done: each one's code does what its section says, and each one
-has a test that fails if it stops doing it. Stage 8 is blocked on a question
-about the dependency, above.
+All eight stages are done: each one's code does what its section says, and each
+one has a test that fails if it stops doing it. Stage 8's first reading — that the
+dependency made pause impossible — was wrong about where the freeze belongs, not
+about what pi-durable offers; the pause holds the provider's response body, under
+the harness, and the test that matters asserts one request, not two.
 
 Two things moved between stages, and the plan says so where they landed rather
 than here: `F`/`D` handles on tree rows (stage 3's job) had to be built in stage
@@ -305,7 +346,9 @@ task always belongs to the run (stage 6).
 
 ## Order and why
 
-1 → 2 → 3 → 4 → 5 → 6 → 7, then 8 as a question for the person. The archive's
-marks come first because everything else that touches the archive is built on
-them; the pins come next because they are the head's promise; the rest are
-independent and ordered by how much they mislead the agent today.
+1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. The archive's marks come first because everything
+else that touches the archive is built on them; the pins come next because they
+are the head's promise; the rest are independent and ordered by how much they
+mislead the agent today. Pause is last because it is the only one that is not a
+description of a feature already built on the harness — it is a hold on the
+provider's own stream, and it changes nothing else.
