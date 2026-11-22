@@ -274,7 +274,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "ledger",
       description:
-        "Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one the person asked is the same call as writing it.",
+        "Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one the person asked is the same call as writing it. A plan is made of these records: the goal, then one record per step in the order you will take them, with progress naming the step it moved. A plan written here reaches the person in their Ledger, and is in your head at the next collapse without your reading it again.",
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),

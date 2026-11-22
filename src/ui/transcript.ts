@@ -31,9 +31,17 @@
  * long result stays readable inline without pushing the transcript off the
  * screen, and full is the same card with nothing held back.
  *
+ * **Every row carries its handle** (§5.4): a person's line its `U`, a card the
+ * `X` of the item it renders, a tool row the `R` or `S` of the result it shows —
+ * the text a person quotes and a pin holds. The number is the Context view's
+ * number, because the two views are one prompt seen two ways.
+ *
  * Order is the context's order, not arrival order: a person's line appears
  * where it actually landed, and a line that is submitted but not yet placed sits
- * at the end, dimmed and labelled, until the run reaches a boundary.
+ * at the end, dimmed and labelled, until the run reaches a boundary. Chat a
+ * collapse brought into the new context is placed by when it was said, so it
+ * sits at the head of this generation and the transcript before it stays under
+ * it rather than being replaced.
  *
  * Nothing here is data: the workspace rebuilds the landed list from the session
  * and the Brain at every drain and pushes the in-flight partial separately.
@@ -47,6 +55,8 @@ type BlockRange = { id: string; start: number; end: number };
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
   id: string;
+  /** The prompt's ephemeral handle (§5.4): `X3` for one item, or the call's own handle on its result. */
+  handle?: string;
   /** True while fed from the live partial: defaults its fold open and is replaced when the round lands. */
   live?: boolean;
   /** Live tool status, from the live round's slot; absent when landed. */
@@ -60,8 +70,8 @@ export type CardEntry =
   | (CardBase & { kind: "tool"; name: string; args: string; /** Retained running output while the call executes; preferred as the card body when present. */ output?: string });
 
 export type TranscriptEntry =
-  | { kind: "person"; text: string }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
+  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -331,10 +341,16 @@ export class TranscriptView implements Component {
    * A voice block: a coloured spine, a label in its own hue, the text in body
    * ink, and every continuation line aligned under the text column.
    */
-  private block(who: "you" | "carto", text: string, width: number, extra?: string): string[] {
+  private block(who: "you" | "carto", text: string, width: number, handle?: string, extra?: string): string[] {
     const tint = who === "you" ? tokens.person : tokens.agent;
     const label = who === "you" ? "you" : "carto";
-    const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
+    const marker = [
+      handle === undefined || handle.length === 0 ? "" : tokens.faint(handle),
+      extra === undefined || extra.length === 0 ? "" : tokens.pin(extra),
+    ]
+      .filter((part) => part.length > 0)
+      .map((part) => ` ${part}`)
+      .join("");
     // The text is wrapped once, at the body's width, and a pin rides on the last
     // line if there is room for it there. Wrapping it twice — narrower for the
     // first line, wider for the rest — would move the column, which is worse.
@@ -381,7 +397,10 @@ export class TranscriptView implements Component {
     const labelText = kindLabel(card);
     const label = tint(tokens.bold(labelText));
     const gap = " ".repeat(Math.max(1, 6 - labelText.length)); // the label column: thinking/text/tool …
-    const keyPrefix = `  ${tint(glyph)} ${label}`;
+    // The handle rides the header like every other row in the prompt (§5.4):
+    // three cells of faint type, so the column lines up down the transcript.
+    const handle = card.handle === undefined ? "" : `${tokens.faint(card.handle.padEnd(3))} `;
+    const keyPrefix = `  ${handle}${tint(glyph)} ${label}`;
 
     const marks: string[] = [];
     if (card.failed === true) marks.push(tokens.danger("· failed"));
@@ -533,11 +552,11 @@ export class TranscriptView implements Component {
       }
       gap();
       if (entry.kind === "person") {
-        lines.push(...this.block("you", entry.text, width));
+        lines.push(...this.block("you", entry.text, width, entry.handle));
       } else if (entry.kind === "agent") {
         const start = lines.length;
-        const pin = entry.pinned === undefined ? "" : tokens.pin(`⊙ ${entry.pinned === "user" ? "you" : "agent"}`);
-        lines.push(...this.block("carto", entry.text, width, pin.length > 0 ? pin : undefined));
+        const pin = entry.pinned === undefined ? "" : `⊙ ${entry.pinned === "user" ? "you" : "agent"}`;
+        lines.push(...this.block("carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
         if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);

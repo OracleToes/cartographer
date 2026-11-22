@@ -111,7 +111,7 @@ export class Sidebar implements Component {
     return undefined;
   }
 
-  /** The figure a row shows: a count, or a compact token figure for the prompt itself. */
+  /** The figure a row shows: a count, or a compact token figure for the context itself. */
   private figure(kind: BookKind): string {
     if (kind === "chat") return String(this.counts.chat);
     if (kind === "context") {
@@ -178,7 +178,7 @@ export class Sidebar implements Component {
     lines.push(fill(`   ${tokens.faint("WORKSPACE")}`));
     lines.push(fill(""));
     book("chat", "transcript");
-    book("context", "prompt");
+    book("context", "context");
 
     blank();
     lines.push(fill(`   ${tokens.faint("BRAIN")}`));

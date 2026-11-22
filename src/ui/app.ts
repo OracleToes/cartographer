@@ -11,7 +11,7 @@
  *
  * - the **transcript** is the boot view and the only place you type;
  * - the **atlas** and the **ledger** are the Brain, read and pinned;
- * - the **context** is the real prompt, and the only place surgery happens;
+ * - the **context** is the prompt the model reads, and the only place surgery happens;
  * - the **archive** is a layer over the working area, toggled by `ctrl+t`, the
  *   sidebar's layer row, or the palette (§3.3) — it is the person's, and no
  *   handle names it to the agent.
@@ -56,6 +56,7 @@ import { createTools } from "../runtime/tools.js";
 import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
+import { handleOf } from "../domain/handles.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
 import { Registry, type Command } from "./commands.js";
@@ -66,12 +67,13 @@ import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, formatToolArgs, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, formatToolArgs, isCard, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
 import { ruleLine, tokens } from "./tokens.js";
+import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
@@ -86,8 +88,6 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
-  /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
-  sealedAgentIds: Set<string>;
   sendMode: SendMode;
   view: ViewMode;
   /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
@@ -183,13 +183,66 @@ function prettyArgs(value: unknown): string {
 }
 
 /**
+ * The prompt's ephemeral items in prompt order (§5.4): a person's message, then
+ * the agent's reasoning, text and tool calls as the model produced them. One
+ * definition, used by the transcript's numbering and by the Context view's, so
+ * a handle names the same item in both. A result is an item of its own — the
+ * prefill carries it as its own message, and pinning it pins the result (§5.5).
+ */
+function promptItemsOf(entries: readonly ContextEntryLike[]): PromptItem[] {
+  const items: PromptItem[] = [];
+  // Call id → tool name, so a result knows whether it is a shell result (`S`)
+  // or any other tool's (`R`) without a second pass.
+  const tools = new Map<string, string>();
+  for (const entry of entries) {
+    const message = messageOf(entry);
+    if (message === undefined || !Array.isArray(message.content)) continue;
+    for (const part of message.content as unknown[]) {
+      if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+        tools.set(part.id, part.name);
+      }
+    }
+  }
+  for (const entry of entries) {
+    const message = messageOf(entry);
+    if (message === undefined) continue;
+    const id = typeof entry.id === "number" ? entry.id : 0;
+    const role = typeof message.role === "string" ? message.role : "";
+    if (role === "user" && typeof message.content === "string") {
+      if (message.content.trim() === STATE_BLOCK_MARKER || message.content.trim().length === 0) continue;
+      items.push({ kind: "person", key: String(id) });
+    } else if (role === "assistant" && Array.isArray(message.content)) {
+      (message.content as unknown[]).forEach((part, partIndex) => {
+        if (!isRecord(part)) return;
+        if (part.type === "thinking") items.push({ kind: "reasoning", key: `${id}-${partIndex}` });
+        else if (part.type === "text") items.push({ kind: "text", key: `${id}-${partIndex}` });
+        else if (part.type === "toolCall" && typeof part.id === "string") {
+          items.push({ kind: "call", key: `${id}-${partIndex}` });
+        }
+      });
+    } else if (role === "toolResult") {
+      const callId = (message as Record<string, unknown>).toolCallId;
+      // The tool is on the call the result answers; the result's own message
+      // carries only the call's id.
+      const tool = tools.get(typeof callId === "string" ? callId : "");
+      items.push({ kind: "result", key: String(id), ...(tool === undefined ? {} : { tool }) });
+    }
+  }
+  return items;
+}
+
+/**
  * The in-flight partial (`pi.live`) as foldable cards: the streaming
  * thinking/text blocks in content order, then the current round's tool slots.
  */
-function liveCardsOf(live: LiveState | undefined): CardEntry[] {
+function liveCardsOf(live: LiveState | undefined, handles: PromptHandles): CardEntry[] {
   const cards: CardEntry[] = [];
   if (live === undefined) return cards;
   const attempt = live.generation?.attempt ?? 0;
+  const handleOf = (key: string | number): { handle?: string } => {
+    const handle = handles.ephemeral(String(key));
+    return handle === undefined ? {} : { handle };
+  };
   const slots = new Map((live.tools ?? []).map((slot) => [slot.callId, slot]));
   const seenCalls = new Set<string>();
   const message = live.generation?.message as { content?: unknown } | undefined;
@@ -198,9 +251,9 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
       if (!isRecord(part)) return;
       const id = `live-${attempt}-${index}`;
       if (part.type === "thinking" && typeof part.thinking === "string") {
-        if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking });
+        if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking, ...handleOf(id) });
       } else if (part.type === "text" && typeof part.text === "string") {
-        if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text });
+        if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text, ...handleOf(id) });
       } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
         if (callId !== undefined) seenCalls.add(callId);
@@ -211,7 +264,7 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
           : undefined;
         const args = rawArgs ?? formatToolArgs(part.arguments, name);
         const status = slot?.status ?? (name.length > 0 ? "running" : "pending");
-        cards.push({ kind: "tool", id, live: true, name, args, status });
+        cards.push({ kind: "tool", id, live: true, name, args, status, ...handleOf(callId ?? id) });
       }
     });
   }
@@ -224,11 +277,44 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
       live: true,
       name: slot.name,
       args: "",
+      // A slot whose call has not streamed into the message yet is still the
+      // call it is, so it is numbered by the call's id like any other.
+      ...handleOf(slot.callId),
       ...(output === undefined ? {} : { output }),
       status: slot.status,
     });
   }
   return cards;
+}
+
+/**
+ * The numbering for a generation, as the transcript shows it: the prompt's
+ * landed items, then the in-flight partial after them, numbered once. A card in
+ * flight therefore takes the next handle rather than restarting at `X1`, which
+ * is what the person sees in the two views at the same moment.
+ */
+function generationHandles(live: LiveState | undefined, landed: readonly PromptItem[]): PromptHandles {
+  if (live === undefined) return promptHandles(landed);
+  const partial: PromptItem[] = [];
+  const content = (live.generation?.message as { content?: unknown } | undefined)?.content;
+  if (Array.isArray(content)) {
+    content.forEach((part, index) => {
+      if (!isRecord(part)) return;
+      const id = `live-${index}`;
+      if (part.type === "thinking") partial.push({ kind: "reasoning", key: id });
+      else if (part.type === "text") partial.push({ kind: "text", key: id });
+      else if (part.type === "toolCall" && typeof part.id === "string") partial.push({ kind: "call", key: id });
+    });
+  }
+  const streamed = new Set<string>();
+  for (const part of (Array.isArray(content) ? content : []) as unknown[]) {
+    if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string") streamed.add(part.id);
+  }
+  for (const slot of live.tools ?? []) {
+    if (streamed.has(slot.callId)) continue;
+    partial.push({ kind: "call", key: slot.callId });
+  }
+  return promptHandles([...landed, ...partial]);
 }
 
 /** One hairline, exactly the width it is given: the seam under the header. */
@@ -249,11 +335,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   if (options.refreshCapacity === true) await refresh();
 
-  const boot = await brain.read();
   const session = await openLiveSession(options);
   const state: TuiState = {
     session,
-    sealedAgentIds: new Set(boot.chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
     view: "chat",
     layer: "context",
@@ -426,6 +510,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       messages,
     );
 
+    // Numbered by the same function the transcript uses, over the same entries,
+    // so a handle means one thing in both views (§5.4).
+    const handles = promptHandles(promptItemsOf(entries));
     contextView.setData({
       brain: brainState,
       systemPrompt: CARTO_INSTRUCTIONS,
@@ -436,6 +523,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tools: allTools,
       transcriptMessages,
       toolWorkItems,
+      handles,
       stateBlockText: stateBlock,
     });
   };
@@ -718,6 +806,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const toolErrors = new Map<string, boolean>();
       const toolOutputs = new Map<string, string>();
       const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
+      // One order, one numbering, both views (§5.4).
+      const promptItems = promptItemsOf(entries);
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
         const message = messageOf(entry);
@@ -749,6 +839,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           }
         }
       }
+      const handles = promptHandles(promptItems);
+      // Now that the items are numbered, each row takes its own: a person's
+      // line is `U1`, a card is the `X` of the item it renders, and a result is
+      // the `R` or `S` of the result it is.
+      const handleFor = (key: string): { handle?: string } => {
+        const handle = handles.ephemeral(key);
+        return handle === undefined ? {} : { handle };
+      };
+      for (const item of person) {
+        const handle = handles.person(String(item.key));
+        if (handle !== undefined && item.entry.kind === "person") item.entry.handle = handle;
+      }
 
       // The working, as cards: reasoning, plain model text, and tool calls, in
       // the order the model produced them. Landed cards default folded.
@@ -767,10 +869,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         }
         parts.forEach((part, partIndex) => {
           const key = entryId + (partIndex + 1) * 0.0001;
+          const itemHandle = handleFor(`${entryId}-${partIndex}`);
           if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
-            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking } });
+            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking, ...itemHandle } });
           } else if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
-            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
+            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text, ...itemHandle } });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             const callId = typeof part.id === "string" ? part.id : undefined;
             const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
@@ -781,6 +884,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
                 id: `ctx-${entryId}-${partIndex}`,
                 name: part.name,
                 args: formatToolArgs(part.arguments, part.name),
+                ...itemHandle,
                 ...(output !== undefined ? { output } : {}),
                 ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
               },
@@ -789,11 +893,36 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         });
       }
 
+      // A tool row is the call and its result together, so it wears the
+      // result's handle: that is the text the person quotes, and pinning it
+      // pins the text that came back (§5.5).
+      for (const item of cards) {
+        const card = item.entry;
+        if (!isCard(card) || card.kind !== "tool") continue;
+        const handle = handles.result(String(card.id).replace(/^ctx-/, ""));
+        if (handle !== undefined) card.handle ??= handle;
+      }
+
+      // Agent Chat is the conversation, so every record is on screen: one
+      // written now, and one a collapse built the context with — those are in
+      // the archive once the store that held them is gone, which is why this
+      // asks the store and not the Brain alone. A record is placed by its
+      // timestamp, so Chat that came back at a collapse sits at the head of this
+      // generation, where the model reads it, and the earlier transcript stays
+      // under it.
       const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
-      for (const record of brainState.chat) {
-        if (record.author !== "agent") continue;
-        if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
-        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text, recordId: record.id, pinned: record.pinned } });
+      for (const record of await brain.readAgentChat()) {
+        const chatHandle = handleOf(brainState.handles, "chat", record.id);
+        agent.push({
+          key: anchorAt(record.createdAt) + 0.5,
+          entry: {
+            kind: "agent",
+            text: record.text,
+            recordId: record.id,
+            ...(chatHandle === undefined ? {} : { handle: chatHandle }),
+            pinned: record.pinned,
+          },
+        });
       }
 
       // Clear pending items whose placement we can now see: same text, an
@@ -831,7 +960,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         cards.map((item) => item.key).join(","),
         stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
         agent.map((item) => `${String(item.key)}:${item.entry.kind === "agent" ? String(item.entry.recordId ?? "") + ":" + String(item.entry.pinned ?? "") : ""}`).join(","),
-        state.sealedAgentIds.size,
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),
         String(Math.round(parts.systemTokens)),
@@ -870,7 +998,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     watch.start(async (call) => {
       if (call.kind !== "value") return;
       const live = call.value as LiveState;
-      const cards = liveCardsOf(live);
+      // The partial continues the prompt's numbering rather than starting a
+      // second one: a card in flight is the next item after everything the
+      // generation already holds, and it wears the handle of the item it is.
+      const landedEntries = (await sessionTranscript(state.session).catch(() => [])) as unknown as ContextEntryLike[];
+      const cards = liveCardsOf(live, generationHandles(live, promptItemsOf(landedEntries)));
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
@@ -901,7 +1033,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.liveWatch = undefined;
     try {
       const before = await brain.read();
-      for (const record of before.chat) if (record.author === "agent") state.sealedAgentIds.add(record.id);
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
       headerState.session = outcome.session;
@@ -1118,7 +1249,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     },
     {
       id: "prompt-fold",
-      group: "the prompt",
+      group: "the context",
       label: "fold every entry",
       hint: "enter folds one entry or a whole section",
       key: "shift+e",
@@ -1192,7 +1323,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     {
       id: "view-context",
       group: "go to",
-      label: "the prompt",
+      label: "the context",
       hint: "what the model reads, and surgery on it",
       run: () => void switchToView("context"),
       available: () => !inView("context"),

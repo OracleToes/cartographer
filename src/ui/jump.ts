@@ -27,7 +27,7 @@ export const JUMP_TARGETS: JumpTarget[] = [
   { key: "c", view: "chat", label: "transcript", description: "the conversation" },
   { key: "a", view: "atlas", label: "atlas", description: "nodes, links and attachments" },
   { key: "l", view: "ledger", label: "ledger", description: "goals, notes, questions, progress" },
-  { key: "x", view: "context", label: "prompt", description: "what the model reads, and surgery on it" },
+  { key: "x", view: "context", label: "context", description: "what the model reads, and surgery on it" },
 ];
 
 export class JumpOverlay implements Component, Focusable {

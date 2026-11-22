@@ -4,12 +4,13 @@ import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { Registry } from "../dist/ui/commands.js";
-import { previewArchive, previewPrompt, previewTranscript } from "../dist/ui/preview.js";
+import { previewArchive, previewContext, previewTranscript } from "../dist/ui/preview.js";
 import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
+import { promptHandles } from "../dist/ui/prompt-handles.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -38,7 +39,7 @@ test("a line already the width is left whole — no ellipsis, no eaten character
   assert.ok(!padLine(tokens.accent(exact), 40).includes("…"));
 });
 
-test("Sidebar renders the transcript, the prompt, and both books with counts", () => {
+test("Sidebar renders the transcript, the context, and both books with counts", () => {
   const sidebar = new Sidebar();
   sidebar.setCounts({
     chat: 3,
@@ -59,10 +60,10 @@ test("Sidebar renders the transcript, the prompt, and both books with counts", (
 
   // The workspace's two rows, then the Brain's: names, not old book slugs.
   assert.ok(rendered.includes("transcript"));
-  assert.ok(rendered.includes("prompt"));
+  assert.ok(rendered.includes("context"));
   assert.ok(rendered.includes("atlas"));
   assert.ok(rendered.includes("ledger"));
-  assert.ok(rendered.includes("1.3k"), "the prompt's figure is the compact token count");
+  assert.ok(rendered.includes("1.3k"), "the context's figure is the compact token count");
   assert.ok(rendered.includes("WORKSPACE") && rendered.includes("BRAIN"), "rows are grouped under quiet headings");
   assert.ok(rendered.includes("layer"), "the archive layer toggle sits in the pane, apart from the books");
 
@@ -82,8 +83,8 @@ test("Sidebar mouse click switches view", () => {
   // Rows are found where they rendered, not guessed: the pane's layout may change.
   const lines = sidebar.render(28).map((line) => plain(line));
   const chatRow = lines.findIndex((line) => line.includes("transcript"));
-  const promptRow = lines.findIndex((line) => line.includes("prompt"));
-  assert.ok(chatRow >= 0 && promptRow >= 0, "the rows render at the pane's own width");
+  const contextRow = lines.findIndex((line) => line.includes("context"));
+  assert.ok(chatRow >= 0 && contextRow >= 0, "the rows render at the pane's own width");
 
   const click = (y) =>
     sidebar.handleMouse({
@@ -102,7 +103,7 @@ test("Sidebar mouse click switches view", () => {
 
   assert.ok(click(chatRow)?.handled);
   assert.equal(selected, "chat");
-  assert.ok(click(promptRow)?.handled);
+  assert.ok(click(contextRow)?.handled);
   assert.equal(selected, "context");
 });
 
@@ -228,7 +229,39 @@ test("a streaming card keeps its tail, and the rule that counts the hidden lines
   assert.ok(shown.includes("line 1 ") || shown.includes("line 1\n") || /line 1\b/.test(shown), "the first line is on screen");
 });
 
-test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () => {
+test("every item in the prompt carries its own handle, and a bash result takes S", () => {
+  // §5.4 and §5.5: a person's message is `U`, an ephemeral item is `X`, and a
+  // tool result is an item of its own — `R`, or `S` when the shell produced it,
+  // because a result is what gets pinned and quoted, not the call that asked.
+  const handles = promptHandles([
+    { kind: "person", key: "1" },
+    { kind: "reasoning", key: "2-0" },
+    { kind: "call", key: "2-1" },
+    { kind: "result", key: "3" },
+    { kind: "call", key: "4-0" },
+    { kind: "result", key: "5", tool: "bash" },
+    { kind: "text", key: "2-2" },
+  ]);
+  assert.equal(handles.person("1"), "U1");
+  assert.equal(handles.ephemeral("2-0"), "X1");
+  assert.equal(handles.ephemeral("2-1"), "X2");
+  assert.equal(handles.result("3"), "R1", "a tool result has a handle like any other item");
+  assert.equal(handles.ephemeral("2-2"), "X4", "and the other items are still counted in prompt order");
+  assert.equal(handles.result("5"), "S1", "a bash result is the subdivision of R that gets quoted");
+
+  // The transcript draws them: a person's line, a card, and a tool row that
+  // carries the handle of the result it holds.
+  const transcript = new TranscriptView();
+  transcript.setEntries([
+    { kind: "person", text: "make the dice soft", handle: "U1" },
+    { kind: "tool", id: "t", handle: "S1", name: "bash", args: "npm test", output: "ok" },
+  ]);
+  const shown = plain(transcript.render(80).join("\n"));
+  assert.ok(shown.includes("U1"), "a person's line carries its handle");
+  assert.ok(shown.includes("S1"), "a card carries the handle of the item it is");
+});
+
+test("the context view is the prefill: head, body, tail, leaves unfoldable", () => {
   const view = new ContextView();
   const brain = emptyBrain();
   brain.handles = {
@@ -241,7 +274,7 @@ test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () =
   };
   brain.atlas.push({ id: "a1", title: "The Brain is the persistent record", text: "…", links: [], attachments: [], createdAt: 0, updatedAt: 0 });
   brain.ledger.push({ id: "l1", kind: "goal", text: "Keep the prefill in one order", status: "open", answer: null, createdAt: 1, updatedAt: 1 });
-  brain.chat.push({ id: "c1", author: "agent", text: "The prompt view is the prefill now.", createdAt: 2, updatedAt: 2 });
+  brain.chat.push({ id: "c1", author: "agent", text: "The context view is the prefill now.", createdAt: 2, updatedAt: 2 });
   view.setData({
     brain,
     systemPrompt: "You are Carto.",
@@ -316,7 +349,7 @@ test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () =
   folding.handleInput("\r"); // and opens it again
   assert.equal(gutter(), true, "and opens it again");
 
-  // `toggleAll` is the same action for the whole prompt: close what is open,
+  // `toggleAll` is the same action for the whole context: close what is open,
   // and leave a leaf alone, because a leaf is the one thing that stays whole.
   folding.toggleAll();
   assert.equal(gutter(), false, "everything foldable closes at once");
@@ -648,10 +681,10 @@ test("the command registry drives the footer, and a key only fires where it is a
 test("the drawn workspace is exact to its width, and the archive is a layer over it", () => {
   const width = 104;
   const transcript = previewTranscript(width);
-  const prompt = previewPrompt(width);
+  const context = previewContext(width);
   const archive = previewArchive(width);
 
-  for (const [name, frame] of [["transcript", transcript], ["prompt", prompt], ["archive", archive]]) {
+  for (const [name, frame] of [["transcript", transcript], ["context", context], ["archive", archive]]) {
     for (const line of frame.split("\n")) {
       assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
     }

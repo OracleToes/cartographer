@@ -93,7 +93,7 @@ export function projectContext(brain: CartoBrain): Projection {
 
   const text =
     parts.length === 0
-      ? "(the Brain is empty: nothing recorded yet. Write what you learn, and what you are working on.)"
+      ? "(the Brain is empty: nothing recorded yet. Write what you learn about the project, and the plan you are working to.)"
       : parts.map((part) => part.text).join("\n\n");
   const sizes = { atlas: 0, ledger: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;

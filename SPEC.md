@@ -424,6 +424,18 @@ not give it a second name.
 deserves its own letter because it is quoted and discussed far more than it is
 cited.
 
+**`X`, `U`, `R`, and `S` are numbered in prompt order, and the transcript and
+the Context view use one numbering.** A Brain record's handle is the Brain's, and
+survives a collapse with the record. An ephemeral item has no record to hold one,
+so its number comes from where it sits: `X3` is the third ephemeral item in the
+prompt in both views, because a handle is only useful if it names the same thing
+wherever the person reads it.
+
+A tool row in the transcript is one row — the call's arguments and its result —
+so it wears the result's handle, `R` or `S`, which is the text a person quotes
+and the item a pin holds (§5.5). The call keeps its own `X` handle in the Context
+view, where both are drawn.
+
 ### 5.5 Read results and staleness
 
 A `read` produces a tool result in the body, and that result carries a handle

@@ -1,5 +1,5 @@
 /**
- * The prompt (§8): what the model reads, in the order it reads it.
+ * The context (§8): the prompt the model reads, in the order it reads it.
  *
  * This view is not a browser for the Brain and not a debug dump. It is the
  * prefill itself — head, body, tail (§5) — with a fold tree over it:
@@ -47,6 +47,7 @@ import { handleOf } from "../domain/handles.js";
 import type { CartoBrain } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, tokens } from "./tokens.js";
+import type { PromptHandles } from "./prompt-handles.js";
 
 export interface ContextToolItem {
   name: string;
@@ -68,6 +69,8 @@ export interface ContextWorkItem {
   args?: string | undefined;
   output?: string | undefined;
   text?: string | undefined;
+  /** For a result: the row id of the call it answers, so it can take that call's handle. */
+  callId?: string | undefined;
 }
 
 export interface ContextViewData {
@@ -78,6 +81,13 @@ export interface ContextViewData {
   tools: ContextToolItem[];
   transcriptMessages: ContextDialogueMessage[];
   toolWorkItems: ContextWorkItem[];
+  /**
+   * The prompt's ephemeral handles (§5.4), numbered by `promptHandles` over the
+   * same items the transcript numbers — so `X3` is the same item in both views.
+   * Absent in a preview with no numbering of its own; the view then numbers its
+   * rows itself, which is right for a frame that stands alone.
+   */
+  handles?: PromptHandles | undefined;
   stateBlockText: string;
 }
 
@@ -286,8 +296,10 @@ export class ContextView implements Component, Focusable {
     // by that number and nothing else.
     const candidates: Array<{ key: number; order: number; node: PromptNode }> = [];
     let workCount = 0;
+    let resultCount = 0;
     for (const item of data.toolWorkItems) {
-      workCount += 1;
+      if (item.kind === "toolResult") resultCount += 1;
+      else workCount += 1;
       const key = Number.parseInt(String(item.id), 10) || 0;
       const suffix = Number.parseInt(String(item.id).split("-")[1] ?? "0", 10) || 0;
       if (item.kind === "reasoning") {
@@ -324,7 +336,9 @@ export class ContextView implements Component, Focusable {
           order: suffix,
           node: {
             id: `work-${String(item.id)}`,
-            handle: `X${workCount}`,
+            // A result is its own item with its own handle (§5.4, §5.5): `R`,
+            // or `S` when the shell produced it.
+            handle: data.handles?.result(String(item.id)) ?? `R${resultCount}`,
             kind: "result",
             label: "result",
             summary: oneLine(item.output ?? ""),
@@ -355,6 +369,15 @@ export class ContextView implements Component, Focusable {
       });
     }
     const body = candidates.sort((left, right) => left.key - right.key || left.order - right.order).map((entry) => entry.node);
+    // The numbering is the transcript's, when the app supplied it: `X3` names
+    // one item, and the two views are two renderings of one prompt (§5.4).
+    if (data.handles !== undefined) {
+      for (const node of body) {
+        const rowId = node.id.replace(/^(work|msg)-/, "");
+        const handle = node.kind === "person" ? data.handles.person(rowId) : data.handles.ephemeral(rowId);
+        if (handle !== undefined) node.handle = handle;
+      }
+    }
 
     // ── tail ────────────────────────────────────────────────────────────────
     const tail: PromptNode[] = [
@@ -379,7 +402,7 @@ export class ContextView implements Component, Focusable {
   }
 
   /**
-   * The whole prompt on one screen: every entry closed to its one-line summary,
+   * The whole context on one screen: every entry closed to its one-line summary,
    * or every entry open if any of them was closed. This is the counterpart to
    * the per-row fold, for when the person wants the shape of the prompt back
    * rather than a page of prose.
@@ -472,7 +495,7 @@ export class ContextView implements Component, Focusable {
     const inner = Math.max(16, width - 2);
     const ink = (text: string): string => ` ${text}`;
 
-    const left = `${tokens.bold(tokens.accent("PROMPT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.totalTokens().toLocaleString("en-US")} tokens`)}`;
+    const left = `${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.totalTokens().toLocaleString("en-US")} tokens`)}`;
     const mode = this.showReal ? tokens.warn("as the model receives it") : tokens.muted("as a person reads it");
     const armed = this.nowArmed ? ` ${tokens.danger("· next mark applies now")}` : "";
     const right = `${mode}${armed}`;
@@ -481,7 +504,7 @@ export class ContextView implements Component, Focusable {
     lines.push(canvasLine("", width));
 
     if (this.data === undefined) {
-      lines.push(ink(tokens.muted("Nothing in the prompt yet.")));
+      lines.push(ink(tokens.muted("Nothing in the context yet.")));
       return lines;
     }
 

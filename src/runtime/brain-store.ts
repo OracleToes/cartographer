@@ -53,6 +53,14 @@ export interface BrainStore {
   /** The archive as it stands. The agent never sees it (§3.3). */
   readArchive(): Promise<Archive>;
   /**
+   * Every Agent Chat record that still exists anywhere — in the Brain, or in
+   * the archive because a collage swept it out. A Chat record does not leave
+   * the agent's context when a collapse rebuilds it, and the transcript is where
+   * the person reads the conversation, so it stays on screen; this is how the
+   * transcript finds it after the store it was written in is gone.
+   */
+  readAgentChat(): Promise<ChatRecord[]>;
+  /**
    * One collapse's worth of Brain and archive change, in one transaction: the
    * writes apply to the Brain, what `sweep` says moves into the archive, and
    * what the archive drops is gone. Nothing half-done survives a crash at a
@@ -185,6 +193,21 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       }),
 
     readArchive: () => readArchiveFrom(database),
+
+    readAgentChat: async () => {
+      // Both places an Agent Chat record can be: the Brain, and the archive —
+      // archived records keep their id, so a swept record is the same record,
+      // and the transcript shows it once either way.
+      const brainRecords = (await readFrom(database)).chat.filter((record) => record.author === "agent");
+      const archived = (await readArchiveFrom(database)).items
+        .filter((item) => item.layer === "record" && item.record?.kind === "chat")
+        .map((item) => item.record?.value as ChatRecord | undefined)
+        .filter((record): record is ChatRecord => record !== undefined && record.author === "agent");
+      const seen = new Set(brainRecords.map((record) => record.id));
+      return [...brainRecords, ...archived.filter((record) => !seen.has(record.id))].sort(
+        (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+      );
+    },
 
     applyCollapse: (change) =>
       database.transaction(async (tx) => {

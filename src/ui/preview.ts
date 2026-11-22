@@ -27,7 +27,7 @@ const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 /**
  * The transcript as it sits in the working column: a seam under the header, the
- * entries, and the prompt's frame. Only the preview needs the frame, because
+ * entries, and the context's frame. Only the preview needs the frame, because
  * only the preview draws without an `Editor`.
  */
 class PreviewTranscript extends TranscriptView {
@@ -96,21 +96,23 @@ export function previewTranscript(width = 110): string {
 
   const transcript = new PreviewTranscript();
   transcript.setEntries([
-    { kind: "person", text: "the collapse still rebuilds from the brain but the transcript loses the tool cards. look at how the cards are keyed." },
+    { kind: "person", text: "the collapse still rebuilds from the brain but the transcript loses the tool cards. look at how the cards are keyed.", handle: "U1" },
     {
       kind: "agent",
       text: "Found it. The cards were keyed by the live attempt, so a rebuild replaced them instead of folding them. They are keyed by the context entry now.",
       recordId: "12",
+      handle: "C1",
       pinned: "user",
     },
-    { kind: "reasoning", id: "r1", text: "The live cards used the attempt number in their id. A rebuild after the round landed produced different ids, so the fold state was discarded and the card came back open. Keying by the entry and the part index makes the id stable across the boundary." },
-    { kind: "tool", id: "t1", name: "read", args: "path: src/ui/transcript.ts\noffset: 120\nlimit: 40" },
-    { kind: "tool", id: "t2", name: "edit", args: "path: src/ui/transcript.ts\nold: live-<attempt>\nnew: ctx-<entry>-<part>" },
+    { kind: "reasoning", id: "r1", handle: "X1", text: "The live cards used the attempt number in their id. A rebuild after the round landed produced different ids, so the fold state was discarded and the card came back open. Keying by the entry and the part index makes the id stable across the boundary." },
+    { kind: "tool", id: "t1", handle: "X2", name: "read", args: "path: src/ui/transcript.ts\noffset: 120\nlimit: 40" },
+    // The edit's result answers the edit's call, so it carries the same handle.
+    { kind: "tool", id: "t2", handle: "X3", name: "edit", args: "path: src/ui/transcript.ts\nold: live-<attempt>\nnew: ctx-<entry>-<part>", output: "applied 2 replacements to src/ui/transcript.ts" },
     { kind: "status", text: "collapsed and rebuilt from the Brain (7b21ee → 9d40c1)" },
-    { kind: "output", id: "o1", text: "Both views agree now: the footer draws the keys that are live, f1 lists every one of them, and the palette is the long tail." },
+    { kind: "output", id: "o1", handle: "X4", text: "Both views agree now: the footer draws the keys that are live, f1 lists every one of them, and the palette is the long tail." },
   ]);
   transcript.setLive([
-    { kind: "reasoning", id: "live-2-0", live: true, text: "Checking the fold state survives the boundary by running the view tests, then reading the bar's figures against the server's own count." },
+    { kind: "reasoning", id: "live-2-0", live: true, handle: "X5", text: "Checking the fold state survives the boundary by running the view tests, then reading the bar's figures against the server's own count." },
   ]);
 
   const footer = new FooterView(() =>
@@ -239,8 +241,8 @@ export function previewArchive(width = 110): string {
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
 }
 
-/** The prompt, over a small but complete Brain: all three sections, real handles. */
-export function previewPrompt(width = 110): string {
+/** The context, over a small but complete Brain: all three sections, real handles. */
+export function previewContext(width = 110): string {
   const brain = emptyBrain();
   brain.handles = {
     counters: { A: 2, L: 1, C: 1 },
@@ -256,8 +258,7 @@ export function previewPrompt(width = 110): string {
     { id: "a2", title: "The context bar is the server's own capacity", text: "Not a budget: a picture.", links: [], attachments: [], createdAt: 1, updatedAt: 1 },
   );
   brain.ledger.push({ id: "l1", kind: "goal", text: "Rebuild the workspace UI in Posting's idiom", status: "open", answer: null, createdAt: 2, updatedAt: 2 });
-  brain.chat.push({ id: "c1", author: "agent", text: "The prompt view is the prefill now: head, body, tail.", createdAt: 3, updatedAt: 3 });
-  void 0;
+  brain.chat.push({ id: "c1", author: "agent", text: "The context view is the prefill now: head, body, tail.", createdAt: 3, updatedAt: 3 });
   const data: ContextViewData = {
     brain,
     systemPrompt: "You are Carto: the working attention on one project, kept for one person.\nYour plain text is your own thinking; it reaches no one.",
@@ -267,13 +268,13 @@ export function previewPrompt(width = 110): string {
       { name: "read", description: "Read a file: its handle from the tree, or a path inside the project.", parameters: { type: "object", properties: { path: { type: "string" } } } },
     ],
     transcriptMessages: [
-      { id: 2, role: "user", text: "the prompt view is the prefill now, not a rail of six parts" },
-      { id: 6, role: "assistant [chat]", text: "Both sections read in prompt order." },
+      { id: 2, role: "user", text: "the context view is the prefill now, not a rail of six parts" },
+      { id: 6, role: "assistant [chat]", text: "Both regions read in the order the model reads them." },
     ],
     toolWorkItems: [
       { id: "3-0", kind: "reasoning", text: "The rail was a table of contents over a view that is already ordered; the order is the thing to show." },
       { id: "4-0", kind: "toolCall", name: "read", args: "path: src/ui/context-view.ts" },
-      { id: "5-0", kind: "toolResult", output: "export class ContextView implements Component, Focusable {" },
+      { id: "5-0", kind: "toolResult", callId: "4-0", output: "export class ContextView implements Component, Focusable {" },
     ],
     stateBlockText: "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\ntree: . (depth 2)\n  src/  24K\npins: none\nmarks: none\n</carto-state>",
   };
@@ -353,7 +354,7 @@ function beside(left: string[], leftWidth: number, right: string[], rightWidth: 
 /** Every preview, for `npm run ui` and for the tests. */
 export const previews = (width = 110): Record<string, string> => ({
   transcript: previewTranscript(width),
-  prompt: previewPrompt(width),
+  context: previewContext(width),
   archive: previewArchive(width),
   help: previewHelp(88),
   palette: previewPalette(64),

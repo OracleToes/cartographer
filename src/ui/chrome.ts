@@ -22,7 +22,7 @@ import { canvasLine, padLine, tokens } from "./tokens.js";
 
 /** The archive is a layer (§3.3), not a screen: the same UI over a different layer. */
 export type Layer = "context" | "archive";
-/** The books, plus the prompt itself. `archive` is not here: it is a layer, not a book. */
+/** The books, plus the context itself. `archive` is not here: it is a layer, not a book. */
 export type ViewMode = "chat" | "atlas" | "ledger" | "context";
 export type SendMode = "steer" | "after run" | "now";
 
