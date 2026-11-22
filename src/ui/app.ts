@@ -625,6 +625,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       messages,
     );
 
+    // A timer refresh may have begun before a mark was written. Read the Brain
+    // again immediately before drawing, so that stale refresh cannot hide it.
+    brainState = await brain.read();
     // Numbered by the same function the transcript uses, over the same entries,
     // so a handle means one thing in both views (§5.4).
     const handles = promptHandles(promptItemsOf(entries));

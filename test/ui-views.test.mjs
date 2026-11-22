@@ -342,7 +342,7 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
     for (const line of wide.render(width)) assert.equal(visibleWidth(line), width, "the pane's width holds at every size");
   }
 
-  // A section heading folds everything under it; pressing again opens it.
+  // An entry folds and unfolds independently of cursor wrapping.
   const folding = new ContextView();
   folding.setData({
     brain: emptyBrain(),
@@ -358,11 +358,10 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   const gutter = () => plain(folding.render(80).join("\n")).includes("│");
   folding.handleInput("\r"); // open the system prompt
   assert.equal(gutter(), true, "enter opens an entry");
-  folding.handleInput("k"); // the HEAD heading
-  folding.handleInput("\r"); // close everything under it
-  assert.equal(gutter(), false, "a heading closes the section");
+  folding.handleInput("\r"); // close the entry
+  assert.equal(gutter(), false, "enter closes the entry");
   folding.handleInput("\r"); // and opens it again
-  assert.equal(gutter(), true, "and opens it again");
+  assert.equal(gutter(), true, "enter opens it again");
 
   // `toggleAll` is the same action for the whole context: close what is open,
   // and open what is closed — with no class of row left out of it.
@@ -833,7 +832,7 @@ test("the archive keeps a restored item's type and the author of its pin", () =>
   assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
 });
 
-test("the context cursor only lands on entries, stays put at the edges, and survives a refresh", () => {
+test("the context cursor wraps between entries and survives refreshes and deletions", () => {
   const data = () => ({
     brain: emptyBrain(),
     systemPrompt: "you are carto",
@@ -864,15 +863,15 @@ test("the context cursor only lands on entries, stays put at the edges, and surv
     assert.equal(onHeading(), false, `k ${press + 1} landed on an entry`);
   }
 
-  // At the edges it stays put rather than wrapping or jumping to a heading.
+  // The edges wrap, skipping the section headings in both directions.
   view.handleInput("g");
   const first = view.cursor;
-  view.handleInput("k");
-  assert.equal(view.cursor, first, "k at the first entry stays there");
   view.handleInput("G");
   const last = view.cursor;
   view.handleInput("j");
-  assert.equal(view.cursor, last, "j at the last entry stays there");
+  assert.equal(view.cursor, first, "j at the last entry wraps to the first");
+  view.handleInput("k");
+  assert.equal(view.cursor, last, "k at the first entry wraps to the last");
 
   // The app re-renders this view on a timer while a run is going. That refresh
   // used to reset the cursor to the top; it must hold the entry instead.
@@ -897,6 +896,21 @@ test("the context cursor only lands on entries, stays put at the edges, and surv
   view.handleInput("!");
   view.handleInput("d");
   assert.deepEqual(target, { part: "tool-work", id: before.node.target.id, now: true });
+
+  // Remove the last body entry as an apply-now action would; the state block
+  // still follows it, but the cursor should move up to the preceding entry.
+  view.handleInput("G");
+  view.handleInput("k");
+  assert.equal(view.rows[view.cursor].node.id, "msg-u1");
+  view.handleInput("k");
+  const preceding = view.rows[view.cursor].node.id;
+  view.handleInput("j");
+  const removed = data();
+  removed.transcriptMessages = [];
+  view.onDelete = () => view.setData(removed);
+  view.handleInput("!");
+  view.handleInput("d");
+  assert.equal(view.rows[view.cursor].node.id, preceding, "deleting the last body entry selects its predecessor");
 });
 
 test("a moving cursor is scrolled into view rather than off the pane", () => {

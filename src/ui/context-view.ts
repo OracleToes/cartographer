@@ -247,7 +247,9 @@ export class ContextView implements Component, Focusable {
   private hits: Array<{ start: number; end: number; index: number }> = [];
 
   setData(data: ContextViewData): void {
-    const previous = this.rows[this.cursor];
+    const oldRows = this.rows;
+    const oldCursor = this.cursor;
+    const previous = oldRows[oldCursor];
     this.data = data;
     this.sections = this.build(data);
     this.rows = [];
@@ -258,12 +260,17 @@ export class ContextView implements Component, Focusable {
     // The cursor stays on the entry it was on, by id, across a refresh. The app
     // refreshes this view on a timer while a run is going; resetting to the top
     // each time is what made the cursor look like it jumped while scrolling.
-    // Only when the entry it was on is gone does it fall back to the first one,
-    // and it never lands on a section heading, which carries no cursor.
-    const held =
-      previous !== undefined && "node" in previous
-        ? this.rows.findIndex((row) => "node" in row && row.node.id === previous.node.id)
+    // If it disappears, prefer the previous surviving entry, then the next
+    // one. Deleting the last entry therefore moves up instead of to the top.
+    const findOld = (row: (typeof oldRows)[number] | undefined): number =>
+      row !== undefined && "node" in row
+        ? this.rows.findIndex((candidate) => "node" in candidate && candidate.node.id === row.node.id)
         : -1;
+    let held = findOld(previous);
+    if (held < 0 && previous !== undefined && "node" in previous) {
+      for (let at = oldCursor - 1; at >= 0 && held < 0; at -= 1) held = findOld(oldRows[at]);
+      for (let at = oldCursor + 1; at < oldRows.length && held < 0; at += 1) held = findOld(oldRows[at]);
+    }
     this.cursor = held >= 0 ? held : this.firstEntry();
   }
 
@@ -343,7 +350,7 @@ export class ContextView implements Component, Focusable {
         // having happened.
         ...(mark === undefined
           ? {}
-          : { marked: `${mark.action} · ${mark.author === "user" ? (data.person ?? "you") : "agent"}` }),
+          : { marked: `${mark.action} · ${mark.author === "user" ? (data.person ?? "you") : "agent"} · on collapse` }),
       };
     };
 
@@ -556,13 +563,13 @@ export class ContextView implements Component, Focusable {
       .find((node) => node.target?.part === part && String(node.target.id) === String(id));
   }
 
-  /** The next entry in a direction, skipping section headings; stays put at the edge. */
+  /** The next entry in a direction, skipping headings and wrapping at the edge. */
   private step(direction: 1 | -1): number {
     for (let at = this.cursor + direction; at >= 0 && at < this.rows.length; at += direction) {
       const row = this.rows[at];
       if (row !== undefined && "node" in row) return at;
     }
-    return this.cursor;
+    return direction === 1 ? this.firstEntry() : this.lastEntry();
   }
 
   /**
@@ -764,7 +771,8 @@ export class ContextView implements Component, Focusable {
         : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? who : "agent"}`)} `;
     const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
-    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}${pinned}`;
+    // Put the pending action before the name and preview so it survives narrow panes.
+    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${mark}${mark === "" ? "" : " "}${paddedName}${pinned}`;
     const lines: string[] = [];
 
     if (!open) {
