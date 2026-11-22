@@ -17,12 +17,32 @@
  * that, their message was the turn and the rest stays quiet (§10: "A rest that
  * is over is over ... no second start").
  */
-import { defineTask } from "@earendil-works/pi-durable";
+import { defineDoc, defineTask } from "@earendil-works/pi-durable";
+
+/** The one timed rest allowed to resume this conversation. */
+export const RestDoc = defineDoc<{ active: number | null; legacyAllowed: boolean }>({
+  kind: "carto.rest",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ active: null, legacyAllowed: true }),
+  checkpointWhen: () => true,
+});
+
+/** The tool call's durable receipt prevents a replay from creating a second rest. */
+export const RestCallDoc = defineDoc<{ handled: boolean }>({
+  kind: "carto.rest-call",
+  version: 1,
+  scope: "task",
+  initial: () => ({ handled: false }),
+  checkpointWhen: () => true,
+});
 
 import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 
 export const SleepTask = defineTask<
-  { seconds: number },
+  { seconds: number; tracked?: boolean },
   { phase: "rest" | "wake" },
   { restedAt: number },
   object
@@ -38,21 +58,27 @@ export const SleepTask = defineTask<
         context,
       );
     },
-    wake: async (_task, runtime, context) => {
+    wake: async (task, runtime, context) => {
       const conversation = await runtime.conversation(runtime.conversationId, context);
-      if (conversation !== undefined) {
-        // A queued item is placed at the next boundary; admitted while the
-        // conversation is idle, it starts the turn at once. Either way this is
-        // one turn and it begins from the state block, not from a word.
-        await conversation.submit({ type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" }, context);
-      }
-      await runtime.commit(
-        () => ({
+      await runtime.commit(async (tx) => {
+        const rest = await tx.doc(RestDoc, runtime.conversationId);
+        // Legacy tasks created before RestDoc existed may still be sleeping
+        // when the program is upgraded. A person's message invalidates them too.
+        const active = task.input.tracked === true ? rest.active === runtime.taskId : rest.legacyAllowed;
+        if (active && conversation !== undefined) {
+          // Admission and completion are the same durable commit: neither a
+          // crash nor a retry can commit one without the other.
+          await conversation.submit(tx, { type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" });
+        }
+        if (active) {
+          rest.active = null;
+          rest.legacyAllowed = false;
+        }
+        return {
           status: "terminal" as const,
           outcome: { status: "completed" as const, result: { restedAt: runtime.now() } },
-        }),
-        context,
-      );
+        };
+      }, context);
     },
   },
   abort: async (_task, runtime, context) => {

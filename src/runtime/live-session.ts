@@ -24,6 +24,8 @@ import {
   type Conversation,
   type HarnessOptions,
   type ModelRef,
+  type Cursor,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -47,6 +49,7 @@ import {
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
+import { RestDoc } from "./sleep-task.js";
 
 export interface LiveSessionOptions {
   /**
@@ -233,10 +236,34 @@ export async function waitForRunEnd(session: LiveSession): Promise<void> {
 
 /** Submit a person message; the submission settles when its run answers. */
 export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
-  // A message from the person ends a rest early (§10) and starts its own turn.
-  // The rest is told, so when its time does come it starts nothing of its own:
-  // one message, one turn.
-  return session.conversation.submit({ type: "input", content: text, whenBusy }, BACKGROUND_CONTEXT);
+  // Admit the message and invalidate the rest in one commit. Whichever of a
+  // wake or this message reaches the session line first wins; a crash cannot
+  // leave an admitted message alongside an eligible old wake.
+  const { id, oldTasks } = await session.conversation.commit(async (tx) => {
+    const rest = await tx.doc(RestDoc, session.conversation.id);
+    const oldTasks: TaskId[] = [];
+    if (rest.active !== null) oldTasks.push(rest.active as TaskId);
+    if (rest.legacyAllowed) {
+      // Upgrade existing sessions without losing or accidentally reviving
+      // conversation-owned rests created by earlier versions.
+      let cursor: Cursor | undefined;
+      do {
+        const page = await tx.scanTasks({ conversationId: session.conversation.id, kind: "carto.sleep" }, 100, cursor);
+        for (const task of page.items) if (task.state.status !== "terminal") oldTasks.push(task.id);
+        cursor = page.next;
+      } while (cursor !== undefined);
+    }
+    const id = await session.conversation.submit(tx, { type: "input", content: text, whenBusy });
+    rest.active = null;
+    rest.legacyAllowed = false;
+    return { id, oldTasks };
+  }, BACKGROUND_CONTEXT);
+  // Aborting frees the dormant task promptly. If interrupted here, the durable
+  // invalidation above still prevents it from starting another run on restart.
+  await Promise.all(oldTasks.map((id) => session.harness.abortTask(id, BACKGROUND_CONTEXT).catch(() => undefined)));
+  const submission = await session.harness.submission(id, BACKGROUND_CONTEXT);
+  if (submission === undefined) throw new Error("The admitted message is missing");
+  return submission;
 }
 
 /**

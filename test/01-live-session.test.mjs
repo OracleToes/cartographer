@@ -28,6 +28,7 @@ import { configuredModels } from "../dist/runtime/llama-swap-model.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
+import { RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -163,6 +164,43 @@ test("no product tool carries a bound its own description does not state", async
   }
 });
 
+test("a timed wake commits admission and completion together and does not revive a cancelled rest", async () => {
+  let rest = { active: 42, legacyAllowed: false };
+  let messages = 0;
+  let completed = false;
+  let crash = true;
+  const runtime = {
+    taskId: 42,
+    conversationId: 1,
+    now: () => 123,
+    conversation: async () => ({ submit: async (tx, submission) => {
+      assert.equal(submission.content, STATE_BLOCK_MARKER);
+      tx.messages += 1;
+    } }),
+    commit: async (callback) => {
+      const candidate = { ...rest };
+      const tx = { messages: 0, doc: async (token) => { assert.equal(token, RestDoc); return candidate; } };
+      const result = await callback(tx);
+      if (crash) throw new Error("crash before durable commit");
+      rest = candidate;
+      messages += tx.messages;
+      completed = result.status === "terminal";
+    },
+  };
+  const task = { input: { seconds: 10, tracked: true } };
+  await assert.rejects(SleepTask.definition.phases.wake(task, runtime, BACKGROUND_CONTEXT), /crash/);
+  assert.equal(messages, 0);
+  assert.equal(completed, false);
+  assert.equal(rest.active, 42);
+  crash = false;
+  await SleepTask.definition.phases.wake(task, runtime, BACKGROUND_CONTEXT);
+  assert.equal(messages, 1);
+  assert.equal(completed, true);
+  assert.equal(rest.active, null);
+  await SleepTask.definition.phases.wake(task, runtime, BACKGROUND_CONTEXT);
+  assert.equal(messages, 1, "replay or a cancelled rest cannot queue another wake");
+});
+
 test("a timed rest is durable: it sleeps in the store, survives a reopen, and the agent goes on", async () => {
   const { root, brain, cleanup } = await fixture();
   // A clock the test moves and timers it fires, so a rest of ten seconds costs
@@ -266,8 +304,11 @@ test("a message ends a rest early, and the rest does not then start a second tur
 
     // The rest holds nothing: the conversation is free while the agent sleeps,
     // so the person's message is a turn of its own rather than a queued one.
-    const queued = (await session.harness.inspect(BACKGROUND_CONTEXT)).submissions;
+    const inspection = await session.harness.inspect(BACKGROUND_CONTEXT);
+    const queued = inspection.submissions;
     assert.equal(queued.length, 0, "nothing is waiting on the rest");
+    const rest = inspection.tasks.find((task) => task.record.kind === "carto.sleep");
+    assert.ok(rest, "the timed rest is actually pending before the message");
 
     const reply = await submitInput(session, "never mind, do this instead");
     assert.equal((await reply.wait(BACKGROUND_CONTEXT)).status, "done", "the message got its turn at once");

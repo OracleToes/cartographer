@@ -11,7 +11,7 @@ import { existsSync, statSync } from "node:fs";
 
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
-import { defineTool } from "@earendil-works/pi-durable";
+import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
 // the env's cwd, and the two things Carto adds are the `.brain` wall and the
 // existence check on `create` that the package's `write` does not offer.
@@ -23,8 +23,8 @@ import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
-import { SleepTask } from "./sleep-task.js";
-import type { PendingWrite } from "../domain/state-block.js";
+import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
+import { STATE_BLOCK_MARKER, type PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
   /**
@@ -517,21 +517,24 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           // nothing is stored and nothing is pending (§10).
           return { output: [{ type: "text" as const, text: `Resting until ${them} messages you.` }], control: { terminate: true } };
         }
-        // A timed rest is durable (§10): the seconds are kept on the session for
-        // the run's end to turn into a sleep in the store, so a restart during a
-        // rest does not lose it. The turn ends here; the state block is what the
-        // agent reads when the rest is over.
-        // A timed rest is a task of the conversation (§10), so the wait is in
-        // the store and not in this process, and the conversation is free while
-        // it sleeps — a message from the person ends the rest and starts its own
-        // turn. The run ends here either way: the state block is what the agent
-        // reads when the rest is over.
-        await api.createTask(
-          SleepTask,
-          { seconds: args.seconds },
-          { ownership: { kind: "conversation" } },
-          context,
-        );
+        // The receipt and the conversation-owned task are committed together.
+        // A replay after a crash cannot create a second timed rest. If a person
+        // already queued a line for this boundary, it ends this rest instead.
+        const seconds = args.seconds;
+        await api.commit(async (tx) => {
+          const receipt = await tx.doc(RestCallDoc, api.taskId);
+          if (receipt.handled) return;
+          const rest = await tx.doc(RestDoc, api.conversationId);
+          const inbox = await tx.doc(InboxDoc, api.conversationId);
+          const hasPerson = inbox.items.some((item) => item.mode !== "write" && item.content !== STATE_BLOCK_MARKER);
+          rest.legacyAllowed = false;
+          if (!hasPerson) {
+            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" } });
+          } else {
+            rest.active = null;
+          }
+          receipt.handled = true;
+        }, context);
         return {
           output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },
