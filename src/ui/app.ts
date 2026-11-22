@@ -1101,6 +1101,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * skips the re-render entirely when nothing moved.
    */
   const rebuildTranscript = async (): Promise<void> => {
+    // The session is closed on the way out, and a rebuild in flight at that
+    // moment reads a closed harness: there is nothing left to draw, and the
+    // frame is about to go away with the terminal.
+    if (shutdownRequested) return;
     if (state.rebuilding) return;
     state.rebuilding = true;
     try {
@@ -1314,6 +1318,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (state.view === "context" && state.layer === "context") {
         await syncContextView(brainState);
       }
+    } catch (error) {
+      // Shutdown closed the session under us; every other failure is a real
+      // one and stays visible.
+      if (!shutdownRequested) throw error;
     } finally {
       state.rebuilding = false;
     }
@@ -1340,7 +1348,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
         lastLiveRebuild = now;
         setImmediate(() => {
-          void rebuildTranscript();
+          void rebuildTranscript().catch(() => undefined);
         });
       }
       hadLive = hasLive;
@@ -1425,6 +1433,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
     headerState.running = state.running;
+    // The run settled after the person left: the session is closed, and every
+    // read below would raise against a harness that is already gone.
+    if (shutdownRequested) return;
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
@@ -1538,8 +1549,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus("the held reply ends here — your line is the next thing");
     }
     state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
-    void rebuildTranscript();
-    void runSubmission(message);
+    void rebuildTranscript().catch(() => undefined);
+    // Nothing awaits a submission: the run outlives the frame that started it
+    // and settles after the person may have left, so a failure here is the
+    // status line's business, never the process's.
+    void runSubmission(message).catch((error: unknown) => {
+      if (!shutdownRequested) pushStatus(`the run failed: ${errorText(error)}`);
+    });
   };
 
   editor.onSubmit = (text: string) => {
@@ -1688,10 +1704,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       label: "stop the run",
       key: "ctrl+x",
       run: () => {
-        void interruptRun(state.session).then(
-          () => pushStatus("interrupt sent — the run stops"),
-          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
-        ).then(() => rebuildTranscript());
+        void interruptRun(state.session)
+          .then(
+            () => pushStatus("interrupt sent — the run stops"),
+            (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
+          )
+          .then(() => rebuildTranscript())
+          .catch(() => undefined);
       },
       available: () => state.running,
     },
