@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { InboxDoc } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
@@ -28,7 +29,7 @@ import { configuredModels } from "../dist/runtime/llama-swap-model.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
-import { RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
+import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -164,6 +165,56 @@ test("no product tool carries a bound its own description does not state", async
   }
 });
 
+test("timed sleep creation survives replay and respects an already queued message", async () => {
+  const tool = createTools({
+    root: ".", brain: {},
+    session: { person: "OracleToes", pending: [], tree: { anchor: ".", depth: 1 }, collapseRequested: null, generation: "test", readOnly: false },
+  }).find((item) => item.name === "sleep");
+  const rest = { active: null, legacyAllowed: true };
+  const receipts = new Map();
+  const inbox = { items: [] };
+  const created = [];
+  let taskId = 1;
+  const api = {
+    get taskId() { return taskId; },
+    conversationId: 2,
+    commit: async (fn) => fn({
+      doc: async (token, id) => {
+        if (token === RestDoc) return rest;
+        if (token === InboxDoc) return inbox;
+        assert.equal(token, RestCallDoc);
+        if (!receipts.has(id)) receipts.set(id, { handled: false });
+        return receipts.get(id);
+      },
+      createTask: async (definition, input) => {
+        assert.equal(definition, SleepTask);
+        created.push(input);
+        return 40 + created.length;
+      },
+    }),
+  };
+  await tool.execute({ seconds: 5 }, api, BACKGROUND_CONTEXT);
+  await tool.execute({ seconds: 5 }, api, BACKGROUND_CONTEXT);
+  assert.deepEqual(created, [{ seconds: 5, tracked: true }], "replay did not create another task");
+  assert.equal(rest.active, 41);
+
+  // The person can write before the tool reaches its creation commit, even
+  // with text that happens to equal Carto's internal marker.
+  inbox.items.push({ mode: "followUp", content: STATE_BLOCK_MARKER });
+  taskId = 2;
+  await tool.execute({ seconds: 7 }, api, BACKGROUND_CONTEXT);
+  assert.equal(created.length, 1);
+  assert.equal(rest.active, null);
+  inbox.items.length = 0;
+  await tool.execute({ seconds: 7 }, api, BACKGROUND_CONTEXT);
+  assert.equal(created.length, 1, "replay cannot revive a rest ended by the queued input");
+
+  taskId = 3;
+  await tool.execute({ seconds: 9 }, api, BACKGROUND_CONTEXT);
+  assert.equal(created.length, 2, "a later sleep remains possible");
+  assert.equal(rest.active, 42);
+});
+
 test("a timed wake commits admission and completion together and does not revive a cancelled rest", async () => {
   let rest = { active: 42, legacyAllowed: false };
   let messages = 0;
@@ -296,7 +347,7 @@ test("a message ends a rest early, and the rest does not then start a second tur
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 600 }, { id: "call-rest" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-after" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
+  let session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
   try {
     await (await submitInput(session, "rest for ten minutes")).wait(BACKGROUND_CONTEXT);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -313,8 +364,13 @@ test("a message ends a rest early, and the rest does not then start a second tur
     const reply = await submitInput(session, "never mind, do this instead");
     assert.equal((await reply.wait(BACKGROUND_CONTEXT)).status, "done", "the message got its turn at once");
     assert.equal(captured.length, 2, "and the agent answered it");
+    await session.harness.waitForTask(rest.record.id, BACKGROUND_CONTEXT);
+    assert.ok(!(await session.harness.inspect(BACKGROUND_CONTEXT)).tasks.some((task) => task.record.kind === "carto.sleep"), "the rest is no longer pending");
 
-    // The rest's time comes and passes: it must start nothing.
+    // Cancellation remains effective across restart, even when the old due
+    // time comes and passes.
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
     clock += 601_000;
     session.harness.resume();
     await new Promise((resolve) => setTimeout(resolve, 20));

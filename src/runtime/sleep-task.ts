@@ -19,6 +19,8 @@
  */
 import { defineDoc, defineTask } from "@earendil-works/pi-durable";
 
+import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
+
 /** The one timed rest allowed to resume this conversation. */
 export const RestDoc = defineDoc<{ active: number | null; legacyAllowed: boolean }>({
   kind: "carto.rest",
@@ -38,8 +40,6 @@ export const RestCallDoc = defineDoc<{ handled: boolean }>({
   initial: () => ({ handled: false }),
   checkpointWhen: () => true,
 });
-
-import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 
 export const SleepTask = defineTask<
   { seconds: number; tracked?: boolean },

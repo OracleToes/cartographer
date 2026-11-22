@@ -24,7 +24,7 @@ import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
-import { STATE_BLOCK_MARKER, type PendingWrite } from "../domain/state-block.js";
+import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
   /**
@@ -526,9 +526,11 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           if (receipt.handled) return;
           const rest = await tx.doc(RestDoc, api.conversationId);
           const inbox = await tx.doc(InboxDoc, api.conversationId);
-          const hasPerson = inbox.items.some((item) => item.mode !== "write" && item.content !== STATE_BLOCK_MARKER);
+          // Any queued input already starts or continues a turn. Do not
+          // distinguish by content: a person's text may equal the marker.
+          const hasInput = inbox.items.some((item) => item.mode !== "write");
           rest.legacyAllowed = false;
-          if (!hasPerson) {
+          if (!hasInput) {
             rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" } });
           } else {
             rest.active = null;
