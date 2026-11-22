@@ -17,7 +17,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
-import { advertisedCapacityOf, catalogModel, resolveContextWindow, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
+import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
 import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
@@ -126,7 +126,7 @@ test("capacity advertisement is read from context_length, then context_window, t
 
 test("a listing entry maps to a Model: the configured pin wins, then the advertised window, else unknown", () => {
   const pinnedHigh = catalogModel({ id: "ByteShape", context_length: 131_072 }, 75_000, "http://x/v1");
-  assert.equal(pinnedHigh.contextWindow, 75_000, "the pin wins over an advertised window below it");
+  assert.equal(pinnedHigh.contextWindow, 75_000, "the pin wins over an advertised window above it");
   assert.equal(pinnedHigh.maxTokens, 75_000);
   const pinnedLow = catalogModel({ id: "ByteShape", context_length: 65_536 }, 131_072, "http://x/v1");
   assert.equal(pinnedLow.contextWindow, 131_072, "the pin can raise the server above its advertised window");
@@ -134,20 +134,12 @@ test("a listing entry maps to a Model: the configured pin wins, then the adverti
   assert.equal(silentPin.contextWindow, 75_000, "the pin serves a silent server");
   const advertised = catalogModel({ id: "ByteShape", context_length: 65_536 }, undefined, "http://x/v1");
   assert.deepEqual([advertised.contextWindow, advertised.maxTokens], [65_536, 65_536], "no pin: the server's advertised window is the truth");
+  const zeroPin = catalogModel({ id: "ByteShape", context_length: 65_536 }, 0, "http://x/v1");
+  assert.equal(zeroPin.contextWindow, 65_536, "a configured 0 means no pin, so the advertised window stands");
   const unknown = catalogModel({ id: "ByteShape" }, undefined, "http://x/v1");
   assert.deepEqual([unknown.contextWindow, unknown.maxTokens], [0, UNKNOWN_MAX_TOKENS], "no pin and no advertisement: the window is unknown and generation is uncapped");
   assert.equal(catalogModel({ context_length: 65_536 }, 75_000, "http://x/v1"), undefined);
   assert.equal(catalogModel({ id: "  " }, 75_000, "http://x/v1"), undefined);
-});
-
-test("the pin always wins — advertised capacity neither caps nor lowers it; unknown when both are absent", () => {
-  assert.equal(resolveContextWindow(75_000, undefined), 75_000);
-  assert.equal(resolveContextWindow(75_000, 65_536), 75_000);
-  assert.equal(resolveContextWindow(75_000, 131_072), 75_000);
-  assert.equal(resolveContextWindow(75_000, 0), 75_000);
-  assert.equal(resolveContextWindow(undefined, 65_536), 65_536);
-  assert.equal(resolveContextWindow(undefined, undefined), 0);
-  assert.equal(resolveContextWindow(undefined, 0), 0);
 });
 
 // ---------- the llama-swap provider ----------

@@ -186,18 +186,13 @@ export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
   return handles;
 }
 
-/** The root's own label: the directory the anchor names, as the tree shows it. */
-export function rootLabel(entry: TreeEntry): string {
-  return entry.name;
-}
-
 /**
  * The size of the subtree under one path, in bytes: what a directory actually
  * costs. The scan already aggregates it, so this is a lookup, not a walk — the
  * Tree view shows the per-directory figure beside a files-only aggregate
  * without walking the disk a second time.
  */
-export function subtreeSizes(entry: TreeEntry, depth: number): Map<string, number> {
+function subtreeSizes(entry: TreeEntry, depth: number): Map<string, number> {
   const sizes = new Map<string, number>();
   const walk = (node: TreeEntry, level: number): void => {
     if (level > depth) return;

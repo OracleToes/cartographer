@@ -91,6 +91,79 @@ one per test.
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
 
+### Stage: tests audit (campaign) — whole suite, 2026-11-22
+
+- Re-read every subsystem in `src/domain/`, `src/runtime/`, and `src/ui/`
+  alongside all 14 test files (`test/*.test.mjs`, 150 tests entering the pass).
+- Dead production code removed:
+  - Deleted `src/runtime/digest.ts` whole (`resolveInsideRoot` had zero callers
+    anywhere in `src/` or `test/`; `src/runtime/workspace.ts` is the real path
+    boundary).
+  - Removed unused export `rootLabel` and demoted `subtreeSizes` to
+    module-private in `src/runtime/project-tree.ts` (`src/ui/tree-view.ts`
+    carries its own label helper, and `subtreeSizes` is internal to
+    `walkProject`).
+  - Demoted `resolveContextWindow` and `maxTokensFor` to module-private in
+    `src/runtime/llama-swap-model.ts` (only called inside `llama-swap-model.ts`;
+    `catalogModel` is the public caller).
+  - Removed the dead `pad` computation (`void pad`) and unused `visibleWidth`
+    import in `src/ui/jump.ts`.
+- Duplicate and subset tests removed or folded:
+  - `test/handles.test.mjs` (3 → 2): folded the standalone `findByHandle`
+    lookup test into the first test, which already builds the same registry.
+  - `test/r4-config.test.mjs` (18 → 17): removed the standalone
+    `resolveContextWindow` unit test and folded its `configured = 0` ("no pin")
+    case into the `catalogModel` test, which already exercises every branch of
+    the helper through the public caller.
+  - `test/live-session.test.mjs` (22 → 21): folded `"the tree tool ends its
+    turn, and the host starts the next one at the new anchor"` into `"the tree
+    tool ends its turn, and readTreeNext — alone — consumes the request to
+    start the next one at the new anchor"` — the first test was a strict subset
+    of the second on the same fixture and scripted turn.
+  - `test/ui-views.test.mjs`: consolidated the near-duplicate `AtlasView` and
+    `LedgerView` two-pane tests into one test (`"the two books are two panes:
+    the list names the entry, l focuses its detail, h returns"`) that asserts
+    the `[FOCUSED]` detail state change on `l` and `h` in addition to frame
+    width and mouse wheel handling.
+- Strengthened in place (`test/ui-views.test.mjs`):
+  - Tightened the tree-preview pin check from `frame.includes("brain.ts") &&
+    /\bP\b/.test(frame)` (which would pass if `P` appeared anywhere in the
+    frame) to the row-scoped `/brain\.ts\s+P\b/`.
+  - Added the `tree` row and its `treeDirs/treeFiles` (`2/6`) figure to the
+    sidebar count test.
+- Untested behavior given a named guard (`test/ui-views.test.mjs`, net 26 → 27):
+  - `ArchiveView.withdrawSelected()` and its `u` key route (`"the archive's u
+    withdraws the mark on the selected item, and refuses when there is none"`).
+  - `JumpOverlay` single-keystroke routing (`"jump is one keystroke: a listed
+    letter lands, anything else lands nowhere"`).
+- Retained suite by file (14 files, 148 tests): `collapse` (18 — generation
+  discovery, crash-recovery reconciliation, record/ephemeral sweep, one-collapse
+  grace, pin suspension, mark-then-apply restore, person-only mark withdrawal,
+  pinned file and readResult refresh at collapse), `live-session` (21 — full
+  turn Brain write and trailing state block, continuation marker, read→atlas
+  attachment, tree turn termination and `readTreeNext` single consumption,
+  `.brain`/escape boundary, package file tools, read-only mode, unknown handle
+  errors, agent/person collapse and drift, bash execution and interrupt, tree
+  handle addressing, tool-parameter bound descriptions, durable timed rest and
+  early wake, in-place omit rebuild, and real-socket stream-freeze pause/resume),
+  `ui-views` (27 — width exactness, sidebar rows/figures/clicks, transcript
+  folding/tail/handles/pins, context prefill/cursor/scroll/body order/pinned
+  files, unified pin grammar, atlas+ledger two-pane focus/wheel/pin, token bar,
+  command registry, jump overlay, archive two-step delete/marks/withdraw/restore,
+  and tree view), `r4-config` (17 — model-ref/config parsing and persistence,
+  capacity advertisement precedence, `catalogModel` pin-wins mapping, provider
+  refresh cold/warm/retain-on-failure, headless driver, capacity refresh, and
+  concurrent CLI end-to-end), `gitignore` (11), `project-tree` (9),
+  `projection` (8), `person` (7), `brain` (6), `state-block` (6),
+  `brain-store` (4), `compose` (3), `freshness` (3), `handles` (2).
+- Suite 150 → 148 (~3.1s under the 10s guard). Boundaries preserved: SQLite
+  (`brain-store` and generation stores), faux `pi-ai` provider, two real
+  loopback HTTP sockets (catalog refresh and mid-sentence pause/resume), real
+  `bash` child execution and interrupt, real editor spawn in `compose`, and the
+  spawned CLI. Known gaps unchanged: `ui/app.ts` composed TUI loop, `palette.ts`,
+  `dump.ts`, `clipboard.ts`, `help-panel.ts`, `chrome.ts`, and a live
+  llama-swap server.
+
 ### Stage: tests audit (campaign) — workspace views, 2026-11-21
 
 - Read `ui/tokens.ts`, `ui/sidebar.ts`, `ui/transcript.ts`, `ui/context-view.ts`,

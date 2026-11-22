@@ -12,7 +12,7 @@
  */
 import { matchesKey, type Component, type Focusable } from "@earendil-works/pi-tui";
 
-import { padLine, tokens, visibleWidth } from "./tokens.js";
+import { padLine, tokens } from "./tokens.js";
 
 export interface JumpTarget {
   /** Single lowercase letter. */
@@ -62,9 +62,7 @@ export class JumpOverlay implements Component, Focusable {
     for (const target of this.targets) {
       const key = tokens.accent(tokens.bold(` ${target.key} `));
       const name = tokens.text(target.label.padEnd(11));
-      const pad = Math.max(1, inner - 3 - 11 - 4 - visibleWidth(target.description));
       lines.push(padLine(`  ${key} ${name}${tokens.faint(target.description)}`, inner));
-      void pad;
     }
     lines.push(padLine("", inner));
     lines.push(padLine(`  ${tokens.faint("esc stays where you are")}`, inner));

@@ -14,6 +14,7 @@ import { emptyBrain } from "../dist/domain/records.js";
 import { applyWrite } from "../dist/domain/brain.js";
 import { promptHandles } from "../dist/ui/prompt-handles.js";
 import { renderStateBlock } from "../dist/domain/state-block.js";
+import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -42,11 +43,13 @@ test("a line already the width is left whole — no ellipsis, no eaten character
   assert.ok(!padLine(tokens.accent(exact), 40).includes("…"));
 });
 
-test("Sidebar renders the transcript, the context, and both books with counts", () => {
+test("Sidebar renders the transcript, the context, the tree, and both books with counts", () => {
   const sidebar = new Sidebar();
   sidebar.setCounts({
     chat: 3,
     contextTokens: 1250,
+    treeDirs: 2,
+    treeFiles: 6,
     atlas: 5,
     ledger: 2,
     pinned: { atlas: 1 },
@@ -61,12 +64,14 @@ test("Sidebar renders the transcript, the context, and both books with counts", 
   const lines = sidebar.render(30);
   const rendered = plain(lines.join("\n"));
 
-  // The workspace's two rows, then the Brain's: names, not old book slugs.
+  // The workspace's three rows, then the Brain's: names, not old book slugs.
   assert.ok(rendered.includes("transcript"));
   assert.ok(rendered.includes("context"));
+  assert.ok(rendered.includes("tree"));
   assert.ok(rendered.includes("atlas"));
   assert.ok(rendered.includes("ledger"));
   assert.ok(rendered.includes("1.3k"), "the context's figure is the compact token count");
+  assert.ok(rendered.includes("2/6"), "the tree's figure is folders/files");
   assert.ok(rendered.includes("WORKSPACE") && rendered.includes("BRAIN"), "rows are grouped under quiet headings");
   assert.ok(rendered.includes("layer"), "the archive layer toggle sits in the pane, apart from the books");
 
@@ -394,11 +399,16 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
   assert.equal(collapses.length, 1, "`c` collapses");
 });
 
-test("AtlasView two-pane navigation, mouse interaction, and detail scrolling", () => {
+test("the two books are two panes: the list names the entry, l focuses its detail, h returns", () => {
+  // Atlas and Ledger share the two-pane shape (§2.1): a list on the left, the
+  // selected entry's detail on the right, and one keystroke between them. The
+  // break this names is a pane switch that moves focus without showing it —
+  // the detail must say [FOCUSED] when it has the keys, and stop saying it
+  // when the list takes them back.
   const atlas = new AtlasView();
-  const brain = emptyBrain();
-  brain.atlas.push({
-    id: 1,
+  const atlasBrain = emptyBrain();
+  atlasBrain.atlas.push({
+    id: "a1",
     title: "Entrypoint",
     text: "Entrypoint of the application",
     links: [],
@@ -406,49 +416,13 @@ test("AtlasView two-pane navigation, mouse interaction, and detail scrolling", (
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
-  brain.handles.entries.push({ kind: "atlas", id: 1, handle: "&1", timestamp: Date.now() });
+  atlasBrain.handles.entries.push({ kind: "atlas", id: "a1", handle: "A1", timestamp: Date.now() });
+  atlas.setData(atlasBrain, []);
 
-  atlas.setData(brain, []);
-
-  let lines = atlas.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Switch to detail pane
-  atlas.handleInput("l");
-  atlas.handleInput("j"); // scroll detail down
-  atlas.handleInput("k"); // scroll detail up
-  atlas.handleInput("h"); // back to list
-
-  lines = atlas.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Mouse wheel scrolling
-  const wheelRes = atlas.handleMouse({
-    type: "wheel",
-    button: "wheel-down",
-    wheelDelta: 1,
-    x: 40,
-    y: 5,
-    screenX: 40,
-    screenY: 5,
-    width: 80,
-    height: 20,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(wheelRes?.handled);
-});
-
-test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", () => {
   const ledger = new LedgerView();
-  const brain = emptyBrain();
-  brain.ledger.push({
-    id: 1,
+  const ledgerBrain = emptyBrain();
+  ledgerBrain.ledger.push({
+    id: "l1",
     kind: "goal",
     text: "Refactor UI components with two-pane layout",
     status: "open",
@@ -457,42 +431,44 @@ test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", 
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
-  brain.handles.entries.push({ kind: "ledger", id: 1, handle: "!1", timestamp: Date.now() });
+  ledgerBrain.handles.entries.push({ kind: "ledger", id: "l1", handle: "L1", timestamp: Date.now() });
+  ledger.setData(ledgerBrain);
 
-  ledger.setData(brain);
+  for (const [name, view, shown] of [["atlas", atlas, "Entrypoint"], ["ledger", ledger, "Refactor UI"]]) {
+    // The list names the entry under its handle, and every line is the frame's width.
+    let lines = view.render(100);
+    for (const line of lines) assert.equal(visibleWidth(line), 100, `${name}: every line is the frame's width`);
+    assert.ok(plain(lines.join("\n")).includes(shown), `${name}: the list shows the entry`);
 
-  let lines = ledger.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
+    // l focuses the detail pane and the detail says so; j/k scroll it.
+    view.handleInput("l");
+    view.handleInput("j");
+    view.handleInput("k");
+    lines = view.render(100);
+    for (const line of lines) assert.equal(visibleWidth(line), 100, `${name}: still exact after the pane switch`);
+    assert.ok(plain(lines.join("\n")).includes("[FOCUSED]"), `${name}: the focused detail says so`);
+
+    // h hands the keys back to the list.
+    view.handleInput("h");
+    assert.ok(!plain(view.render(100).join("\n")).includes("[FOCUSED]"), `${name}: the list takes the keys back`);
+
+    // A wheel over the view is handled, not dropped.
+    const wheel = view.handleMouse({
+      type: "wheel",
+      button: "wheel-down",
+      wheelDelta: 1,
+      x: 40,
+      y: 5,
+      screenX: 40,
+      screenY: 5,
+      width: 80,
+      height: 20,
+      shift: false,
+      alt: false,
+      ctrl: false,
+    });
+    assert.ok(wheel?.handled, `${name}: the wheel is handled`);
   }
-
-  // Switch to detail pane
-  ledger.handleInput("l");
-  ledger.handleInput("j"); // scroll detail down
-  ledger.handleInput("k"); // scroll detail up
-  ledger.handleInput("h"); // back to list
-
-  lines = ledger.render(80);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line), 80);
-  }
-
-  // Mouse wheel scrolling
-  const wheelRes = ledger.handleMouse({
-    type: "wheel",
-    button: "wheel-down",
-    wheelDelta: 1,
-    x: 40,
-    y: 5,
-    screenX: 40,
-    screenY: 5,
-    width: 80,
-    height: 20,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(wheelRes?.handled);
 });
 
 test("formatToolArgs formats progressively based on tool name availability", () => {
@@ -683,6 +659,34 @@ test("the command registry drives the footer, and a key only fires where it is a
   assert.equal(ran, 11);
 });
 
+test("jump is one keystroke: a listed letter lands, anything else lands nowhere", () => {
+  // §8: the overlay is a reminder of the keys, not a second scheme, so every
+  // target's letter is the same letter `ctrl+o <letter>` takes. A letter that
+  // is listed but does not jump would be a key the overlay lies about.
+  const landed = [];
+  const overlay = new JumpOverlay();
+  overlay.onJump = (key) => landed.push(key);
+
+  assert.equal(new Set(JUMP_TARGETS.map((target) => target.key)).size, JUMP_TARGETS.length, "no two views share a letter");
+  for (const target of JUMP_TARGETS) {
+    overlay.handleInput(target.key);
+    assert.equal(landed.at(-1), target.key, `${target.key} lands on ${target.view}`);
+  }
+
+  // Anything not on the list is not a destination, and closing is not jumping.
+  const before = landed.length;
+  overlay.handleInput("z");
+  overlay.handleInput("\u001b");
+  assert.equal(landed.length, before, "an unlisted letter and esc land nowhere");
+
+  // The frame names every destination it offers, one row each.
+  const shown = plain(overlay.render(60).join("\n"));
+  for (const target of JUMP_TARGETS) {
+    assert.ok(shown.includes(target.label), `${target.label} is drawn`);
+    assert.ok(shown.includes(target.description.slice(0, 12)), `${target.label}'s description is drawn`);
+  }
+});
+
 test("the drawn workspace is exact to its width, and the archive is a layer over it", () => {
   const width = 104;
   const transcript = previewTranscript(width);
@@ -756,6 +760,35 @@ test("an archive mark is drawn with its action and its author, so it is not invi
   });
   const frame = view.render(90).join("\n");
   assert.match(frame, /→ restore at the next collapse · agent/, "the row says what the collapse will do, and who decided it");
+});
+
+test("the archive's u withdraws the mark on the selected item, and refuses when there is none", () => {
+  // The app's `u` calls withdrawSelected and reports the false: a key that looks
+  // dead when the item carries no mark, rather than one that does nothing and
+  // says nothing. Both halves are the guard — the mark is withdrawn where one
+  // stands, and nowhere else.
+  const view = new ArchiveView();
+  const withdrawn = [];
+  view.onWithdrawMark = (id) => withdrawn.push(id);
+  view.setData({
+    version: 1,
+    items: [
+      { id: "1", layer: "ephemeral", ephemeral: { kind: "plainText", text: "marked" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 20, mark: { action: "restore", author: "agent" } },
+      { id: "2", layer: "ephemeral", ephemeral: { kind: "plainText", text: "bare" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 10 },
+    ],
+  });
+
+  assert.equal(view.withdrawSelected(), true, "a mark on the selection is withdrawn");
+  assert.deepEqual(withdrawn, ["1"], "and it names the item the cursor is on");
+
+  view.handleInput("j");
+  assert.equal(view.withdrawSelected(), false, "an item with no mark refuses");
+  assert.deepEqual(withdrawn, ["1"], "and nothing else is withdrawn");
+
+  // The key route takes the same path, so the footer's `u` is not decoration.
+  view.handleInput("k");
+  view.handleInput("u");
+  assert.deepEqual(withdrawn, ["1", "1"], "u withdraws the selected item's mark");
 });
 
 test("the archive keeps a restored item's type and the author of its pin", () => {
@@ -953,8 +986,11 @@ test("the tree view shows the harness's own facts: handles, attached notes, pins
   assert.ok(shown.includes("A1") && shown.includes("brain.ts"), "an attached Atlas node is named on the file it attaches to");
   assert.ok(shown.includes("A2") && shown.includes("handles.ts"), "and so is the second one");
 
-  // The pin, and who placed it: the head holds this file's bytes.
-  assert.ok(shown.includes("P") && shown.includes("pinned"), "a pinned file is marked");
+  // The pin on the row itself, not merely somewhere in the frame: the head is
+  // holding this file's bytes, and `P` beside its handle is how the row says so.
+  const pinnedRow = shown.split("\n").find((line) => line.includes("brain.ts"));
+  assert.ok(pinnedRow !== undefined, "the pinned file is in the tree");
+  assert.match(pinnedRow, /brain\.ts\s+P\b/, "the pinned file's own row carries P");
 
   // The detail pane teaches the interface rather than only describing the row,
   // and a file's pane names the move from one file to what holds it.

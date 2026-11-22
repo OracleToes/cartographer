@@ -24,6 +24,9 @@ test("rebuildHandles assigns contiguous prefixes in creation order", () => {
   );
   assert.equal(handleOf(handles, "chat", "chat-a"), "C1");
   assert.equal(handleOf(handles, "chat", "chat-b"), "C2");
+  // A handle resolves back to its record; an unknown one resolves to nothing.
+  assert.equal(findByHandle(handles, "L1")?.id, "ledger-1");
+  assert.equal(findByHandle(handles, "W9"), undefined);
 });
 
 test("reconcileHandles keeps existing handles, drops vanished records, numbers newcomers", () => {
@@ -43,9 +46,3 @@ test("reconcileHandles keeps existing handles, drops vanished records, numbers n
   assert.equal(handleOf(next.handles, "chat", "chat-c"), "C3");
 });
 
-test("findByHandle resolves and rejects", () => {
-  const brain = brainWith();
-  brain.handles = rebuildHandles(brain);
-  assert.equal(findByHandle(brain.handles, "L1")?.id, "ledger-1");
-  assert.equal(findByHandle(brain.handles, "W9"), undefined);
-});
