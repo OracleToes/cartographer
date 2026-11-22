@@ -10,7 +10,7 @@
  *
  */
 import { spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const BUDGET_MS = 10_000;
@@ -42,10 +42,13 @@ const run = (command, args) => new Promise((resolve, reject) => {
 
 try {
   const started = performance.now();
-  let code = await run("npm", ["run", "build"]);
+  // npm has already put node_modules/.bin on PATH. Run the very same build
+  // script directly rather than paying for a second npm startup.
+  const build = JSON.parse(readFileSync("package.json", "utf8")).scripts.build;
+  let code = await run("sh", ["-c", build]);
   console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
   if (code === 0 && !aborted) {
-    code = await run(process.execPath, ["--test", "--test-reporter=dot", "--test-concurrency=3", ...files]);
+    code = await run(process.execPath, ["--test", "--test-reporter=dot", "--test-concurrency=4", ...files]);
   }
   clearTimeout(timer);
   if (aborted) {

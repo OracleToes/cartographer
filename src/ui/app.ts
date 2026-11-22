@@ -1063,6 +1063,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   let contextActionQueue: Promise<void> = Promise.resolve();
   const queueContextAction = (action: () => Promise<void>) => {
+    if (state.collapsing) {
+      pushStatus("collapsing — hold on");
+      tui.requestRender();
+      return;
+    }
     contextActionQueue = contextActionQueue.then(action).catch((error: unknown) => {
       pushStatus(`context action failed: ${errorText(error)}`);
       tui.requestRender();
