@@ -683,6 +683,22 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   assert.equal(visibleWidth(lines[0]), 60, "it spans the whole width");
   assert.match(plain(lines[0]), /8,000 \/ 32,768/);
 
+  // Fill stays visible while the current prompt's cached, processed and
+  // remaining regions advance independently. Progress changes invalidate the
+  // render cache even if no transcript entry has changed.
+  Object.assign(state.session.state, { prefillActive: true, prefillTotal: 16000, prefilledTokens: 6000, prefillCached: 2000, prefillRate: 100, decodeRate: 20 });
+  const reading = plain(bar.render(130)[0]);
+  assert.match(reading, /8,000 \/ 32,768/);
+  assert.match(reading, /prefill 6,000\/16,000/);
+  assert.match(reading, /P 100\.0 D 20\.0 tok\/s/);
+  assert.match(reading, /█/);
+  assert.match(reading, /▓/);
+  state.session.state.prefilledTokens = 9000;
+  assert.match(plain(bar.render(130)[0]), /prefill 9,000\/16,000/);
+  state.session.state.prefillTotal = undefined;
+  assert.match(plain(bar.render(130)[0]), /prefill \?/);
+  state.session.state.prefillActive = false;
+
   // Before any measurement: an estimate, announced as one, against no capacity.
   state.session.state.contextWindow = 0;
   state.session.state.lastReportedInput = undefined;

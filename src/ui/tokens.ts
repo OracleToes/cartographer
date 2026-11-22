@@ -178,6 +178,9 @@ export const tokens = {
   output: style(palette.output),
   /** Tool cards: the machinery of the work, its own hue. */
   tool: style(palette.tool),
+  /** Prefill over already occupied context: background keeps the fill visible. */
+  prefillOnFill: both(palette.gold, "#354c61"),
+  prefillPendingOnFill: both(palette.textDim, "#354c61"),
   /** Pin marker: warm gold. */
   pin: style(palette.gold),
 

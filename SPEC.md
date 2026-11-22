@@ -711,9 +711,16 @@ gauge with a budget mark.
 
 It shows three quantities, each in its own colour:
 
-- **Fill** — how much of the context is occupied, as a solid colour.
-- **Prefilled** — during a prompt read, how much has been read so far.
+- **Fill** — how much of the context is occupied, as a solid colour. The last
+  known fill remains visible while a new request is prefilling and is restored
+  from the session's last measured response after reopening.
+- **Prefilled** — during a prompt read, how much has been read so far, including
+  the reused prefix; newly read tokens are distinguished from the solid fill.
 - **To prefill** — during a prompt read, how much is still to read.
+
+The bar also shows prefill and decode speeds in tokens per second. When the
+server has not supplied a progress or speed figure, it is unknown, not zero or
+an invented live measurement. On narrow terminals the bar may shorten its labels.
 
 The two prefill quantities are the point of the bar. Prefill is the slow half of
 a long context, and a bar that shows how far along the read is tells the person

@@ -138,7 +138,7 @@ test("a record marked for archive leaves the Brain and lands in the archive", as
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live004", 1_700_000_100);
-    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(":memory:");
     await store.apply({ kind: "chat.record", record: { id: "c1", author: "user", text: "keep me", createdAt: at(1), updatedAt: at(1) } }, at(1));
     await store.apply({ kind: "mark.set", target: "chat", id: "c1", action: "archive", author: "user" }, at(2));
 
@@ -168,7 +168,7 @@ test("a record marked for delete is deleted for real at the collapse and leaves 
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live007", 1_700_000_100);
-    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(":memory:");
     await store.apply({ kind: "chat.record", record: { id: "c1", author: "agent", text: "gone at collapse", createdAt: at(1), updatedAt: at(1) } }, at(1));
     await store.apply({ kind: "mark.set", target: "chat", id: "c1", action: "delete", author: "user" }, at(2));
 
@@ -187,7 +187,7 @@ test("grace is one collapse: an item swept at a collapse survives the next one a
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live005", 1_700_000_100);
-    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(":memory:");
     await store.apply({ kind: "chat.record", record: { id: "c1", author: "user", text: "swept once", createdAt: at(1), updatedAt: at(1) } }, at(1));
     await store.apply({ kind: "mark.set", target: "chat", id: "c1", action: "archive", author: "user" }, at(2));
 
@@ -212,7 +212,7 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live006", 1_700_000_100);
-    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(":memory:");
     await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "a note", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
     await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "agent" }, at(2));
     await collapse(root, store);
@@ -241,7 +241,7 @@ test("restore is a mark: the item waits in the archive, and the next collapse re
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live00b", 1_700_000_100);
-    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(":memory:");
     await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "a marked note", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
     await store.apply({ kind: "mark.set", target: "ledger", id: "l1", action: "archive", author: "agent" }, at(2));
     await collapse(root, store);

@@ -412,6 +412,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const header = new HeaderView(headerState);
   const barState: ContextBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
+  // Pi reports raw llama.cpp progress between durable transcript updates.
+  // Repaint the bar on those events, without rebuilding the whole transcript.
+  const bindTelemetry = (session: LiveSession) => {
+    session.state.onTelemetry = () => tui.requestRender();
+  };
+  bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
   const sidebar = new Sidebar();
   const transcriptScroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
@@ -1506,6 +1512,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
       headerState.session = outcome.session;
       barState.session = outcome.session;
+      bindTelemetry(outcome.session);
       void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
       // What the archive did is the person's business, so it is said. Nothing
@@ -1529,6 +1536,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         state.session = recovered;
         headerState.session = recovered;
         barState.session = recovered;
+        bindTelemetry(recovered);
         void startLiveWatch();
       } catch (recoveryError) {
         tui.stop();

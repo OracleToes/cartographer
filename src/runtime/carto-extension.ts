@@ -35,6 +35,7 @@ import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
+import type { ModelTelemetry } from "./model-telemetry.js";
 
 /**
  * The system prompt (§7): the tools describe themselves, so this carries only
@@ -58,7 +59,7 @@ export function cartoInstructions(person: string): string {
   ].join("\n");
 }
 
-export interface LiveSessionState extends ToolSession {
+export interface LiveSessionState extends ToolSession, ModelTelemetry {
   /** What the agent calls the person: the configured name, or the launching account. */
   person: string;
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
@@ -71,6 +72,7 @@ export interface LiveSessionState extends ToolSession {
    */
   paused: boolean;
   lastReportedInput: number | undefined;
+  lastReportedOutput?: number | undefined;
   /** Tool-work estimate as of the last provider report. */
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
@@ -345,10 +347,14 @@ export function createCartoExtension(options: CartoExtensionOptions) {
         },
         afterResponse: (message) => {
           const usage = message.usage;
-          if (usage !== undefined && typeof usage.input === "number" && usage.input > 0) {
-            options.session.lastReportedInput = usage.input;
+          // Pi separates cached tokens from input; all of them occupy context.
+          const input = usage === undefined ? 0 : usage.input + usage.cacheRead + usage.cacheWrite;
+          if (input > 0) {
+            options.session.lastReportedInput = input;
+            options.session.lastReportedOutput = usage?.output ?? 0;
+            options.session.toolWorkAtLastReport = options.session.toolWorkAtLastRequest + splitContextMessages([message]).toolWorkTokens;
           }
-          options.session.toolWorkAtLastReport = options.session.toolWorkAtLastRequest;
+          options.session.onTelemetry?.();
         },
         onYield: () => ({ continue: STATE_BLOCK_MARKER }),
         afterRun: async (run, api, context) => {

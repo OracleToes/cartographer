@@ -50,6 +50,8 @@ import {
 import { writeSnapshot } from "./projection-files.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
+import { createModelTelemetry } from "./model-telemetry.js";
+import { splitContextMessages } from "../domain/state-block.js";
 
 export interface LiveSessionOptions {
   /**
@@ -137,7 +139,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // One gate per session, around every model call the session makes (§9).
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
-  const gatedModels = freeze.gate(options.models);
+  const gatedModels = freeze.gate(options.models, createModelTelemetry(state));
 
   let harness: Harness | undefined;
   try {
@@ -173,6 +175,20 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
+    // The latest response is durable in Pi's context. Rehydrate its reported
+    // usage on reopen instead of resetting the bar to an unrelated estimate.
+    const prior = (await conversation.context(BACKGROUND_CONTEXT)).messages;
+    for (let index = prior.length - 1; index >= 0; index -= 1) {
+      const message = prior[index];
+      if (message?.role !== "assistant") continue;
+      const usage = message.usage;
+      const input = usage.input + usage.cacheRead + usage.cacheWrite;
+      if (input <= 0) continue;
+      state.lastReportedInput = input;
+      state.lastReportedOutput = usage.output;
+      state.toolWorkAtLastReport = splitContextMessages(prior.slice(0, index + 1)).toolWorkTokens;
+      break;
+    }
     harness.resume();
     const session: LiveSession = {
       root,

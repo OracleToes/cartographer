@@ -565,6 +565,7 @@ const pausedServer = async (before, after) => {
     release = resolve;
   });
   const seen = [];
+  const bodies = [];
   const server = createServer((request, response) => {
     if (request.method !== "POST") {
       response.writeHead(404);
@@ -572,21 +573,23 @@ const pausedServer = async (before, after) => {
       return;
     }
     const number = seen.length + 1;
-    request.resume();
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => { bodies.push(JSON.parse(body)); });
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     if (number > 1) {
       // A turn that ends: one tool call and a finish.
       const call = { tool_calls: [{ index: 0, id: `call-${number}`, type: "function", function: { name: "sleep", arguments: "{}" } }] };
       response.write(frame({ role: "assistant", content: "" }));
       response.write(frame(call));
-      response.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+      response.end(`${frame({}, "tool_calls")}data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 1000, completion_tokens: 20, total_tokens: 1020, prompt_tokens_details: { cached_tokens: 700 } }, timings: { prompt_per_second: 125, predicted_per_second: 25, predicted_n: 20 } })}\n\ndata: [DONE]\n\n`);
       seen.push(`turn ${number}: sleep`);
       return;
     }
     seen.push("turn 1: the paused reply");
     // The opening frame, the first half of the sentence, and then the wait: the
     // reply is open and unfinished, which is what a pause needs to find.
-    response.write(frame({ role: "assistant", content: "" }));
+    response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: null }, finish_reason: null }], prompt_progress: { total: 1000, cache: 700, processed: 850, time_ms: 1000 } })}\n\n`);
     response.write(sse(before, { finish: false }));
     void held.then(() => response.end(sse(after)));
   });
@@ -595,6 +598,7 @@ const pausedServer = async (before, after) => {
     endpoint: `http://127.0.0.1:${server.address().port}/v1`,
     release: () => release(),
     requests: () => seen.length,
+    bodies: () => bodies,
     // Keep-alive sockets from the client would otherwise hold close() open.
     close: () => new Promise((done) => {
       server.closeAllConnections();
@@ -617,7 +621,9 @@ test("a pause holds the reply mid-sentence and the same response finishes it: no
   const config = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: stand.endpoint };
   const models = configuredModels(config, { provider: "llama-swap", modelId: "ByteShape" });
   const ref = { provider: "llama-swap", modelId: "ByteShape" };
-  const session = await openLiveSession({ root, brain, models, model: ref });
+  let session = await openLiveSession({ root, brain, models, model: ref });
+  const progress = [];
+  session.state.onTelemetry = () => progress.push({ active: session.state.prefillActive, total: session.state.prefillTotal, done: session.state.prefilledTokens, rate: session.state.prefillRate });
   try {
     const submission = await submitInput(session, "what is the answer?");
     // The response body is open: this is the moment ^v finds something to hold.
@@ -654,6 +660,16 @@ test("a pause holds the reply mid-sentence and the same response finishes it: no
     assert.ok(context.includes("forty-two."), "and the same response carried the second half");
     assert.equal(stand.requests(), 2, "two requests in all: the paused one, and the turn that ended the run");
     assert.ok(!JSON.stringify(entries).includes("The answer is The answer is"), "the reply was not replayed");
+    assert.ok(stand.bodies().every((body) => body.return_progress === true && body.timings_per_token === true));
+    assert.ok(progress.some((event) => event.active && event.total === 1000 && event.done === 850 && event.rate === 150), "raw progress reaches the session");
+    assert.equal(session.state.lastReportedInput, 1000, "cached tokens count toward the occupied context");
+    assert.equal(session.state.lastReportedOutput, 20);
+    assert.equal(session.state.prefillRate, 125);
+    assert.equal(session.state.decodeRate, 25);
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref });
+    assert.equal(session.state.lastReportedInput, 1000, "the measured fill survives reopening");
+    assert.equal(session.state.lastReportedOutput, 20);
   } finally {
     await closeLiveSession(session);
     await stand.close();

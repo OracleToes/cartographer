@@ -26,6 +26,7 @@
  * about a request changes; only the body that comes back.
  */
 import type { Models } from "@earendil-works/pi-ai/models";
+import type { createModelTelemetry } from "./model-telemetry.js";
 
 export interface StreamFreeze {
   /**
@@ -46,7 +47,7 @@ export interface StreamFreeze {
    * The models to hand the harness: the registry's own, except that every
    * request's response body goes through the gate. Call once, before opening.
    */
-  gate(models: Models): Models;
+  gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>): Models;
 }
 
 /** One upstream body in flight, with its own dying mark. */
@@ -174,16 +175,34 @@ export function createStreamFreeze(): StreamFreeze {
      * session on it (`configuredModels` builds it once): wrapping it would
      * outlive the session that froze it, and double-wrap after a collapse.
      */
-    gate(models: Models): Models {
+    gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>): Models {
       const gated = Object.create(models) as Models;
       for (const name of ["stream", "streamSimple"] as const) {
         const inner = models[name].bind(models);
         Object.defineProperty(gated, name, {
-          value: (model: unknown, context: unknown, options: { fetch?: typeof fetch } = {}) =>
-            inner(model as never, context as never, {
+          value: (model: { provider?: string }, context: unknown, options: {
+            fetch?: typeof fetch;
+            samplingParams?: Record<string, unknown>;
+            onProviderStreamEvent?: (event: unknown, model: unknown) => void | Promise<void>;
+          } = {}) => {
+            const observe = model.provider === "llama-swap" && telemetry !== undefined;
+            const id = observe ? telemetry.start() : undefined;
+            const stream = inner(model as never, context as never, {
               ...options,
               fetch: gatedFetch(options.fetch ?? globalThis.fetch),
-            }),
+              ...(observe ? {
+                samplingParams: { ...options.samplingParams, return_progress: true, timings_per_token: true },
+                onProviderStreamEvent: async (event: unknown, eventModel: unknown) => {
+                  telemetry!.event(id!, event);
+                  await options.onProviderStreamEvent?.(event, eventModel);
+                },
+              } : {}),
+            } as never);
+            if (id !== undefined) {
+              void stream.result().then((message) => telemetry!.end(id, message.stopReason === "error"), () => telemetry!.end(id, true));
+            }
+            return stream;
+          },
         });
       }
       return gated;
