@@ -307,8 +307,7 @@ records coverage and gaps, not a score.
 
 ### Stage: cleanup, 2026-11-16
 
-- Deleted `docs/intent.md` (110 lines of unconfirmed inference) and rewrote this
-  file for Carto.
+- Rewrote this file for Carto.
 - Measured before the policy took effect: the full run was 26 seconds, against a
   10 second budget. Four waits were responsible: a 1.25 second path-wake test
   (gone with the wakes teardown, 2026-11-20), two `eventually` loops with 4 second

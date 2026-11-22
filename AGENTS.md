@@ -23,10 +23,9 @@ From highest to lowest:
    document is stale and the contradiction is a task.
 2. **`SPEC.md`.** The specification of record: what Carto is, what it keeps, and
    what it must do.
-3. **`docs/intent.md`.** Confirmed intent only. See §6.
-4. **This file.** Process: how to work, how to test, what to record, and how to
+3. **This file.** Process: how to work, how to test, what to record, and how to
    report.
-5. **Other `docs/`.** Plans and notes. A plan is a proposal, never authority. A
+4. **Other `docs/`.** Plans and notes. A plan is a proposal, never authority. A
    plan that has been overtaken is marked superseded, not silently edited.
 
 Nothing in a plan, a commit message, or a chat log outranks the person.
