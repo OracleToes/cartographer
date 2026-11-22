@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc --project tsconfig.json",
-    "test": "echo \"npm test: if this session was compacted, read AGENTS.md before doing anything \" && npm run build && node test/guard.mjs",
+    "test": "node test/guard.mjs",
     "start": "npm run build && node bin/carto.mjs",
     "install:home": "npm run build && node scripts/install-home.mjs",
     "ui": "node scripts/ui.mjs"
@@ -26,6 +26,6 @@
   },
   "devDependencies": {
     "@types/node": "22.15.3",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   }
 }

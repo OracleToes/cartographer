@@ -13,6 +13,7 @@
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -24,7 +25,7 @@ import {
   type HarnessOptions,
   type ModelRef,
 } from "@earendil-works/pi-durable";
-import type { Models } from "@earendil-works/pi-ai";
+import type { Message, Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
@@ -38,6 +39,8 @@ import {
   generationPaths,
   newGenerationId,
   reconcileGenerations,
+  removedPartKeys,
+  stablePartKeys,
   rewriteHeadSnapshot,
   type CollapseOptions,
   type CollapseReport,
@@ -184,6 +187,17 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         return reason;
       },
     };
+    // Only restores already committed by a collapse are retried here. Ordinary
+    // archive marks still wait for collapse. An active run can defer recovery;
+    // its marked source remains safe and will be retried at the next collapse.
+    const live = await harness.snapshot(LiveDoc, conversation.id, BACKGROUND_CONTEXT);
+    if (live?.run === undefined) {
+      for (const item of (await options.brain.readArchive()).items) {
+        if (item.restorePending === true && item.mark?.action === "restore" && await restoreEphemeral(session, item)) {
+          await options.brain.applyArchive({ kind: "restore-complete", id: item.id });
+        }
+      }
+    }
     return session;
   } catch (error) {
     if (harness !== undefined) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
@@ -236,8 +250,25 @@ export async function submitInput(session: LiveSession, text: string, whenBusy: 
  * and the head is untouched, so the frozen part of the projection is
  * byte-identical afterwards. A prune is an epilogue, not a head.
  */
+const omitQueues = new WeakMap<LiveSession, Promise<unknown>>();
+
 export async function applyOmitNow(session: LiveSession, itemId: string): Promise<boolean> {
+  // Pi queues context writes while a run is active. Serialize our edits and
+  // wait for placement before reading the next contribution, otherwise two
+  // quick actions replace the same old value and resurrect one another.
+  const previous = omitQueues.get(session) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(() => omitOneNow(session, itemId));
+  omitQueues.set(session, operation);
+  try {
+    return await operation;
+  } finally {
+    if (omitQueues.get(session) === operation) omitQueues.delete(session);
+  }
+}
+
+async function omitOneNow(session: LiveSession, itemId: string): Promise<boolean> {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
+  const removed = removedPartKeys(view.entries, session.generation);
   for (const [index, entry] of view.entries.entries()) {
     const messages = view.contributions[index] ?? [];
     const prefix = `${session.generation}:${entry.id}:`;
@@ -248,23 +279,23 @@ export async function applyOmitNow(session: LiveSession, itemId: string): Promis
     // Pi edits a whole entry. A row can instead be one part of an assistant
     // message, so replace that contribution with its other parts intact.
     let replacement = messages;
-    if (partKey !== undefined && partKey !== "r") {
-      let removed = false;
+    if (partKey === "x0" && messages.length === 1 && messages[0]?.role === "user") {
+      replacement = [];
+    } else if (partKey !== undefined && partKey !== "r") {
+      let foundPart = false;
       replacement = messages.map((message) => {
         if (message.role !== "assistant") return message;
-        let thinking = 0;
-        let text = 0;
-        const content = message.content.filter((part, partIndex) => {
-          const key = part.type === "thinking" ? `t${thinking++}`
-            : part.type === "text" ? `x${text++}`
-              : part.type === "toolCall" ? `c${partIndex}` : "";
-          if (key !== partKey) return true;
-          removed = true;
+        const original = entry.model?.find((candidate) => candidate.role === "assistant");
+        if (original === undefined) throw new Error("Cannot identify the original assistant message");
+        const keys = stablePartKeys(original.content, message.content, removed.get(String(entry.id)) ?? new Set());
+        const content = message.content.filter((_part, partIndex) => {
+          if (keys[partIndex] !== partKey) return true;
+          foundPart = true;
           return false;
         });
         return { ...message, content };
       });
-      if (!removed) return false;
+      if (!foundPart) return false;
       replacement = replacement.filter((message) => message.role !== "assistant" || message.content.length > 0);
     } else if (partKey === "r" && !messages.some((message) => message.role === "toolResult")) {
       return false;
@@ -272,7 +303,7 @@ export async function applyOmitNow(session: LiveSession, itemId: string): Promis
       replacement = [];
     }
 
-    await session.conversation.submit(
+    const submission = await session.conversation.submit(
       {
         type: "write",
         entry: {
@@ -285,7 +316,7 @@ export async function applyOmitNow(session: LiveSession, itemId: string): Promis
       },
       BACKGROUND_CONTEXT,
     );
-    return true;
+    return (await submission.wait(BACKGROUND_CONTEXT)).status === "done";
   }
   return false;
 }
@@ -429,29 +460,59 @@ export async function interruptRun(session: LiveSession): Promise<void> {
  * Restoring does not pin it: the next collapse sweeps it again unless the person
  * pins it, and it goes back into the archive with its grace starting again.
  *
- * Pi drops an orphan tool result and requires full assistant-message metadata.
- * Legacy archive rows lack that metadata, so unsupported kinds must stay in the
- * archive instead of being acknowledged as restored and silently losing text.
+ * New archive rows retain the original Pi messages. A result is accompanied by
+ * its call because Pi drops orphan results; a fresh call id avoids collisions.
+ * Legacy rows without enough metadata are refused rather than lost.
  */
 export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
   const ephemeral = item.ephemeral;
   if (ephemeral === undefined) return false;
-  if (ephemeral.kind !== "personMessage") return false;
+  let model: Message[];
+  if (Array.isArray(ephemeral.model) && ephemeral.model.length > 0) {
+    const saved = structuredClone(ephemeral.model) as Message[];
+    if (ephemeral.kind === "personMessage") {
+      if (saved.length !== 1 || saved[0]?.role !== "user") return false;
+    } else if (ephemeral.kind === "reasoning" || ephemeral.kind === "plainText" || ephemeral.kind === "toolCall") {
+      if (saved.length !== 1 || saved[0]?.role !== "assistant" || saved[0].content.length !== 1) return false;
+      const expected = ephemeral.kind === "reasoning" ? "thinking" : ephemeral.kind === "plainText" ? "text" : "toolCall";
+      if (saved[0].content[0]?.type !== expected) return false;
+    } else {
+      if (saved.length !== 2 || saved[0]?.role !== "assistant" || saved[1]?.role !== "toolResult") return false;
+      if (saved[0].content.length !== 1 || saved[0].content[0]?.type !== "toolCall" || saved[0].content[0].id !== saved[1].toolCallId) return false;
+    }
+    const assistant = saved[0];
+    if (assistant?.role === "assistant") {
+      // Incomplete metadata in legacy or damaged rows is not safe to send.
+      if (!assistant.api || !assistant.provider || !assistant.model || !assistant.usage || typeof assistant.timestamp !== "number") return false;
+      const part = assistant.content[0];
+      if (part?.type === "toolCall") {
+        const id = `call_carto_${createHash("sha256").update(item.id).digest("hex").slice(0, 24)}`;
+        part.id = id;
+        const result = saved[1];
+        if (result?.role === "toolResult") result.toolCallId = id;
+      }
+    }
+    model = saved;
+  } else if (ephemeral.kind === "personMessage") {
+    model = [{ role: "user", content: ephemeral.text, timestamp: Date.now() }];
+  } else {
+    return false;
+  }
   try {
-    const submission = await session.conversation.submit(
-      {
-        type: "write",
-        // Repeating a transfer after a crash must not insert the item twice.
-        requestId: `carto.restore:${item.id}`,
-        entry: {
-          kind: "carto.restored",
-          data: { archiveId: item.id },
-          model: [{ role: "user", content: ephemeral.text, timestamp: Date.now() }],
+    // Separate entries retain normal Context/sweep identity for the paired
+    // call and result. Deterministic request ids make a partial retry safe.
+    for (const [index, message] of model.entries()) {
+      const submission = await session.conversation.submit(
+        {
+          type: "write",
+          requestId: `carto.restore:${item.id}${model.length === 1 ? "" : `:${index}`}`,
+          entry: { kind: "carto.restored", data: { archiveId: item.id }, model: [message] },
         },
-      },
-      BACKGROUND_CONTEXT,
-    );
-    return (await submission.wait(BACKGROUND_CONTEXT)).status === "done";
+        BACKGROUND_CONTEXT,
+      );
+      if ((await submission.wait(BACKGROUND_CONTEXT)).status !== "done") return false;
+    }
+    return true;
   } catch {
     // A conversation that will not take the write — it is closing, or busy in a
     // way that refuses one — leaves the item in the archive rather than losing
@@ -464,7 +525,16 @@ export async function sessionTranscript(session: LiveSession) {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
   // The raw entries remain on disk after an apply-now edit. Views must show
   // the contributions Pi actually sends, not the superseded raw messages.
-  return view.entries.map((entry, index) => ({ ...entry, model: view.contributions[index] ?? [] }));
+  const removed = removedPartKeys(view.entries, session.generation);
+  return view.entries.map((entry, index) => {
+    const model = view.contributions[index] ?? [];
+    const original = entry.model?.[0];
+    const current = model[0];
+    const partKeys = original?.role === "assistant" && current?.role === "assistant"
+      ? stablePartKeys(original.content, current.content, removed.get(String(entry.id)) ?? new Set())
+      : undefined;
+    return { ...entry, model, partKeys };
+  });
 }
 
 export async function closeLiveSession(session: LiveSession): Promise<void> {

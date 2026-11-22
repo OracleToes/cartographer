@@ -56,6 +56,8 @@ export interface ContextToolItem {
 
 export interface ContextDialogueMessage {
   id: string | number;
+  /** Generation-scoped sweep identity for a live person message. */
+  targetId?: string | undefined;
   /**
    * The context entry this message is, and where it sits in the body. A message
    * id can be a composite (`"7-0"` for a chat call's part), so the order comes
@@ -242,6 +244,8 @@ export class ContextView implements Component, Focusable {
   private rows: Array<{ section: number } | { node: PromptNode; section: number }> = [];
   private cursor = 0;
   private nowArmed = false;
+  /** The first archive press is a confirmation, not a deferred archive mark. */
+  private archiveConfirmation: string | undefined;
   private showReal = false;
   private folded = new Map<string, boolean>();
   private hits: Array<{ start: number; end: number; index: number }> = [];
@@ -385,6 +389,7 @@ export class ContextView implements Component, Focusable {
     for (const item of data.brain.ephemera) {
       head.push({
         ...record("ephemera", item.id, handleOf(handles, "ephemera", item.id), item.text),
+        ...((data.brain.ephemeralDeletes ?? []).includes(item.id) ? { marked: "delete on collapse · you" } : {}),
         label: item.kind,
         pinned: item.pinned,
         // The head is where a carried item is, so the head is where its pin is
@@ -474,11 +479,15 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
-          target: { part: "transcript", id: message.id },
+          target: { part: "transcript", id: message.targetId ?? message.id },
         },
       });
     }
     const body = candidates.sort((left, right) => left.key - right.key || left.order - right.order).map((entry) => entry.node);
+    const deletions = new Set(data.brain.ephemeralDeletes ?? []);
+    for (const node of body) {
+      if (node.target !== undefined && deletions.has(String(node.target.id))) node.marked = "delete on collapse · you";
+    }
     // The numbering is the transcript's, when the app supplied it: `X3` names
     // one item, and the two views are two renderings of one prompt (§5.4).
     if (data.handles !== undefined) {
@@ -540,14 +549,26 @@ export class ContextView implements Component, Focusable {
     if (target === undefined) return;
     const now = this.nowArmed;
     this.nowArmed = false;
-    if (action === "archive") this.onArchive?.(target.part, target.id, now);
+    const ephemeral = target.part === "transcript" || target.part === "tool-work" || target.part === "ephemera";
+    const key = `${target.part}:${String(target.id)}`;
+    if (ephemeral && action === "archive" && !now && this.archiveConfirmation !== key) {
+      this.archiveConfirmation = key;
+      return;
+    }
+    this.archiveConfirmation = undefined;
+    if (action === "archive") this.onArchive?.(target.part, target.id, ephemeral || now);
     else this.onDelete?.(target.part, target.id, now);
   }
 
   /** Withdraw the mark on the entry under the cursor (§4.1). The palette calls this. */
   withdrawSelected(): void {
     const target = this.selectedNode()?.target;
-    if (target !== undefined) this.onWithdrawMark?.(target.part, target.id);
+    if (target === undefined) return;
+    if (this.archiveConfirmation === `${target.part}:${String(target.id)}`) {
+      this.archiveConfirmation = undefined;
+      return;
+    }
+    this.onWithdrawMark?.(target.part, target.id);
   }
 
   /** Arm or disarm apply-now, and say which it is now: the next mark is spent either way. */
@@ -755,8 +776,9 @@ export class ContextView implements Component, Focusable {
     // "you", which is what a stand-alone frame means.
     const who = this.data?.person ?? "you";
     const open = this.isOpen(node);
-    const ink = KIND_INK[node.kind];
-    const cursor = selected ? tokens.accent("▌") : " ";
+    const confirmed = node.target !== undefined && this.archiveConfirmation === `${node.target.part}:${String(node.target.id)}`;
+    const ink = confirmed ? tokens.danger : KIND_INK[node.kind];
+    const cursor = selected ? (confirmed ? tokens.danger("▌") : tokens.accent("▌")) : " ";
     const glyph = open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));
     // One name column. The handle's prefix already says what kind of thing the
@@ -778,7 +800,7 @@ export class ContextView implements Component, Focusable {
     if (!open) {
       const room = Math.max(8, width - visibleWidth(head) - 2);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "…", room, "…");
-      lines.push(canvasLine(`${head}${tokens.faint(preview)}`, width));
+      lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
       return lines;
     }
 

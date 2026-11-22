@@ -173,6 +173,8 @@ export interface CartoBrain {
   atlas: AtlasNode[];
   /** Pinned ephemera: what a collapse carries into the head instead of sweeping (§3.2, §5.1). */
   ephemera: PinnedEphemeral[];
+  /** Live generation item identities chosen for deletion at the next collapse. */
+  ephemeralDeletes?: string[];
   /** Pinned files, read again at every collapse so the head holds the file (§5.1). */
   files: PinnedFile[];
   handles: HandleTable;

@@ -406,16 +406,20 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   view.handleInput("d");
   assert.ok(marks.length > 0 && marks.every((mark) => mark.now === true), "an armed mark applies now");
 
-  // `a` is the other mark the agent can place (§4.1), and it reports the same
-  // way: a mark waiting for the collapse, or the act applied at once.
+  // Ephemera is swept by default: the first `a` only highlights, the second
+  // archives immediately, and `u` can cancel the confirmation.
   archives.length = 0;
   view.handleInput("a");
-  assert.ok(archives.length > 0, "`a` marks the entry for archive");
-  assert.ok(archives.every((mark) => mark.now === false), "and it waits for the collapse");
+  assert.equal(archives.length, 0);
+  view.handleInput("u");
+  view.handleInput("a");
+  assert.equal(archives.length, 0);
+  view.handleInput("a");
+  assert.ok(archives.length > 0 && archives.every((mark) => mark.now === true));
   archives.length = 0;
   view.handleInput("!");
   view.handleInput("a");
-  assert.ok(archives.length > 0 && archives.every((mark) => mark.now === true), "and `!` arms it to apply now");
+  assert.ok(archives.length > 0 && archives.every((mark) => mark.now === true), "`!a` applies immediately");
 
   view.handleInput("c");
   assert.equal(collapses.length, 1, "`c` collapses");
@@ -870,6 +874,32 @@ test("a Brain delete mark appears on the Context row until withdrawn", () => {
   brain = applyWrite(brain, { kind: "mark.clear", target: "chat", id: "c1", author: "user" }, 3);
   refresh();
   assert.doesNotMatch(plain(view.render(40).join("\n")), /delete on collapse/);
+});
+
+test("ephemeral delete and archive confirmation are visible and cancellable", () => {
+  let brain = emptyBrain();
+  const view = new ContextView();
+  const id = "generation:7:t0";
+  const refresh = () => view.setData({ brain, systemPrompt: "system", tools: [], transcriptMessages: [], toolWorkItems: [{ id, kind: "reasoning", text: "some thought" }], stateBlockText: "state" });
+  const archived = [];
+  view.onArchive = (part, target, now) => archived.push({ part, target, now });
+  view.onDelete = (_part, target) => { brain = applyWrite(brain, { kind: "ephemeral.delete-mark", id: target, marked: true }, 1); refresh(); };
+  view.onWithdrawMark = (_part, target) => { brain = applyWrite(brain, { kind: "ephemeral.delete-mark", id: target, marked: false }, 1); refresh(); };
+  refresh();
+  view.handleInput("j");
+  view.handleInput("d");
+  assert.match(plain(view.render(50).join("\n")), /delete on collapse/);
+  view.handleInput("u");
+  assert.doesNotMatch(plain(view.render(50).join("\n")), /delete on collapse/);
+  view.handleInput("a");
+  assert.equal(archived.length, 0);
+  const highlighted = view.render(80).find((line) => plain(line).includes("some thought"));
+  assert.match(highlighted, /\x1b\[/, "confirmation has styled ink");
+  view.handleInput("u");
+  view.handleInput("a");
+  assert.equal(archived.length, 0, "withdraw cancelled the first confirmation");
+  view.handleInput("a");
+  assert.deepEqual(archived, [{ part: "tool-work", target: id, now: true }]);
 });
 
 test("every marked Brain record is indicated in Context and in its book", () => {

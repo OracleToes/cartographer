@@ -64,7 +64,7 @@ export interface ArchivedItem {
   /** Set for a record; absent for an ephemeral item. */
   record?: { kind: ArchivedKind; value: ArchivedRecord };
   /** Set for an ephemeral item; absent for a record. */
-  ephemeral?: { kind: EphemeralKind; text: string; data?: unknown };
+  ephemeral?: { kind: EphemeralKind; text: string; data?: unknown; model?: unknown };
   /** The generation whose collapse swept this item in, for the person to read. */
   sweptAtGeneration: string;
   /**
@@ -81,6 +81,8 @@ export interface ArchivedItem {
    * item carrying no mark is simply waiting out its grace.
    */
   mark?: ArchiveMark;
+  /** A collapse committed a restore whose live-store acknowledgement is pending. */
+  restorePending?: boolean;
   /** When it was swept, on the Brain's clock. */
   sweptAt: number;
 }

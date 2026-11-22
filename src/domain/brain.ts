@@ -41,7 +41,8 @@ export type BrainWrite =
   | { kind: "file.stale"; path: string; stale: boolean }
   /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
   | { kind: "ephemeral.pin"; item: PinnedEphemeral }
-  | { kind: "ephemeral.unpin"; id: RecordId };
+  | { kind: "ephemeral.unpin"; id: RecordId }
+  | { kind: "ephemeral.delete-mark"; id: RecordId; marked: boolean };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   const next = doApplyWrite(brain, write, now);
@@ -50,6 +51,12 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
+    case "ephemeral.delete-mark": {
+      const ids = new Set(brain.ephemeralDeletes ?? []);
+      if (write.marked) ids.add(write.id);
+      else ids.delete(write.id);
+      return { ...brain, ephemeralDeletes: [...ids] };
+    }
     case "ephemeral.pin": {
       // One entry per item. Pinning again replaces the pin and its author,
       // which is what a pin being "a boolean on an entry" means (§3.2).

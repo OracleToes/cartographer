@@ -81,6 +81,8 @@ export interface BrainStore {
   }>;
   /** Replace the archive wholesale, for the person's pin and restore operations. */
   applyArchive(write: ArchiveWrite): Promise<{ archive: Archive; item?: ArchivedItem; refused: boolean }>;
+  /** Copy an ephemeral into the archive before removing it from the live store. */
+  archiveEphemeral(item: IncomingItem, generation: string, now: number): Promise<void>;
   /**
    * Apply one Brain record's archive or delete mark now (§4.1), in one
    * transaction: an archived record leaves the Brain and enters the archive
@@ -303,7 +305,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         // until the destination confirms it has durably accepted the item.
         const pending = swept.items
           .filter((item) => item.layer === "ephemeral" && item.mark?.action === "restore")
-          .map((item) => ({ ...item }));
+          .map((item) => ({ ...item, restorePending: true }));
         const { archive: nextArchive, dropped } = dropExpired(
           { ...applied.archive, items: [...applied.archive.items, ...pending] }, collapse,
         );
@@ -330,8 +332,16 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           // agent tries to withdraw a mark the person placed.
           const marked = setArchiveMark(current, write.id, write.action === null ? null : { action: write.action, author: write.author }, write.author);
           if (marked.refused) return { archive: current, refused: true };
-          await writeArchiveRows(tx, marked.archive);
-          return { archive: marked.archive, refused: false };
+          const archive = write.action === "restore" ? marked.archive : {
+            ...marked.archive,
+            items: marked.archive.items.map((item) => {
+              if (item.id !== write.id || item.restorePending !== true) return item;
+              const { restorePending: _pending, ...rest } = item;
+              return rest;
+            }),
+          };
+          await writeArchiveRows(tx, archive);
+          return { archive, refused: false };
         }
         const item = current.items.find((candidate) => candidate.id === write.id);
         if (item === undefined) return { archive: current, refused: false };
@@ -351,6 +361,16 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         }
         await writeArchiveRows(tx, archive);
         return { archive, item, refused: false };
+      }),
+
+    archiveEphemeral: (item, generation, now) =>
+      database.transaction(async (tx) => {
+        if (item.layer !== "ephemeral" || item.ephemeral === undefined) throw new Error("Not an ephemeral item");
+        const current = await readArchiveFrom(tx);
+        // Retrying after interruption must not reset its grace or overwrite a pin.
+        if (current.items.some((candidate) => candidate.id === item.id)) return;
+        const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
+        await writeArchiveRows(tx, sweep(current, generation, counter?.collapses ?? 0, now, [item]));
       }),
 
     applyRecordAction: (change) =>

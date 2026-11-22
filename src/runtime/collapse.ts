@@ -151,19 +151,23 @@ export function reconcileGenerations(root: string): { live: GenerationFiles | nu
  * its own mark (§4.1).
  */
 export async function readGenerationEphemera(storePath: string, generation: string): Promise<IncomingItem[]> {
-  if (!existsSync(storePath)) return [];
-  let database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
-  try {
-    database = await openNodeSqliteDatabase(storePath);
-  } catch {
-    // Not a store at all — an interrupted creation, say. Nothing to move out.
-    return [];
-  }
+  if (!existsSync(storePath)) throw new Error(`Live generation store is missing: ${storePath}`);
+  // Failure to read the old store must abort collapse before the store is
+  // removed. Treating a damaged database as an empty one destroys its only copy.
+  const database = await openNodeSqliteDatabase(storePath);
   try {
     const table = await database.get<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_entries'",
     );
-    if (table === undefined) return [];
+    if (table === undefined) {
+      // A freshly created generation has an empty SQLite file before Pi opens
+      // it. A database with other tables but no entries is not that state.
+      const other = await database.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+      );
+      if (other !== undefined) throw new Error(`Live generation has an unrecognized store schema: ${storePath}`);
+      return [];
+    }
     const rows = await database.all<{ id: string; head: number | null; record: string }>(
       "SELECT id, head, record FROM live_entries ORDER BY id",
     );
@@ -175,9 +179,14 @@ export async function readGenerationEphemera(storePath: string, generation: stri
     // it; there is no second, later cut to walk.
     const newestHead = rows.reduce<number>((latest, row) => (row.head === null ? latest : Math.max(latest, Number(row.id))), 0);
     const tools = new Map<string, { name: string; path?: string }>();
+    const callMessages = new Map<string, unknown>();
     const parsed = rows
       .filter((row) => Number(row.id) >= newestHead)
-      .map((row) => ({ id: String(row.id), entry: JSON.parse(row.record) as StoredEntry }));
+      .map((row) => {
+        const entry = JSON.parse(row.record) as StoredEntry;
+        return { id: String(row.id), entry, original: entry };
+      });
+    const removed = removedPartKeys(parsed.map(({ entry }) => entry), generation);
     // Pi's context edits supersede the raw model contribution. A delete applied
     // now must not reappear in the archive when the old store is swept.
     const edits = new Map<string, NonNullable<StoredEntry["edits"]>[number]>();
@@ -188,23 +197,49 @@ export async function readGenerationEphemera(storePath: string, generation: stri
       const edit = edits.get(item.id);
       if (edit !== undefined) item.entry = { ...item.entry, model: edit.action === "replace" ? (edit.messages ?? []) : [] };
     }
-    for (const { entry } of parsed) {
-      for (const call of toolCallsOf(entry)) tools.set(call.id, call);
+    for (const { original } of parsed) {
+      // Keep pairing metadata even when an edit removed the call. The result's
+      // original bytes must still be recoverable rather than silently discarded.
+      for (const call of toolCallsOf(original)) tools.set(call.id, call);
+      for (const message of original.model ?? []) {
+        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (part === null || typeof part !== "object") continue;
+          const call = part as { type?: unknown; id?: unknown };
+          if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
+        }
+      }
     }
     const incoming: IncomingItem[] = [];
-    for (const { id, entry } of parsed) {
+    for (const { id, entry, original } of parsed) {
+      const oldMessage = original.model?.[0];
+      const message = entry.model?.[0];
+      const keys = oldMessage?.role === "assistant" && message?.role === "assistant"
+        ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set())
+        : undefined;
       // The entity is what a restore needs to put the item back where it was:
       // the tool call's own id, and for a result the call it answers.
       const callId = callIdOf(entry);
       const call = callId === undefined ? undefined : tools.get(callId);
       const tool = call?.name;
       const path = call?.path;
-      for (const part of ephemeralPartsOf(entry, tool)) {
+      for (const part of ephemeralPartsOf(entry, tool, keys)) {
+        let model: unknown;
+        if (message?.role === "assistant" && Array.isArray(message.content)) {
+          const index = keys?.indexOf(part.key) ?? -1;
+          if (index >= 0) model = [{ ...message, content: [message.content[index]], stopReason: part.value.kind === "toolCall" ? "toolUse" : "stop" }];
+        } else if (message?.role === "toolResult" && callId !== undefined) {
+          const callMessage = callMessages.get(callId);
+          if (callMessage !== undefined) model = [callMessage, message];
+        } else if (message?.role === "user") {
+          model = [message];
+        }
         incoming.push({
           id: ephemeralItemId(generation, id, part.key),
           layer: "ephemeral",
           ephemeral: {
             ...part.value,
+            ...(model === undefined ? {} : { model }),
             ...(callId === undefined
               ? {}
               : { data: { callId, ...(tool === undefined ? {} : { tool }), ...(path === undefined ? {} : { path }) } }),
@@ -213,10 +248,6 @@ export async function readGenerationEphemera(storePath: string, generation: stri
       }
     }
     return incoming;
-  } catch {
-    // A store whose shape this build does not recognise is not one to guess at:
-    // the collapse still runs, and the store is still deleted whole (§3.4).
-    return [];
   } finally {
     await database.close().catch(() => undefined);
   }
@@ -225,8 +256,46 @@ export async function readGenerationEphemera(storePath: string, generation: stri
 /** One row of the store's entries table, as far as the sweep reads it. */
 interface StoredEntry {
   kind?: string;
+  data?: unknown;
   model?: Array<{ role?: string; content?: unknown }>;
   edits?: Array<{ target: string | number; action: "omit" | "replace"; messages?: Array<{ role?: string; content?: unknown }> }>;
+}
+
+/**
+ * Keep a part's original key after Carto edits a sibling. The original entry
+ * remains in Pi's append-only log, and each edit records the exact removed key.
+ * Never guess if another writer changed the contribution or an old edit cannot
+ * be reconciled: guessing could delete or pin a different, identical sibling.
+ */
+export function stablePartKeys(original: unknown, current: unknown, removed: ReadonlySet<string>): string[] {
+  if (!Array.isArray(original) || !Array.isArray(current)) throw new Error("Cannot identify edited context parts safely");
+  let thinking = 0;
+  let text = 0;
+  const candidates = original.map((part: unknown, index: number) => {
+    const type = part !== null && typeof part === "object" ? (part as { type?: unknown }).type : undefined;
+    const key = type === "thinking" ? `t${thinking++}` : type === "text" ? `x${text++}` : type === "toolCall" ? `c${index}` : `other${index}`;
+    return { key, part };
+  }).filter(({ key }) => !removed.has(key));
+  if (candidates.length !== current.length || candidates.some(({ part }, index) => JSON.stringify(part) !== JSON.stringify(current[index]))) {
+    throw new Error("Context parts changed outside Carto; refusing to guess their identities");
+  }
+  return candidates.map(({ key }) => key);
+}
+
+/** Carto's persisted part removals, keyed by original entry id. */
+export function removedPartKeys(entries: readonly { kind?: string | undefined; data?: unknown }[], generation: string): Map<string, Set<string>> {
+  const removed = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    if (entry.kind !== "carto.apply-now" || entry.data === null || typeof entry.data !== "object") continue;
+    const data = entry.data as { entry?: unknown; item?: unknown };
+    if (typeof data.entry !== "string" || typeof data.item !== "string") continue;
+    const prefix = `${generation}:${data.entry}:`;
+    if (!data.item.startsWith(prefix)) continue;
+    const keys = removed.get(data.entry) ?? new Set<string>();
+    keys.add(data.item.slice(prefix.length));
+    removed.set(data.entry, keys);
+  }
+  return removed;
 }
 
 /** A tool call in one entry, by the id the model issued and the tool's name. */
@@ -300,10 +369,29 @@ export function ephemeralItemId(generation: string, entryId: string | number, ke
   return `${generation}:${entryId}:${key}`;
 }
 
-export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
+export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, keys?: readonly string[]): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
   const parts: Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> = [];
   const role = entry.model?.find((message) => typeof message.role === "string")?.role;
   const { thinking, text } = modelTexts(entry);
+  if (role === "assistant") {
+    const content = entry.model?.[0]?.content;
+    if (!Array.isArray(content)) return parts;
+    const stable = keys ?? stablePartKeys(content, content, new Set());
+    for (const [index, part] of content.entries()) {
+      if (part === null || typeof part !== "object") continue;
+      const value = part as { type?: unknown; thinking?: unknown; text?: unknown; name?: unknown; arguments?: unknown };
+      const key = stable[index];
+      if (key === undefined) throw new Error("Missing stable part key");
+      if (value.type === "thinking" && typeof value.thinking === "string" && value.thinking.trim()) {
+        parts.push({ key, value: { kind: "reasoning", text: value.thinking } });
+      } else if (value.type === "text" && typeof value.text === "string" && value.text.trim()) {
+        parts.push({ key, value: { kind: "plainText", text: value.text } });
+      } else if (value.type === "toolCall" && value.name !== "chat") {
+        parts.push({ key, value: { kind: "toolCall", text: `${String(value.name)} ${JSON.stringify(value.arguments ?? {})}` } });
+      }
+    }
+    return parts;
+  }
   for (const [index, value] of thinking.entries()) parts.push({ key: `t${index}`, value: { kind: "reasoning", text: value } });
 
   if (role === "toolResult") {
@@ -436,13 +524,18 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   // head is rebuilt from the Brain, so it is in the next store's head without
   // being read out of this one.
   const pins = new Set(refreshed.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
-  const swept = (await readGenerationEphemera(live.store, live.generation)).filter((item) => !pins.has(item.id));
+  const deletions = new Set(refreshed.ephemeralDeletes ?? []);
+  const swept = (await readGenerationEphemera(live.store, live.generation)).filter((item) => !pins.has(item.id) && !deletions.has(item.id));
 
   // The Brain the new generation is built from: the marks applied, so a record
   // that is archived or deleted is not in the head it was swept out of (§2,
   // §4.1). The same writes go into the transaction below, so what is rendered
   // and what is committed are the same Brain.
   const writes: { write: BrainWrite; now: number }[] = [];
+  for (const id of deletions) {
+    writes.push({ write: { kind: "ephemeral.delete-mark", id, marked: false }, now });
+    if (pins.has(id)) writes.push({ write: { kind: "ephemeral.unpin", id }, now });
+  }
   for (const record of leaving) {
     writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
     writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });
@@ -462,7 +555,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
   }
   for (const item of refreshed.ephemera) {
-    if (item.pinned === undefined) continue;
+    if (item.pinned === undefined || deletions.has(item.id)) continue;
     const path = item.kind === "readResult" ? item.entity?.path : undefined;
     if (path === undefined) continue;
     const text = readPinnedFile(root, path);

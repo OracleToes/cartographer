@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { applyWrite } from "../dist/domain/brain.js";
@@ -22,7 +23,9 @@ function tempRoot() {
 /** A fake live generation: a store file plus its frozen snapshot. */
 function fakeGeneration(root, generation, mtimeSeconds) {
   const paths = generationPaths(root, generation);
-  writeFileSync(paths.store, "fake store bytes");
+  const database = new DatabaseSync(paths.store);
+  database.exec("CREATE TABLE live_entries (id INTEGER, head INTEGER, record TEXT)");
+  database.close();
   const brain = emptyBrain();
   writeSnapshot(root, generation, projectContext(brain), at(1));
   const when = new Date(mtimeSeconds * 1000);
@@ -102,6 +105,25 @@ test("collapse creates the new generation, sweeps the old store into the archive
     for (const name of ["gen-20261116T020000Z-live001.sqlite", "gen-20261116T020000Z-live001.projection.md", "gen-20261116T020000Z-live001.projection.json"]) {
       try { chmodSync(join(root, ".brain", "context", name), 0o644); } catch { /* gone */ }
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("collapse preserves an unreadable live store instead of sweeping it as empty", async () => {
+  const root = tempRoot();
+  try {
+    const live = fakeGeneration(root, "gen-20261116T020000Z-corrupt", 1_700_000_100);
+    const bytes = "not a sqlite database: recover me";
+    writeFileSync(live.store, bytes);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      await assert.rejects(collapse(root, store));
+      assert.equal(readFileSync(live.store, "utf8"), bytes);
+      assert.deepEqual((await store.readArchive()).items, []);
+    } finally {
+      await store.close();
+    }
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -418,6 +440,35 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
     assert.match(markdown, /X1 \[reasoning\] this one is worth keeping/);
     assert.equal((await store.read()).ephemera.length, 1, "the pin survives the collapse it carried it through");
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deferred ephemeral deletion bypasses archive and removes a pin", async () => {
+  const root = tempRoot();
+  try {
+    const generation = "gen-20261116T020000Z-live014";
+    await realGeneration(root, generation, 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "delete me" }] },
+      { kind: "pi.user", model: [{ role: "user", content: "archive me" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      const items = await readGenerationEphemera(generationPaths(root, generation).store, generation);
+      const target = items.find((item) => item.ephemeral?.text === "delete me");
+      assert.ok(target);
+      await store.apply({ kind: "ephemeral.pin", item: { id: target.id, text: "delete me", kind: "personMessage", pinned: "user", createdAt: at(1) } }, at(1));
+      await store.apply({ kind: "ephemeral.delete-mark", id: target.id, marked: true }, at(2));
+      await collapse(root, store);
+      assert.ok(!(await store.readArchive()).items.some((item) => item.ephemeral?.text === "delete me"));
+      assert.ok((await store.readArchive()).items.some((item) => item.ephemeral?.text === "archive me"));
+      const brain = await store.read();
+      assert.ok(!brain.ephemera.some((item) => item.id === target.id));
+      assert.ok(!brain.ephemeralDeletes.includes(target.id));
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

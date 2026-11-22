@@ -56,7 +56,7 @@ import {
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
-import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
+import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
@@ -186,6 +186,7 @@ interface ContextEntryLike {
   id?: number;
   kind?: string;
   model?: unknown;
+  partKeys?: readonly string[] | undefined;
 }
 
 interface MessageLike {
@@ -558,29 +559,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
           // The entry number is the order; the id may be composite for other
           // kinds, so the view is told where the body sits rather than guessing.
-          transcriptMessages.push({ id, entry: i, order: -1, role, text: textContent, timestamp: ts });
+          transcriptMessages.push({ id, targetId: ephemeralItemId(generation, id, "x0"), entry: i, order: -1, role, text: textContent, timestamp: ts });
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
         // Counted per entry, the same way the sweep counts them, so `t0` means
         // one thing on both sides. A tool call is named by its part: it has an
         // id of its own and does not need counting.
-        let thinkingSeen = 0;
-        let textSeen = 0;
         for (let j = 0; j < content.length; j++) {
           const part = content[j];
           if (!isRecord(part)) continue;
-          if (part.type === "thinking" && typeof part.thinking === "string") {
-            toolWorkItems.push({ id: ephemeralItemId(generation, id, `t${thinkingSeen++}`), entry: i, order: j, kind: "reasoning", text: part.thinking });
-          } else if (part.type === "text" && typeof part.text === "string") {
-            toolWorkItems.push({ id: ephemeralItemId(generation, id, `x${textSeen++}`), entry: i, order: j, kind: "output", text: part.text });
+          const partKey = entry.partKeys?.[j];
+          if (partKey === undefined) continue;
+          if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, partKey), entry: i, order: j, kind: "reasoning", text: part.thinking });
+          } else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, partKey), entry: i, order: j, kind: "output", text: part.text });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             if (part.name === "chat") {
               const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
               transcriptMessages.push({ id: `${id}-${j}`, entry: i, order: j, role: "assistant [chat]", text: textArg, timestamp: ts });
             } else {
               toolWorkItems.push({
-                id: ephemeralItemId(generation, id, `c${j}`),
+                id: ephemeralItemId(generation, id, partKey),
                 entry: i,
                 order: j,
                 kind: "toolCall",
@@ -992,23 +993,64 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.requestRender();
       return;
     }
-    if (partId === "transcript" || partId === "tool-work") {
-      // An item in the live context is not a Brain record, so it carries no
-      // mark: the collapse sweeps it (§3.1). What the person can do at once is
-      // take it out of the model's view — the delete the append-only store
-      // allows, with the text gone from the view before it is gone from disk
-      // (§3.4).
+    if (partId === "transcript" || partId === "tool-work" || partId === "ephemera") {
+      const id = String(itemId);
+      const held = brainState.ephemera.find((pin) => pin.id === id);
+      if (partId === "ephemera") {
+        if (held === undefined) return;
+        if (action === "delete" && !now) {
+          await brain.apply({ kind: "ephemeral.delete-mark", id, marked: true }, Date.now());
+        } else {
+          const session = state.session;
+          const live = (await readGenerationEphemera(generationPaths(options.root, session.generation).store, session.generation)).find((candidate) => candidate.id === id);
+          if (action === "archive") {
+            await brain.archiveEphemeral(live ?? { id, layer: "ephemeral", ephemeral: { kind: held.kind, text: held.text, ...(held.entity === undefined ? {} : { data: held.entity }) } }, session.generation, Date.now());
+          }
+          if (live !== undefined && !(await applyOmitNow(session, id))) {
+            pushStatus("the live item could not be removed; its pin is unchanged");
+            return;
+          }
+          let next = await brain.apply({ kind: "ephemeral.unpin", id }, Date.now());
+          next = await brain.apply({ kind: "ephemeral.delete-mark", id, marked: false }, Date.now());
+          rewriteHeadSnapshot(options.root, session.generation, next, session.state.person, Date.now());
+        }
+        await syncContextView(await brain.read());
+        await refreshSidebar();
+        tui.requestRender();
+        return;
+      }
       if (action === "archive") {
-        pushStatus("an item in the live context carries no archive mark: it is swept at the next collapse, and `!d` takes it out of the model's view now");
+        // Copy before omitting: a failed or interrupted live write may leave a
+        // duplicate, but can never destroy the only copy.
+        const session = state.session;
+        const item = (await readGenerationEphemera(generationPaths(options.root, session.generation).store, session.generation)).find((candidate) => candidate.id === id);
+        if (item === undefined) {
+          pushStatus("that item is no longer in the live context");
+        } else {
+          await brain.archiveEphemeral(item, session.generation, Date.now());
+          const applied = await applyOmitNow(session, id);
+          if (applied) {
+            await brain.apply({ kind: "ephemeral.delete-mark", id, marked: false }, Date.now());
+            if (held !== undefined) {
+              const next = await brain.apply({ kind: "ephemeral.unpin", id }, Date.now());
+              rewriteHeadSnapshot(options.root, session.generation, next, session.state.person, Date.now());
+            }
+          }
+          pushStatus(applied ? "archived the item now" : "copied to the archive; the live item could not be removed");
+        }
       } else if (now) {
-        const applied = await applyOmitNow(state.session, String(itemId));
-        pushStatus(
-          applied
-            ? "applied now: the entry is out of the model's view, and the store still holds it"
-            : "nothing in the live context matches that entry, so there is nothing to omit",
-        );
+        const applied = await applyOmitNow(state.session, id);
+        if (applied) {
+          await brain.apply({ kind: "ephemeral.delete-mark", id, marked: false }, Date.now());
+          if (held !== undefined) {
+            const next = await brain.apply({ kind: "ephemeral.unpin", id }, Date.now());
+            rewriteHeadSnapshot(options.root, state.session.generation, next, state.session.state.person, Date.now());
+          }
+        }
+        pushStatus(applied ? "deleted from the model's view; bytes remain until collapse" : "that item is no longer in the live context");
       } else {
-        pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
+        await brain.apply({ kind: "ephemeral.delete-mark", id, marked: true }, Date.now());
+        pushStatus("marked the item for deletion at collapse");
       }
       await rebuildTranscript();
       await syncContextView(await brain.read());
@@ -1019,8 +1061,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     pushStatus("that entry is the prompt's to describe, not a record to mark");
     tui.requestRender();
   };
-  contextView.onDelete = (partId, itemId, now) => void markRecord(partId, itemId, "delete", now);
-  contextView.onArchive = (partId, itemId, now) => void markRecord(partId, itemId, "archive", now);
+  let contextActionQueue: Promise<void> = Promise.resolve();
+  const queueContextAction = (action: () => Promise<void>) => {
+    contextActionQueue = contextActionQueue.then(action).catch((error: unknown) => {
+      pushStatus(`context action failed: ${errorText(error)}`);
+      tui.requestRender();
+    });
+  };
+  contextView.onDelete = (partId, itemId, now) => queueContextAction(() => markRecord(partId, itemId, "delete", now));
+  contextView.onArchive = (partId, itemId, now) => queueContextAction(() => markRecord(partId, itemId, "archive", now));
 
   /**
    * Withdraw a mark on a Brain record, or leave the record alone if the mark is
@@ -1041,8 +1090,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   contextView.onWithdrawMark = (partId, itemId) => {
-    void (async () => {
+    queueContextAction(async () => {
       const brainState = await brain.read();
+      if (partId === "transcript" || partId === "tool-work" || partId === "ephemera") {
+        await brain.apply({ kind: "ephemeral.delete-mark", id: String(itemId), marked: false }, Date.now());
+        await syncContextView(await brain.read());
+        tui.requestRender();
+        return;
+      }
       const kind =
         partId === "chat" && brainState.chat.some((record) => String(record.id) === String(itemId))
           ? "chat"
@@ -1057,7 +1112,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         return;
       }
       await withdrawRecordMark(kind, String(itemId));
-    })();
+    });
   };
   // ── The screen ────────────────────────────────────────────────────────────
   // Posting's map of a screen, in bands: one header row, the working area, the
@@ -1413,6 +1468,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
     try {
+      // A queued edit can be waiting for a run boundary. Interrupt first so
+      // collapse does not deadlock waiting for that edit to land.
+      await interruptRun(state.session);
+      await contextActionQueue;
       const before = await brain.read();
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
