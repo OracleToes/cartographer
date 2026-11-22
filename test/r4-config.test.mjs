@@ -247,6 +247,25 @@ test("a person line comes back only as chat words, prefixed", async () => {
   }
 });
 
+test("headless waits for consecutive tree continuations and prints their chat", async () => {
+  const { root, brain, cleanup } = await headlessFixture();
+  const { faux, models, ref } = fauxFor();
+  faux.setResponses([
+    () => fauxAssistantMessage([fauxToolCall("tree", { depth: 1 }, { id: "tree-1" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("tree", { depth: 2 }, { id: "tree-2" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("chat", { text: "tree checked" }, { id: "tree-chat" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "tree-stop" })], { stopReason: "toolUse" }),
+  ]);
+  const out = captureStream();
+  try {
+    const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["look", "/quit"]), output: out.stream, now: FIXED_NOW });
+    assert.equal(code, 0);
+    assert.match(out.text(), /carto: tree checked/);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("a turn with no chat tool call ends quietly: silence, never model prose", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();

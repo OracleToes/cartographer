@@ -48,9 +48,9 @@ import {
   interruptRun,
   openLiveSession,
   sessionTranscript,
-  readTreeNext,
   submitInput,
   togglePause,
+  waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
@@ -1457,6 +1457,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const submission = await submitInput(state.session, message, whenBusy);
       await rebuildTranscript();
       const settled = await submission.wait(BACKGROUND_CONTEXT);
+      await waitForRunEnd(state.session);
       if (settled.status !== "done") {
         pushStatus(`the run ended with status "${settled.status}"`);
       }
@@ -1472,25 +1473,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
-    // `tree` ended the turn to read the tree it just set (§6.3): the person
-    // watches the next turn happen rather than waiting to speak first.
-    //
-    // Peek, do not take: `readTreeNext` consumes the request itself, and taking
-    // it here first would leave it nothing to consume — the continuation would
-    // be skipped and the agent would stay halted until somebody spoke.
-    if (state.session.state.treeReadNext === true) {
-      state.running = true;
-      headerState.running = true;
-      tui.requestRender();
-      try {
-        await readTreeNext(state.session);
-      } finally {
-        state.running = false;
-        headerState.running = false;
-        await rebuildTranscript();
-        tui.requestRender();
-      }
-    }
     // A timed sleep no longer needs anything here: the rest is a durable task
     // (§10), so the next turn begins from the store, even after a restart, and
     // the watch on the live generation shows it when it happens.

@@ -39,11 +39,6 @@ export interface ToolSession {
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
 
-  /**
-   * Set by `tree`: the turn has ended and the host starts the next one at once,
-   * so the agent reads the tree it just asked for (§6.3). Cleared when read.
-   */
-  treeReadNext?: boolean;
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
   /** The generation this context belongs to; recorded on context-sourced pins. */
@@ -480,9 +475,8 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         // The tree itself is not the result (§6.3): it ends the turn, and the
         // state block — rendered at this anchor — is the next turn. So the agent
         // sees the tree it just asked for instead of acting on the last one.
-        // The host reads `treeReadNext` and starts that turn; the same shape as
-        // a rest, without the waiting.
-        session.treeReadNext = true;
+        // Pi's after-run task queues that next turn, including when this run
+        // was itself a continuation or came from a timed rest.
         return {
           output: [
             {

@@ -18,10 +18,10 @@ import {
   closeLiveSession,
   interruptRun,
   openLiveSession,
-  readTreeNext,
   sessionTranscript,
   submitInput,
   togglePause,
+  waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
@@ -147,43 +147,23 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
   }
 });
 
-test("the tree tool ends its turn, and readTreeNext — alone — consumes the request to start the next one at the new anchor", async () => {
-  // §6.3: the tree call ends the turn so the agent never acts on the tree it
-  // had before it asked. The host peeks at `treeReadNext` and calls
-  // `readTreeNext`, which consumes the request once; a host that called
-  // `takeTreeReadRequest()` first left `readTreeNext` nothing to consume and
-  // halted the agent.
+test("successive tree calls continue automatically with the freshly anchored state block", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree-1" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: root, depth: 2 }, { id: "call-tree-2" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const settled = await (await submitInput(session, "look at src")).wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done");
-    assert.equal(session.state.tree.anchor, join(realpathSync(root), "src"));
-    assert.equal(session.state.tree.depth, 1);
-    assert.equal(captured.length, 1, "the tree call ended the run");
-    assert.equal(session.state.treeReadNext, true, "and left the request for its next turn");
-
-    // The negative half: a host that *takes* the request before calling
-    // readTreeNext leaves the continuation nothing to consume, and no second
-    // turn happens at all.
-    const consumed = session.takeTreeReadRequest();
-    assert.equal(consumed, true, "a take does report the request…");
-    assert.equal(await readTreeNext(session), undefined, "…and then the continuation has nothing left to run");
-    assert.equal(captured.length, 1, "which is exactly the halt: no second turn ever happens");
-    session.state.treeReadNext = true; // put the request back for the walk below
-
-    // The positive half: the host calls readTreeNext, which takes the request
-    // and starts the next turn at the anchor the agent just set.
-    const next = await readTreeNext(session);
-    assert.equal(next?.status, "done", "the continuation turn ran");
-    assert.equal(captured.length, 2, "and the agent went on instead of halting");
-    assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/, "with the tree it asked for");
-    assert.equal(session.state.treeReadNext, false, "and the request is spent");
+    await waitForRunEnd(session);
+    assert.equal(captured.length, 3, "both tree calls continued without a host intervention");
+    assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/);
+    assert.match(blockOf(captured[2]).content, /T1 tree: \. \(depth 2\)/);
+    assert.equal(session.state.tree.anchor, realpathSync(root));
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -519,6 +499,7 @@ test("a timed rest is durable: it sleeps in the store, survives a reopen, and th
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 10 }, { id: "call-rest" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-after-rest" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-done" })], { stopReason: "toolUse" })),
   ]);
   let session = await openLiveSession({ root, brain, models, model: ref, now: clockNow, setTimer });
@@ -556,9 +537,10 @@ test("a timed rest is durable: it sleeps in the store, survives a reopen, and th
     await fireDue();
     await session.conversation.waitForIdle(BACKGROUND_CONTEXT);
     const deadline = Date.now() + 2000;
-    while (captured.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(captured.length, 2, "the rest ended and the agent went on, by itself");
+    while (captured.length < 3 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(captured.length, 3, "the rest ended and the tree call also continued by itself");
     assert.match(blockOf(captured[1]).content, /<carto-state>/, "starting from the state block, as any turn does");
+    assert.match(blockOf(captured[2]).content, /T1 tree: src \(depth 1\)/, "the wake's tree call refreshed the next block");
   } finally {
     await closeLiveSession(session);
     await cleanup();

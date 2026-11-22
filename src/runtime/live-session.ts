@@ -30,7 +30,6 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
 import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
-import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 import { createCartoExtension, cartoInstructions, type LiveSessionState } from "./carto-extension.js";
 import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
@@ -85,11 +84,6 @@ export interface LiveSession {
   readonly freeze: StreamFreeze;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
-  /**
-   * Take the `tree` tool's request to start the next turn at once, so the agent
-   * reads the tree it just set (§6.3). Cleared when read, like a collapse.
-   */
-  takeTreeReadRequest(): boolean;
 }
 
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
@@ -127,7 +121,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
-    treeReadNext: false,
     readOnly: false,
     generation,
     lastReportedInput: undefined,
@@ -190,11 +183,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         state.collapseRequested = null;
         return reason;
       },
-      takeTreeReadRequest() {
-        const wanted = state.treeReadNext === true;
-        state.treeReadNext = false;
-        return wanted;
-      },
     };
   } catch (error) {
     if (harness !== undefined) await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
@@ -203,40 +191,37 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   }
 }
 
-/** Submit a person message; the submission settles when the run ends (including any continuations). */
+/**
+ * Wait for the current chain of runs to end, without waiting for a sleeping
+ * conversation-owned task. Submission.wait settles before Pi's after-run tasks
+ * have queued their follow-ups; the live run remains present until they finish.
+ */
+export async function waitForRunEnd(session: LiveSession): Promise<void> {
+  const watch = await session.harness.watchDoc(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+  if (watch === undefined) return;
+  try {
+    if (watch.value?.run === undefined) return;
+    await new Promise<void>((resolve, reject) => {
+      watch.start(async (call) => {
+        if (call.kind === "failed") reject(call.error);
+        else if (call.value.run === undefined) resolve();
+      });
+      void watch.closed.then((end) => {
+        if (end.kind === "failed" || end.kind === "listener_error") reject(end.error);
+        else resolve();
+      });
+    });
+  } finally {
+    await watch.stop();
+  }
+}
+
+/** Submit a person message; the submission settles when its run answers. */
 export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
   // A message from the person ends a rest early (§10) and starts its own turn.
   // The rest is told, so when its time does come it starts nothing of its own:
   // one message, one turn.
   return session.conversation.submit({ type: "input", content: text, whenBusy }, BACKGROUND_CONTEXT);
-}
-
-/**
- * Start the next turn with the state block, as the state asks for one.
- *
- * The submitted message is the block's own marker: `beforeRequest` replaces it
- * with the freshly rendered block, so what starts the run is the state, not a
- * word from the person. `tree` uses this when it ends its turn to read the tree
- * it just set (§6.3); a woken rest reaches the same place through `SleepTask`.
- */
-export async function resumeAfterRest(session: LiveSession) {
-  return session.conversation.submit({ type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" }, BACKGROUND_CONTEXT);
-}
-
-/**
- * Start the next turn now, with the state block, because the agent asked to read
- * the tree (§6.3). `tree` ends its turn so the very next thing the agent reads is
- * the tree it just set, not the one it had before; this is the same continuation
- * a woken rest takes, without the wait.
- *
- * Paused, it starts nothing (§9): the request is left where it is, and the tree
- * is read when the person lets the run go on.
- */
-export async function readTreeNext(session: LiveSession): Promise<{ status: string } | undefined> {
-  if (session.state.paused) return undefined;
-  if (!session.takeTreeReadRequest()) return undefined;
-  const submission = await resumeAfterRest(session);
-  return submission.wait(BACKGROUND_CONTEXT);
 }
 
 /**

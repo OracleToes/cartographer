@@ -32,9 +32,9 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
-  readTreeNext,
   submitInput,
   togglePause,
+  waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
@@ -164,6 +164,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       try {
         const submission = await submitInput(session, line);
         const settled = await submission.wait(BACKGROUND_CONTEXT);
+        await waitForRunEnd(session);
         if (settled.status !== "done") {
           writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
         }
@@ -178,9 +179,6 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       if (reason !== null) {
         session = await runCollapse(session, options, output, reason);
       }
-      // `tree` ended the turn to read the tree it just set (§6.3): start that
-      // turn now, then settle into whatever the rest of the run asks for.
-      await readTreeNext(session);
       if (options.refreshCapacity === true) {
         await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
       }

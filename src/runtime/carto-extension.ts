@@ -13,7 +13,7 @@
 import { readFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 
-import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, section, type ToolRegistration } from "@earendil-works/pi-durable";
+import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, runEndTask, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
 
@@ -32,6 +32,7 @@ import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
 import { lexicalProjectPath } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
+import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 
@@ -313,7 +314,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
     name: "carto",
     // A rest is durable, so its task is part of what this extension installs;
     // `sleep` creates one and the harness runs it (§10).
-    tasks: [SleepTask],
+    tasks: [SleepTask, TreeReadTask],
     sections: [
       /**
        * The frozen projection for this generation: written once at creation,
@@ -350,6 +351,16 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           options.session.toolWorkAtLastReport = options.session.toolWorkAtLastRequest;
         },
         onYield: () => ({ continue: STATE_BLOCK_MARKER }),
+        afterRun: async (run, api, context) => {
+          if (run.reason !== "terminate") return;
+          const answer = (await api.entry(run.answer, context))?.model?.[0];
+          if (answer?.role !== "assistant") return;
+          const calls = answer.content.filter((part) => part.type === "toolCall");
+          // A tree-only terminal round asks for the new block. Sleep and
+          // collapse deliberately stop, even if the model called tree alongside.
+          if (calls.length === 0 || !calls.every((call) => call.name === "tree")) return;
+          return { tasks: [runEndTask(TreeReadTask, {})] };
+        },
       }),
     ],
     tools: [
