@@ -546,9 +546,13 @@ files, directories, and their sizes, and marks which files an Atlas node is
 attached to, so the tree is a map of what the agent understands rather than a
 listing.
 
-The tree is anchored at the project root by default. The `tree` tool changes the
-anchor and nothing else: it does not return the tree, because the tree is already
-in the state block, which every request carries.
+The tree is anchored at the project root by default, at a depth of two. The `tree`
+tool sets the anchor and the depth, both optional: the anchor defaults to the
+project root, and the depth defaults to two. A depth of zero renders the same as a
+depth of one — the anchor and its immediate contents — because there is no useful
+rendering of an anchor with nothing under it. The tool does not return the tree:
+it is already in the state block, which every request carries, and the tool's
+result is only that the block will be rendered at the new anchor.
 
 **`tree` ends the turn immediately.** The state block renders as the next turn, so
 the agent sets where it is attending and sees the tree it just asked for at once,
@@ -592,7 +596,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
-| `tree` | Sets the project tree's anchor. The tree renders in the state block. |
+| `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 
