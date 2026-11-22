@@ -764,6 +764,122 @@ test("the archive keeps a restored item's type and the author of its pin", () =>
   assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
 });
 
+test("the context cursor only lands on entries, stays put at the edges, and survives a refresh", () => {
+  const data = () => ({
+    brain: emptyBrain(),
+    systemPrompt: "you are carto",
+    tools: [],
+    transcriptMessages: [{ id: "u1", entry: 9, order: -1, role: "user", text: "hello" }],
+    toolWorkItems: [
+      { id: "g1:7:t0", entry: 7, order: 0, kind: "reasoning", text: "thinking one" },
+      { id: "g1:7:c1", entry: 7, order: 1, kind: "toolCall", name: "tree", args: "{}" },
+      { id: "g1:8:r", entry: 8, order: 99, kind: "toolResult", output: "result one" },
+    ],
+    stateBlockText: "<carto-state>\n</carto-state>",
+  });
+  const view = new ContextView();
+  view.setData(data());
+  const onHeading = () => {
+    const row = view.rows[view.cursor];
+    return row === undefined || !("node" in row);
+  };
+
+  // Walking either way must never land on a section heading: the heading is
+  // drawn without a cursor, so landing on one made the cursor disappear.
+  for (let press = 0; press < 12; press += 1) {
+    view.handleInput("j");
+    assert.equal(onHeading(), false, `j ${press + 1} landed on an entry`);
+  }
+  for (let press = 0; press < 12; press += 1) {
+    view.handleInput("k");
+    assert.equal(onHeading(), false, `k ${press + 1} landed on an entry`);
+  }
+
+  // At the edges it stays put rather than wrapping or jumping to a heading.
+  view.handleInput("g");
+  const first = view.cursor;
+  view.handleInput("k");
+  assert.equal(view.cursor, first, "k at the first entry stays there");
+  view.handleInput("G");
+  const last = view.cursor;
+  view.handleInput("j");
+  assert.equal(view.cursor, last, "j at the last entry stays there");
+
+  // The app re-renders this view on a timer while a run is going. That refresh
+  // used to reset the cursor to the top; it must hold the entry instead.
+  view.handleInput("g");
+  view.handleInput("j");
+  view.handleInput("j");
+  const before = view.rows[view.cursor];
+  view.setData(data());
+  const after = view.rows[view.cursor];
+  assert.ok(before !== undefined && "node" in before && after !== undefined && "node" in after);
+  assert.equal(after.node.id, before.node.id, "the cursor held its entry across the refresh");
+  assert.equal(view.cursor, view.rows.findIndex((row) => "node" in row && row.node.id === after.node.id));
+});
+
+test("a moving cursor is scrolled into view rather than off the pane", () => {
+  const view = new ContextView();
+  const revealed = [];
+  view.onReveal = (start, end) => revealed.push([start, end]);
+  view.setData({
+    brain: emptyBrain(),
+    systemPrompt: "you are carto",
+    tools: [],
+    transcriptMessages: [{ id: "u1", entry: 9, order: -1, role: "user", text: "hello" }],
+    toolWorkItems: [
+      { id: "g1:7:t0", entry: 7, order: 0, kind: "reasoning", text: "thinking one" },
+      { id: "g1:7:c1", entry: 7, order: 1, kind: "toolCall", name: "tree", args: "{}" },
+    ],
+    stateBlockText: "<carto-state>\n</carto-state>",
+  });
+  const lines = view.render(100);
+  assert.equal(revealed.length, 0, "nothing is revealed before there is a row to reveal");
+
+  view.handleInput("j");
+  assert.equal(revealed.length, 1, "a move asks the pane to show the row");
+  const [start, end] = revealed.at(-1);
+  assert.ok(start >= 0 && end > start && end <= lines.length, "the range is real rendered lines");
+
+  view.handleInput("G");
+  const final = revealed.at(-1);
+  assert.equal(final[1], lines.length, "the last entry's range ends at the last line");
+});
+
+test("the body is the order the model reads, even when the ids are sweep keys", () => {
+  // The sweep names an item `generation:entry:part` for the archive, and that id
+  // is what a pin uses. It carries no order: parsing it as a number yields 0,
+  // which used to float every piece of tool work above the person's message.
+  // Order comes from the entry and the part, which is what the app supplies.
+  const view = new ContextView();
+  view.setData({
+    brain: emptyBrain(),
+    systemPrompt: "you are carto",
+    tools: [],
+    transcriptMessages: [
+      // Entry 9: what the person said, so it comes last of the three.
+      { id: "u1", entry: 9, order: -1, role: "user", text: "let's build a dice roller" },
+    ],
+    toolWorkItems: [
+      { id: "gen-20261121T120000Z-ab12:7:t0", entry: 7, order: 0, kind: "reasoning", text: "start with the tree" },
+      { id: "gen-20261121T120000Z-ab12:7:c1", entry: 7, order: 1, kind: "toolCall", name: "tree", args: '{ "depth": 3 }' },
+      { id: "gen-20261121T120000Z-ab12:8:r", entry: 8, order: Number.MAX_SAFE_INTEGER, kind: "toolResult", output: "Anchored at src, depth 3." },
+    ],
+    stateBlockText: "<carto-state>\n</carto-state>",
+  });
+  const frame = plain(view.render(110).join("\n"));
+  const at = (needle) => {
+    const index = frame.indexOf(needle);
+    assert.notEqual(index, -1, `${needle} is in the body`);
+    return index;
+  };
+  // The model reads: thinking, the call, its result, then the message that came after.
+  assert.ok(at("start with the tree") < at("tree"), "thinking precedes the call it produced");
+  assert.ok(at("tree") < at("Anchored at src"), "the call precedes its result");
+  assert.ok(at("Anchored at src") < at("dice roller"), "and the person's message is last, where it arrived");
+  assert.ok(at("start with the tree") < at("dice roller"), "tool work never jumps above an earlier message");
+});
+
 test("a pinned file is in the head, under the tree's handle, with the person who pinned it", () => {
   const view = new ContextView();
   view.setData({

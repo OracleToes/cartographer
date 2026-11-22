@@ -57,6 +57,13 @@ export interface ContextToolItem {
 
 export interface ContextDialogueMessage {
   id: string | number;
+  /**
+   * The context entry this message is, and where it sits in the body. A message
+   * id can be a composite (`"7-0"` for a chat call's part), so the order comes
+   * from here rather than from parsing the id.
+   */
+  entry?: number | undefined;
+  order?: number | undefined;
   role: string;
   text: string;
   timestamp?: number | undefined;
@@ -65,6 +72,14 @@ export interface ContextDialogueMessage {
 export interface ContextWorkItem {
   /** The item's id, which is also the id a pin on it uses: the sweep names it the same way (§3.1). */
   id: string | number;
+  /**
+   * The context entry this item belongs to. The body is ordered by entry, then
+   * by the item's place within it — never by parsing the id, which is a
+   * generation-stamped sweep key and carries no order of its own.
+   */
+  entry?: number | undefined;
+  /** The item's place within its entry: thinking and text in part order, a result after its call. */
+  order?: number | undefined;
   kind: string;
   name?: string | undefined;
   args?: string | undefined;
@@ -216,6 +231,12 @@ export class ContextView implements Component, Focusable {
   onWithdrawMark?: (partId: string, itemId: string | number) => void;
   /** Fired on `p` over an entry that names a Brain chat record: toggle the pin marker. */
   onTogglePin?: (partId: string, itemId: string | number) => void;
+  /**
+   * Bring a rendered line range into view. The view lives in a scroll pane, so
+   * moving the cursor below the fold would otherwise carry it off screen; the
+   * host fills this in with the pane's own `scrollTo`.
+   */
+  onReveal?: (start: number, end: number) => void;
 
   private data: ContextViewData | undefined;
   private sections: PromptSection[] = [];
@@ -235,10 +256,17 @@ export class ContextView implements Component, Focusable {
       this.rows.push({ section: index });
       for (const node of section.nodes) this.rows.push({ node, section: index });
     });
-    // The cursor starts on an entry, never on a section heading: a heading is a
-    // label for what follows, not something a mark or a fold can land on.
-    const firstNode = this.rows.findIndex((row) => "node" in row);
-    this.cursor = firstNode === -1 ? 0 : firstNode;
+    // The cursor stays on the entry it was on, by id, across a refresh. The app
+    // refreshes this view on a timer while a run is going; resetting to the top
+    // each time is what made the cursor look like it jumped while scrolling.
+    // Only when the entry it was on is gone does it fall back to the first one,
+    // and it never lands on a section heading, which carries no cursor.
+    const previous = this.rows[this.cursor];
+    const held =
+      previous !== undefined && "node" in previous
+        ? this.rows.findIndex((row) => "node" in row && row.node.id === previous.node.id)
+        : -1;
+    this.cursor = held >= 0 ? held : this.firstEntry();
   }
 
   /** Estimated size of everything the model reads, for the header. */
@@ -362,14 +390,17 @@ export class ContextView implements Component, Focusable {
     // calls and their results sit in the order the model receives them. The app
     // hands two lists; their ids are the context entry numbers, so the merge is
     // by that number and nothing else.
+    // Ordered by entry number, then by place within the entry (§5: the body is
+    // the order the model receives). A caller that does not supply the fields
+    // gets its list's own order, which is already the order it was built in.
     const candidates: Array<{ key: number; order: number; node: PromptNode }> = [];
     let workCount = 0;
     let resultCount = 0;
     for (const item of data.toolWorkItems) {
       if (item.kind === "toolResult") resultCount += 1;
       else workCount += 1;
-      const key = Number.parseInt(String(item.id), 10) || 0;
-      const suffix = Number.parseInt(String(item.id).split("-")[1] ?? "0", 10) || 0;
+      const key = item.entry ?? Number.MAX_SAFE_INTEGER;
+      const suffix = item.order ?? candidates.length;
       if (item.kind === "reasoning") {
         candidates.push({
           key,
@@ -428,9 +459,9 @@ export class ContextView implements Component, Focusable {
       if (message.role !== "user") continue;
       personCount += 1;
       candidates.push({
-        key: Number.parseInt(String(message.id), 10) || 0,
+        key: message.entry ?? Number.MAX_SAFE_INTEGER,
         // A person's message precedes the work its entry produced.
-        order: -1,
+        order: message.order ?? -1,
         node: {
           id: `msg-${String(message.id)}`,
           handle: `U${personCount}`,
@@ -505,6 +536,39 @@ export class ContextView implements Component, Focusable {
       .find((node) => node.target?.part === part && String(node.target.id) === String(id));
   }
 
+  /** The next entry in a direction, skipping section headings; stays put at the edge. */
+  private step(direction: 1 | -1): number {
+    for (let at = this.cursor + direction; at >= 0 && at < this.rows.length; at += direction) {
+      const row = this.rows[at];
+      if (row !== undefined && "node" in row) return at;
+    }
+    return this.cursor;
+  }
+
+  /**
+   * Scroll the cursor's row into view after a move. The line offsets come from
+   * the last render, which is the only place they exist; a view that has not
+   * rendered yet has nothing to reveal, and the next one will.
+   */
+  private revealCursor(): void {
+    const range = this.hits.find((hit) => hit.index === this.cursor);
+    if (range === undefined) return;
+    this.onReveal?.(range.start, range.end);
+  }
+
+  private firstEntry(): number {
+    const at = this.rows.findIndex((row) => "node" in row);
+    return at === -1 ? 0 : at;
+  }
+
+  private lastEntry(): number {
+    for (let at = this.rows.length - 1; at >= 0; at -= 1) {
+      const row = this.rows[at];
+      if (row !== undefined && "node" in row) return at;
+    }
+    return 0;
+  }
+
   private selectedNode(): PromptNode | undefined {
     const row = this.rows[this.cursor];
     return row !== undefined && "node" in row ? row.node : undefined;
@@ -519,26 +583,34 @@ export class ContextView implements Component, Focusable {
       this.onBack?.();
       return;
     }
+    // The cursor only ever lands on an entry. A section heading is a label for
+    // what follows, is drawn without a cursor, and has nothing a mark or a fold
+    // can act on — so walking onto one made the cursor vanish mid-scroll.
     if (matchesKey(data, "j") || matchesKey(data, "down")) {
-      this.cursor = Math.min(this.rows.length - 1, this.cursor + 1);
+      this.cursor = this.step(1);
+      this.revealCursor();
       return;
     }
     if (matchesKey(data, "k") || matchesKey(data, "up")) {
-      this.cursor = Math.max(0, this.cursor - 1);
+      this.cursor = this.step(-1);
+      this.revealCursor();
       return;
     }
     if (matchesKey(data, "g")) {
-      this.cursor = 0;
+      this.cursor = this.firstEntry();
+      this.revealCursor();
       return;
     }
     if (data === "G") {
-      this.cursor = Math.max(0, this.rows.length - 1);
+      this.cursor = this.lastEntry();
+      this.revealCursor();
       return;
     }
     if (matchesKey(data, "enter") || matchesKey(data, "space")) {
       this.toggleAt(this.cursor);
       return;
     }
+
     if (data === "!") {
       this.nowArmed = !this.nowArmed;
       return;

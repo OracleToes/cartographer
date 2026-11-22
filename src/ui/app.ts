@@ -510,7 +510,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (role === "user") {
         const textContent = typeof message.content === "string" ? message.content : undefined;
         if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
-          transcriptMessages.push({ id, role, text: textContent, timestamp: ts });
+          // The entry number is the order; the id may be composite for other
+          // kinds, so the view is told where the body sits rather than guessing.
+          transcriptMessages.push({ id, entry: i, order: -1, role, text: textContent, timestamp: ts });
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
@@ -523,16 +525,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           const part = content[j];
           if (!isRecord(part)) continue;
           if (part.type === "thinking" && typeof part.thinking === "string") {
-            toolWorkItems.push({ id: ephemeralItemId(generation, id, `t${thinkingSeen++}`), kind: "reasoning", text: part.thinking });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `t${thinkingSeen++}`), entry: i, order: j, kind: "reasoning", text: part.thinking });
           } else if (part.type === "text" && typeof part.text === "string") {
-            toolWorkItems.push({ id: ephemeralItemId(generation, id, `x${textSeen++}`), kind: "output", text: part.text });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `x${textSeen++}`), entry: i, order: j, kind: "output", text: part.text });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             if (part.name === "chat") {
               const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
-              transcriptMessages.push({ id: `${id}-${j}`, role: "assistant [chat]", text: textArg, timestamp: ts });
+              transcriptMessages.push({ id: `${id}-${j}`, entry: i, order: j, role: "assistant [chat]", text: textArg, timestamp: ts });
             } else {
               toolWorkItems.push({
                 id: ephemeralItemId(generation, id, `c${j}`),
+                entry: i,
+                order: j,
                 kind: "toolCall",
                 name: part.name,
                 args: prettyArgs(part.arguments),
@@ -554,6 +558,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             const call = callId === undefined ? undefined : callNames.get(callId);
             toolWorkItems.push({
               id: ephemeralItemId(generation, id, "r"),
+              entry: i,
+              // A result answers the call that precedes it, so it sits after
+              // every part of the entry it answers.
+              order: Number.MAX_SAFE_INTEGER,
               kind: "toolResult",
               output: toolText,
               tool: call?.name,
@@ -670,6 +678,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
+  // Keep the cursor on screen as it walks: the view knows which rendered lines
+  // its row occupies, and the pane is the only thing that can scroll to them.
+  contextView.onReveal = (start, end) => {
+    const top = contextScroll.scrollTop;
+    const height = contextScroll.viewportHeight;
+    if (start < top) contextScroll.scrollTo(start);
+    else if (end > top + height) contextScroll.scrollTo(Math.max(0, end - height));
+  };
 
   /** Person-side pin toggles: place/remove a pin as "user". Shared by every view that can toggle a pin. */
   const togglePin = async (target: "chat" | "ledger" | "atlas", id: string) => {
