@@ -337,17 +337,19 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
-      title: "The answer",
-      text: "The answer is 42.",
-      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
-    }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   const previousGeneration = session.generation;
   try {
-    const submission = await submitInput(session, "remember this, then reset");
+    // Atlas writes through a model call are exercised by the read/Atlas case;
+    // the collapse contract only needs a real record already in the Brain.
+    await brain.apply({ kind: "atlas.upsert", node: {
+      id: "collapse-node", title: "The answer", text: "The answer is 42.", links: [],
+      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
+      createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    } }, 1_700_000_000_000);
+    const submission = await submitInput(session, "reset");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done", "the collapse tool ends the run; no continuation follows a terminate");
     const reason = session.takeCollapseRequest();
@@ -378,7 +380,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     const second = await submitInput(outcome.session, "still here?");
     const secondSettled = await second.wait(BACKGROUND_CONTEXT);
     assert.equal(secondSettled.status, "done");
-    assert.equal(captured.length, 3, "one request per scripted response, across the collapse");
+    assert.equal(captured.length, 2, "one request per scripted response, across the collapse");
     await closeLiveSession(outcome.session);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
@@ -390,27 +392,23 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
-  faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
-      title: "The answer",
-      text: "The answer is 42.",
-      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
-    }, { id: "call-atlas" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
-  ]);
   const session = await openLiveSession(options());
   try {
-    const first = await submitInput(session, "learn this");
-    await first.wait(BACKGROUND_CONTEXT);
+    // The read-to-Atlas tool chain is covered above. Seed its result directly
+    // here so this case exercises drift and its propagation, not that chain a
+    // second time.
+    await brain.apply({ kind: "atlas.upsert", node: {
+      id: "drift-node", title: "The answer", text: "The answer is 42.", links: [],
+      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
+      createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+    } }, 1_700_000_000_000);
     // The file drifts (and is touched) after the entry was written.
     const driftPath = join(root, "src", "verify-me.ts");
     writeFileSync(driftPath, "export const answer = 43;\n");
     const drift = new Date(1_700_001_000_000);
     utimesSync(driftPath, drift, drift);
-    const reason = session.takeCollapseRequest();
     const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
-    const outcome = await collapseLiveSession(session, options(), reason ?? "person-triggered");
+    const outcome = await collapseLiveSession(session, options(), "person-triggered");
     const { renderLiveStateBlock } = await import("../dist/runtime/carto-extension.js");
     const block = await renderLiveStateBlock(
       { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },

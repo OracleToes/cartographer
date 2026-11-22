@@ -32,6 +32,9 @@ const captureStream = () => {
   return { stream, text: () => text };
 };
 
+// Each test has its own temporary home, project, models, and HTTP server.
+// Running independent cases concurrently avoids a serial headless/CLI tail.
+describe("configuration and headless", { concurrency: 3 }, () => {
 // ---------- config ----------
 
 test("parseModelRef splits on the first slash; the model id keeps the rest", () => {
@@ -386,6 +389,8 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     assert.match(help, /workspace TUI/);
     assert.match(help, /--headless/);
     assert.match(help, /--model llama-swap\/ByteShape/);
+    assert.match(help, /--user <name>/);
+    assert.match(help, /userName/);
   });
 
   test("no config and no --model: exit 1 and the one-liner that creates it", async () => {
@@ -405,20 +410,31 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     }
   });
 
-  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", async () => {
+  test("--model and --user create the config and boot the headless driver at stdin EOF", async () => {
     const home = tempDir();
     const root = projectRoot();
     try {
       const first = await runCli(
-        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--user", "OracleToes", "--root", root],
         { home, input: "" },
       );
-      void first;
+      assert.match(first, /carto · llama-swap\/ByteShape/);
       const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
-      const second = await runCli(["--root", root], { home, input: "" });
-      assert.match(second, /carto · llama-swap\/ByteShape/);
+      assert.equal(raw.userName, "OracleToes", "--user is persisted instead of the login name");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a bare run reads an existing config and boots the headless driver", async () => {
+    const home = tempDir();
+    const root = projectRoot();
+    try {
+      await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://127.0.0.1:9/v1", contextWindow: 75_000, userName: "OracleToes" }, home);
+      assert.match(await runCli(["--root", root], { home, input: "" }), /carto · llama-swap\/ByteShape/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
@@ -443,4 +459,5 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
 });
