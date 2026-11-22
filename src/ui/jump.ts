@@ -18,7 +18,7 @@ export interface JumpTarget {
   /** Single lowercase letter. */
   key: string;
   /** The view it lands on. */
-  view: "chat" | "atlas" | "ledger" | "context";
+  view: "chat" | "atlas" | "ledger" | "tree" | "context";
   label: string;
   description: string;
 }
@@ -27,6 +27,7 @@ export const JUMP_TARGETS: JumpTarget[] = [
   { key: "c", view: "chat", label: "transcript", description: "the conversation" },
   { key: "a", view: "atlas", label: "atlas", description: "nodes, links and attachments" },
   { key: "l", view: "ledger", label: "ledger", description: "goals, notes, questions, progress" },
+  { key: "t", view: "tree", label: "tree", description: "the project, under its handles" },
   { key: "x", view: "context", label: "context", description: "what the model reads, and surgery on it" },
 ];
 

@@ -58,7 +58,7 @@ import { createTools } from "../runtime/tools.js";
 import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
-import { projectTreeBlock } from "../runtime/project-tree.js";
+import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
@@ -78,6 +78,7 @@ import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
+import { TreeView } from "./tree-view.js";
 import { ruleLine, tokens } from "./tokens.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
@@ -126,7 +127,13 @@ interface TuiState {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root: string, contextTokens: number = 0, archive?: { total: number; pinned: number }): SidebarCounts {
+function countSidebar(
+  brainState: Awaited<ReturnType<BrainStore["read"]>>,
+  root: string,
+  contextTokens: number = 0,
+  archive?: { total: number; pinned: number },
+  tree?: { anchor: string; depth: number },
+): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
   const stale: Partial<Record<"atlas" | "ledger" | "chat" | "context", number>> = {};
   for (const mark of marks) {
@@ -142,6 +149,22 @@ function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root:
   for (const record of brainState.chat) {
     if (record.mark?.action === "delete") marked.chat = (marked.chat ?? 0) + 1;
   }
+  // The tree's figures are the rows the view shows, counted from the same
+  // projection it renders, so the sidebar and the pane cannot disagree.
+  let treeDirs = 0;
+  let treeFiles = 0;
+  if (tree !== undefined) {
+    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState);
+    const walk = (entry: TreeEntry, level: number): void => {
+      if (level > projection.depth) return;
+      for (const child of entry.children ?? []) {
+        if (child.directory) treeDirs += 1;
+        else treeFiles += 1;
+        walk(child, level + 1);
+      }
+    };
+    walk(projection.entry, 1);
+  }
   return {
     chat: brainState.chat.length,
     contextTokens,
@@ -151,6 +174,8 @@ function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root:
     marked,
     stale,
     staleTotal: marks.length,
+    treeDirs,
+    treeFiles,
     archive: archive?.total ?? 0,
     archivePinned: archive?.pinned ?? 0,
   };
@@ -417,6 +442,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
   const contextView = new ContextView();
+  const treeView = new TreeView();
   const archiveView = new ArchiveView();
 
   // Each pannable view gets its own scroll view: Posting's "one scrolling pane in
@@ -424,6 +450,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const atlasScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
   const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
   const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
+  const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
   const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
 
   sidebar.onSelect = (book) => void switchToView(book);
@@ -434,10 +461,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
     sidebar.setCounts(
-      countSidebar(brainState, options.root, contextTokens, {
-        total: archive.items.length,
-        pinned: archive.items.filter((item) => item.pinned !== undefined).length,
-      }),
+      countSidebar(
+        brainState,
+        options.root,
+        contextTokens,
+        {
+          total: archive.items.length,
+          pinned: archive.items.filter((item) => item.pinned !== undefined).length,
+        },
+        // The same anchor and depth the `tree` tool last set: the sidebar counts
+        // what the view shows, not a second tree of its own.
+        state.session.state.tree,
+      ),
     );
     sidebar.setActiveBook(state.view);
     sidebar.setLayer(state.layer);
@@ -624,6 +659,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (state.view === "chat") tui.setFocus(editor);
     else if (state.view === "atlas") tui.setFocus(atlasView);
     else if (state.view === "ledger") tui.setFocus(ledgerView);
+    else if (state.view === "tree") tui.setFocus(treeView);
     else tui.setFocus(contextView);
   };
 
@@ -638,6 +674,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
     } else if (view === "ledger") {
       ledgerView.setData(brainState);
+    } else if (view === "tree") {
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: brainState });
     } else if (view === "context") {
       await syncContextView(brainState);
     }
@@ -667,6 +705,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
     } else if (state.view === "ledger") {
       ledgerView.setData(await brain.read());
+    } else if (state.view === "tree") {
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
     }
     focusCurrent();
     await refreshSidebar();
@@ -677,6 +717,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   atlasView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
+  treeView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
   // Keep the cursor on screen as it walks: the view knows which rendered lines
   // its row occupies, and the pane is the only thing that can scroll to them.
@@ -708,6 +749,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const fresh = await brain.read();
     if (state.view === "atlas") atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
     if (state.view === "ledger") ledgerView.setData(fresh);
+    if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
     if (state.view === "context") await syncContextView(fresh);
     await refreshSidebar();
     tui.requestRender();
@@ -778,6 +820,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await refreshArchive();
       await rebuildTranscript();
       await refreshSidebar();
+      if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
       if (state.view === "context") await syncContextView(await brain.read());
       tui.requestRender();
     })();
@@ -985,6 +1028,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { component: transcriptScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
     { component: atlasScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
     { component: ledgerScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
+    { component: treeScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "tree" && state.layer === "context" },
     { component: contextScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" && state.layer === "context" },
     { component: archiveScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.layer === "archive" },
   ]);
@@ -1811,6 +1855,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => !inView("ledger"),
     },
     {
+      id: "view-tree",
+      group: "go to",
+      label: "the tree",
+      hint: "the project under its handles, as the harness sees it",
+      run: () => void switchToView("tree"),
+      available: () => !inView("tree"),
+    },
+    {
       id: "view-context",
       group: "go to",
       label: "the context",
@@ -1946,6 +1998,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   liveTimer = setInterval(() => {
     void rebuildTranscript().catch(() => undefined);
+    // The tree is live too: the agent moves the anchor with the `tree` tool
+    // mid-run, and the person watching the view should see it move rather than
+    // find out at the next collapse.
+    if (state.view === "tree") {
+      void brain
+        .read()
+        .then((brainState) => {
+          treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: brainState });
+          tui.requestRender();
+        })
+        .catch(() => undefined);
+    }
   }, 1_500);
 
   void startLiveWatch();

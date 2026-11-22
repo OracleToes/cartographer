@@ -21,7 +21,7 @@ import { truncateToWidth, visibleWidth, type Component, type TuiMouseEvent, type
 
 import { bandLine, padLine, tokens } from "./tokens.js";
 
-export type BookKind = "chat" | "context" | "atlas" | "ledger";
+export type BookKind = "chat" | "context" | "atlas" | "ledger" | "tree";
 export type SidebarLayer = "context" | "archive";
 
 export interface SidebarCounts {
@@ -35,6 +35,9 @@ export interface SidebarCounts {
   marked: Partial<Record<BookKind, number>>;
   /** Stale attachments, by book. */
   stale: Partial<Record<BookKind, number>>;
+  /** The project tree: how many directories and files it shows at the anchor. */
+  treeDirs: number;
+  treeFiles: number;
   staleTotal: number;
   /** Things in the archive, and how many of them are pinned. */
   archive: number;
@@ -50,6 +53,8 @@ const EMPTY: SidebarCounts = {
   marked: {},
   stale: {},
   staleTotal: 0,
+  treeDirs: 0,
+  treeFiles: 0,
   archive: 0,
   archivePinned: 0,
 };
@@ -84,7 +89,7 @@ export class Sidebar implements Component {
   }
 
   setActiveBook(item: string): void {
-    if (item === "chat" || item === "context" || item === "atlas" || item === "ledger") this.activeItem = item;
+    if (item === "chat" || item === "context" || item === "atlas" || item === "ledger" || item === "tree") this.activeItem = item;
   }
 
   setLayer(layer: SidebarLayer): void {
@@ -118,6 +123,11 @@ export class Sidebar implements Component {
       const tokens = this.counts.contextTokens;
       if (tokens <= 0) return "—";
       return tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(Math.round(tokens));
+    }
+    if (kind === "tree") {
+      // Two figures, because a tree is two things: the folders and the files.
+      // Faint, because they are counts of what is there, not a size to judge.
+      return `${this.counts.treeDirs}/${this.counts.treeFiles}`;
     }
     return String(kind === "atlas" ? this.counts.atlas : this.counts.ledger);
   }
@@ -186,6 +196,7 @@ export class Sidebar implements Component {
     lines.push(fill(`   ${tokens.faint("BRAIN")}`));
     book("atlas", "atlas");
     book("ledger", "ledger");
+    book("tree", "tree");
 
     if (this.counts.staleTotal > 0) {
       blank();

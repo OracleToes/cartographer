@@ -17,11 +17,15 @@ import { Sidebar } from "./sidebar.js";
 import { TranscriptView } from "./transcript.js";
 import { ArchiveView } from "./archive-view.js";
 import { ContextView, type ContextViewData } from "./context-view.js";
+import { TreeView } from "./tree-view.js";
 import { HelpPanel, type HelpExtra } from "./help-panel.js";
 import { Palette } from "./palette.js";
 import { tokens, visibleWidth } from "./tokens.js";
 import { sidebarWidth } from "./sidebar.js";
 import { emptyBrain } from "../domain/records.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -91,6 +95,8 @@ export function previewTranscript(width = 110): string {
     marked: {},
     stale: {},
     staleTotal: 0,
+    treeDirs: 4,
+    treeFiles: 22,
     archive: 3,
     archivePinned: 1,
   });
@@ -164,6 +170,8 @@ export function previewArchive(width = 110): string {
     marked: {},
     stale: {},
     staleTotal: 0,
+    treeDirs: 4,
+    treeFiles: 22,
     archive: 3,
     archivePinned: 1,
   });
@@ -309,7 +317,7 @@ export function previewContext(width = 110): string {
     windowUnknown: false,
   });
   const sidebar = new Sidebar();
-  sidebar.setCounts({ chat: 1, contextTokens: 14_220, atlas: 2, ledger: 1, pinned: {}, marked: {}, stale: {}, staleTotal: 0, archive: 0, archivePinned: 0 });
+  sidebar.setCounts({ chat: 1, contextTokens: 14_220, atlas: 2, ledger: 1, pinned: {}, marked: {}, stale: {}, staleTotal: 0, treeDirs: 4, treeFiles: 22, archive: 0, archivePinned: 0 });
   sidebar.setActiveBook("context");
   const footer = new FooterView(() => [
     { key: "↑↓", label: "move" },
@@ -328,6 +336,110 @@ export function previewContext(width = 110): string {
   const column = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...view.render(mainWidth)];
   const rows = beside(sidebar.render(sidebarWidth), sidebarWidth, column, mainWidth);
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
+}
+
+/**
+ * The Tree view, over a throwaway project on disk.
+ *
+ * The tree reads the filesystem, so a drawn-in fixture would not be the tree the
+ * app shows. This builds a small project, gives it a Brain that attaches a note
+ * to one file and pins another, and renders the real view.
+ */
+export function previewTree(width = 110): string {
+  const root = mkdtempSync(join(tmpdir(), "carto-preview-tree-"));
+  const write = (path: string, text: string): void => {
+    const absolute = join(root, path);
+    mkdirSync(join(absolute, ".."), { recursive: true });
+    writeFileSync(absolute, text);
+  };
+  write("src/domain/brain.ts", "export const brain = 1;\n");
+  write("src/domain/records.ts", "export const records = 1;\n");
+  write("src/domain/handles.ts", "export const handles = 1;\n");
+  write("src/ui/tree-view.ts", "export class TreeView {}\n");
+  write("src/ui/app.ts", "export const app = 1;\n");
+  write("test/tree.test.mjs", "// the tree's tests\n");
+  write("README.md", "# cartographer\n");
+  write("package.json", '{ "name": "carto" }\n');
+
+  const brain = emptyBrain();
+  brain.handles = {
+    counters: { A: 2, L: 0, C: 0 },
+    entries: [
+      { kind: "atlas", id: "a1", handle: "A1", timestamp: 0 },
+      { kind: "atlas", id: "a2", handle: "A2", timestamp: 1 },
+    ],
+  };
+  brain.atlas.push(
+    {
+      id: "a1",
+      title: "The Brain is the persistent record",
+      text: "The context is rebuilt from it at every collapse, so nothing outside it survives.",
+      links: ["a2"],
+      attachments: [{ kind: "file", path: "src/domain/brain.ts" }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+    {
+      id: "a2",
+      title: "Handles are minted by what shows them",
+      text: "A file's handle comes from the tree, and a file the tree does not show has no handle.",
+      links: [],
+      attachments: [{ kind: "file", path: "src/domain/handles.ts" }],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+  );
+  // One pinned file, so the head's promise is visible; one that is stale, so the
+  // mark the agent acts on is visible too.
+  brain.files.push(
+    { path: "src/domain/brain.ts", pinned: "user", createdAt: 0 },
+    { path: "src/ui/tree-view.ts", pinned: "agent", createdAt: 1 },
+  );
+
+  const view = new TreeView();
+  view.setData({ root, anchor: { anchor: root, depth: 3 }, brain });
+  // Three rows down is the first file: the pane then shows the facts for a file
+  // — its handle's tool calls, the pin, the note attached to it — rather than a
+  // directory's size.
+  for (const key of ["j", "j", "j"]) view.handleInput(key);
+
+  const header = new HeaderView({
+    project: "cartographer",
+    modelLabel: "llama-swap/ByteShape",
+    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: false, paused: false } },
+    view: "tree",
+    layer: "context",
+    running: false,
+    windowUnknown: false,
+  });
+  const sidebar = new Sidebar();
+  sidebar.setCounts({
+    chat: 1,
+    contextTokens: 14_220,
+    atlas: 2,
+    ledger: 0,
+    pinned: { atlas: 0 },
+    marked: {},
+    stale: {},
+    staleTotal: 0,
+    treeDirs: 4,
+    treeFiles: 6,
+    archive: 0,
+    archivePinned: 0,
+  });
+  sidebar.setActiveBook("tree");
+  const footer = new FooterView(() => [
+    { key: "↑↓", label: "move" },
+    { key: "h/l", label: "fold" },
+    { key: "t", label: "note" },
+    { key: "f", label: "pinned" },
+    { key: "/", label: "filter" },
+  ]);
+  const mainWidth = width - sidebarWidth;
+  const column = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...view.render(mainWidth)];
+  const rows = beside(sidebar.render(sidebarWidth), sidebarWidth, column, mainWidth);
+  rmSync(root, { recursive: true, force: true });
+  return [...rows, frame(footer.render(width), width)].join("\n");
 }
 
 export function previewHelp(width = 88): string {
@@ -374,6 +486,7 @@ function beside(left: string[], leftWidth: number, right: string[], rightWidth: 
 export const previews = (width = 110): Record<string, string> => ({
   transcript: previewTranscript(width),
   context: previewContext(width),
+  tree: previewTree(width),
   archive: previewArchive(width),
   help: previewHelp(88),
   palette: previewPalette(64),

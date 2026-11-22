@@ -4,7 +4,7 @@ import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { Registry } from "../dist/ui/commands.js";
-import { previewArchive, previewContext, previewTranscript } from "../dist/ui/preview.js";
+import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
 import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { ArchiveView } from "../dist/ui/archive-view.js";
@@ -688,8 +688,9 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
   const transcript = previewTranscript(width);
   const context = previewContext(width);
   const archive = previewArchive(width);
+  const tree = previewTree(width);
 
-  for (const [name, frame] of [["transcript", transcript], ["context", context], ["archive", archive]]) {
+  for (const [name, frame] of [["transcript", transcript], ["context", context], ["archive", archive], ["tree", tree]]) {
     for (const line of frame.split("\n")) {
       assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
     }
@@ -936,4 +937,30 @@ test("a pin reads the same in the block and in the view: P and the handle of wha
   });
   // Same person, same handle: the view and the block agree on both.
   assert.match(plain(view.render(120).join("\n")), new RegExp(`P ${handle} OracleToes`), "the view names the pin the block names");
+});
+
+test("the tree view shows the harness's own facts: handles, attached notes, pins, deep sizes", () => {
+  const frame = previewTree(110);
+  const shown = plain(frame);
+
+  // Handles come from the same minting the block uses, so a file the tree lists
+  // wears the handle the `read` tool would take.
+  assert.match(shown, /F1\b/, "files carry their handles");
+  assert.match(shown, /D1\b/, "directories carry theirs");
+
+  // A note attached to a file, and the node's handle, on the file's own row: this
+  // is the fact that makes the tree more than a listing.
+  assert.ok(shown.includes("A1") && shown.includes("brain.ts"), "an attached Atlas node is named on the file it attaches to");
+  assert.ok(shown.includes("A2") && shown.includes("handles.ts"), "and so is the second one");
+
+  // The pin, and who placed it: the head holds this file's bytes.
+  assert.ok(shown.includes("P") && shown.includes("pinned"), "a pinned file is marked");
+
+  // The detail pane teaches the interface rather than only describing the row,
+  // and a file's pane names the move from one file to what holds it.
+  assert.match(shown, /read F\d/, "the pane names the call the file's handle is for");
+  assert.match(shown, /tree D\d+ depth \d+/, "and the call that moves the anchor");
+
+  // A directory's size counts its whole subtree: it is a cost, not a listing.
+  assert.match(shown, /\d+(\.\d+)?[KMG]?\s+src/, "directories carry a deep size");
 });

@@ -186,6 +186,30 @@ export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
   return handles;
 }
 
+/** The root's own label: the directory the anchor names, as the tree shows it. */
+export function rootLabel(entry: TreeEntry): string {
+  return entry.name;
+}
+
+/**
+ * The size of the subtree under one path, in bytes: what a directory actually
+ * costs. The scan already aggregates it, so this is a lookup, not a walk — the
+ * Tree view shows the per-directory figure beside a files-only aggregate
+ * without walking the disk a second time.
+ */
+export function subtreeSizes(entry: TreeEntry, depth: number): Map<string, number> {
+  const sizes = new Map<string, number>();
+  const walk = (node: TreeEntry, level: number): void => {
+    if (level > depth) return;
+    for (const child of node.children ?? []) {
+      sizes.set(child.path, child.size);
+      walk(child, level + 1);
+    }
+  };
+  walk(entry, 1);
+  return sizes;
+}
+
 /** Render the entry lines (no header — the caller prints the anchor line itself). Display is bounded by depth. */
 export function renderTreeLines(
   entry: TreeEntry,
@@ -209,6 +233,39 @@ export function renderTreeLines(
   };
   walk(entry, 1);
   return lines;
+}
+
+/**
+ * The tree a view shows: the scanned entry, its handles, its aggregate sizes,
+ * and the Atlas nodes attached to its files. The block renders lines from the
+ * same pieces, so a handle in the view is the handle in the block (§5.4) —
+ * one numbering, computed once.
+ */
+export interface TreeProjection {
+  /** Where the anchor landed, absolute. */
+  anchor: string;
+  /** The depth actually rendered, after the same floor the block applies. */
+  depth: number;
+  entry: TreeEntry;
+  handles: TreeHandles;
+  /** Subtree bytes by path, for every entry the depth shows. */
+  sizes: ReadonlyMap<string, number>;
+  /** Atlas handles attached to each file path (§2.1). */
+  attached: ReadonlyMap<string, readonly string[]>;
+}
+
+export function projectTreeView(root: string, anchor: string, depth: number, brain: CartoBrain): TreeProjection {
+  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
+  const target = containedAnchor(root, anchor);
+  const entry = scanTree(root, target);
+  return {
+    anchor: target,
+    depth: shown,
+    entry,
+    handles: treeHandles(entry, shown),
+    sizes: subtreeSizes(entry, shown),
+    attached: atlasAttachedPaths(brain, root),
+  };
 }
 
 /** The `tree` state as the block carries it: anchor (absolute), depth, lines, and the handles it minted. */

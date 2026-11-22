@@ -23,7 +23,7 @@ import { canvasLine, padLine, tokens } from "./tokens.js";
 /** The archive is a layer (§3.3), not a screen: the same UI over a different layer. */
 export type Layer = "context" | "archive";
 /** The books, plus the context itself. `archive` is not here: it is a layer, not a book. */
-export type ViewMode = "chat" | "atlas" | "ledger" | "context";
+export type ViewMode = "chat" | "atlas" | "ledger" | "tree" | "context";
 export type SendMode = "steer" | "after run" | "now";
 
 export interface HeaderState {
@@ -41,6 +41,7 @@ const VIEW_TITLES: Record<ViewMode, string> = {
   chat: "chat",
   atlas: "atlas",
   ledger: "ledger",
+  tree: "tree",
   context: "context",
 };
 
