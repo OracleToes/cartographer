@@ -48,7 +48,7 @@ try {
   let code = await run("sh", ["-c", build]);
   console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
   if (code === 0 && !aborted) {
-    code = await run(process.execPath, ["--test", "--test-reporter=dot", "--test-concurrency=4", ...files]);
+    code = await run(process.execPath, ["--test", "--test-reporter=dot", "--test-concurrency=3", ...files]);
   }
   clearTimeout(timer);
   if (aborted) {
