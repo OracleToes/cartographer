@@ -216,6 +216,33 @@ export async function readTreeNext(session: LiveSession): Promise<{ status: stri
   return submission.wait(BACKGROUND_CONTEXT);
 }
 
+/**
+ * Apply a deletion now (§4.1): take the entry out of the model's view, and leave
+ * everything else where it is.
+ *
+ * This is a rebuild, not a collapse. Nothing is swept, the generation does not
+ * rotate, and no grace is spent; what changes is the prefill, which runs again
+ * from the changed entry through the tail. The entry itself stays in the store —
+ * "the text is gone from the model's view before it is gone from disk" (§4.1) —
+ * and the head is untouched, so the frozen part of the projection is
+ * byte-identical afterwards. A prune is an epilogue, not a head.
+ */
+export async function applyOmitNow(session: LiveSession, entryId: string): Promise<boolean> {
+  // The id the package hands out is the one it will accept back, so it is taken
+  // from the entry itself rather than rebuilt from the string the view shows.
+  const entries = await sessionTranscript(session);
+  const entry = entries.find((candidate) => String(candidate.id) === String(entryId));
+  if (entry === undefined) return false;
+  await session.conversation.submit(
+    {
+      type: "write",
+      entry: { kind: "carto.apply-now", data: { entry: String(entryId) }, edits: [{ target: entry.id, action: "omit" }] },
+    },
+    BACKGROUND_CONTEXT,
+  );
+  return true;
+}
+
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
 export async function interruptRun(session: LiveSession): Promise<void> {
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);

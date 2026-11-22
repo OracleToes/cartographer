@@ -238,6 +238,18 @@ cheap one.
   says so plainly in what it reports.
 - A mark still waits for the collapse when the person has not applied it now.
 
+**Status: done.** Applying a deletion now is a rebuild at that point: a `write`
+submission carrying `edits: [{ target, action: "omit" }]` takes the entry out of
+the model's view and leaves the store, the generation, the snapshot and the
+collapse counter exactly where they were. It is the `Context` view's `!` path;
+the archive's apply-now was already a store operation (a pin taken off, or a mark
+applied and dropped) and never collapsed anything.
+
+The head is untouched for the same reason §4.1 gives: an omit is an edit to one
+entry's contribution, and the projection the head is rendered from is not
+rewritten. A Brain record's own head composition still changes only at a
+collapse, which is what §5.1 says.
+
 **Test.** An apply-now on a body entry leaves the head prefix byte-identical and
 changes only what follows it; no collapse counter moves.
 

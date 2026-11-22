@@ -46,6 +46,7 @@ import {
   interruptRun,
   openLiveSession,
   sessionTranscript,
+  applyOmitNow,
   readTreeNext,
   submitInput,
   type LiveSession,
@@ -885,8 +886,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     } else if (partId !== "transcript" && partId !== "tools" && partId !== "ephemera") {
       pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
     }
-    if (now && found !== undefined) {
-      await runCollapse("context surgery (now)");
+    if (now) {
+      // §4.1: applying now is a rebuild at this point, not a collapse. The entry
+      // leaves the model's view and nothing else moves — no sweep, no rotation,
+      // no grace spent. The record's own entry is what the write omits.
+      const applied = await applyOmitNow(state.session, String(itemId));
+      pushStatus(
+        applied
+          ? "applied now: the entry is out of the model's view, and the store still holds it"
+          : "nothing in the live context matches that entry, so there is nothing to omit",
+      );
+      await rebuildTranscript();
+      await syncContextView(await brain.read());
+      await refreshSidebar();
       tui.requestRender();
       return;
     }

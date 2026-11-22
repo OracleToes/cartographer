@@ -589,7 +589,10 @@ export class ContextView implements Component, Focusable {
 
     const left = `${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.totalTokens().toLocaleString("en-US")} tokens`)}`;
     const mode = this.showReal ? tokens.warn("as the model receives it") : tokens.muted("as a person reads it");
-    const armed = this.nowArmed ? ` ${tokens.danger("· next mark applies now")}` : "";
+    // "Now" is a rebuild in place, not a collapse (§4.1), and the line says so:
+    // a key that turns out to be the most expensive operation there is would be
+    // worse than no key at all.
+    const armed = this.nowArmed ? ` ${tokens.danger("· next mark applies now, rebuilding in place")}` : "";
     const right = `${mode}${armed}`;
     const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(` ${left}${" ".repeat(gap)}${right}`, width)));

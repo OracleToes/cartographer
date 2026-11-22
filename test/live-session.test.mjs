@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,16 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { closeLiveSession, interruptRun, openLiveSession, readTreeNext, submitInput } from "../dist/runtime/live-session.js";
+import {
+  applyOmitNow,
+  closeLiveSession,
+  interruptRun,
+  openLiveSession,
+  readTreeNext,
+  sessionTranscript,
+  submitInput,
+} from "../dist/runtime/live-session.js";
+import { generationPaths } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -579,6 +588,45 @@ test("a message ends a rest early, and the rest does not then start a second tur
     for (const timer of timers.filter((candidate) => candidate.due <= clock)) timer.callback();
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(captured.length, 2, "and the rest ended quietly, with no second start");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("applying a deletion now rebuilds the context in place: no collapse, no sweep, no rotation", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "first thing said" }, { id: "call-chat" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-stop" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    await (await submitInput(session, "say something")).wait(BACKGROUND_CONTEXT);
+    const generation = session.state.generation;
+    const entries = await sessionTranscript(session);
+    const chatEntry = entries.find((entry) => JSON.stringify(entry.model ?? []).includes("first thing said"));
+    assert.ok(chatEntry !== undefined, "the chat is in the context");
+
+    // §4.1: applying a delete now changes the model's view at once, and the
+    // store still holds the entry — the text is gone from the view before it is
+    // gone from disk.
+    assert.equal(await applyOmitNow(session, String(chatEntry.id)), true);
+    const after = await sessionTranscript(session);
+    assert.ok(after.some((entry) => entry.id === chatEntry.id), "the entry is still in the store");
+
+    const view = await session.conversation.context(BACKGROUND_CONTEXT);
+    assert.equal(
+      JSON.stringify(view.messages).includes("first thing said"),
+      false,
+      "and it is out of the model's view",
+    );
+
+    // The rebuild is not a collapse: nothing was swept, and the generation is
+    // the same one, so the head prefix is untouched (§4.1, §5.6).
+    assert.equal(session.state.generation, generation, "no rotation");
+    assert.equal(existsSync(generationPaths(root, generation).markdown), true, "the same generation's snapshot is the one in use");
   } finally {
     await closeLiveSession(session);
     await cleanup();
