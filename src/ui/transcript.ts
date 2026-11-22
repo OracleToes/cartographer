@@ -17,8 +17,8 @@
  *   streaming stays open on the last lines of what is arriving — a card you are
  *   watching is the end of it — and the moment the round lands it folds to its
  *   header.
- * - **Status lines** are a faint middot and a sentence: quiet facts about the
- *   session, never the agent's voice.
+ * - **Stop-reason lines** are a faint middot and a sentence attached to the
+ *   current model work. UI notifications use pi's transient flash instead.
  *
  * **A click on the header deepens a card**: folded to open, open to full. **A
  * click on the body closes it.** A click on the `⋯ n lines …` rule shows
@@ -48,7 +48,7 @@
  */
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
-import type { Mark } from "../domain/records.js";
+import type { Mark, PinnedEphemeral } from "../domain/records.js";
 import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
 import { pinHandle } from "./prompt-handles.js";
 
@@ -65,6 +65,9 @@ type CardBase = {
   status?: "pending" | "running" | "done";
   /** Landed tool calls whose result came back as an error. */
   failed?: boolean;
+  /** Stable Context identities for the call/part and its result, if any. */
+  sourceId?: string;
+  resultId?: string;
 };
 export type CardEntry =
   | (CardBase & { kind: "reasoning"; text: string })
@@ -79,6 +82,49 @@ export type TranscriptEntry =
 
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
+
+/** Retain dialogue and only the work that actually survived a collapse. */
+export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: readonly PinnedEphemeral[]): TranscriptEntry[] {
+  const held = new Map(pins.filter((item) => item.pinned !== undefined).map((item) => [item.id, item]));
+  const seenChat = new Set<string>();
+  const retained: TranscriptEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "person") {
+      // U handles belong to the old generation, not to historical dialogue.
+      retained.push({ kind: "person", text: entry.text });
+    } else if (entry.kind === "agent") {
+      if (entry.recordId !== undefined && seenChat.has(entry.recordId)) continue;
+      if (entry.recordId !== undefined) seenChat.add(entry.recordId);
+      retained.push(entry);
+    } else if (isCard(entry)) {
+      const part = entry.sourceId === undefined ? undefined : held.get(entry.sourceId);
+      const result = entry.resultId === undefined ? undefined : held.get(entry.resultId);
+      if (part === undefined && result === undefined) continue;
+      // A tool row combines a call and a result. If only one was pinned, do
+      // not leak the swept half back into the transcript or its copied text.
+      if (entry.kind === "tool") {
+        const { handle: _handle, output: _output, failed: _failed, ...card } = entry;
+        retained.push({ ...card, id: `retained-${entry.sourceId ?? entry.resultId}`, args: part === undefined ? "" : entry.args, ...(result === undefined ? {} : { output: result.text, ...(entry.failed === undefined ? {} : { failed: entry.failed }) }) });
+      } else if (part !== undefined) {
+        const { handle: _handle, ...card } = entry;
+        retained.push({ ...card, id: `retained-${entry.sourceId}`, text: part.text });
+      }
+    }
+  }
+  return retained;
+}
+
+/** Deliver UI status through pi's flash, suppressing rapid identical repeats. */
+export function createStatusNotifier(flash: (message: string, durationMs: number) => void, now: () => number = Date.now): (message: string) => void {
+  let last: { message: string; at: number } | undefined;
+  const duration = 3_000;
+  return (message) => {
+    const at = now();
+    if (last?.message === message && at - last.at >= 0 && at - last.at < duration) return;
+    last = { message, at };
+    flash(message, duration);
+  };
+}
 
 /** Spine, gap, then a six-cell label column; the body starts here and every continuation lines up under it. */
 const LABEL_WIDTH = 6;

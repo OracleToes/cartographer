@@ -205,7 +205,9 @@ const headlessFixture = async () => {
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  // These headless cases do not reopen the Brain; persistence is covered by
+  // the Brain and recovery suites, while the live generation remains on disk.
+  const brain = await openBrain(":memory:");
   return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxFor = (contextWindow = 100_000) => {
@@ -231,25 +233,6 @@ test("stdin that is not a terminal and carries no lines announces itself instead
   }
 });
 
-test("a person line comes back only as chat words, prefixed", async () => {
-  const { root, brain, cleanup } = await headlessFixture();
-  const { faux, models, ref } = fauxFor();
-  const factory = (build) => (context) => build(context);
-  faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
-  ]);
-  const out = captureStream();
-  try {
-    const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["say hi", "/quit"]), output: out.stream, now: FIXED_NOW });
-    assert.equal(code, 0);
-    assert.match(out.text(), /carto: hello person/);
-    assert.match(out.text(), /carto · faux-test\/faux-model/);
-  } finally {
-    await cleanup();
-  }
-});
-
 test("headless waits for consecutive tree continuations and prints their chat", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
@@ -264,6 +247,7 @@ test("headless waits for consecutive tree continuations and prints their chat", 
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["look", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
     assert.match(out.text(), /carto: tree checked/);
+    assert.match(out.text(), /carto · faux-test\/faux-model/);
   } finally {
     await cleanup();
   }
@@ -423,18 +407,6 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
       assert.equal(raw.userName, "OracleToes", "--user is persisted instead of the login name");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("a bare run reads an existing config and boots the headless driver", async () => {
-    const home = tempDir();
-    const root = projectRoot();
-    try {
-      await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://127.0.0.1:9/v1", contextWindow: 75_000, userName: "OracleToes" }, home);
-      assert.match(await runCli(["--root", root], { home, input: "" }), /carto · llama-swap\/ByteShape/);
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });

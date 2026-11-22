@@ -34,7 +34,9 @@ const fixture = async () => {
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  // These cases reopen the durable session, not the Brain. Persistence of the
+  // Brain itself is exercised separately; keep the real live store on disk.
+  const brain = await openBrain(":memory:");
   return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxSetup = () => {

@@ -5,7 +5,7 @@ import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
-import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
+import { TranscriptView, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
@@ -113,6 +113,57 @@ test("Sidebar mouse click switches view", () => {
   assert.equal(selected, "chat");
   assert.ok(click(contextRow)?.handled);
   assert.equal(selected, "context");
+});
+
+test("collapse retains dialogue and pinned work, without swept halves or duplicate Chat", () => {
+  const entries = [
+    { kind: "person", text: "hello", handle: "U1" },
+    { kind: "agent", text: "hi", recordId: "chat-1", handle: "C1" },
+    { kind: "reasoning", id: "think", sourceId: "think-id", text: "swept thought" },
+    { kind: "output", id: "out", sourceId: "out-id", text: "kept output" },
+    { kind: "tool", id: "tool-result-pin", sourceId: "call1", resultId: "result1", name: "read", args: "swept arguments", output: "old result" },
+    { kind: "tool", id: "tool-call-pin", sourceId: "call2", resultId: "result2", name: "bash", args: "kept arguments", output: "swept result", failed: true },
+    { kind: "status", text: "stopped: toolUse" },
+    { kind: "agent", text: "hi", recordId: "chat-1" },
+    { kind: "person", text: "hello", handle: "U2" },
+  ];
+  const pins = [
+    { id: "out-id", kind: "plainText", text: "kept output", pinned: "user", createdAt: 1 },
+    { id: "result1", kind: "readResult", text: "refreshed result", pinned: "user", createdAt: 1 },
+    { id: "call2", kind: "toolCall", text: "kept arguments", pinned: "agent", createdAt: 1 },
+  ];
+  const first = retainAfterCollapse(entries, pins);
+  assert.deepEqual(first.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello"], "identical person messages are distinct");
+  assert.equal(first.filter((entry) => entry.kind === "agent").length, 1, "the same Chat record is kept only once");
+  assert.equal(first[0].handle, undefined, "old generation U handles are not reused");
+  const view = new TranscriptView();
+  view.setEntries(first);
+  const text = view.toPlainText();
+  assert.match(text, /kept output/);
+  assert.match(text, /refreshed result/);
+  assert.match(text, /kept arguments/);
+  assert.doesNotMatch(text, /swept thought|swept arguments|swept result|stopped: toolUse/);
+  const second = retainAfterCollapse([...first, { kind: "agent", text: "hi", recordId: "chat-1" }, { kind: "person", text: "next" }], [pins[0]]);
+  assert.equal(second.filter((entry) => entry.kind === "agent").length, 1);
+  assert.equal(second.filter((entry) => entry.kind === "tool").length, 0, "unpinned work disappears on the next collapse");
+  assert.deepEqual(second.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello", "next"]);
+});
+
+test("notifications flash transiently instead of accumulating in the transcript", () => {
+  let clock = 1_000;
+  const flashes = [];
+  const notify = createStatusNotifier((text, duration) => flashes.push({ text, duration }), () => clock);
+  const transcript = new TranscriptView();
+  transcript.setEntries([{ kind: "person", text: "hello" }]);
+  notify("that entry is not a Brain record");
+  notify("that entry is not a Brain record");
+  assert.deepEqual(flashes, [{ text: "that entry is not a Brain record", duration: 3_000 }]);
+  assert.equal(transcript.toPlainText(), "you: hello");
+  notify("another notice");
+  clock += 3_001;
+  notify("that entry is not a Brain record");
+  assert.equal(flashes.length, 3, "different or later notifications can still be shown");
+  assert.equal(transcript.toPlainText(), "you: hello");
 });
 
 test("TranscriptView mouse click folds and unfolds cards", () => {

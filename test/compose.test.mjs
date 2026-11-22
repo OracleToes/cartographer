@@ -34,34 +34,30 @@ test("the editor is $VISUAL first, then $EDITOR, then vi — and a blank one is 
 test("the editor's file comes back as the prompt; a failure says why and keeps the old text", async () => {
   // A real program, so the spawn, the temporary file, and the read-back are all
   // exercised rather than mocked. It rewrites the file it is handed.
-  const writes = await composeInEditor("half a thought", {
-    env: { EDITOR: `sh -c 'printf "the whole thought" > "$1"' sh` },
-  });
+  const [writes, untouched, failing, missing, none] = await Promise.all([
+    composeInEditor("half a thought", { env: { EDITOR: `sh -c 'printf "the whole thought" > "$1"' sh` } }),
+    composeInEditor("as it was", { env: { EDITOR: "true" } }),
+    composeInEditor("keep me", { env: { EDITOR: "sh -c 'exit 3'" } }),
+    composeInEditor("keep me", { env: { EDITOR: "carto-no-such-editor-xyz" } }),
+    composeInEditor("keep me", { env: { EDITOR: "" } }),
+  ]);
   assert.equal(writes.ok, true, `the editor ran: ${JSON.stringify(writes)}`);
   assert.equal(writes.ok && writes.text, "the whole thought");
   assert.equal(writes.ok && writes.command, "sh");
 
   // The same editor, but it leaves the file alone: the text is unchanged, which
   // is how the caller knows not to touch the prompt.
-  const untouched = await composeInEditor("as it was", {
-    env: { EDITOR: "true" },
-  });
   assert.equal(untouched.ok, true);
   assert.equal(untouched.ok && untouched.text, "as it was");
 
   // A failing editor that wrote nothing: refused, with the reason, and no text
   // pretending to be an edit.
-  const failing = await composeInEditor("keep me", {
-    env: { EDITOR: "sh -c 'exit 3'" },
-  });
   assert.equal(failing.ok, false);
   assert.match(failing.ok ? "" : failing.error, /exited 3/);
 
   // A command that does not exist is a failure, not a crash.
-  const missing = await composeInEditor("keep me", { env: { EDITOR: "carto-no-such-editor-xyz" } });
   assert.equal(missing.ok, false);
 
-  const none = await composeInEditor("keep me", { env: { EDITOR: "" } });
   assert.equal(none.ok, false);
   assert.match(none.ok ? "" : none.error, /no editor set/);
 });

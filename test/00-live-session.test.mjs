@@ -58,7 +58,7 @@ const flatten = (messages) => JSON.stringify(messages);
 // Running the independent cases concurrently avoids a long serial tail.
 test.describe("live session", { concurrency: 4 }, () => {
 test("the continuation loop: a text-only answer is continued with a marker, stripped on the next request", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxText("first pass, no tools")], {}, )),
@@ -86,18 +86,18 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
 });
 
 test("a turn records chat, reads, and writes Atlas with marker-free trailing state", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([
       fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" }),
       fauxToolCall("chat", { text: "hello person" }, { id: "call-1" }),
+      fauxToolCall("atlas", {
+        title: "The answer",
+        text: "The answer is 42.",
+        attachments: [{ kind: "file", path: "src/verify-me.ts" }],
+      }, { id: "call-atlas" }),
     ], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
-      title: "The answer",
-      text: "The answer is 42.",
-      attachments: [{ kind: "file", path: "src/verify-me.ts" }],
-    }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
@@ -112,7 +112,7 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     assert.equal(current.chat[0].text, "hello person");
     assert.equal(current.chat[0].author, "agent");
     assert.ok(session.state.pending.some((item) => item.kind === "chat" && item.action === "record" && item.id === "chat:call-1"));
-    assert.equal(captured.length, 3);
+    assert.equal(captured.length, 2);
     const firstBlock = blockOf(captured[0]);
     assert.ok(firstBlock);
     assert.equal(captured[0].at(-1), firstBlock);
@@ -121,10 +121,11 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     const secondBlock = blockOf(captured[1]);
     assert.ok(secondBlock);
     assert.match(flatten(captured[1]), /export const answer = 42/);
-    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to OracleToes/);
+    assert.match(secondBlock.content, /since the rebuild:/);
+    assert.match(secondBlock.content, /C1 · said to OracleToes/);
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER));
-    assert.match(blockOf(captured[2]).content, /A1 · written/);
+    assert.match(secondBlock.content, /A1 · written/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -132,7 +133,7 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
 });
 
 test("successive tree calls continue automatically with the freshly anchored state block", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree-1" })], { stopReason: "toolUse" })),
@@ -312,7 +313,7 @@ test("work restores retain their actual Pi messages and tool result pairing", as
 });
 
 test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh context carries the Brain", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
@@ -368,7 +369,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
 });
 
 test("drift rides the collapse: the frozen projection carries the marks", async () => {
-  const { root, brain, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   const session = await openLiveSession(options());

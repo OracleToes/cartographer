@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 const BUDGET_MS = 10_000;
 
-// These suites run together in one worker; fast-suite imports each of them.
+// The collapse worker also imports fast-suite, which imports these small suites.
 // Everything else is still discovered automatically as its own test worker.
 const grouped = new Set([
   "brain.test.mjs", "brain-store.test.mjs", "freshness.test.mjs", "gitignore.test.mjs",
@@ -26,7 +26,6 @@ const files = readdirSync("test")
   .filter((name) => name.endsWith(".test.mjs") && !grouped.has(name))
   .sort()
   .map((name) => join("test", name));
-files.push(join("test", "fast-suite.mjs"));
 
 // The build and the runner share one wall-clock deadline and one process
 // group at a time. Do not run the suite against an incomplete build.

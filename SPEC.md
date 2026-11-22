@@ -699,7 +699,10 @@ Chat, in their own hues, never mistaken for Chat. A card streams while the run i
 in flight inside a limited-height window, and folds to a one-line header at the
 boundary. A click folds or unfolds a card, a toggle toggles every card in view,
 and the wheel over an open card scrolls its window. Chat remains the only channel
-that addresses the person.
+that addresses the person. When a collapse sweeps work out of the context, that
+work disappears from the transcript as well; the person's messages and the
+agent's Chat remain. Pinned work that survives the collapse remains visible.
+Session notifications are transient UI notices, not transcript messages.
 
 **The context bar spans the whole bottom of the application and is always
 visible.** Its width is the server's own context capacity: the total the server

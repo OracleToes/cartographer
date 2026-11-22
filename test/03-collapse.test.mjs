@@ -1,3 +1,5 @@
+// Run the independent small suites in this worker to avoid a fifth Node startup.
+import "./fast-suite.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -13,6 +15,7 @@ import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { projectContext } from "../dist/domain/projection.js";
+import { retainAfterCollapse } from "../dist/ui/transcript.js";
 
 const at = (n) => 1_700_000_000_000 + n * 1_000;
 
@@ -638,7 +641,12 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
       await store.read(),
     );
 
+    const generation = "gen-20261116T020000Z-live009";
+    const work = await readGenerationEphemera(generationPaths(root, generation).store, generation);
+    const transcript = work.map((item) => ({ kind: "reasoning", id: item.id, sourceId: item.id, text: item.ephemeral.text }));
     const report = await collapse(root, store, { person: "OracleToes" });
+    const retained = retainAfterCollapse(transcript, (await store.read()).ephemera);
+    assert.deepEqual(retained.map((entry) => entry.text), ["this one is worth keeping"], "the transcript follows the actual sweep and pin identities");
     const archived = (await store.readArchive()).items;
     assert.equal(
       archived.some((item) => item.ephemeral?.text === "this one is worth keeping"),
