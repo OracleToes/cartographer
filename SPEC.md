@@ -243,6 +243,13 @@ and a collapse rebuilds the agent's context from the Brain.
 
 A collapse rebuilds the context, and everything unrecorded is gone.
 
+A collapse must not lose live content because it was interrupted. Before creating
+its new generation, it records the intended handoff; the handoff becomes committed
+in the same transaction as the Brain and archive changes. Recovery keeps the old
+store if that transaction did not commit, and keeps the new generation if it did.
+When missing or ambiguous files prevent a safe decision, recovery preserves the
+stores and reports the problem instead of guessing which one to delete.
+
 **The agent collapses when it is appropriate**, and what makes it appropriate is
 that it has finished a piece of work and put what it needs into its Brain. A
 short run ends that way: the work is done, the Brain is current, and a collapse

@@ -16,11 +16,9 @@
  * The frozen projection snapshot for a generation is written once, at
  * creation, and is immutable until purge.
  *
- * Recovery at open is derived from those rules: a generation whose snapshot
- * is missing never existed as a frozen whole (crash mid-creation), so it is
- * deleted and the Brain — which is authoritative — builds the next one.
- * Anything beyond the newest live store and its archive is purged the same
- * way, crash remainders included.
+ * Recovery uses a journal committed with the Brain and archive. A transition
+ * that did not commit keeps its original store; one that committed keeps its
+ * destination. Unjournaled stores whose history is ambiguous are preserved.
  */
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
@@ -107,33 +105,77 @@ function unlinkIfExists(path: string): void {
   }
 }
 
+const activeCollapses = new Set<string>();
+
+/**
+ * Resolve an interrupted cross-database collapse before the ordinary generation
+ * cleanup runs. The Brain journal is written before any destination file and is
+ * committed atomically with the sweep. Never infer success from timestamps.
+ */
+export async function recoverCollapse(root: string, brain: BrainStore, finishing = false): Promise<void> {
+  if (activeCollapses.has(resolve(root)) && !finishing) throw new Error("A collapse is still running for this project.");
+  await brain.recoverCollapseJournal(async (journal) => {
+    if (!Number.isSafeInteger(journal.ownerPid) || journal.ownerPid <= 0) throw new Error("Invalid collapse owner; all generation files were preserved.");
+    if (journal.ownerPid !== process.pid) {
+      let alive = true;
+      try { process.kill(journal.ownerPid, 0); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+      }
+      if (alive) throw new Error("Another process may still be collapsing this project; all generation files were preserved.");
+    }
+    const valid = (id: string) => /^gen-[\w-]+$/.test(id);
+    if (!valid(journal.source) || !valid(journal.destination) || journal.source === journal.destination) {
+      throw new Error("Invalid collapse journal; refusing to remove generation files.");
+    }
+    const keep = generationPaths(root, journal.committed ? journal.destination : journal.source);
+    if (!existsSync(keep.store) || !existsSync(keep.markdown) || !existsSync(keep.sidecar)) {
+      throw new Error("Collapse recovery cannot find the complete generation to keep; all remaining files were preserved.");
+    }
+    const keepDatabase = await openNodeSqliteDatabase(keep.store, { mode: "read-only" });
+    try {
+      const integrity = await keepDatabase.get<{ quick_check: string }>("PRAGMA quick_check");
+      if (integrity?.quick_check !== "ok") throw new Error("The generation to keep failed its integrity check.");
+    } finally {
+      await keepDatabase.close();
+    }
+    const discardId = journal.committed ? journal.source : journal.destination;
+    const discard = generationPaths(root, discardId);
+    // A partially written destination is disposable only before the Brain commit;
+    // after commit, the old source is disposable only because the archive owns it.
+    unlinkIfExists(discard.store);
+    if (existsSync(discard.store)) throw new Error("Collapse recovery could not remove the superseded store; its journal remains for retry.");
+    unlinkIfExists(`${discard.store}-wal`);
+    unlinkIfExists(`${discard.store}-shm`);
+    removeSnapshot({ directory: contextDirectory(root), markdown: discard.markdown, sidecar: discard.sidecar });
+    if ([discard.store, `${discard.store}-wal`, `${discard.store}-shm`, discard.markdown, discard.sidecar].some(existsSync)) {
+      throw new Error("Collapse recovery could not remove the superseded generation; its journal remains for retry.");
+    }
+  });
+}
+
 /**
  * Bring the generations in line with the rules at open. Returns the live
  * generation, or null when none is valid and one must be created.
  */
-export function reconcileGenerations(root: string): { live: GenerationFiles | null; removed: string[] } {
-  const removed: string[] = [];
-  // A generation missing any piece of its snapshot never existed as a frozen
-  // whole: delete it and let the Brain build the next one.
-  for (;;) {
-    const generations = discoverGenerations(root);
-    const head = generations[0];
-    if (head === undefined) return { live: null, removed };
-    if (head.hasStore && head.hasMarkdown && head.hasSidecar) break;
-    removeGenerationFiles(root, head);
-    removed.push(head.generation);
-  }
+export async function reconcileGenerations(root: string, brain: BrainStore): Promise<{ live: GenerationFiles | null; removed: string[] }> {
+  await recoverCollapse(root, brain);
   const generations = discoverGenerations(root);
-  const live = generations[0] ?? null;
-  // Only the live generation's files have any use: the archive lives in the
-  // Brain's own database, and a store a collapse was interrupted before
-  // deleting is a crash remainder, swept into the archive where it can still
-  // be reached or simply gone (§3.3, §3.4). Nothing keeps a second store.
-  for (const extra of generations.slice(1)) {
-    removeGenerationFiles(root, extra);
-    removed.push(extra.generation);
+  const stores = generations.filter((generation) => generation.hasStore);
+  // Legacy unjournaled crash remainders are ambiguous: a newer store may have
+  // been created before the sweep committed. Also, a store whose snapshot has
+  // gone missing may still hold the only copy of live messages. Never guess.
+  if (stores.some((generation) => !generation.hasMarkdown || !generation.hasSidecar)) {
+    throw new Error("A generation store is missing its snapshot; all generation files were preserved for recovery.");
   }
-  return { live, removed };
+  if (stores.length > 1) {
+    throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
+  }
+  const removed: string[] = [];
+  for (const incomplete of generations.filter((generation) => !generation.hasStore)) {
+    removeGenerationFiles(root, incomplete);
+    removed.push(incomplete.generation);
+  }
+  return { live: stores[0] ?? null, removed };
 }
 
 /**
@@ -154,7 +196,7 @@ export async function readGenerationEphemera(storePath: string, generation: stri
   if (!existsSync(storePath)) throw new Error(`Live generation store is missing: ${storePath}`);
   // Failure to read the old store must abort collapse before the store is
   // removed. Treating a damaged database as an empty one destroys its only copy.
-  const database = await openNodeSqliteDatabase(storePath);
+  const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
   try {
     const table = await database.get<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_entries'",
@@ -500,12 +542,26 @@ export interface CollapseReport {
  * lifecycle around this call.
  */
 export async function collapse(root: string, brain: BrainStore, options: CollapseOptions = {}): Promise<CollapseReport> {
+  const key = resolve(root);
+  if (activeCollapses.has(key)) throw new Error("A collapse is already running for this project.");
+  activeCollapses.add(key);
+  try {
+    return await performCollapse(root, brain, options);
+  } finally {
+    activeCollapses.delete(key);
+  }
+}
+
+async function performCollapse(root: string, brain: BrainStore, options: CollapseOptions): Promise<CollapseReport> {
+  await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
 
-  const discovered = discoverGenerations(root);
+  const discovered = discoverGenerations(root).filter((candidate) => candidate.hasStore);
+  if (discovered.length > 1) throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
   const live = discovered[0];
   if (live === undefined) throw new Error("No live generation exists to collapse.");
+  if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
   const generation = newGenerationId(new Date(now));
 
   // What is leaving the Brain: every record carrying a mark, with its action.
@@ -568,6 +624,22 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   for (const step of writes) next = applyWrite(next, step.write, step.now);
   const projection = projectContext(next, fileTexts, options.person ?? personName());
 
+  // Reserve the handoff before creating any destination files. Recovery can
+  // distinguish a partial destination from a committed sweep even if the
+  // process stops at any point between those operations.
+  const destination = generationPaths(root, generation);
+  if (existsSync(destination.store) || existsSync(destination.markdown) || existsSync(destination.sidecar)) {
+    throw new Error("New collapse generation already exists; refusing to overwrite it.");
+  }
+  await brain.beginCollapse(live.generation, generation, () => {
+    const stores = discoverGenerations(root).filter((candidate) => candidate.hasStore);
+    if (stores.length !== 1 || stores[0]?.generation !== live.generation || !stores[0].hasMarkdown || !stores[0].hasSidecar) {
+      throw new Error("The live generation changed during collapse; all files were preserved.");
+    }
+    if (existsSync(destination.store) || existsSync(destination.markdown) || existsSync(destination.sidecar)) {
+      throw new Error("New collapse generation already exists; refusing to overwrite it.");
+    }
+  });
   // 1. Snapshot first: no store exists for the new generation until the bytes
   //    are frozen on disk.
   writeSnapshot(root, generation, projection, now);
@@ -583,15 +655,16 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   const applied = await brain.applyCollapse({
     writes,
     generation,
+    source: live.generation,
     incoming: [
       ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),
       ...swept,
     ],
     now,
   });
-  // 2. The old store is deleted whole. Everything it held is gone rather than
-  //    hidden, which is what makes the sweep a real deletion (§3.4).
-  removeGenerationFiles(root, live);
+  // 2. The journal is committed with the sweep, so the same recovery path
+  // safely deletes the old store whether we finish here or crash beforehand.
+  await recoverCollapse(root, brain, true);
   return {
     generation,
     swept: live.generation,

@@ -8,7 +8,7 @@ import test from "node:test";
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { collapse, discoverGenerations, reconcileGenerations, generationPaths } from "../dist/runtime/collapse.js";
+import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readGenerationEphemera } from "../dist/runtime/collapse.js";
@@ -33,6 +33,8 @@ function fakeGeneration(root, generation, mtimeSeconds) {
   return paths;
 }
 
+// Each case uses a separate temporary project and database.
+test.describe("collapse and recovery", { concurrency: 3 }, () => {
 test("discovery orders newest first and pairs store with snapshot", () => {
   const root = tempRoot();
   try {
@@ -47,7 +49,7 @@ test("discovery orders newest first and pairs store with snapshot", () => {
   }
 });
 
-test("a head generation missing its snapshot never existed as frozen; it is deleted", () => {
+test("an unjournaled store missing its snapshot is preserved for recovery", async () => {
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T010000Z-aaaa01", 1_700_000_000);
@@ -55,27 +57,28 @@ test("a head generation missing its snapshot never existed as frozen; it is dele
     writeFileSync(paths.store, "bytes"); // store, but no snapshot: crashed mid-creation
     utimesSync(paths.store, new Date(1_700_000_200_000), new Date(1_700_000_200_000));
 
-    const { live, removed } = reconcileGenerations(root);
-    assert.equal(live?.generation, "gen-20261116T010000Z-aaaa01");
-    assert.deepEqual(removed, ["gen-20261116T020000Z-crashed"]);
-    assert.equal(existsSync(paths.store), false);
+    const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await assert.rejects(reconcileGenerations(root, brain), /missing its snapshot/);
+    await brain.close();
+    assert.equal(readFileSync(paths.store, "utf8"), "bytes");
+    assert.equal(existsSync(generationPaths(root, "gen-20261116T010000Z-aaaa01").store), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("only the live generation keeps its store; older remainders are deleted", () => {
+test("multiple unjournaled stores are preserved rather than guessed away", async () => {
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T010000Z-aaaa01", 1_700_000_000);
     fakeGeneration(root, "gen-20261116T020000Z-bbbb02", 1_700_000_100);
     fakeGeneration(root, "gen-20261116T030000Z-cccc03", 1_700_000_200);
-    const { live, removed } = reconcileGenerations(root);
-    assert.equal(live?.generation, "gen-20261116T030000Z-cccc03");
-    assert.deepEqual(removed, ["gen-20261116T020000Z-bbbb02", "gen-20261116T010000Z-aaaa01"]);
-    assert.equal(existsSync(generationPaths(root, "gen-20261116T010000Z-aaaa01").store), false);
-    // The archive is Carto's own database, not a sealed store: nothing is left read-only.
-    assert.equal(existsSync(generationPaths(root, "gen-20261116T020000Z-bbbb02").store), false);
+    const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await assert.rejects(reconcileGenerations(root, brain), /Multiple unjournaled/);
+    await brain.close();
+    for (const generation of ["gen-20261116T010000Z-aaaa01", "gen-20261116T020000Z-bbbb02", "gen-20261116T030000Z-cccc03"]) {
+      assert.equal(existsSync(generationPaths(root, generation).store), true);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -339,6 +342,184 @@ async function realGeneration(root, generation, mtimeSeconds, rows, brain = empt
   for (const path of [paths.store, paths.markdown, paths.sidecar]) utimesSync(path, when, when);
   return paths;
 }
+
+test("an interrupted collapse recovers on the correct side of the durable commit", async () => {
+  for (const committed of [false, true]) {
+    const root = tempRoot();
+    let store;
+    try {
+      const generation = "gen-20261116T020000Z-source01";
+      const source = await realGeneration(root, generation, 1_700_000_100, [
+        { kind: "pi.user", model: [{ role: "user", content: "preserve this message" }] },
+      ]);
+      store = await openBrain(join(root, ".brain", "brain.sqlite"));
+      const interrupted = { ...store, applyCollapse: async (change) => {
+        if (committed) await store.applyCollapse(change);
+        throw new Error("simulated crash");
+      } };
+      await assert.rejects(collapse(root, interrupted), /simulated crash/);
+      const journal = await store.readCollapseJournal();
+      assert.equal(journal.committed, committed);
+      assert.equal(journal.source, generation);
+      assert.ok(existsSync(source.store), "the source is intact at the crash point");
+      await store.close();
+      store = await openBrain(join(root, ".brain", "brain.sqlite"));
+      const reconciled = await reconcileGenerations(root, store);
+      assert.equal(reconciled.live.generation, committed ? journal.destination : generation);
+      assert.equal(await store.readCollapseJournal(), undefined);
+      if (committed) {
+        assert.equal(existsSync(source.store), false);
+        assert.ok(existsSync(generationPaths(root, journal.destination).store));
+        assert.ok((await store.readArchive()).items.some((item) => item.ephemeral?.text === "preserve this message"));
+      } else {
+        assert.ok(existsSync(source.store));
+        assert.equal(existsSync(generationPaths(root, journal.destination).store), false);
+        assert.ok((await readGenerationEphemera(source.store, generation)).some((item) => item.ephemeral?.text === "preserve this message"));
+        assert.equal((await store.readArchive()).items.length, 0);
+      }
+    } finally {
+      if (store) await store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a failed Brain transaction cannot mark an uncommitted sweep as committed", async () => {
+  const root = tempRoot();
+  try {
+    const source = "gen-20261116T020000Z-source05";
+    const destination = "gen-20261116T030000Z-dest0005";
+    await realGeneration(root, source, 1_700_000_100, []);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      await store.beginCollapse(source, destination);
+      const bad = { kind: "plainText", text: "cannot be serialized" };
+      bad.data = bad;
+      await assert.rejects(store.applyCollapse({ source, generation: destination, writes: [], incoming: [{ id: "bad", layer: "ephemeral", ephemeral: bad }], now: at(1) }));
+      assert.equal((await store.readCollapseJournal()).committed, false);
+      assert.equal((await store.readArchive()).items.length, 0);
+      await recoverCollapse(root, store);
+      assert.ok(existsSync(generationPaths(root, source).store));
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recovery discards an incomplete destination when the sweep has not committed", async () => {
+  const root = tempRoot();
+  try {
+    const sourceId = "gen-20261116T020000Z-source03";
+    const destination = "gen-20261116T030000Z-dest0003";
+    const source = await realGeneration(root, sourceId, 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "still here" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      await store.beginCollapse(sourceId, destination);
+      writeFileSync(generationPaths(root, destination).markdown, "partial destination");
+      const result = await reconcileGenerations(root, store);
+      assert.equal(result.live.generation, sourceId);
+      assert.ok(existsSync(source.store));
+      assert.equal(existsSync(generationPaths(root, destination).markdown), false);
+      assert.equal(await store.readCollapseJournal(), undefined);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reconciliation cannot mistake a still-running collapse for a crash", async () => {
+  const root = tempRoot();
+  try {
+    const sourceId = "gen-20261116T020000Z-source04";
+    const source = await realGeneration(root, sourceId, 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "concurrent recovery" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      let reached;
+      let release;
+      const arrived = new Promise((resolve) => { reached = resolve; });
+      const gate = new Promise((resolve) => { release = resolve; });
+      const slowed = { ...store, applyCollapse: async (change) => {
+        reached();
+        await gate;
+        return store.applyCollapse(change);
+      } };
+      const collapsing = collapse(root, slowed);
+      await arrived;
+      try {
+        await assert.rejects(reconcileGenerations(root, store), /still running/);
+        assert.ok(existsSync(source.store));
+      } finally {
+        release();
+      }
+      const report = await collapsing;
+      assert.notEqual(report.generation, sourceId);
+      assert.ok((await store.readArchive()).items.some((item) => item.ephemeral?.text === "concurrent recovery"));
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recovery does not interfere with a collapse owned by another live process", async () => {
+  const root = tempRoot();
+  try {
+    const sourceId = "gen-20261116T020000Z-source06";
+    const destination = "gen-20261116T030000Z-dest0006";
+    const source = await realGeneration(root, sourceId, 1_700_000_100, []);
+    const path = join(root, ".brain", "brain.sqlite");
+    const store = await openBrain(path);
+    try {
+      await store.beginCollapse(sourceId, destination);
+      const db = await openNodeSqliteDatabase(path);
+      try { await db.run("UPDATE collapse_journal SET owner_pid = ? WHERE id = 1", process.ppid); }
+      finally { await db.close(); }
+      await assert.rejects(recoverCollapse(root, store), /Another process/);
+      assert.ok(existsSync(source.store));
+      assert.notEqual(await store.readCollapseJournal(), undefined);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recovery preserves the source if a committed destination is missing", async () => {
+  const root = tempRoot();
+  try {
+    const source = await realGeneration(root, "gen-20261116T020000Z-source02", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "do not delete" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      const interrupted = { ...store, applyCollapse: async (change) => {
+        await store.applyCollapse(change);
+        throw new Error("simulated crash");
+      } };
+      await assert.rejects(collapse(root, interrupted), /simulated crash/);
+      const journal = await store.readCollapseJournal();
+      rmSync(generationPaths(root, journal.destination).store);
+      await assert.rejects(recoverCollapse(root, store), /complete generation/);
+      assert.ok(existsSync(source.store));
+      assert.ok((await store.readArchive()).items.some((item) => item.ephemeral?.text === "do not delete"));
+      assert.equal((await store.readCollapseJournal()).committed, true);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a collapse sweeps the store's ephemera into the archive, item by item, and deletes the store", async () => {
   const root = tempRoot();
@@ -653,4 +834,5 @@ test("a pinned read result is refreshed at the collapse, and says so when the fi
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
 });

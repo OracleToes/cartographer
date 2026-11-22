@@ -15,10 +15,18 @@ import { join } from "node:path";
 
 const BUDGET_MS = 10_000;
 
+// These suites run together in one worker; fast-suite imports each of them.
+// Everything else is still discovered automatically as its own test worker.
+const grouped = new Set([
+  "brain.test.mjs", "brain-store.test.mjs", "freshness.test.mjs", "gitignore.test.mjs",
+  "handles.test.mjs", "project-tree.test.mjs", "projection.test.mjs", "state-block.test.mjs", "ui-views.test.mjs",
+  "compose.test.mjs", "person.test.mjs",
+]);
 const files = readdirSync("test")
-  .filter((name) => name.endsWith(".test.mjs"))
+  .filter((name) => name.endsWith(".test.mjs") && !grouped.has(name))
   .sort()
   .map((name) => join("test", name));
+files.push(join("test", "fast-suite.mjs"));
 
 // The build and the runner share one wall-clock deadline and one process
 // group at a time. Do not run the suite against an incomplete build.
@@ -48,7 +56,7 @@ try {
   let code = await run("sh", ["-c", build]);
   console.log(`Build: ${((performance.now() - started) / 1000).toFixed(2)}s`);
   if (code === 0 && !aborted) {
-    code = await run(process.execPath, ["--test", "--test-reporter=dot", "--test-concurrency=3", ...files]);
+    code = await run(process.execPath, ["--test", "--test-reporter=spec", "--test-concurrency=4", ...files]);
   }
   clearTimeout(timer);
   if (aborted) {

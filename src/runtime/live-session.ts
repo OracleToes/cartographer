@@ -96,7 +96,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
   // or build a new one from the Brain — which is authoritative.
-  const reconciled = reconcileGenerations(root);
+  const reconciled = await reconcileGenerations(root, options.brain);
   let generation: string;
   if (reconciled.live !== null) {
     generation = reconciled.live.generation;
@@ -573,14 +573,8 @@ export async function collapseLiveSession(
   // string names: one name, carried from the session that built it.
   const report = await collapse(session.root, options.brain, { person: session.state.person, ...ceremony });
   const next = await openLiveSession(options);
-  // An ephemeral item a mark restored comes home to the live context, which is
-  // the store the collapse just built (§3.3): it goes back as the kind it was,
-  // with no pin, so the next collapse sweeps it again unless the person pins it.
-  for (const item of report.restored) {
-    if (item.ephemeral !== undefined && await restoreEphemeral(next, item)) {
-      await options.brain.applyArchive({ kind: "restore-complete", id: item.id });
-    }
-  }
+  // Opening retries committed ephemeral restores and acknowledges each one
+  // only after placement. Do not submit the report's items a second time.
   return { session: next, report, reason };
 }
 

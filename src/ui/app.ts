@@ -1493,6 +1493,22 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await refreshArchive();
     } catch (error) {
       pushStatus(`collapse failed: ${errorText(error)}`);
+      // The ceremony closes the old session before touching generation files.
+      // Reopen through journal recovery rather than continuing with a closed
+      // harness (or guessing which generation survived).
+      try {
+        await closeLiveSession(state.session).catch(() => undefined);
+        const recovered = await openLiveSession(options);
+        state.session = recovered;
+        headerState.session = recovered;
+        barState.session = recovered;
+        void startLiveWatch();
+      } catch (recoveryError) {
+        tui.stop();
+        process.stderr.write(`Collapse recovery failed: ${errorText(recoveryError)}. Generation files were preserved.\n`);
+        shutdownRequested = true;
+        resolveRun?.(1);
+      }
     } finally {
       state.collapsing = false;
       state.inFlight = Math.max(0, state.inFlight);
