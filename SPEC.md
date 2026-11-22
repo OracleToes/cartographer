@@ -131,7 +131,8 @@ calls, other non-Chat model output, and the model transcript. None of it is
 kept.
 
 An ephemeral item survives only if it is pinned on the live context layer.
-Everything else is swept to the archive at collapse.
+Otherwise it is swept to the archive at collapse, unless the person has chosen
+to delete it at that collapse (§4.1).
 
 Brain records are not ephemeral. They stay in the Brain until they are deleted,
 or until they are marked for archive and a collapse moves them out (§4.1).
@@ -162,7 +163,8 @@ The state block lists every pinned entry and its author.
 ### 3.3 The archive
 
 The archive is Carto's own database under `.brain/`. It is the destination for
-everything a collapse sweeps, and nothing else.
+everything a collapse sweeps and for ephemeral entries the person archives
+immediately (§4.1).
 
 - It holds swept ephemeral items and Brain records marked for archive.
 - It grants one collapse of grace. An unpinned item in the archive is deleted
@@ -224,10 +226,10 @@ context, and either party may trigger it. It needs no approval.
 A collapse:
 
 1. ends the live context;
-2. sweeps every unpinned ephemeral item and every Brain record marked for
-   archive into the archive;
-3. deletes every Brain record marked for delete, and every unpinned archive item
-   past its grace period;
+2. sweeps every unpinned ephemeral item not chosen for deletion, and every Brain
+   record marked for archive, into the archive;
+3. deletes ephemeral items chosen for deletion, every Brain record marked for
+   delete, and every unpinned archive item past its grace period;
 4. places every record the Brain holds into the new context's head (§5.1), in
    order, clustered by type, and returns every entry marked for restore to its
    place in the context;
@@ -268,6 +270,14 @@ changed or withdrawn until then.
   next collapse.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
   for now and returns it to the context at the next collapse.
+
+For ephemeral content in Context, sweeping to the archive is already the default.
+The person's `d` instead chooses deletion at the next collapse and shows that
+choice on the entry; it does not sweep the entry to the archive. `!d` removes it
+from the model's view immediately; its bytes remain in the append-only live store
+until that store is removed at collapse. The first `a` highlights the ephemeral
+entry in red to confirm the action; the second `a` archives it immediately.
+The highlight is a confirmation, not an archive mark waiting for collapse.
 
 The person and the agent can both create, edit, delete, reorder, and mark records
 of every type the Brain knows, from the workspace as much as from a tool. A record
