@@ -218,6 +218,9 @@ export class AtlasView implements Component, Focusable {
     if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
 
     rawLines.push(tokens.cardHeaderBg(padLine(` ${titlePrefix} ${badges.join(" ")}`, width)));
+    if (node.mark !== undefined) {
+      rawLines.push(tokens.cardBg(padLine(` ${tokens.warn(`◆ ${node.mark.action} on collapse · ${node.mark.author === "user" ? "you" : "agent"}`)}`, width)));
+    }
     rawLines.push(tokens.cardBg(" ".repeat(width)));
 
     // Text entry
@@ -323,10 +326,11 @@ export class AtlasView implements Component, Focusable {
         const pinStr = pinBadgeText(node.pinned, "P");
         const staleStr = isStale ? tokens.staleBadge("!") : "";
         const badges = `${pinStr}${staleStr}`;
-        const titleSpace = Math.max(4, listWidth - 10 - visibleWidth(badges));
+        const mark = node.mark === undefined ? "" : `${tokens.warn(`◆ ${node.mark.action}`)} `;
+        const titleSpace = Math.max(1, listWidth - 10 - visibleWidth(badges) - visibleWidth(mark));
         const titleStr = truncateToWidth(node.title, titleSpace, "…");
 
-        const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${titleStr} ${badges}`;
+        const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${mark}${titleStr} ${badges}`;
         const paddedRow = isSelected
           ? (this.focusedPane === "list" ? tokens.selectedBg(padLine(rowText, listWidth)) : tokens.activeRowBg(padLine(rowText, listWidth)))
           : tokens.sidebarBg(padLine(rowText, listWidth));
@@ -351,7 +355,8 @@ export class AtlasView implements Component, Focusable {
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const pinStr = pinBadgeText(node.pinned, "pin");
         const staleStr = isStale ? tokens.staleBadge("!stale") : "";
-        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${node.title} ${pinStr} ${staleStr}`;
+        const mark = node.mark === undefined ? "" : `${tokens.warn(`◆ ${node.mark.action} on collapse`)} `;
+        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${mark}${node.title} ${pinStr} ${staleStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);
 
         if (isSelected && this.detailExpanded) {

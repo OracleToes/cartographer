@@ -210,6 +210,9 @@ export class LedgerView implements Component, Focusable {
     if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
 
     rawLines.push(tokens.cardHeaderBg(padLine(` ${titlePrefix} ${badges.join(" ")}`, width)));
+    if (entry.mark !== undefined) {
+      rawLines.push(tokens.cardBg(padLine(` ${tokens.warn(`◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`)}`, width)));
+    }
     rawLines.push(tokens.cardBg(" ".repeat(width)));
 
     // Body text
@@ -287,10 +290,11 @@ export class LedgerView implements Component, Focusable {
         const kindStr = tokens.muted(`[${entry.kind}]`);
 
         const badgeStr = `${pinStr} ${statusStr}`;
-        const previewSpace = Math.max(4, listWidth - 14 - visibleWidth(badgeStr));
+        const mark = entry.mark === undefined ? "" : `${tokens.warn(`◆ ${entry.mark.action}`)} `;
+        const previewSpace = Math.max(1, listWidth - 14 - visibleWidth(badgeStr) - visibleWidth(mark));
         const preview = truncateToWidth(entry.text.replace(/\s+/g, " "), previewSpace, "…");
 
-        const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${kindStr} ${preview} ${badgeStr}`;
+        const rowText = `${prefix}${isSelected ? tokens.bold(tokens.accent(handleStr)) : tokens.muted(handleStr)} ${mark}${kindStr} ${preview} ${badgeStr}`;
         const paddedRow = isSelected
           ? (this.focusedPane === "list" ? tokens.selectedBg(padLine(rowText, listWidth)) : tokens.activeRowBg(padLine(rowText, listWidth)))
           : tokens.sidebarBg(padLine(rowText, listWidth));
@@ -313,7 +317,8 @@ export class LedgerView implements Component, Focusable {
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const pinStr = pinBadgeText(entry.pinned, "pin");
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
-        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} [${entry.kind}] ${entry.text} ${statusStr} ${pinStr}`;
+        const mark = entry.mark === undefined ? "" : `${tokens.warn(`◆ ${entry.mark.action} on collapse`)} `;
+        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${mark}[${entry.kind}] ${entry.text} ${statusStr} ${pinStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);
 
         if (isSelected && this.detailExpanded) {

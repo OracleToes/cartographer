@@ -48,6 +48,7 @@
  */
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
+import type { Mark } from "../domain/records.js";
 import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
 import { pinHandle } from "./prompt-handles.js";
 
@@ -72,7 +73,7 @@ export type CardEntry =
 
 export type TranscriptEntry =
   | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -564,6 +565,12 @@ export class TranscriptView implements Component {
             ? ""
             : `${pinHandle(entry.handle ?? "?")} ${entry.pinned === "user" ? "you" : "agent"}`;
         lines.push(...this.block("carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
+        if (entry.mark !== undefined) {
+          const mark = `◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`;
+          for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - PREFIX_WIDTH))) {
+            lines.push(`${" ".repeat(PREFIX_WIDTH)}${tokens.warn(line)}`);
+          }
+        }
         if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);

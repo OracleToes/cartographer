@@ -794,6 +794,13 @@ test("an archive mark is drawn with its action and its author, so it is not invi
   });
   const frame = view.render(90).join("\n");
   assert.match(frame, /→ restore at the next collapse · agent/, "the row says what the collapse will do, and who decided it");
+  view.setData({ version: 1, items: [
+    { id: "long-id", layer: "ephemeral", ephemeral: { kind: "readResult", text: "one" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 20, pinned: "user", mark: { action: "delete", author: "user" } },
+    { id: "2", layer: "ephemeral", ephemeral: { kind: "plainText", text: "two" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 10, mark: { action: "restore", author: "agent" } },
+  ] });
+  const narrow = plain(view.render(40).join("\n"));
+  assert.match(narrow, /→ delete at the next collapse/, "a pin does not hide the delete mark");
+  assert.match(narrow, /→ restore at the next collapse/, "the other marked item is visible too");
 });
 
 test("the archive's u withdraws the mark on the selected item, and refuses when there is none", () => {
@@ -832,6 +839,19 @@ test("the archive keeps a restored item's type and the author of its pin", () =>
   assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
 });
 
+test("marked Chat entries in the transcript show their pending action", () => {
+  const view = new TranscriptView();
+  view.setEntries([
+    { kind: "agent", recordId: "1", handle: "C1", text: "first", mark: { action: "delete", author: "user" } },
+    { kind: "agent", recordId: "2", handle: "C2", text: "second", pinned: "agent", mark: { action: "archive", author: "agent" } },
+  ]);
+  const frame = plain(view.render(80).join("\n"));
+  assert.match(frame, /delete on collapse · you/);
+  assert.match(frame, /archive on collapse · agent/);
+  view.setEntries([{ kind: "agent", recordId: "1", handle: "C1", text: "first" }]);
+  assert.doesNotMatch(plain(view.render(80).join("\n")), /on collapse/);
+});
+
 test("a Brain delete mark appears on the Context row until withdrawn", () => {
   let brain = emptyBrain();
   brain = applyWrite(brain, { kind: "chat.record", record: { id: "c1", author: "agent", text: "remember this", createdAt: 1, updatedAt: 1 } }, 1);
@@ -850,6 +870,37 @@ test("a Brain delete mark appears on the Context row until withdrawn", () => {
   brain = applyWrite(brain, { kind: "mark.clear", target: "chat", id: "c1", author: "user" }, 3);
   refresh();
   assert.doesNotMatch(plain(view.render(40).join("\n")), /delete on collapse/);
+});
+
+test("every marked Brain record is indicated in Context and in its book", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "a", title: "a very long atlas title that should not hide the mark", text: "body", links: [], attachments: [], pinned: "user", createdAt: 1, updatedAt: 1 } }, 1);
+  brain = applyWrite(brain, { kind: "ledger.upsert", entry: { id: "l", kind: "note", text: "a very long ledger entry that should not hide the mark", status: "open", answer: null, pinned: "agent", createdAt: 2, updatedAt: 2 } }, 2);
+  brain = applyWrite(brain, { kind: "chat.record", record: { id: "c", author: "agent", text: "chat", createdAt: 3, updatedAt: 3 } }, 3);
+  const view = new ContextView();
+  for (const action of ["delete", "archive"]) {
+    for (const author of ["user", "agent"]) {
+      for (const [target, id] of [["atlas", "a"], ["ledger", "l"], ["chat", "c"]]) {
+        brain = applyWrite(brain, { kind: "mark.set", target, id, action, author }, 4);
+      }
+      view.setData({ brain, systemPrompt: "system", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "state" });
+      const rows = view.render(40).map(plain);
+      for (const handle of ["A1", "L1", "C1"]) {
+        const row = rows.find((line) => new RegExp(`\\b${handle}\\b`).test(line));
+        assert.ok(row?.includes(`${action} on collapse · ${author === "user" ? "you" : "agent"}`), `${handle}: ${action} by ${author}`);
+      }
+      const atlas = new AtlasView();
+      atlas.setData(brain, []);
+      const ledger = new LedgerView();
+      ledger.setData(brain);
+      for (const [book, handle] of [[atlas, "A1"], [ledger, "L1"]]) {
+        for (const width of [40, 100]) {
+          const row = book.render(width).map(plain).find((line) => line.includes(`[${handle}]`) && line.includes("◆"));
+          assert.ok(row?.includes(action), `${handle}: ${action} visible at width ${width}`);
+        }
+      }
+    }
+  }
 });
 
 test("the context cursor wraps between entries and survives refreshes and deletions", () => {

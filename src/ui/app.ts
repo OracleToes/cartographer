@@ -147,9 +147,9 @@ function countSidebar(
   for (const node of brainState.atlas) if (node.pinned !== undefined) pinned.atlas = (pinned.atlas ?? 0) + 1;
   for (const entry of brainState.ledger) if (entry.pinned !== undefined) pinned.ledger = (pinned.ledger ?? 0) + 1;
   const marked: Partial<Record<BookKind, number>> = {};
-  for (const record of brainState.chat) {
-    if (record.mark?.action === "delete") marked.chat = (marked.chat ?? 0) + 1;
-  }
+  for (const record of brainState.chat) if (record.mark !== undefined) marked.chat = (marked.chat ?? 0) + 1;
+  for (const node of brainState.atlas) if (node.mark !== undefined) marked.atlas = (marked.atlas ?? 0) + 1;
+  for (const entry of brainState.ledger) if (entry.mark !== undefined) marked.ledger = (marked.ledger ?? 0) + 1;
   // The tree's figures are the rows the view shows, counted from the same
   // projection it renders, so the sidebar and the pane cannot disagree.
   let treeDirs = 0;
@@ -960,11 +960,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // id the Context view drew them under.
     const brainState = await brain.read();
     const found =
-      brainState.chat.find((record) => String(record.id) === String(itemId)) !== undefined
+      partId === "chat" && brainState.chat.find((record) => String(record.id) === String(itemId)) !== undefined
         ? ({ kind: "chat", id: String(itemId) } as const)
-        : brainState.ledger.find((entry) => String(entry.id) === String(itemId)) !== undefined
+        : partId === "ledger" && brainState.ledger.find((entry) => String(entry.id) === String(itemId)) !== undefined
           ? ({ kind: "ledger", id: String(itemId) } as const)
-          : brainState.atlas.find((node) => String(node.id) === String(itemId)) !== undefined
+          : partId === "atlas" && brainState.atlas.find((node) => String(node.id) === String(itemId)) !== undefined
             ? ({ kind: "atlas", id: String(itemId) } as const)
             : undefined;
     if (found !== undefined) {
@@ -1044,11 +1044,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     void (async () => {
       const brainState = await brain.read();
       const kind =
-        brainState.chat.some((record) => String(record.id) === String(itemId))
+        partId === "chat" && brainState.chat.some((record) => String(record.id) === String(itemId))
           ? "chat"
-          : brainState.ledger.some((entry) => String(entry.id) === String(itemId))
+          : partId === "ledger" && brainState.ledger.some((entry) => String(entry.id) === String(itemId))
             ? "ledger"
-            : brainState.atlas.some((node) => String(node.id) === String(itemId))
+            : partId === "atlas" && brainState.atlas.some((node) => String(node.id) === String(itemId))
               ? "atlas"
               : undefined;
       if (kind === undefined) {
@@ -1291,6 +1291,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             recordId: record.id,
             ...(chatHandle === undefined ? {} : { handle: chatHandle }),
             pinned: record.pinned,
+            mark: brainState.chat.find((chat) => chat.id === record.id)?.mark,
           },
         });
       }
@@ -1330,6 +1331,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         cards.map((item) => item.key).join(","),
         stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
         agent.map((item) => `${String(item.key)}:${item.entry.kind === "agent" ? String(item.entry.recordId ?? "") + ":" + String(item.entry.pinned ?? "") : ""}`).join(","),
+        JSON.stringify(brainState.chat.map((record) => [record.id, record.mark ?? null])),
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),
         String(Math.round(parts.systemTokens)),
@@ -1342,9 +1344,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         state.sig = sig;
         const live = [...person, ...cards, ...stops, ...agent, ...statusMerged];
         live.sort((left, right) => left.key - right.key);
-        // Sealed history is an immutable prefix; the live segment follows in the frame's order.
+        // The text of sealed history is immutable, but a mark is current Brain
+        // state, not history. Reconcile it so a withdrawn or applied mark never
+        // lingers on an older rendering of the same Chat record.
+        const sealed = state.sealed.map((entry) => entry.kind === "agent" && entry.recordId !== undefined
+          ? { ...entry, mark: brainState.chat.find((record) => record.id === entry.recordId)?.mark }
+          : entry);
         transcript.setEntries(
-          [...state.sealed, ...live.map((item) => item.entry)],
+          [...sealed, ...live.map((item) => item.entry)],
           state.pending.map((item) => ({ text: item.text, mode: item.mode })),
         );
         headerState.windowUnknown = state.session.state.contextWindow <= 0;
