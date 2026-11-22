@@ -28,6 +28,16 @@ test("padLine pads accurately with and without ANSI escape sequences", () => {
   assert.equal(visibleWidth(truncated), 5);
 });
 
+test("a line already the width is left whole — no ellipsis, no eaten characters", () => {
+  // The defect this guards: `>=` sent an exactly-wide line through
+  // `truncateToWidth`, which reserves room for its ellipsis, so three
+  // characters vanished from the middle of a paragraph that was never too long.
+  const exact = "x".repeat(40);
+  assert.equal(padLine(exact, 40), exact);
+  assert.equal(padLine(tokens.accent(exact), 40), tokens.accent(exact));
+  assert.ok(!padLine(tokens.accent(exact), 40).includes("…"));
+});
+
 test("Sidebar renders the transcript, the prompt, and both books with counts", () => {
   const sidebar = new Sidebar();
   sidebar.setCounts({
@@ -211,6 +221,56 @@ test("the prompt view is the prefill: head, body, tail, leaves unfoldable", () =
 
   // A leaf is never folded: the system prompt's body is shown, not its title.
   assert.ok(shown.includes("You are Carto."), "a leaf renders whole");
+
+  // The open body is a paragraph, not a preview: at the width it is drawn at,
+  // nothing is clipped and no line carries an ellipsis for want of room.
+  const longPrompt = "Everything you can see carries a short handle, and a handle is how you point at a thing, which is why a sentence of any length has to wrap rather than trail off.";
+  const wide = new ContextView();
+  wide.setData({
+    brain: emptyBrain(),
+    systemPrompt: longPrompt,
+    projectionText: "",
+    tools: [],
+    transcriptMessages: [{ id: 2, role: "user", text: longPrompt }],
+    toolWorkItems: [],
+    stateBlockText: "",
+  });
+  let promptLines = wide.render(100).map(plain).filter((line) => line.includes("│"));
+  for (const line of promptLines) assert.ok(!line.includes("…"), `an open body is not clipped: ${line}`);
+  assert.equal(promptLines.join(" ").replace(/\s+/g, " ").includes("rather than trail off"), true, "the whole paragraph is there");
+  for (const width of [72, 100, 140]) {
+    for (const line of wide.render(width)) assert.equal(visibleWidth(line), width, "the pane's width holds at every size");
+  }
+
+  // A section heading folds everything under it; pressing again opens it.
+  const folding = new ContextView();
+  folding.setData({
+    brain: emptyBrain(),
+    systemPrompt: "line one\nline two",
+    projectionText: "",
+    tools: [],
+    transcriptMessages: [],
+    toolWorkItems: [],
+    stateBlockText: "",
+  });
+  // A closed row keeps a one-line summary, so the fold is read off the gutter,
+  // not off the words: `│` only appears beside an open body.
+  const gutter = () => plain(folding.render(80).join("\n")).includes("│");
+  folding.handleInput("\r"); // open the system prompt
+  assert.equal(gutter(), true, "enter opens an entry");
+  folding.handleInput("k"); // the HEAD heading
+  folding.handleInput("\r"); // close everything under it
+  assert.equal(gutter(), false, "a heading closes the section");
+  folding.handleInput("\r"); // and opens it again
+  assert.equal(gutter(), true, "and opens it again");
+
+  // `toggleAll` is the same action for the whole prompt: close what is open,
+  // and leave a leaf alone, because a leaf is the one thing that stays whole.
+  folding.toggleAll();
+  assert.equal(gutter(), false, "everything foldable closes at once");
+  assert.ok(plain(folding.render(80).join("\n")).includes("line one"), "a closed entry keeps its summary");
+  folding.toggleAll();
+  assert.equal(gutter(), true, "and opens again");
 
   // Folding, and `tab` between the human and the real view of schema-shaped content.
   view.handleInput("j"); // the system row (head's first entry)

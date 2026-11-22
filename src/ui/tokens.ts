@@ -89,10 +89,17 @@ export const band = (text: string): string => tokens.sidebarBg(text);
 export const bandLine = (line: string, width: number): string => fillLine(line, width, palette.panel);
 
 export { visibleWidth, truncateToWidth };
+/**
+ * Fit a line to the width: pad it, and clip it only when it is genuinely too
+ * long. `>=` here was a real defect — a body line that filled the column
+ * exactly was handed to `truncateToWidth`, which reserves room for its
+ * ellipsis and so ate three characters out of the middle of a paragraph that
+ * had nothing wrong with it. A line already at the width is left alone.
+ */
 export function padLine(str: string, width: number): string {
   const w = visibleWidth(str);
-  if (w >= width) return truncateToWidth(str, width);
-  return str + " ".repeat(width - w);
+  if (w > width) return truncateToWidth(str, width);
+  return w === width ? str : str + " ".repeat(width - w);
 }
 
 /**

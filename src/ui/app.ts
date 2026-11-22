@@ -1117,6 +1117,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => true,
     },
     {
+      id: "prompt-fold",
+      group: "the prompt",
+      label: "fold every entry",
+      hint: "enter folds one entry or a whole section",
+      key: "shift+e",
+      run: () => {
+        contextView.toggleAll();
+        tui.requestRender();
+      },
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
       id: "fold-all",
       group: "the transcript",
       label: "fold the cards",

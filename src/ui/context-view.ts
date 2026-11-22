@@ -15,11 +15,15 @@
  * numbers come from the Brain's table for records and from prompt order for
  * everything ephemeral.
  *
- * **A leaf is never folded.** A tool call's arguments, a result, a line of
- * system prompt: each is a leaf, and it renders whole. Only things that contain
- * things — a tool's schema, a Brain entry with links and attachments, the state
- * block's sections — fold. A collapsed entry keeps a one-line summary, so the
- * prompt is scannable without being a list of headings.
+ * **A leaf carries no fold.** A tool call's arguments, a result, the person's
+ * own message: nothing inside it can be closed, so it has no arrow and
+ * `enter` does nothing on it. A leaf on screen is on screen whole.
+ *
+ * Everything is a row, and a row opens by default: the prompt is the thing
+ * being read, so the body wraps across the pane rather than trailing off at
+ * the first line. What keeps the view navigable is the fold — `enter` or a
+ * click closes an entry to its one-line summary, and a section heading closes
+ * or opens everything beneath it.
  *
  * `tab` swaps between the **human** view and the **real** view for
  * schema-shaped content: the same entry, as a person reads it and as the model
@@ -137,6 +141,10 @@ const KIND_INK: Record<NodeKind, (text: string) => string> = {
 
 /** Cells the name column takes, so the summaries line up under each other. */
 const NAME_COLUMN = 14;
+/** The open body's gutter: five spaces and the rule, then one space. */
+const BODY_GUTTER = `     ${tokens.rule("│")} `;
+/** Its visible width — what the wrap must leave room for. */
+const BODY_INSET = 7;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
@@ -370,10 +378,19 @@ export class ContextView implements Component, Focusable {
     ];
   }
 
-  /** Fold state: open unless the person closed it. A leaf is never folded. */
-  private isOpen(node: PromptNode): boolean {
-    if (node.leaf === true) return true;
-    return this.folded.get(node.id) ?? node.open === true;
+  /**
+   * The whole prompt on one screen: every entry closed to its one-line summary,
+   * or every entry open if any of them was closed. This is the counterpart to
+   * the per-row fold, for when the person wants the shape of the prompt back
+   * rather than a page of prose.
+   */
+  toggleAll(): void {
+    // A leaf has nothing to close, so it is left alone: the person's message
+    // stays readable while the bulk of the prompt folds away around it.
+    const foldable = this.sections.flatMap((section) => section.nodes.filter((node) => node.leaf !== true));
+    if (foldable.length === 0) return;
+    const anyOpen = foldable.some((node) => this.isOpen(node));
+    for (const node of foldable) this.folded.set(node.id, !anyOpen);
   }
 
   private selectedNode(): PromptNode | undefined {
@@ -407,8 +424,7 @@ export class ContextView implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "enter") || matchesKey(data, "space")) {
-      const node = this.selectedNode();
-      if (node !== undefined && node.leaf !== true) this.folded.set(node.id, !this.isOpen(node));
+      this.toggleAt(this.cursor);
       return;
     }
     if (data === "!") {
@@ -441,8 +457,8 @@ export class ContextView implements Component, Focusable {
     const hit = this.hits.find((range) => event.y >= range.start && event.y < range.end);
     if (hit === undefined) return undefined;
     this.cursor = hit.index;
-    const node = this.selectedNode();
-    if (node !== undefined && node.leaf !== true) this.folded.set(node.id, !this.isOpen(node));
+    // A click anywhere in an entry folds it, not only on the line it hit.
+    this.toggleAt(hit.index);
     return { handled: true, render: true, focus: true };
   }
 
@@ -487,12 +503,45 @@ export class ContextView implements Component, Focusable {
     return lines;
   }
 
-  /** One entry: handle, kind, name; then its body when it is open. */
+  /**
+   * Are this entry's contents on screen? A leaf always is — nothing in it can
+   * close — and anything else follows its fold. This is what a click and
+   * `enter` act on, for one entry or for everything under a section heading.
+   */
+  private isOpen(node: PromptNode): boolean {
+    if (node.leaf === true) return true;
+    return this.folded.get(node.id) ?? node.open === true;
+  }
+
+  /**
+   * `enter` or a click, on whatever the cursor or the pointer landed on: an
+   * entry folds or unfolds; a section heading opens or closes every entry under
+   * it, which is how a long head becomes one line again. A leaf has no fold, so
+   * nothing happens — the row says so rather than pretending.
+   */
+  private toggleAt(cursor: number): void {
+    const row = this.rows[cursor];
+    if (row === undefined) return;
+    if ("node" in row) {
+      if (row.node.leaf !== true) this.folded.set(row.node.id, !this.isOpen(row.node));
+      return;
+    }
+    const section = this.sections[row.section];
+    if (section === undefined) return;
+    const foldable = section.nodes.filter((node) => node.leaf !== true);
+    if (foldable.length === 0) return;
+    // The map holds "open", so closing everything is `false`: a heading with
+    // anything open under it closes the lot; a heading fully closed opens it.
+    const anyOpen = foldable.some((node) => this.isOpen(node));
+    for (const node of foldable) this.folded.set(node.id, !anyOpen);
+  }
+
+  /** One entry: handle, name; then its body when it is open. */
   private renderNode(node: PromptNode, width: number, selected: boolean): string[] {
     const open = this.isOpen(node);
     const ink = KIND_INK[node.kind];
     const cursor = selected ? tokens.accent("▌") : " ";
-    const glyph = node.leaf === true ? " " : open ? "▾" : "▸";
+    const glyph = node.leaf === true ? "·" : open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));
     // One name column. The handle's prefix already says what kind of thing the
     // entry is, so the column holds its name: `read`, `bash`, a record's title.
@@ -503,7 +552,7 @@ export class ContextView implements Component, Focusable {
     const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}`;
     const lines: string[] = [];
 
-    if (node.leaf === true || !open) {
+    if (!open) {
       const room = Math.max(8, width - visibleWidth(head) - 2);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "…", room, "…");
       lines.push(canvasLine(`${head}${tokens.faint(preview)}`, width));
@@ -511,15 +560,28 @@ export class ContextView implements Component, Focusable {
     }
 
     lines.push(canvasLine(head, width));
+    lines.push(...this.renderBody(node, width, ink));
+    return lines;
+  }
+
+  /**
+   * The body of an entry that is on screen: a paragraph, never a preview and
+   * never clipped. It wraps to the column, and `BODY_INSET` is the exact
+   * visible width of the `│` gutter plus its space, so a wrapped line lands
+   * inside the pane instead of one column past it where `padLine` would clip it.
+   */
+  private renderBody(node: PromptNode, width: number, ink: (text: string) => string): string[] {
     const body = this.showReal && node.real !== undefined ? node.real : node.body;
-    const bodyWidth = Math.max(8, width - 6);
+    if (body.trim().length === 0) return [];
+    const lines: string[] = [];
+    const bodyWidth = Math.max(8, width - BODY_INSET);
     for (const logical of body.split("\n")) {
-      if (logical.length === 0) {
+      if (logical.trim().length === 0) {
         lines.push(canvasLine("", width));
         continue;
       }
       for (const line of wrapTextWithAnsi(logical, bodyWidth)) {
-        lines.push(canvasLine(`     ${tokens.rule("│")} ${ink(line)}`, width));
+        lines.push(canvasLine(`${BODY_GUTTER}${ink(line)}`, width));
       }
     }
     return lines;
