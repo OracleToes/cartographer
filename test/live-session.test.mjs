@@ -11,8 +11,10 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
+import { handleOf } from "../dist/domain/handles.js";
 import {
   applyOmitNow,
+  applyRecordActionNow,
   closeLiveSession,
   interruptRun,
   openLiveSession,
@@ -643,6 +645,55 @@ test("applying a deletion now rebuilds the context in place: no collapse, no swe
     // the same one, so the head prefix is untouched (§4.1, §5.6).
     assert.equal(session.state.generation, generation, "no rotation");
     assert.equal(existsSync(generationPaths(root, generation).markdown), true, "the same generation's snapshot is the one in use");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+// ---------- §4.1: a Brain record's action applies now, and the head follows ----------
+
+test("applying a Brain record's mark now moves it out and re-freezes the head, with no collapse", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  // Two notes, written before the session opens, so the frozen head is built
+  // with both of them in it — the state the person is looking at.
+  await brain.apply(
+    {
+      kind: "atlas.upsert",
+      node: { id: "a1", title: "First note", text: "the first understanding", links: [], attachments: [], createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000 },
+    },
+    1_700_000_000_000,
+  );
+  await brain.apply(
+    {
+      kind: "atlas.upsert",
+      node: { id: "a2", title: "Second note", text: "the second understanding", links: [], attachments: [], createdAt: 1_700_000_001_000, updatedAt: 1_700_000_001_000 },
+    },
+    1_700_000_001_000,
+  );
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  try {
+    const before = await brain.read();
+    const secondHandle = handleOf(before.handles, "atlas", "a2");
+    assert.ok(secondHandle !== undefined, "the second note has a handle");
+    const headBefore = readFileSync(session.markdownPath, "utf8");
+    assert.ok(headBefore.includes("First note") && headBefore.includes("Second note"), "the frozen head holds both notes");
+
+    // §4.1: the act applied now. The record leaves the Brain and the head is
+    // re-frozen for the generation that is still open, so the person is shown
+    // the prompt the model now reads.
+    assert.equal(await applyRecordActionNow(session, brain, root, "atlas", "a1", "archive"), true);
+    const after = await brain.read();
+    assert.equal(after.atlas.length, 1, "the record left the Brain");
+    assert.equal(handleOf(after.handles, "atlas", "a2"), secondHandle, "and the surviving record kept its handle");
+    assert.ok((await brain.readArchive()).items.some((item) => item.record?.kind === "atlas"), "it is in the archive");
+    const headAfter = readFileSync(session.markdownPath, "utf8");
+    assert.ok(!headAfter.includes("First note"), "so it is out of the head the model reads");
+    assert.ok(headAfter.includes(`${secondHandle} Second note`), "and the rest of the head is still there, under the handle it had");
+
+    // A rebuild, not a collapse: the generation did not move.
+    assert.equal(session.state.generation, session.generation, "no rotation");
   } finally {
     await closeLiveSession(session);
     await cleanup();

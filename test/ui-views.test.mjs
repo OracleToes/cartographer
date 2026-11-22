@@ -269,7 +269,7 @@ test("every item in the prompt carries its own handle, and a bash result takes S
   assert.ok(shown.includes("S1"), "a card carries the handle of the item it is");
 });
 
-test("the context view is the prefill: head, body, tail, leaves unfoldable", () => {
+test("the context view is the prefill: head, body, tail, every entry folds and starts closed", () => {
   const view = new ContextView();
   const brain = emptyBrain();
   brain.handles = {
@@ -280,8 +280,8 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
       { kind: "chat", id: "c1", handle: "C1", timestamp: 2 },
     ],
   };
-  brain.atlas.push({ id: "a1", title: "The Brain is the persistent record", text: "…", links: [], attachments: [], createdAt: 0, updatedAt: 0 });
-  brain.ledger.push({ id: "l1", kind: "goal", text: "Keep the prefill in one order", status: "open", answer: null, createdAt: 1, updatedAt: 1 });
+  brain.atlas.push({ id: "a1", title: "The Brain is the persistent record", text: "…", links: [], attachments: [], mark: { action: "archive", author: "user" }, createdAt: 0, updatedAt: 0 });
+  brain.ledger.push({ id: "l1", kind: "goal", text: "Keep the prefill in one order", status: "open", answer: null, mark: { action: "delete", author: "agent" }, createdAt: 1, updatedAt: 1 });
   brain.chat.push({ id: "c1", author: "agent", text: "The context view is the prefill now.", createdAt: 2, updatedAt: 2 });
   view.setData({
     brain,
@@ -312,8 +312,13 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
     assert.ok(new RegExp(`\\b${handle}\\b`).test(shown), `the ${handle} handle is rendered`);
   }
 
-  // A leaf is never folded: the system prompt's body is shown, not its title.
-  assert.ok(shown.includes("You are Carto."), "a leaf renders whole");
+  // Nothing starts open: the prompt is a list of one-line rows, and the `│`
+  // gutter appears only beside a body that has been opened.
+  assert.ok(!shown.includes("│"), "every entry starts closed");
+  assert.ok(shown.includes("You are Carto."), "a closed row carries its one-line summary");
+  // Any mark on a Brain record is visible on its closed row (§4.1).
+  assert.ok(shown.includes("archive · you"), "a user archive mark is shown on the row");
+  assert.ok(shown.includes("delete · agent"), "an agent delete mark is shown on the row");
 
   // The open body is a paragraph, not a preview: at the width it is drawn at,
   // nothing is clipped and no line carries an ellipsis for want of room.
@@ -328,6 +333,8 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
     toolWorkItems: [],
     stateBlockText: "",
   });
+  // The cursor starts on the system prompt, so one press opens the body.
+  wide.handleInput("\r");
   let promptLines = wide.render(100).map(plain).filter((line) => line.includes("│"));
   for (const line of promptLines) assert.ok(!line.includes("…"), `an open body is not clipped: ${line}`);
   assert.equal(promptLines.join(" ").replace(/\s+/g, " ").includes("rather than trail off"), true, "the whole paragraph is there");
@@ -358,7 +365,7 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
   assert.equal(gutter(), true, "and opens it again");
 
   // `toggleAll` is the same action for the whole context: close what is open,
-  // and leave a leaf alone, because a leaf is the one thing that stays whole.
+  // and open what is closed — with no class of row left out of it.
   folding.toggleAll();
   assert.equal(gutter(), false, "everything foldable closes at once");
   assert.ok(plain(folding.render(80).join("\n")).includes("line one"), "a closed entry keeps its summary");
@@ -375,16 +382,21 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
 
   // A mark is a mark, not a deletion (§4.1): `d` reports it and `!` arms it.
   const marks = [];
+  const archives = [];
   const collapses = [];
   view.onDelete = (part, id, now) => marks.push({ part, id, now });
+  view.onArchive = (part, id, now) => archives.push({ part, id, now });
   view.onCollapse = () => collapses.push(true);
-  // Walk down to the person's line: the head's tool entry is markable too, so
-  // the walk takes whatever it lands on until the marks name the transcript.
+  // Walk down to the person's line: the head's Brain records and tools are
+  // markable too, so the walk reaches them first and names each of them.
   for (let step = 0; step < 20; step += 1) {
     view.handleInput("j");
     view.handleInput("d");
     if (marks.some((mark) => mark.part === "transcript")) break;
   }
+  assert.ok(marks.some((mark) => mark.part === "atlas" && mark.id === "a1"), "an atlas record in the head can be marked");
+  assert.ok(marks.some((mark) => mark.part === "ledger" && mark.id === "l1"), "a ledger record in the head can be marked");
+  assert.ok(marks.some((mark) => mark.part === "chat" && mark.id === "c1"), "a chat record in the head can be marked");
   const onPerson = marks.find((mark) => mark.part === "transcript");
   assert.ok(onPerson !== undefined, "the person's line can be marked");
   assert.equal(onPerson.id, 2, "the mark names the entry it is on, not a phantom");
@@ -394,7 +406,18 @@ test("the context view is the prefill: head, body, tail, leaves unfoldable", () 
   view.handleInput("!");
   view.handleInput("d");
   assert.ok(marks.length > 0 && marks.every((mark) => mark.now === true), "an armed mark applies now");
+
+  // `a` is the other mark the agent can place (§4.1), and it reports the same
+  // way: a mark waiting for the collapse, or the act applied at once.
+  archives.length = 0;
+  view.handleInput("a");
+  assert.ok(archives.length > 0, "`a` marks the entry for archive");
+  assert.ok(archives.every((mark) => mark.now === false), "and it waits for the collapse");
+  archives.length = 0;
   view.handleInput("!");
+  view.handleInput("a");
+  assert.ok(archives.length > 0 && archives.every((mark) => mark.now === true), "and `!` arms it to apply now");
+
   view.handleInput("c");
   assert.equal(collapses.length, 1, "`c` collapses");
 });
@@ -653,6 +676,18 @@ test("the command registry drives the footer, and a key only fires where it is a
   assert.equal(registry.dispatch("\u0005"), true);
   assert.equal(ran, 1);
 
+  // When two views bind the same key, an unavailable command yields to the
+  // later available one rather than blocking it.
+  let sharedRan = 0;
+  let layer = "context";
+  const shared = new Registry([
+    { id: "first", group: "a", label: "first", key: "d", run: () => { sharedRan += 100; }, available: () => layer === "context" },
+    { id: "second", group: "b", label: "second", key: "d", run: () => { sharedRan += 200; }, available: () => layer === "archive" },
+  ]);
+  layer = "archive";
+  assert.equal(shared.dispatch("d"), true);
+  assert.equal(sharedRan, 200, "an unavailable binding lets a later binding on the same key run");
+
   // `^p` is in the registry but quiet, so it never crowds the footer.
   assert.deepEqual(registry.footer().map((command) => command.id), ["fold"]);
   assert.equal(registry.dispatch("\u0010"), true);
@@ -907,9 +942,12 @@ test("the body is the order the model reads, even when the ids are sweep keys", 
     assert.notEqual(index, -1, `${needle} is in the body`);
     return index;
   };
-  // The model reads: thinking, the call, its result, then the message that came after.
-  assert.ok(at("start with the tree") < at("tree"), "thinking precedes the call it produced");
-  assert.ok(at("tree") < at("Anchored at src"), "the call precedes its result");
+  // The model reads: thinking, the call, its result, then the message that came
+  // after. A closed row carries the item's own summary, so the order is read off
+  // the rows themselves — the call's arguments name its row where its label
+  // alone could be confused with the thinking above it.
+  assert.ok(at("start with the tree") < at('"depth": 3'), "thinking precedes the call it produced");
+  assert.ok(at('"depth": 3') < at("Anchored at src"), "the call precedes its result");
   assert.ok(at("Anchored at src") < at("dice roller"), "and the person's message is last, where it arrived");
   assert.ok(at("start with the tree") < at("dice roller"), "tool work never jumps above an earlier message");
 });

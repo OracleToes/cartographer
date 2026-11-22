@@ -76,7 +76,7 @@ export class Registry {
       } catch {
         available = false;
       }
-      if (!available) return false; // the key belongs to this command but not here: let the view see it
+      if (!available) continue; // another command on this key may be available in the active view
       command.run();
       return true;
     }

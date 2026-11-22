@@ -42,7 +42,9 @@ import {
   setArchiveMark,
   setArchivePin,
   sweep,
+  withoutMark,
   type ArchivedItem,
+  type ArchivedRecord,
   type Archive,
   type IncomingItem,
 } from "../domain/archive.js";
@@ -79,6 +81,13 @@ export interface BrainStore {
   }>;
   /** Replace the archive wholesale, for the person's pin and restore operations. */
   applyArchive(write: ArchiveWrite): Promise<{ archive: Archive; item?: ArchivedItem; refused: boolean }>;
+  /**
+   * Apply one Brain record's archive or delete mark now (§4.1), in one
+   * transaction: an archived record leaves the Brain and enters the archive
+   * here, a deleted one leaves the Brain and goes nowhere. The collapse counter
+   * does not move and no grace is spent, because this is not a collapse.
+   */
+  applyRecordAction(change: RecordActionChange): Promise<{ brain: CartoBrain; archive: Archive; found: boolean }>;
   /** Secure-delete the old pages: WAL checkpoint and VACUUM. */
   compact(): Promise<void>;
   close(): Promise<void>;
@@ -154,6 +163,27 @@ export type ArchiveWrite =
   | { kind: "mark"; id: string; action: "restore" | "delete" | null; author: "user" | "agent" }
   | { kind: "restore"; id: string }
   | { kind: "drop"; id: string };
+
+/**
+ * One Brain record's mark, applied now rather than at the next collapse
+ * (§4.1). The action is the mark's own: `archive` moves the record into the
+ * archive, `delete` removes it for good.
+ */
+export interface RecordActionChange {
+  kind: "atlas" | "ledger" | "chat";
+  id: string;
+  action: "archive" | "delete";
+  /** The generation whose head is rebuilt from the change; the archive stamps it on an archived record. */
+  generation: string;
+  now: number;
+}
+
+/** One Brain record by kind and id, or undefined when it is not in the Brain. */
+function recordOf(brain: CartoBrain, kind: "atlas" | "ledger" | "chat", id: string): ArchivedRecord | undefined {
+  if (kind === "chat") return brain.chat.find((record) => record.id === id);
+  if (kind === "ledger") return brain.ledger.find((entry) => entry.id === id);
+  return brain.atlas.find((node) => node.id === id);
+}
 
 export async function openBrain(databasePath: string): Promise<BrainStore> {
   // pi defaults to WAL + synchronous=NORMAL + a 5,000 ms busy timeout and
@@ -314,6 +344,38 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           await tx.run(UPSERT, JSON.stringify(brain));
         }
         return { archive: applied.archive, item, refused: false };
+      }),
+
+    applyRecordAction: (change) =>
+      database.transaction(async (tx) => {
+        const current = await readFrom(tx);
+        const record = recordOf(current, change.kind, change.id);
+        // A record that is not in the Brain is not an error: the person may
+        // have applied it in another window a moment ago. Nothing is written.
+        if (record === undefined) return { brain: current, archive: await readArchiveFrom(tx), found: false };
+        // The mark is spent by being applied, and the record leaves with it:
+        // an archived record is a record, not a record carrying a mark.
+        let next = applyWrite(current, { kind: "mark.clear", target: change.kind, id: change.id }, change.now);
+        next = applyWrite(next, { kind: "delete", target: change.kind, id: change.id }, change.now);
+        let archive = await readArchiveFrom(tx);
+        if (change.action === "archive") {
+          // Stamped with the collapse that last ran, so the record waits out the
+          // same one collapse of grace a swept record does (§3.3): the next
+          // collapse keeps it, the one after that drops it.
+          const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
+          const item: ArchivedItem = {
+            id: `record:${change.kind}:${change.id}`,
+            layer: "record",
+            record: { kind: change.kind, value: withoutMark(record) as ArchivedRecord },
+            sweptAtGeneration: change.generation,
+            sweptAtCollapse: counter?.collapses ?? 0,
+            sweptAt: change.now,
+          };
+          archive = { ...archive, items: [...archive.items.filter((candidate) => candidate.id !== item.id), item] };
+        }
+        await tx.run(UPSERT, JSON.stringify(next));
+        await writeArchiveRows(tx, archive);
+        return { brain: next, archive, found: true };
       }),
 
     async compact() {

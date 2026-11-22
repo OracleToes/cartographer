@@ -247,11 +247,24 @@ applied and dropped) and never collapsed anything.
 
 The head is untouched for the same reason §4.1 gives: an omit is an edit to one
 entry's contribution, and the projection the head is rendered from is not
-rewritten. A Brain record's own head composition still changes only at a
-collapse, which is what §5.1 says.
+rewritten.
+
+**A Brain record's action applies now too.** The person's word settled it —
+"there is no way to mark for archive or deletion or do either of those now" —
+and the plan above already said a Brain record's change does change the head.
+A Brain record is in the head, so applying an archive or a delete on one now is
+`applyRecordActionNow`: the record leaves the Brain and enters the archive (or
+goes nowhere) in one transaction, and the head snapshot for the open generation
+is re-frozen from the Brain as it now stands — the rebuild §4.1 describes, paid
+from the changed entry forward, never from the first byte. Nothing else moves:
+the store, the generation and the collapse counter stay where they were, and the
+surviving records keep their handles, so no handle the agent holds turns into a
+lie.
 
 **Test.** An apply-now on a body entry leaves the head prefix byte-identical and
-changes only what follows it; no collapse counter moves.
+changes only what follows it; no collapse counter moves. An apply-now on a Brain
+record moves it out of the Brain, into the archive or out of existence, and
+re-freezes the head with the other records under the handles they had.
 
 ## Stage 8 — pause
 

@@ -15,23 +15,22 @@
  * numbers come from the Brain's table for records and from prompt order for
  * everything ephemeral.
  *
- * **A leaf carries no fold.** A tool call's arguments, a result, the person's
- * own message: nothing inside it can be closed, so it has no arrow and
- * `enter` does nothing on it. A leaf on screen is on screen whole.
- *
- * Everything is a row, and a row opens by default: the prompt is the thing
- * being read, so the body wraps across the pane rather than trailing off at
- * the first line. What keeps the view navigable is the fold — `enter` or a
- * click closes an entry to its one-line summary, and a section heading closes
- * or opens everything beneath it.
+ * **Every entry carries a fold, and none starts open.** The prompt is long,
+ * and its shape is the first thing to read: a row is one line — its handle, its
+ * name, and a one-line summary — until `enter` or a click opens it. A tool
+ * call's arguments, a result, the person's own message: all of them fold the
+ * same way, so there is one class of row here and not two. A section heading
+ * closes or opens everything beneath it, and `toggleAll` does the same for the
+ * whole prompt.
  *
  * `tab` swaps between the **human** view and the **real** view for
  * schema-shaped content: the same entry, as a person reads it and as the model
  * receives it.
  *
- * Marks are made here and are not deletions (§4.1): `d` marks the entry under
- * the cursor, `!` arms "now" so the next mark is applied by a rebuild instead of
- * waiting for the collapse, `c` collapses.
+ * Marks are made here and are not deletions (§4.1): `a` marks the entry under
+ * the cursor for archive, `d` marks it for delete, `u` withdraws a mark, `!`
+ * arms "now" so the next mark is applied at once instead of waiting for the
+ * collapse, and `c` collapses.
  */
 import {
   matchesKey,
@@ -44,7 +43,7 @@ import {
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
-import type { CartoBrain } from "../domain/records.js";
+import type { CartoBrain, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
@@ -126,7 +125,7 @@ export interface ContextViewData {
 
 /** What a node can be marked: the part of the product a mark on it would touch. */
 export type MarkTarget = {
-  part: "transcript" | "tool-work" | "tools" | "ephemera" | "files";
+  part: "atlas" | "ledger" | "chat" | "transcript" | "tool-work" | "tools" | "ephemera" | "files";
   id: string | number;
 };
 
@@ -158,10 +157,6 @@ export interface PromptNode {
   body: string;
   /** Schema-shaped content: the same entry as the model receives it. */
   real?: string;
-  /** Never folded, whatever the kind says: a leaf. */
-  leaf?: boolean;
-  /** Whether it starts open. Model-shaped bodies start folded, prose starts open. */
-  open?: boolean;
   /** Where a mark on this node lands. Absent for the parts of the prompt the person cannot remove. */
   target?: MarkTarget;
   /** The marked action already recorded on it, if any. */
@@ -225,7 +220,10 @@ function projectionEntries(text: string): Map<string, string[]> {
 export class ContextView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /** Fired on `d`: mark the entry for delete, applied at once when `now` is set (§4.1). */
   onDelete?: (partId: string, itemId: string | number, now: boolean) => void;
+  /** Fired on `a`: mark the entry for archive, applied at once when `now` is set (§4.1). */
+  onArchive?: (partId: string, itemId: string | number, now: boolean) => void;
   onCollapse?: () => void;
   /** Fired on `u` over an entry that names a Brain record: withdraw the mark on it (§4.1). */
   onWithdrawMark?: (partId: string, itemId: string | number) => void;
@@ -296,8 +294,6 @@ export class ContextView implements Component, Focusable {
         summary: oneLine(data.systemPrompt),
         body: data.systemPrompt,
         real: data.systemPrompt,
-        open: false,
-        leaf: false,
       },
     ];
 
@@ -310,7 +306,6 @@ export class ContextView implements Component, Focusable {
         summary: tool.description,
         body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
         real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
-        open: false,
         target: { part: "tools", id: tool.name },
       });
     });
@@ -321,6 +316,7 @@ export class ContextView implements Component, Focusable {
       handle: string | undefined,
       body: string,
       pinned?: "user" | "agent" | undefined,
+      mark?: Mark | undefined,
     ): PromptNode => {
       const bytes = handle === undefined ? undefined : projection.get(handle);
       // The two views of one entry: what the person can read, and the bytes the
@@ -340,19 +336,25 @@ export class ContextView implements Component, Focusable {
         real: frozen === undefined
           ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
           : frozen.join("\n"),
-        open: false,
+        target: { part: kind, id },
         ...(pinned === undefined ? {} : { pinned }),
+        // A mark is a decision waiting for a collapse, and the row says which
+        // one and who made it (§4.1): a mark nobody can see reads as nothing
+        // having happened.
+        ...(mark === undefined
+          ? {}
+          : { marked: `${mark.action} · ${mark.author === "user" ? (data.person ?? "you") : "agent"}` }),
       };
     };
 
     for (const node of data.brain.atlas) {
-      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.pinned));
+      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.pinned, node.mark));
     }
     for (const entry of data.brain.ledger) {
-      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned));
+      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned, entry.mark));
     }
     for (const chat of data.brain.chat) {
-      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned));
+      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned, chat.mark));
     }
     // Pinned files come before pinned ephemera in the head (§5.1), each under
     // the handle the tree gave it (§5.4), so the person can see what is being
@@ -367,7 +369,6 @@ export class ContextView implements Component, Focusable {
         summary: `${name} · pinned by ${file.pinned === "user" ? (data.person ?? "the person") : "the agent"}${file.stale === true ? " · stale" : ""}`,
         body: `${name}\n\nread again at every collapse, so the head holds the file and not a quotation of a reading of it.`,
         real: "(read at the next collapse: a pinned file is the file, not a copy frozen here)",
-        open: false,
         pinned: file.pinned,
         target: { part: "files", id: file.path },
       } satisfies PromptNode);
@@ -412,7 +413,6 @@ export class ContextView implements Component, Focusable {
             label: "thinking",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
-            leaf: true,
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -428,7 +428,6 @@ export class ContextView implements Component, Focusable {
             label: item.name ?? "call",
             summary: oneLine(item.args ?? ""),
             body: item.args ?? "",
-            leaf: true,
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -446,7 +445,6 @@ export class ContextView implements Component, Focusable {
             label: "result",
             summary: oneLine(item.output ?? ""),
             body: item.output ?? "",
-            leaf: true,
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
             payload: item.payload,
@@ -469,7 +467,6 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
-          leaf: true,
           target: { part: "transcript", id: message.id },
         },
       });
@@ -495,8 +492,6 @@ export class ContextView implements Component, Focusable {
         summary: "what is true right now: mode, fullness, writes, staleness, tree, pins, marks",
         body: data.stateBlockText,
         real: data.stateBlockText,
-        open: false,
-        leaf: false,
       },
     ];
 
@@ -514,12 +509,10 @@ export class ContextView implements Component, Focusable {
    * rather than a page of prose.
    */
   toggleAll(): void {
-    // A leaf has nothing to close, so it is left alone: the person's message
-    // stays readable while the bulk of the prompt folds away around it.
-    const foldable = this.sections.flatMap((section) => section.nodes.filter((node) => node.leaf !== true));
-    if (foldable.length === 0) return;
-    const anyOpen = foldable.some((node) => this.isOpen(node));
-    for (const node of foldable) this.folded.set(node.id, !anyOpen);
+    const nodes = this.sections.flatMap((section) => section.nodes);
+    if (nodes.length === 0) return;
+    const anyOpen = nodes.some((node) => this.isOpen(node));
+    for (const node of nodes) this.folded.set(node.id, !anyOpen);
   }
 
   /** Pin or unpin the row under the cursor, the same act `p` performs. The palette calls this. */
@@ -527,6 +520,33 @@ export class ContextView implements Component, Focusable {
     const target = this.selectedNode()?.target;
     if (target === undefined || target.part === "tools") return;
     this.onTogglePin?.(target.part, target.id);
+  }
+
+  /**
+   * Mark the entry under the cursor for archive or for delete (§4.1). The same
+   * act the `a` and `d` keys perform, so the palette cannot drift from the key.
+   * A mark waits for the collapse unless `!` armed it, and arming is spent by
+   * the mark it armed.
+   */
+  markSelected(action: "archive" | "delete"): void {
+    const target = this.selectedNode()?.target;
+    if (target === undefined) return;
+    const now = this.nowArmed;
+    this.nowArmed = false;
+    if (action === "archive") this.onArchive?.(target.part, target.id, now);
+    else this.onDelete?.(target.part, target.id, now);
+  }
+
+  /** Withdraw the mark on the entry under the cursor (§4.1). The palette calls this. */
+  withdrawSelected(): void {
+    const target = this.selectedNode()?.target;
+    if (target !== undefined) this.onWithdrawMark?.(target.part, target.id);
+  }
+
+  /** Arm or disarm apply-now, and say which it is now: the next mark is spent either way. */
+  toggleApplyNow(): boolean {
+    this.nowArmed = !this.nowArmed;
+    return this.nowArmed;
   }
 
   /** One drawn row, by the part it belongs to and its id: what a pin or a mark acts on. */
@@ -611,8 +631,8 @@ export class ContextView implements Component, Focusable {
       return;
     }
 
-    if (data === "!") {
-      this.nowArmed = !this.nowArmed;
+    if (matchesKey(data, "!")) {
+      this.toggleApplyNow();
       return;
     }
     if (matchesKey(data, "c")) {
@@ -620,24 +640,19 @@ export class ContextView implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "p")) {
-      const node = this.selectedNode();
-      const target = node?.target;
-      if (target !== undefined && target.part !== "tools") {
-        this.onTogglePin?.(target.part, target.id);
-      }
+      this.pinSelected();
       return;
     }
     if (matchesKey(data, "d")) {
-      const node = this.selectedNode();
-      if (node !== undefined && node.target !== undefined) {
-        this.onDelete?.(node.target.part, node.target.id, this.nowArmed);
-        this.nowArmed = false;
-      }
+      this.markSelected("delete");
+      return;
+    }
+    if (matchesKey(data, "a")) {
+      this.markSelected("archive");
       return;
     }
     if (matchesKey(data, "u")) {
-      const node = this.selectedNode();
-      if (node !== undefined && node.target !== undefined) this.onWithdrawMark?.(node.target.part, node.target.id);
+      this.withdrawSelected();
       return;
     }
   }
@@ -699,36 +714,32 @@ export class ContextView implements Component, Focusable {
   }
 
   /**
-   * Are this entry's contents on screen? A leaf always is — nothing in it can
-   * close — and anything else follows its fold. This is what a click and
-   * `enter` act on, for one entry or for everything under a section heading.
+   * Are this entry's contents on screen? Nothing starts open, so this is the
+   * fold and only the fold. This is what a click and `enter` act on, for one
+   * entry or for everything under a section heading.
    */
   private isOpen(node: PromptNode): boolean {
-    if (node.leaf === true) return true;
-    return this.folded.get(node.id) ?? node.open === true;
+    return this.folded.get(node.id) === true;
   }
 
   /**
    * `enter` or a click, on whatever the cursor or the pointer landed on: an
    * entry folds or unfolds; a section heading opens or closes every entry under
-   * it, which is how a long head becomes one line again. A leaf has no fold, so
-   * nothing happens — the row says so rather than pretending.
+   * it, which is how a long head becomes one line again.
    */
   private toggleAt(cursor: number): void {
     const row = this.rows[cursor];
     if (row === undefined) return;
     if ("node" in row) {
-      if (row.node.leaf !== true) this.folded.set(row.node.id, !this.isOpen(row.node));
+      this.folded.set(row.node.id, !this.isOpen(row.node));
       return;
     }
     const section = this.sections[row.section];
-    if (section === undefined) return;
-    const foldable = section.nodes.filter((node) => node.leaf !== true);
-    if (foldable.length === 0) return;
+    if (section === undefined || section.nodes.length === 0) return;
     // The map holds "open", so closing everything is `false`: a heading with
     // anything open under it closes the lot; a heading fully closed opens it.
-    const anyOpen = foldable.some((node) => this.isOpen(node));
-    for (const node of foldable) this.folded.set(node.id, !anyOpen);
+    const anyOpen = section.nodes.some((node) => this.isOpen(node));
+    for (const node of section.nodes) this.folded.set(node.id, !anyOpen);
   }
 
   /** One entry: handle, name; then its body when it is open. */
@@ -739,7 +750,7 @@ export class ContextView implements Component, Focusable {
     const open = this.isOpen(node);
     const ink = KIND_INK[node.kind];
     const cursor = selected ? tokens.accent("▌") : " ";
-    const glyph = node.leaf === true ? "·" : open ? "▾" : "▸";
+    const glyph = open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));
     // One name column. The handle's prefix already says what kind of thing the
     // entry is, so the column holds its name: `read`, `bash`, a record's title.

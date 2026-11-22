@@ -32,7 +32,7 @@ import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
-import type { ArchivedItem, ArchivedRecord, EphemeralKind, IncomingItem } from "../domain/archive.js";
+import { withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { lexicalProjectPath } from "./workspace.js";
@@ -498,11 +498,24 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   };
 }
 
-/** The record as it will sit in the archive: the mark is the Brain's business, and it is about to be applied. */
-function withoutMark<T extends { mark?: unknown }>(record: T): Omit<T, "mark"> {
-  const copy: Record<string, unknown> = { ...record };
-  delete copy.mark;
-  return copy as Omit<T, "mark">;
+/**
+ * Re-freeze the head for the live generation, in place (§4.1).
+ *
+ * This is the one sanctioned exception to a snapshot's immutability. Applying
+ * an action now is a rebuild at that point, and the head is the projection of
+ * the Brain — so a Brain record that left the Brain has to leave the head in
+ * the same step, or the person would be shown a prompt the model no longer
+ * reads. Everything before the changed entry stays byte-identical, which is
+ * what the provider's cached prefix is paid for again from there; that is the
+ * cost §4.1 names, and it is why the UI says so before the key is pressed.
+ *
+ * Nothing else moves: the generation stays, the store stays, nothing is swept
+ * and no grace is spent, because this is not a collapse.
+ */
+export function rewriteHeadSnapshot(root: string, generation: string, brain: CartoBrain, person: string, now: number): void {
+  const fileTexts = new Map<string, string | undefined>();
+  for (const file of brain.files) fileTexts.set(file.path, readPinnedFile(root, file.path));
+  writeSnapshot(root, generation, projectContext(brain, fileTexts, person), now);
 }
 
 /** A Brain record a collapse is about to act on, and the archive row it becomes when it is archived. */

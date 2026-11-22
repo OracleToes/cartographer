@@ -39,6 +39,7 @@ import {
   generationPaths,
   newGenerationId,
   reconcileGenerations,
+  rewriteHeadSnapshot,
   type CollapseOptions,
   type CollapseReport,
 } from "./collapse.js";
@@ -262,6 +263,36 @@ export async function applyOmitNow(session: LiveSession, entryId: string): Promi
     },
     BACKGROUND_CONTEXT,
   );
+  return true;
+}
+
+/**
+ * Apply a Brain record's archive or delete mark now (§4.1).
+ *
+ * The mark's own application, done at once: an archived record leaves the
+ * Brain and enters the archive in one transaction, a deleted one leaves the
+ * Brain and goes nowhere. Then the head is re-frozen for the generation that is
+ * still open, because a Brain record is in the head and the model's view has to
+ * change with the Brain — that rebuild is the whole cost of applying now, and
+ * it is paid from the changed entry forward, never from the first byte.
+ *
+ * Nothing else moves. This is not a collapse: the store stays, the generation
+ * stays, nothing is swept and no grace is spent.
+ *
+ * Returns whether a record was there to act on; false when it was already gone,
+ * which is not an error — the person may have acted on it a moment ago.
+ */
+export async function applyRecordActionNow(
+  session: LiveSession,
+  brain: BrainStore,
+  root: string,
+  kind: "atlas" | "ledger" | "chat",
+  id: string,
+  action: "archive" | "delete",
+): Promise<boolean> {
+  const applied = await brain.applyRecordAction({ kind, id, action, generation: session.generation, now: Date.now() });
+  if (!applied.found) return false;
+  rewriteHeadSnapshot(root, session.generation, applied.brain, session.state.person, Date.now());
   return true;
 }
 
