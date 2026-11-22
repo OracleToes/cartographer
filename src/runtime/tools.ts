@@ -34,6 +34,11 @@ export interface ToolSession {
   collapseRequested: string | null;
   /** Set by a timed `sleep`: whole seconds to rest before the host starts the next run. Cleared when read. */
   sleepSeconds: number | undefined;
+  /**
+   * Set by `tree`: the turn has ended and the host starts the next one at once,
+   * so the agent reads the tree it just asked for (§6.3). Cleared when read.
+   */
+  treeReadNext?: boolean;
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
   /** The generation this context belongs to; recorded on context-sourced pins. */
@@ -395,7 +400,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
+        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
       parameters: obj({
         handle: HandleRef,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -436,7 +441,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Move the project tree in your state block to where your attention is. The arguments are optional and stick: an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is not returned here; the state block carries it, as `T1`, from your next request on, so set the anchor and read it there.",
+        "Move the project tree in your state block to where your attention is, and end the turn so you can read it: the block arrives as your next turn with the tree rendered at the anchor you just set. The arguments are optional and stick — an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is `T1` there. Nothing is returned here beyond the fact of the move.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str({ minLength: 1 })),
@@ -459,9 +464,21 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         const depth = args.depth ?? session.tree.depth;
         const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
-        // The tree itself is not the result (§6.3): the state block carries it,
-        // rendered at this anchor from the next request on.
-        return textOutput(`Anchored at ${block.root}, depth ${block.depth}. The tree is in your state block from the next request on.`);
+        // The tree itself is not the result (§6.3): it ends the turn, and the
+        // state block — rendered at this anchor — is the next turn. So the agent
+        // sees the tree it just asked for instead of acting on the last one.
+        // The host reads `treeReadNext` and starts that turn; the same shape as
+        // a rest, without the waiting.
+        session.treeReadNext = true;
+        return {
+          output: [
+            {
+              type: "text" as const,
+              text: `Anchored at ${block.root}, depth ${block.depth}. This turn ends here, and the tree is in your state block as your next turn.`,
+            },
+          ],
+          control: { terminate: true },
+        };
       },
     }),
 

@@ -70,6 +70,11 @@ export interface LiveSession {
   takeCollapseRequest(): string | null;
   /** Bring a timed sleep's wait forward (a host shutting down, or a delivered message). */
   endRest: (() => void) | undefined;
+  /**
+   * Take the `tree` tool's request to start the next turn at once, so the agent
+   * reads the tree it just set (§6.3). Cleared when read, like a collapse.
+   */
+  takeTreeReadRequest(): boolean;
 }
 
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
@@ -106,6 +111,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
     sleepSeconds: undefined,
+    treeReadNext: false,
     restEndedByPerson: false,
     readOnly: false,
     generation,
@@ -162,6 +168,11 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         state.collapseRequested = null;
         return reason;
       },
+      takeTreeReadRequest() {
+        const wanted = state.treeReadNext === true;
+        state.treeReadNext = false;
+        return wanted;
+      },
       endRest: undefined,
     };
   } catch (error) {
@@ -212,6 +223,18 @@ export async function restThenResume(session: LiveSession): Promise<{ status: st
   });
   session.endRest = undefined;
   if (session.state.restEndedByPerson) return undefined;
+  const submission = await resumeAfterRest(session);
+  return submission.wait(BACKGROUND_CONTEXT);
+}
+
+/**
+ * Start the next turn now, with the state block, because the agent asked to read
+ * the tree (§6.3). This is the same continuation a rest uses, without the wait:
+ * `tree` ends its turn so the very next thing the agent reads is the tree it
+ * just set, not the one it had before.
+ */
+export async function readTreeNext(session: LiveSession): Promise<{ status: string } | undefined> {
+  if (!session.takeTreeReadRequest()) return undefined;
   const submission = await resumeAfterRest(session);
   return submission.wait(BACKGROUND_CONTEXT);
 }

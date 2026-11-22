@@ -150,6 +150,11 @@ a file or on an ephemeral item — both of which the sections above make real.
 - `mark`, `pin` and `tree` descriptions say what the tool now does, and nothing
   about what it does not.
 
+**Status: done.** `tree` sets the anchor, asks to terminate, and leaves a request
+the host takes: both hosts (the TUI and headless) then start one more turn, and
+the block in it carries the tree at the new anchor. `mark` and `pin` say what
+they do now — apply-now by collapse, a pin on a file, a pin that is not yours.
+
 **Test.** A `tree` call ends the turn: the tool's result is terminal and the next
 turn is the state block.
 

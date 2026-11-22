@@ -46,6 +46,7 @@ import {
   interruptRun,
   openLiveSession,
   sessionTranscript,
+  readTreeNext,
   restThenResume,
   submitInput,
   type LiveSession,
@@ -1337,6 +1338,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
+    // `tree` ended the turn to read the tree it just set (§6.3): the person
+    // watches the next turn happen rather than waiting to speak first.
+    if (state.session.takeTreeReadRequest()) {
+      state.running = true;
+      headerState.running = true;
+      tui.requestRender();
+      try {
+        await readTreeNext(state.session);
+      } finally {
+        state.running = false;
+        headerState.running = false;
+        await rebuildTranscript();
+        tui.requestRender();
+      }
+    }
     // A timed sleep: the agent rests, then starts again on its own (§10).
     state.running = true;
     headerState.running = true;

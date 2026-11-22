@@ -10,7 +10,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { closeLiveSession, interruptRun, openLiveSession, submitInput } from "../dist/runtime/live-session.js";
+import { closeLiveSession, interruptRun, openLiveSession, readTreeNext, submitInput } from "../dist/runtime/live-session.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -131,7 +131,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
   }
 });
 
-test("the tree tool moves the anchor and the block renders it there", async () => {
+test("the tree tool ends its turn, and the host starts the next one at the new anchor", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
@@ -145,8 +145,18 @@ test("the tree tool moves the anchor and the block renders it there", async () =
     assert.equal(settled.status, "done");
     assert.equal(session.state.tree.anchor, join(realpathSync(root), "src"));
     assert.equal(session.state.tree.depth, 1);
-    // The anchor reads as the path inside the project, not as an absolute path.
+    // §6.3: the tree call ends the turn, and nothing runs on after it by
+    // itself — the agent does not act on the tree it had before it asked.
+    assert.equal(captured.length, 1, "the tree call ended the run");
+    assert.equal(session.state.treeReadNext, true, "and left the request for its next turn");
+
+    // The host takes that request, which is the next turn: the block the agent
+    // reads there is rendered at the anchor it just set.
+    const next = await readTreeNext(session);
+    assert.equal(next?.status, "done");
+    assert.equal(captured.length, 2, "the host started exactly one more turn");
     assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/);
+    assert.equal(session.state.treeReadNext, false, "and the request is spent");
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -172,6 +182,9 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
   assert.match(validTree.output[0].text, /^Anchored at .*, depth 1\./);
   assert.doesNotMatch(validTree.output[0].text, /\n/);
+  // §6.3: tree ends the turn, so the very next thing the agent reads is the
+  // block with the tree it asked for — not the tree it had before.
+  assert.equal(validTree.control?.terminate, true, "the tree call ends the turn");
   await cleanup();
 });
 
@@ -404,7 +417,8 @@ test("the tree is addressable: a directory handle anchors it, a file handle does
     const fileHandle = [...block.handles].find(([path]) => /\.(ts|md|json)$/.test(path))?.[1];
     assert.ok(dirHandle !== undefined && fileHandle !== undefined, "the tree handed out both kinds");
 
-    await byName.tree.execute({ handle: dirHandle }, api, {});
+    const moved = await byName.tree.execute({ handle: dirHandle }, api, {});
+    assert.equal(moved.control?.terminate, true, "and it ends the turn like any other tree call");
     assert.ok(session.tree.anchor.endsWith("src"), "the tree anchored where the directory is");
 
     await assert.rejects(byName.tree.execute({ handle: fileHandle }, api, {}), /not a directory/);
