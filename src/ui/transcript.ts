@@ -1,49 +1,63 @@
 /**
- * The transcript (MINI.md §8, §10a as re-scoped 2026-11-20): everything the
- * agent does is visible — its Chat words, its reasoning, its plain model
- * text, and its tool calls — alongside the person's own lines and quiet
- * status lines. Chat remains the only channel that addresses the person; the
- * rest renders as foldable cards, dimmer and in their own hues, never
- * mistaken for Chat.
+ * The transcript (§8): everything the agent does, in the order it did it.
  *
- * The cards are the working's window: while the model streams, a card shows
- * the live tail in a limited-height window (8 lines); when the run settles,
- * the landed assistant entry renders as the same cards, folded by default.
- * A card folds to its header — a click on it (or `ctrl+e` for all of them)
- * toggles it back. An open LANDED card emits every retained row into the
- * page — the one scrolling owner is the page (MINI.md §8); the wheel is the
- * page's everywhere, so scrolling up suspends the tail-follow and the person
- * scrolls the rest themselves. An open LIVE card keeps the bounded tail: a
- * growing stream must stay bounded or the page could not keep up with it.
- * Landed cards default folded; cards from the in-flight partial default open,
- * so streaming is always watchable and settle folds everything automatically.
+ * Posting's screen is one document you read top to bottom, with the working
+ * surface in front and everything else quiet around it. The transcript is that
+ * document:
  *
- * Order is the context's order, not the arrival order of the person's lines:
- * a line shows up where it actually landed in the context (the Brain, and the
- * entries inside it), which is what "live and honest" means for the window.
- * Submitted-but-unplaced lines render after everything, dimmed, labelled
- * queued; they move into place when the run reaches its boundary. State-block
- * markers never appear at all (they are not landed user entries).
+ * - A **person's line** is a block with a cyan spine, the word `you`, and the
+ *   text in body ink. It is never folded and never truncated.
+ * - An **agent Chat record** is the same block in the agent's green. Chat is the
+ *   only channel that addresses the person (§2.3), so it is the only thing on
+ *   screen at full weight other than the person's own words.
+ * - Everything else — reasoning, plain model text, tool calls and their results
+ *   — is a **card**, and a card has three states: one line folded, open, and
+ *   full. Open is a body with a window on it; full is the whole body and no
+ *   window. It is in its own hue and quieter than Chat. A card that is
+ *   streaming stays open on the last lines of what is arriving — a card you are
+ *   watching is the end of it — and the moment the round lands it folds to its
+ *   header.
+ * - **Status lines** are a faint middot and a sentence: quiet facts about the
+ *   session, never the agent's voice.
  *
- * Nothing here is data — the caller (the workspace) rebuilds the landed list
- * from the session and the Brain at every drain, and pushes the in-flight
- * partial separately with `setLive`. The view only renders, folds, and
- * flashes, and it can render itself as plain text for `/copy`.
+ * **A click on the header deepens a card**: folded to open, open to full. **A
+ * click on the body closes it.** A click on the `⋯ n lines …` rule shows
+ * everything the window was hiding, which is what that line is for. A click on
+ * a Chat block toggles its pin, `ctrl+e` folds every card in view, and the wheel
+ * belongs to the page — the one scrolling owner (§8) — so scrolling up simply
+ * stops following the tail.
+ *
+ * The three states are not decoration: open is a window on a body, so a very
+ * long result stays readable inline without pushing the transcript off the
+ * screen, and full is the same card with nothing held back.
+ *
+ * **Every row carries its handle** (§5.4): a person's line its `U`, a card the
+ * `X` of the item it renders, a tool row the `R` or `S` of the result it shows —
+ * the text a person quotes and a pin holds. The number is the Context view's
+ * number, because the two views are one prompt seen two ways.
+ *
+ * Order is the context's order, not arrival order: a person's line appears
+ * where it actually landed, and a line that is submitted but not yet placed sits
+ * at the end, dimmed and labelled, until the run reaches a boundary. Chat a
+ * collapse brought into the new context is placed by when it was said, so it
+ * sits at the head of this generation and the transcript before it stays under
+ * it rather than being replaced.
+ *
+ * Nothing here is data: the workspace rebuilds the landed list from the session
+ * and the Brain at every drain and pushes the in-flight partial separately.
  */
-import {
-  truncateToWidth,
-  visibleWidth,
-  wrapTextWithAnsi,
-  type Component,
-} from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
-import { pinBadgeText, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { pinHandle } from "./prompt-handles.js";
 
 type BlockRange = { id: string; start: number; end: number };
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
   id: string;
+  /** The prompt's ephemeral handle (§5.4): `X3` for one item, or the call's own handle on its result. */
+  handle?: string;
   /** True while fed from the live partial: defaults its fold open and is replaced when the round lands. */
   live?: boolean;
   /** Live tool status, from the live round's slot; absent when landed. */
@@ -57,23 +71,47 @@ export type CardEntry =
   | (CardBase & { kind: "tool"; name: string; args: string; /** Retained running output while the call executes; preferred as the card body when present. */ output?: string });
 
 export type TranscriptEntry =
-  | { kind: "person"; text: string }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
+  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
 
-const PREFIX_WIDTH = 7; // matches the person/agent blocks; gutter column starts here
-const LIVE_TAIL = 8; // lines an in-flight card shows; a settled open card emits every retained row
+/** Spine, gap, then a six-cell label column; the body starts here and every continuation lines up under it. */
+const LABEL_WIDTH = 6;
+const PREFIX_WIDTH = LABEL_WIDTH + 2;
+/** The body's left margin, added to every line after it is built. Text must fit inside it. */
+const INSET = 2;
+const SPINE = "▌";
 const GUTTER = "│ ";
+/** How many lines of a streaming card are on screen while it is arriving. */
+const LIVE_TAIL = 8;
+/**
+ * How much of an open card is on screen before it asks to be opened fully. A
+ * card that is open is read, not skimmed, so the window is generous; past it
+ * the card is a window on a body, and `full` is the page.
+ */
+const OPEN_WINDOW = 24;
 
+/** Where a card drew, and which of its rows is the header and which the hidden-lines rule. */
 interface CardRange {
   id: string;
   start: number;
   end: number;
+  /** The header row: a click here deepens the card. */
+  header: number;
+  /** The `⋯ n earlier lines` row, when the window is hiding some: a click here shows them. */
+  more?: number;
 }
+
+/**
+ * How much of a card is on screen. A fold is one line; openness is not a
+ * boolean, because a long result needs a page and a short one does not, and
+ * neither needs to throw the transcript's order away.
+ */
+type CardView = "folded" | "open" | "full";
 
 interface WrapMemo {
   width: number;
@@ -81,9 +119,14 @@ interface WrapMemo {
   lines: string[];
 }
 
-const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "think" : card.kind === "output" ? "text" : "tool");
-const kindColor = (card: CardEntry): ((text: string) => string) =>
+/**
+ * What a card is called. A tool card is its tool's name, because that is the
+ * name the person uses for it; the others say what kind of thing they are.
+ */
+const kindLabel = (card: CardEntry): string => (card.kind === "reasoning" ? "thinking" : card.kind === "output" ? "text" : card.name.length > 0 ? card.name : "tool");
+const kindTint = (card: CardEntry): ((text: string) => string) =>
   card.kind === "reasoning" ? tokens.reasoning : card.kind === "output" ? tokens.output : tokens.tool;
+
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 const firstLine = (text: string): string => {
   for (const line of text.split("\n")) {
@@ -172,9 +215,7 @@ export function formatToolArgs(args: unknown, name?: string): string {
     }
     return args;
   }
-  if (isRecord(args)) {
-    return formatObjectArgs(args);
-  }
+  if (isRecord(args)) return formatObjectArgs(args);
   return String(args);
 }
 
@@ -182,7 +223,9 @@ export class TranscriptView implements Component {
   private items: TranscriptEntry[] = [];
   private queued: Array<{ text: string; mode: string }> = [];
   private liveCards: CardEntry[] = [];
-  private expanded = new Map<string, boolean>();
+  private views = new Map<string, CardView>();
+  /** Cards whose hidden head the person asked to see, by clicking the rule that counted it. */
+  private revealed = new Set<string>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
   private blockRanges: BlockRange[] = [];
@@ -190,6 +233,8 @@ export class TranscriptView implements Component {
   /** Fired on a click of an agent block that names a Brain record: toggle the pin marker. */
   onTogglePin?: (recordId: string) => void;
   private cacheLines: string[] = [];
+
+  constructor(private readonly options: { project?: string } = {}) {}
 
   /** Replace the landed list (already in final order) and the queued list (rendered after it). */
   setEntries(entries: TranscriptEntry[], queued: Array<{ text: string; mode: string }> = []): void {
@@ -215,7 +260,8 @@ export class TranscriptView implements Component {
     this.items = [];
     this.queued = [];
     this.liveCards = [];
-    this.expanded.clear();
+    this.views.clear();
+    this.revealed.clear();
     this.wrapMemo.clear();
     this.cacheWidth = -1;
   }
@@ -228,12 +274,19 @@ export class TranscriptView implements Component {
     this.cacheWidth = -1;
   }
 
-  /** Expand every card, or collapse every card when any is open. */
+  /**
+   * Every card deepens one step, or every card folds when any of them is more
+   * than folded. One key for "show me the working", pressed again to put it
+   * back.
+   */
   toggleAllCards(): void {
     const ids = this.cardIds();
     if (ids.length === 0) return;
-    const anyOpen = ids.some((id) => this.isExpanded(this.cardById(id)!));
-    for (const id of ids) this.expanded.set(id, !anyOpen);
+    const anyOpen = ids.some((id) => {
+      const card = this.cardById(id);
+      return card !== undefined && this.viewOf(card) !== "folded";
+    });
+    for (const id of ids) this.views.set(id, anyOpen ? "folded" : "open");
     this.cacheWidth = -1;
   }
 
@@ -249,13 +302,19 @@ export class TranscriptView implements Component {
     return this.liveCards.find((card) => card.id === id);
   }
 
-  private isExpanded(card: CardEntry): boolean {
-    return this.expanded.get(card.id) ?? card.live === true;
+  /**
+   * The state a card is in. A card in flight opens by itself — you are watching
+   * it arrive — and a card that has landed starts folded, because the transcript
+   * is read for what it said, not for every argument it passed.
+   */
+  private viewOf(card: CardEntry): CardView {
+    return this.views.get(card.id) ?? (card.live === true ? "open" : "folded");
   }
 
   private pruneState(): void {
     const present = new Set(this.cardIds());
-    for (const id of [...this.expanded.keys()]) if (!present.has(id)) this.expanded.delete(id);
+    for (const id of [...this.views.keys()]) if (!present.has(id)) this.views.delete(id);
+    for (const id of [...this.revealed]) if (!present.has(id)) this.revealed.delete(id);
     for (const id of [...this.wrapMemo.keys()]) if (!present.has(id)) this.wrapMemo.delete(id);
   }
 
@@ -266,12 +325,12 @@ export class TranscriptView implements Component {
       if (entry.kind === "person") lines.push(`you: ${entry.text}`);
       else if (entry.kind === "agent") lines.push(`carto: ${entry.text}`);
       else if (entry.kind === "status") lines.push(`· ${entry.text}`);
-      else if (entry.kind === "reasoning") lines.push(`think: ${entry.text}`);
+      else if (entry.kind === "reasoning") lines.push(`thinking: ${entry.text}`);
       else if (entry.kind === "output") lines.push(`text: ${entry.text}`);
       else lines.push(`tool ${entry.name}`, ...(entry.output ?? entry.args).split("\n").map((line) => `  ${line}`));
     }
     for (const card of this.liveCards) {
-      if (card.kind === "reasoning") lines.push(`think: ${card.text}`);
+      if (card.kind === "reasoning") lines.push(`thinking: ${card.text}`);
       else if (card.kind === "output") lines.push(`text: ${card.text}`);
       else lines.push(`tool ${card.name}`, ...(card.output ?? card.args).split("\n").map((line) => `  ${line}`));
     }
@@ -279,14 +338,38 @@ export class TranscriptView implements Component {
     return lines.join("\n");
   }
 
-  private block(who: "you" | "carto", text: string, width: number, extra?: string): string[] {
-    const pad = " ".repeat(Math.max(0, PREFIX_WIDTH - visibleWidth(who)));
-    const prefix = tokens.bold(who === "you" ? tokens.accent(who) : tokens.agent(who)) + pad;
-    const body = Math.max(1, width - PREFIX_WIDTH);
-    const wrapped = wrapTextWithAnsi(text, body);
-    const indent = " ".repeat(PREFIX_WIDTH);
-    const marker = extra !== undefined && extra.length > 0 ? ` ${extra}` : "";
-    return wrapped.map((line, index) => (index === 0 ? prefix + line + marker : indent + line));
+  /**
+   * A voice block: a coloured spine, a label in its own hue, the text in body
+   * ink, and every continuation line aligned under the text column.
+   */
+  private block(who: "you" | "carto", text: string, width: number, handle?: string, extra?: string): string[] {
+    const tint = who === "you" ? tokens.person : tokens.agent;
+    const label = who === "you" ? "you" : "carto";
+    const marker = [
+      handle === undefined || handle.length === 0 ? "" : tokens.faint(handle),
+      extra === undefined || extra.length === 0 ? "" : tokens.pin(extra),
+    ]
+      .filter((part) => part.length > 0)
+      .map((part) => ` ${part}`)
+      .join("");
+    // The text is wrapped once, at the body's width, and a pin rides on the last
+    // line if there is room for it there. Wrapping it twice — narrower for the
+    // first line, wider for the rest — would move the column, which is worse.
+    const body = Math.max(1, width - INSET - PREFIX_WIDTH);
+    const lines = wrapTextWithAnsi(text, body).map((line, index) =>
+      index === 0
+        ? `${tint(SPINE)} ${tint(tokens.bold(label.padEnd(LABEL_WIDTH)))}${tokens.text(line)}`
+        : `${" ".repeat(PREFIX_WIDTH)}${tokens.text(line)}`,
+    );
+    if (marker.length > 0) {
+      const room = Math.max(0, body - visibleWidth(wrapTextWithAnsi(text, body).at(-1) ?? ""));
+      if (room >= visibleWidth(marker) + 1) {
+        lines[lines.length - 1] = `${lines[lines.length - 1]}${marker}`;
+      } else {
+        lines.push(`${" ".repeat(PREFIX_WIDTH)}${marker.trimStart()}`);
+      }
+    }
+    return lines;
   }
 
   private wrapBody(card: CardEntry, width: number): string[] {
@@ -307,58 +390,97 @@ export class TranscriptView implements Component {
     return lines;
   }
 
-  private cardHeader(card: CardEntry, width: number, expanded: boolean): string {
-    const glyph = expanded ? "▾" : "▸";
-    const isTool = card.kind === "tool";
-    const labelText = isTool && card.name ? `tool ${card.name}` : kindLabel(card);
-    const label = kindColor(card)(tokens.bold(labelText));
-    const pad = " ".repeat(Math.max(1, PREFIX_WIDTH - visibleWidth(labelText)));
+  private cardHeader(card: CardEntry, width: number, view: CardView): string {
+    const tint = kindTint(card);
+    // Three states, three glyphs: a caret opens, and a card already open says
+    // how it deepens rather than pretending to be closed.
+    const glyph = view === "folded" ? "▸" : view === "open" ? "▾" : "⇣";
+    const labelText = kindLabel(card);
+    const label = tint(tokens.bold(labelText));
+    const gap = " ".repeat(Math.max(1, 6 - labelText.length)); // the label column: thinking/text/tool …
+    // The handle rides the header like every other row in the prompt (§5.4):
+    // three cells of faint type, so the column lines up down the transcript.
+    const handle = card.handle === undefined ? "" : `${tokens.faint(card.handle.padEnd(3))} `;
+    const keyPrefix = `  ${handle}${tint(glyph)} ${label}`;
+
     const marks: string[] = [];
-    if (card.status !== undefined && expanded) marks.push(tokens.muted(`· ${card.status}`));
-    if (card.failed === true) marks.push(tokens.danger(tokens.bold("· failed")));
-    if (expanded) return `${label}${pad}${glyph}${marks.length > 0 ? ` ${marks.join(" ")}` : ""}`;
-    const summary = isTool
-      ? (card.args.trim().length > 0 ? `${card.name}(${oneLine(card.args)})` : card.name)
+    if (card.failed === true) marks.push(tokens.danger("· failed"));
+    else if (card.status === "running") marks.push(tokens.faint("· running"));
+    else if (card.status === "pending") marks.push(tokens.faint("· queued"));
+
+    if (view !== "folded") {
+      const tail = marks.length > 0 ? ` ${marks.join(" ")}` : "";
+      const depth = view === "full" ? ` ${tokens.faint("· full")}` : "";
+      return `${keyPrefix}${depth}${tail}`;
+    }
+    const summary = card.kind === "tool"
+      ? (card.args.trim().length > 0 ? oneLine(card.args) : "")
       : firstLine(card.text);
-    const preview = truncateToWidth(summary.length === 0 ? "…" : summary, Math.max(1, width - PREFIX_WIDTH - 2), "…");
-    if (card.status !== undefined) marks.push(tokens.muted(`· ${card.status}`));
-    return `${label}${pad}${glyph}${tokens.muted(" ")}${tokens.muted(preview)}${marks.length > 0 ? ` ${marks.join(" ")}` : ""}`;
+    const room = Math.max(1, width - visibleWidth(keyPrefix) - gap.length - 2);
+    const preview = truncateToWidth(summary.length === 0 ? "…" : summary, room, "…");
+    const tail = marks.length > 0 ? ` ${marks.join(" ")}` : "";
+    return `${keyPrefix}${gap}${tokens.muted(preview)}${tail}`;
   }
 
-  private renderCard(card: CardEntry, width: number): string[] {
-    const expanded = this.isExpanded(card);
-    const lines = [this.cardHeader(card, width, expanded)];
-    if (!expanded) return lines;
+  /**
+   * One card, and where each of its rows landed. A card in flight keeps a
+   * window on the end of what is arriving; the rule that counts the hidden
+   * lines is the control that shows them, so the count is never a dead end.
+   */
+  private renderCard(card: CardEntry, width: number, start: number): { lines: string[]; range: CardRange } {
+    const view = this.viewOf(card);
+    const lines = [this.cardHeader(card, width, view)];
+    const range: CardRange = { id: card.id, start, end: start, header: start };
+    if (view === "folded") {
+      range.end = start + 1;
+      return { lines, range };
+    }
     const body = this.wrapBody(card, width);
     const total = body.length;
-    const indent = " ".repeat(PREFIX_WIDTH);
-    if (card.live === true && total > LIVE_TAIL) {
-      lines.push(`${indent}${tokens.muted(GUTTER)}${tokens.muted(`⋯ ${total - LIVE_TAIL} earlier lines — bounded while it streams`)}`);
-      for (const line of body.slice(total - LIVE_TAIL)) {
-        lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
-      }
-      return lines;
+    const indent = " ".repeat(PREFIX_WIDTH - 2);
+    const gutter = tokens.rule(GUTTER);
+    const paint = (line: string): string =>
+      card.kind === "reasoning" ? tokens.reasoning(line) : card.kind === "output" ? tokens.output(line) : tokens.text(line);
+    // A card in flight keeps a window on the end of what is arriving — that is
+    // where the words are. A card that has landed is read from its start, and
+    // past the open window it keeps a head and asks to be opened fully. Either
+    // way the rule that counts the hidden lines is the control that shows them,
+    // and `full` is the page with no window on it at all.
+    const shown = card.live === true ? LIVE_TAIL : OPEN_WINDOW;
+    const windowed = view !== "full" && !this.revealed.has(card.id) && total > shown;
+    if (windowed) {
+      const hidden = total - shown;
+      range.more = lines.length + start;
+      lines.push(
+        `${indent}${gutter}${tokens.faint(`⋯ ${hidden} line${hidden === 1 ? "" : "s"} ${card.live === true ? "earlier" : "more"} · click to show`)}`,
+      );
+      const kept = card.live === true ? body.slice(total - shown) : body.slice(0, shown);
+      for (const line of kept) lines.push(`${indent}${gutter}${paint(line)}`);
+    } else {
+      for (const line of body) lines.push(`${indent}${gutter}${paint(line)}`);
     }
-    for (const line of body) {
-      lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
-    }
-    return lines;
+    range.end = start + lines.length;
+    return { lines, range };
   }
 
   private rangeAt(y: number): CardRange | undefined {
     return this.ranges.find((range) => y >= range.start && y < range.end);
   }
 
-  /** A click folds or unfolds a card; a click on an agent block toggles its record's pin; the wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
+  /**
+   * The click map: the header deepens a card (folded → open → full), the body
+   * closes it, the `⋯ n earlier lines` rule shows what it was hiding, and a
+   * click on a Chat block toggles its pin. The wheel stays the page's.
+   */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
     const cardRange = this.rangeAt(event.y);
     const block = this.blockRanges.find((range) => event.y >= range.start && event.y < range.end);
     if (cardRange === undefined && block === undefined) return undefined;
 
-    if (event.type === "press") {
-      return { handled: true };
-    }
+    if (event.type === "press") return { handled: true };
     if (event.type === "click") {
+      // A Chat block over a card: Chat is what the person is reading, so it
+      // keeps the click.
       if (block !== undefined) {
         this.onTogglePin?.(block.id);
         this.cacheWidth = -1;
@@ -367,11 +489,38 @@ export class TranscriptView implements Component {
       if (cardRange === undefined) return undefined;
       const card = this.cardById(cardRange.id);
       if (card === undefined) return undefined;
-      this.expanded.set(card.id, !this.isExpanded(card));
+      if (cardRange.more !== undefined && event.y === cardRange.more) {
+        this.revealed.add(card.id);
+      } else if (event.y === cardRange.header) {
+        const view = this.viewOf(card);
+        this.views.set(card.id, view === "folded" ? "open" : view === "open" ? "full" : "open");
+      } else {
+        this.views.set(card.id, "folded");
+      }
       this.cacheWidth = -1;
       return { handled: true, render: true };
     }
     return undefined;
+  }
+
+  /** The first thing a person sees: what this is, and the three keys that get them around. */
+  private emptyState(width: number): string[] {
+    const project = this.options.project ?? "this project";
+    const rule = tokens.faint("─".repeat(Math.max(1, Math.min(width - 4, 46))));
+    return [
+      "",
+      `  ${tokens.bold(tokens.accent("carto"))} ${tokens.faint("·")} ${tokens.text(project)}`,
+      `  ${rule}`,
+      "",
+      `  ${tokens.muted("Your working attention on this project. The Brain holds what it")}`,
+      `  ${tokens.muted("understands; the context is rebuilt from it at every collapse.")}`,
+      "",
+      `  ${tokens.muted("Type to work. The agent speaks through")} ${tokens.agent("chat")}${tokens.muted("; its reasoning")}`,
+      `  ${tokens.muted("and tool calls appear here as cards you can fold open.")}`,
+      "",
+      `  ${tokens.accent("^p")} ${tokens.faint("palette")}   ${tokens.accent("^o")} ${tokens.faint("jump")}   ${tokens.accent("/help")} ${tokens.faint("commands")}`,
+      "",
+    ];
   }
 
   render(width: number): string[] {
@@ -381,16 +530,9 @@ export class TranscriptView implements Component {
     this.ranges = [];
     this.blockRanges = [];
     if (total === 0) {
-      lines.push("");
-      lines.push(`  ${tokens.bold(tokens.accent("carto"))} ${tokens.muted("— your pair on this project")}`);
-      lines.push(`  ${tokens.muted("Type to work. The agent speaks through chat;")}`);
-      lines.push(`  ${tokens.muted("its reasoning and tool calls render as foldable cards.")}`);
-      lines.push("");
-      lines.push(`  ${tokens.muted("^o jump · ^p palette · ⇧tab send mode · ^x stop · ^e fold cards")}`);
-      lines.push(`  ${tokens.muted("/help lists the commands")}`);
-      this.cacheLines = lines;
+      this.cacheLines = this.inset(this.emptyState(width), width);
       this.cacheWidth = width;
-      return lines;
+      return this.cacheLines;
     }
     let first = true;
     const gap = () => {
@@ -400,34 +542,54 @@ export class TranscriptView implements Component {
     const pushCard = (card: CardEntry) => {
       gap();
       const start = lines.length;
-      const rendered = this.renderCard(card, width);
-      lines.push(...rendered);
-      this.ranges.push({ id: card.id, start, end: lines.length });
+      const drawn = this.renderCard(card, width, start);
+      lines.push(...drawn.lines);
+      this.ranges.push(drawn.range);
     };
     for (const entry of this.items) {
-      if (isCard(entry)) pushCard(entry);
-      else {
-        gap();
-        if (entry.kind === "person") {
-          lines.push(...this.block("you", entry.text, width));
-        } else if (entry.kind === "agent") {
-          const start = lines.length;
-          const pinStr = entry.pinned !== undefined && entry.pinned !== null ? pinBadgeText(entry.pinned, "pin") : "";
-          lines.push(...this.block("carto", entry.text, width, pinStr.length > 0 ? pinStr : undefined));
-          if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
-        } else {
-          lines.push(...wrapTextWithAnsi(entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text), width));
-        }
+      if (isCard(entry)) {
+        pushCard(entry);
+        continue;
+      }
+      gap();
+      if (entry.kind === "person") {
+        lines.push(...this.block("you", entry.text, width, entry.handle));
+      } else if (entry.kind === "agent") {
+        const start = lines.length;
+        // A pin is an entry in its own right (§5.4): it carries the `P` handle
+        // named by the handle of what it marks, and says who placed it, so the
+        // row reads as one entry pinned rather than one entry with a badge.
+        const pin =
+          entry.pinned === undefined
+            ? ""
+            : `${pinHandle(entry.handle ?? "?")} ${entry.pinned === "user" ? "you" : "agent"}`;
+        lines.push(...this.block("carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
+        if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
+      } else {
+        const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);
+        for (const line of wrapTextWithAnsi(`${text}`, width - 3)) lines.push(`  ${line}`);
       }
     }
     for (const card of this.liveCards) pushCard(card);
     for (const item of this.queued) {
       gap();
-      lines.push(...wrapTextWithAnsi(tokens.muted(tokens.italic(`you ⏛ ${item.text} (${item.mode === "after run" ? "after the run" : "queued"} — lands at the boundary)`)), width));
+      const label = item.mode === "after run" ? "sends after the run" : item.mode === "now" ? "sends now" : "steers at the next boundary";
+      const head = `${tokens.faint("⏸")} ${tokens.person(tokens.bold("you".padEnd(LABEL_WIDTH)))}`;
+      const room = Math.max(1, width - INSET - visibleWidth(head));
+      lines.push(`  ${head}${tokens.faint(tokens.italic(truncateToWidth(item.text, room, "…")))}`);
+      lines.push(`  ${" ".repeat(PREFIX_WIDTH)}${tokens.faint(`· ${label}`)}`);
     }
-    lines.push("");
     this.cacheWidth = width;
-    this.cacheLines = lines;
-    return lines;
+    this.cacheLines = this.inset(lines, width);
+    return this.cacheLines;
+  }
+
+  /**
+   * The body breathes: a left margin on every line, and the page's own colour
+   * run to the pane's right edge, so the transcript reads as a surface rather
+   * than as glyphs floating on whatever the terminal had.
+   */
+  private inset(lines: string[], width: number): string[] {
+    return lines.map((line) => canvasLine(line.length === 0 ? "" : `  ${line}`, width));
   }
 }

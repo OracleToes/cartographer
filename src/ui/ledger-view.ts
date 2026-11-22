@@ -1,5 +1,5 @@
 /**
- * The Ledger view (MINI.md §2, §6): goals, notes, questions, instructions,
+ * The Ledger view (§2): goals, notes, questions, instructions,
  * and progress through problems.
  *
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,
@@ -246,17 +246,24 @@ export class LedgerView implements Component, Focusable {
     const lines: string[] = [];
     const filtered = this.getFilteredEntries();
 
-    // Top Header Banner
-    const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
-    const openCount = this.entries.filter((e) => e.status === "open").length;
-    const headerLeft = ` ${tokens.bold(tokens.accent("LEDGER"))} ${tokens.muted("·")} ${filtered.length} entries (${openCount} open) ${tokens.warn(filterInfo)}`;
-    const headerRight = `${tokens.muted("h/l panes · p pin · / filter · esc chat ")}`;
-    const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
-    lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
+    // One header row, Posting's shape: the book's name, its figure, and what the
+    // keys do here. The book itself starts one quiet line below it.
+    const name = tokens.bold(tokens.ledger("LEDGER"));
+    const figure = `${tokens.text(String(filtered.length))} ${tokens.faint("entries")}`;
+    const filter = this.filtering
+      ? ` ${tokens.accent(`/${this.filterText}█`)}`
+      : this.filterText
+        ? ` ${tokens.accent(`/${this.filterText}`)}`
+        : "";
+    const stale = "";
+    const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
+    const right = `${tokens.faint("j/k move · enter open · p pin · / filter ")}`;
+    const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+    lines.push(tokens.panel(padLine(left + " ".repeat(gap) + right, width)));
     lines.push(padLine("", width));
 
     if (filtered.length === 0) {
-      lines.push(`  ${tokens.muted("(The Ledger is empty. Call the ledger tool to track goals, notes, and questions.)")}`);
+      lines.push(`  ${tokens.muted("The Ledger is empty. The agent opens goals, notes and questions with the ledger tool.")}`);
       return lines;
     }
 

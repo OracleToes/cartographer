@@ -1,8 +1,8 @@
 /**
- * The frozen projection's per-generation snapshot files (docs/intent.md §34):
+ * The frozen projection's per-generation snapshot files (§5.6):
  * `<generation>.projection.md` plus `<generation>.projection.json` under
  * `.brain/context/`. Written once, atomically; immutable for the life of
- * the generation; sealed read-only at collapse; deleted at purge. A crash
+ * the generation; deleted whole when the generation ends. A crash
  * reopens the identical bytes.
  */
 import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";

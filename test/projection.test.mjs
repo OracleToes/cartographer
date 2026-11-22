@@ -41,7 +41,7 @@ test("a link to a deleted node renders as (gone), never as a raw id", () => {
 
 test("ledger answers render; empty brain renders the placeholder", () => {
   let brain = emptyBrain();
-  assert.equal(projectContext(brain).text, "(the Brain is empty)");
+  assert.match(projectContext(brain).text, /^\(the Brain is empty/);
   brain = applyWrite(brain, { kind: "ledger.upsert", entry: { id: "l1", kind: "goal", text: "finish R2", status: "answered", answer: { text: "projection lands" }, createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:05:00.000Z") } }, at("2026-11-16T04:05:00.000Z"));
   const projection = projectContext(brain);
   assert.match(projection.text, /L1 \[goal · answered\] finish R2 — 2026-11-16T04:05:00.000Z/);
@@ -53,7 +53,7 @@ test("pins render inline on their entries", () => {
   brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "n1", title: "The collapse boundary", text: "Collapse is person-triggered or agent-triggered", links: [], attachments: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
   brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: "agent" }, at("2026-11-16T04:00:00.000Z"));
   const projection = projectContext(brain);
-  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned:agent\]/);
+  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned by you\]/);
   assert.doesNotMatch(projection.text, /Pins/);
 });
 
@@ -67,4 +67,32 @@ test("the projection omits nothing: all 50 ledger entries render in the frozen t
   for (let index = 0; index < 50; index += 1) {
     assert.ok(frozen.includes(`note ${index} `), `entry ${index} must render; no omission list exists`);
   }
+});
+
+test("a pinned ephemeral item is in the head after Chat, under its own handle, with no raw id", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(
+    brain,
+    { kind: "ephemeral.pin", item: { id: "gen:7:t0", text: "keep this thought", kind: "reasoning", createdAt: at("2026-01-01T00:00:00Z"), pinned: "user" } },
+    at("2026-01-01T00:00:01Z"),
+  );
+  brain = applyWrite(brain, { kind: "chat.record", record: timed("c1", "user", "said this", "2025-12-31T00:00:00Z") }, at("2026-01-01T00:00:02Z"));
+
+  const projection = projectContext(brain, new Map(), "OracleToes");
+  const text = projection.text;
+  assert.match(text, /Pinned — what OracleToes kept in front of you/);
+  assert.match(text, /X1 \[reasoning\] keep this thought/);
+  assert.ok(text.indexOf("said this") < text.indexOf("keep this thought"), "Chat comes before what was pinned after it");
+  assert.equal(text.includes("gen:7:t0"), false, "the storage id never reaches the model");
+  assert.ok(projection.sizes.ephemera > 0, "the part reports its size, so the person can see what it costs");
+});
+
+test("an unpinned partial is not in the head: a restored item waits for its pin", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(
+    brain,
+    { kind: "ephemeral.pin", item: { id: "gen:7:t0", text: "restored but unpinned", kind: "reasoning", createdAt: at("2026-01-01T00:00:00Z") } },
+    at("2026-01-01T00:00:01Z"),
+  );
+  assert.equal(projectContext(brain).text.includes("restored but unpinned"), false);
 });

@@ -6,6 +6,10 @@ It works in small, atomic steps, and it treats its own working context as an
 explicit object it maintains: what the context holds can be written, pinned,
 swept, rebuilt, and deleted for good.
 
+It is lightweight, and what it shows the person is information rather than
+chrome. What makes it different is that the context is maintained as a real
+object rather than left to accumulate.
+
 The Brain persists across restarts and collapses. The live context does not.
 
 ## 1. Scope
@@ -15,8 +19,29 @@ Carto has three defining properties:
 1. **Context gardening.** A full suite of context engineering and surgery over
    the agent's own working context.
 2. **Ephemeral context around a persistent Brain.** The working context is
-   disposable; the Brain is the memory.
+   disposable; the Brain is what the agent brings forward.
 3. **Scoped tasking.** The agent works in small, atomic steps.
+
+The governing idea is that a model only needs what it needs to act now. Carto
+curates the context to be exactly that, which is why it is short and why what is
+in it carries so much weight.
+
+**Permissive first, and the prompt is trusted.** Carto places no limit on the
+agent that the person has not defined: no turn limit, no maximum length on a name
+or an entry, no read limit on a file, and no defensive gate that exists because a
+limit seemed prudent. A limit the person has not asked for slows the agent down
+and teaches it to work around the tool instead of using it.
+
+Where behaviour matters, the answer is the prompt, not a mechanism. The agent is
+told what to do and trusted to do it. Anything that could go wrong is corrected by
+saying so, not by building something that stops it.
+
+The one exception is a capability the person turns off deliberately (§6.1). That
+is not a limit on the agent; it is the person deciding what it has.
+
+Where a bound is part of how a tool works, it is said so in that tool's own
+description and nowhere else. This rule governs every place a limit could be
+added later: it is not there unless the person put it there.
 
 Carto is built on the `pi` packages and adds only what they do not provide
 (§12).
@@ -24,7 +49,8 @@ Carto is built on the `pi` packages and adds only what they do not provide
 ## 2. The Brain
 
 The Brain is the persistent record. It survives restarts and collapses, and a
-live context can always be rebuilt from it alone.
+live context can always be rebuilt from it alone — after a crash as well as at a
+collapse, and a crash during a collapse cannot lose Brain state.
 
 It holds three kinds of record: **Atlas**, **Ledger**, and **Chat**.
 
@@ -46,7 +72,16 @@ the Atlas contains.
 The Atlas is not scored. Attention is a consequence of a small context, not a
 value the system computes.
 
+The Brain is the agent's attention, not its history. Atlas and Ledger tell it
+what it is focused on and what it is working on, and it follows them rather than
+re-deriving what it already decided. Nothing in the Brain is kept because it
+happened; it is kept because it is still what the agent is acting on.
+
 The Atlas tools do not validate connectivity.
+
+What is in the Brain is what is in focus. The agent decides when a record has
+stopped earning its place and deletes it, or moves it to a more permanent Atlas
+entry. Nothing removes a record on the agent's behalf, and nothing scores it.
 
 ### 2.2 Ledger
 
@@ -81,8 +116,8 @@ Deleting a Brain record is one step and has no undo. A deleted record is not
 archived and does not become an archive entry. Marking a record for archive is a
 different action, and the two are never confused (§3.3).
 
-No schema length limit is placed on a Brain entry. The prompt asks the agent to
-size its own entries; the runtime enforces no character budget and exposes none.
+The prompt asks the agent to size its own entries. Under §1 there is no schema
+length limit to size them against.
 
 ## 3. Context
 
@@ -98,8 +133,13 @@ kept.
 An ephemeral item survives only if it is pinned on the live context layer.
 Everything else is swept to the archive at collapse.
 
-Brain records are not ephemeral. They stay in the Brain until they are deleted
-or marked for archive.
+Brain records are not ephemeral. They stay in the Brain until they are deleted,
+or until they are marked for archive and a collapse moves them out (§4.1).
+
+**Only Chat is a conversation.** The person's message is already in the
+transcript, so the prefill does not repeat it. The agent's Chat reaches the model
+as the `chat` tool's result. The prefill carries structure, handles, and state,
+and the transcript is the dialogue.
 
 ### 3.2 Pins
 
@@ -129,15 +169,22 @@ everything a collapse sweeps, and nothing else.
   for good at the following collapse.
 - A pinned item in the archive remains until it is unpinned or restored.
 
-Restoring puts an entry back into the live context as its original type. It does
-not also pin; a pin is a separate action either party can take. A restored
-attachment that no longer resolves is marked stale.
+Restoring puts an entry back where it came from, as its original type: a Brain
+record returns to the Brain and so to the head, and an ephemeral item returns to
+the live context. It does not also pin; a pin is a separate action either party
+can take. A restored attachment that no longer resolves is marked stale.
 
 Restoring is a person action, and the person's alone. The agent does not know
 the archive exists. Anything swept is, to the agent, gone forever: it has no
 handle for it, no way to address it, and no belief that it is retrievable. The
 archive is invisible to the agent in every view, every listing, and every result
 it can reach.
+
+**The person reaches the archive by a toggle.** It swaps their view between the
+context layer and the archive layer, and the person then works the UI as they
+would anywhere else: pin, unpin, and restore from there. There is no separate
+recovery screen and no mode of its own. The archive is the same UI over a
+different layer, which is why a pin means the same thing on both (§3.2).
 
 ### 3.4 Deleted text is really gone
 
@@ -181,19 +228,33 @@ A collapse:
    archive into the archive;
 3. deletes every Brain record marked for delete, and every unpinned archive item
    past its grace period;
-4. places all Brain records into the new context's head (§5.1), in order,
-   clustered by type, and returns every entry marked for restore to its place in
-   the context;
+4. places every record the Brain holds into the new context's head (§5.1), in
+   order, clustered by type, and returns every entry marked for restore to its
+   place in the context;
 5. places pinned ephemera and pinned files into the head, after Chat.
 
 Brain records not marked for archive are never moved. No Brain record is deleted
 by a collapse; only a delete deletes.
 
-The system prompt carries one standing line: Context may collapse at any time, 
+The system prompt carries one standing line: the context may collapse at any time,
 and a collapse rebuilds the agent's context from the Brain.
 
-The agent is expected to keep its brain up-to-date, because it does not want to
-forget.
+A collapse rebuilds the context, and everything unrecorded is gone.
+
+**The agent collapses when it is appropriate**, and what makes it appropriate is
+that it has finished a piece of work and put what it needs into its Brain. A
+short run ends that way: the work is done, the Brain is current, and a collapse
+carries the result forward cleanly.
+
+A long piece of work collapses *before* it starts. If a problem needs a lot known
+about the project, the agent pins what it needs to know, arranges its context so
+nothing in it is a distraction, collapses, and then begins — so it works inside a
+context built for the problem rather than one it accumulated on the way there.
+
+Nothing enforces this, and the spec has no trigger, threshold, or counter for it.
+It is a thing the prompt asks for and the person shares: either side may collapse
+at any moment, and knowing that is what keeps the agent's Brain worth rebuilding
+from.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -208,6 +269,12 @@ changed or withdrawn until then.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
   for now and returns it to the context at the next collapse.
 
+The person and the agent can both create, edit, delete, reorder, and mark records
+of every type the Brain knows, from the workspace as much as from a tool. A record
+the person made is a record of its type, in every respect: the agent does not know
+the difference, and does not know the person made, deleted, or moved anything. To
+the agent, the Brain is simply itself.
+
 Each action can also be **applied now**. Applying an action now changes the
 context immediately, which forces a rebuild at that point: the prefill runs
 again from the changed entry through the tail. The head is untouched, so
@@ -219,6 +286,17 @@ the person may withdraw a mark the agent placed.
 A deletion happens for real only at a collapse. Applying a delete now removes
 the entry from the context, but the store it was committed to still holds it
 (§3.4), so the text is gone from the model's view before it is gone from disk.
+
+**Archiving a Brain record moves it out of the Brain.** The record is not
+duplicated and does not stay behind carrying a mark: it is a Brain record while
+it is in the Brain and an archived record while it is in the archive. The Brain
+holds no archived state, and a record kind has no field to hold one. When it is
+restored it is a Brain record again, of its original type.
+
+That is what makes the archive a destination rather than a flag. It also keeps
+the Brain's promise intact: everything in it is live, and a live context can be
+rebuilt from the Brain alone (§2) without any of it being hidden from the rebuild
+by a mark.
 
 ## 5. The prefill
 
@@ -256,6 +334,9 @@ is the live context in the order it actually occurred, one entry at a time:
 - tool results,
 - the person's messages.
 
+A Brain record written since the last collapse appears here, at the point it was
+written, as `E`. It reaches the head at the next collapse, not before (§5.6).
+
 Body entries are never gathered into clusters, never sorted by kind, and never
 listed by type. They appear where they actually are.
 
@@ -272,8 +353,10 @@ dashboard about its Brain and the project, and it reports:
   by handle.
 - **New and stale entries** — Brain records written since the last collapse, and
   read results whose file changed since the read, named by handle (§5.5).
-- **The project tree** — as described in §6.2.
+- **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
+- **Marks** — every entry carrying a mark, with its action and its author (§4.1).
+- **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
 
 A long pending list is the signal to collapse.
 
@@ -341,6 +424,18 @@ not give it a second name.
 deserves its own letter because it is quoted and discussed far more than it is
 cited.
 
+**`X`, `U`, `R`, and `S` are numbered in prompt order, and the transcript and
+the Context view use one numbering.** A Brain record's handle is the Brain's, and
+survives a collapse with the record. An ephemeral item has no record to hold one,
+so its number comes from where it sits: `X3` is the third ephemeral item in the
+prompt in both views, because a handle is only useful if it names the same thing
+wherever the person reads it.
+
+A tool row in the transcript is one row — the call's arguments and its result —
+so it wears the result's handle, `R` or `S`, which is the text a person quotes
+and the item a pin holds (§5.5). The call keeps its own `X` handle in the Context
+view, where both are drawn.
+
 ### 5.5 Read results and staleness
 
 A `read` produces a tool result in the body, and that result carries a handle
@@ -352,6 +447,13 @@ path.
 
 **A pinned read result goes stale when its file changes.** The state block says
 so, by handle, from the moment the change is seen.
+
+**An Atlas node attached to a file goes stale the same way.** When a file under
+an attachment changes, the node is reported stale in the state block and is
+written back as stale at the next collapse, stored on the entry like a pin.
+Staleness is a gentle signal: it blocks nothing, deletes nothing, and asks for
+nothing. Its whole effect is that the agent is told its note about that file may
+no longer be true.
 
 **At collapse, a pinned read result is made true.** The file is read again, and
 the result becomes what the file now holds. This is what a pin means here: the
@@ -393,7 +495,7 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 ## 6. Project files
 
-Carto inspects and edits paths that resolve inside the selected project root. A
+Carto reads and edits paths that resolve inside the selected project root. A
 symlink that resolves outside the root is rejected.
 
 The agent's ideal edit is small, atomic, and scoped: one function, one value
@@ -403,14 +505,45 @@ it needs the report it wrote and the current state of the project.
 
 Atomic here is an intention (§7). Nothing refuses a large change, and nothing
 counts lines. What keeps changes small is the prompt and the agent's willingness
-to stop.
+to stop. That is deliberate: a mechanism that refused large changes would be the
+prompt not being trusted (§1).
 
-The edit gate is on the capability, not the change. Either the edit tool is
-offered or it is not. When it is not, the agent can still read, reason, and use
-`bash`, and it is instructed not to make edits. There is no propose, approve,
-or apply queue.
+### 6.1 Read only mode and edit mode
 
-### 6.1 `.brain` is outside the agent
+Carto is always in one of two modes. A toggle in the workspace switches between
+them. The person sets it; nothing else does.
+
+- **Edit mode** is the default. The harness enforces nothing, and the agent edits
+  as it works.
+- **Read only mode** means the agent makes no destructive change to the project.
+  The harness enforces this at `create` and `edit`, and nowhere else.
+
+**The tools stay offered in both modes.** Withholding them would mean
+re-defining the schema between collapses, and the head is frozen (§5.1, §5.6):
+the schema changing is a head byte changing, which forces the whole prefill to be
+paid again. So `create` and `edit` remain in the tool set, and in read only mode
+they return an error telling the agent not to make edits or any other destructive
+change while the mode is on.
+
+**The mode is stated in the state block**, as `[READ ONLY MODE]` or
+`[EDIT MODE]`. The state block is the tail, which is rebuilt every request
+anyway, so the mode costs nothing to report and nothing is broken by it changing.
+The system prompt defines what the two modes mean, once, because no tool
+description can say what the mode is rather than what one tool does.
+
+**`bash` is still offered in read only mode, and still trusted.** The mode is not
+a sandbox. The shell can write, replace, and delete files, and the person knows
+it and relies on the agent not to use it that way. Read only mode takes away the
+agent's stated intent to change the project, not its hands.
+
+There is no propose, approve, or apply queue, in either mode. A proposal is not a
+capability, and the gate is on the capability.
+
+The gate is on what each tool is *for*, never on whether a particular change
+looks destructive. There is no definition of a destructive change to test
+against, because nothing tests for one.
+
+### 6.2 `.brain` is outside the agent
 
 The agent does not read or write `.brain` directly. This scopes its capability;
 it is not a permission gate. Direct access would fill the agent's context with
@@ -419,16 +552,20 @@ duplicated or stale copies of its own state.
 `.brain` never renders. It is skipped in every listing, excluded from aggregated
 sizes, and rejected as a tree anchor at any depth.
 
-### 6.2 The project tree
+### 6.3 The project tree
 
 The state block carries the project tree, rendered in the block itself. It shows
 files, directories, and their sizes, and marks which files an Atlas node is
 attached to, so the tree is a map of what the agent understands rather than a
 listing.
 
-The tree is anchored at the project root by default. The `tree` tool changes the
-anchor and nothing else: it does not return the tree, because the tree is already
-in the state block, which every request carries.
+The tree is anchored at the project root by default, at a depth of two. The `tree`
+tool sets the anchor and the depth, both optional: the anchor defaults to the
+project root, and the depth defaults to two. A depth of one is the anchor and its
+immediate contents; anything below one renders the same as one, because there is
+no useful rendering of an anchor with nothing under it. The tool does not return the tree:
+it is already in the state block, which every request carries, and the tool's
+result is only that the block will be rendered at the new anchor.
 
 **`tree` ends the turn immediately.** The state block renders as the next turn, so
 the agent sets where it is attending and sees the tree it just asked for at once,
@@ -442,6 +579,21 @@ The agent's tools are scoped, unique, and permissive. A tool's own description i
 the authority on what it does; the system prompt carries only what no single
 description can say.
 
+The prompt is short as a consequence of that rule, not as a target. There is no
+word count to hit and none to stay under: a prompt that carries only what nothing
+else can say is short because so little qualifies.
+
+**The system prompt teaches, it does not prohibit.** It is the first thing the
+agent reads and the thing it follows: how to read its environment, how to use its
+tools well, and what pattern of thinking to hold to. It guides the agent into the
+way of working rather than fencing off mistakes, because the context it sits over
+is short enough that guidance is not competing with noise.
+
+It is also where the things that cannot be enforced are said: the agent keeps
+small, atomic steps; it does not know when the world changes and trusts its map
+and what it kept; it declares to the person through `chat` and treats its plain
+text as its own reasoning.
+
 **A tool names its target by handle** (§5.4). That is the addressing scheme every
 tool shares, and it is why every item in the context carries one. A file may also
 be named by path: `read` and `edit` prefer the handle and fall back to the path,
@@ -453,11 +605,12 @@ and `create` takes a path because the file it makes has no handle yet.
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
 | `pin` | Sets or clears the pin on one entry. |
+| `mark` | Marks one Brain record for archive or delete, or withdraws a mark the agent placed. Applies at the next collapse. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
-| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. |
-| `create` | Writes a new file, at a path. Refuses a path that already exists. |
+| `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
+| `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
-| `tree` | Sets the project tree's anchor. The tree renders in the state block. |
+| `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 
@@ -512,6 +665,13 @@ folded. Each tool gets one collapsible entry in its own sub-tree. Schema-shaped
 content has a human-readable view and a real view. A row that trails off is
 readable in full somewhere.
 
+**An edit made there is an edit to the source of truth.** A Brain-backed entry is
+edited in the Brain, and the change is everywhere that record appears: the
+record, the pending line in the state block, and the next collapse. It is never a
+private annotation layer over what the model sees. Anything not kept stays
+ephemeral, and a staged change takes effect at the next collapse unless the person
+applies it now (§4.1).
+
 **The transcript renders everything the model does.** The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
@@ -521,28 +681,47 @@ boundary. A click folds or unfolds a card, a toggle toggles every card in view,
 and the wheel over an open card scrolls its window. Chat remains the only channel
 that addresses the person.
 
-**The token bar is always visible**, and its figures come from llama.cpp, not
-from a guess.
+**The context bar spans the whole bottom of the application and is always
+visible.** Its width is the server's own context capacity: the total the server
+reports for its `-c` setting. Filling it is a picture of the context, not a
+gauge with a budget mark.
 
-- **The denominator is the server's own capacity.** The context window is the
-  total the server reports for its `-c` setting. The budget is marked *inside*
-  the bar.
-- **The numerator is the server's own count** for the last request, plus what the
-  tool calls have added since.
-- **The bar also reports what the server measures**: tokens per second for
-  generation and for prompt reading, how much of the window is filled, and
-  whether a prompt is still being read or generation has begun. Prefill is the
-  slow half of a long context, and showing it is the point of reading the server
-  rather than estimating.
-- **Before the first measured request** the bar shows an estimate in a different
-  glyph and colour, and says that it is one.
+It shows three quantities, each in its own colour:
 
-The estimate is not a fixed characters-per-token constant. It is re-learned from
-the server's replies: the size of a request against the prompt tokens the server
-reports for it, as a moving average, clamped so one odd reply cannot swing it.
+- **Fill** — how much of the context is occupied, as a solid colour.
+- **Prefilled** — during a prompt read, how much has been read so far.
+- **To prefill** — during a prompt read, how much is still to read.
 
-`llama.cpp` is a local server with a small, stable HTTP surface. Everything above
-is read from it, and none of it is inferred from a provider's response headers.
+The two prefill quantities are the point of the bar. Prefill is the slow half of
+a long context, and a bar that shows how far along the read is tells the person
+which part of the context is being paid for and how much of it is breaking when
+something invalidates the head.
+
+**The figures come from llama.cpp.** The server's count for the last request plus
+what the tool calls have added since; its tokens per second for generation and
+for prompt reading; and whether a prompt is still being read or generation has
+begun. None of it is inferred from a provider's response headers.
+
+**Before the first measured request** the bar shows an estimate in a different
+glyph and colour, and says that it is one. The estimate is not a fixed
+characters-per-token constant: it is re-learned from the server's replies — the
+size of a request against the prompt tokens the server reports for it — as a
+moving average, clamped so one odd reply cannot swing it.
+
+**When the server is not there**, the bar changes but does not disappear:
+
+- **On a new start with no measurement yet**, the whole bar is empty. Nothing has
+  been measured and there is nothing to draw.
+- **When a server that was reporting stops** — a lost connection, or the server
+  dying — the last known values stay where they are, greyed. The person can still
+  see where the context stood, and the grey says it is no longer live.
+
+The endpoints and field names the figures are read from are the runtime's, not the
+spec's (§12). What the spec fixes is what the bar knows and where it comes from.
+
+The glyphs and the exact colours are the build's to choose. What the spec fixes is
+what the bar represents: capacity across the bottom, three quantities, three
+colours, and an estimate that announces itself.
 
 ## 9. Turn control
 
@@ -591,8 +770,8 @@ the only way the agent stops working.
 
 Resuming is always the same thing: the agent receives the state block as its next
 turn and acts on what it says. A timed sleep is not a different kind of event with
-different handling — the agent wakes by receiving the state block, exactly as it
-would after any turn that carried no tool call.
+different handling — the agent starts again by receiving the state block, exactly
+as it would after any turn that carried no tool call.
 
 A message from the person ends a rest early, whether the rest had a time or not,
 and starts the same way. A rest that is over is over: there is nothing left
@@ -611,7 +790,7 @@ projectContext(brain, liveInput) -> projection
 ```
 
 Neither reads the filesystem, reads a clock, calls a model, renders, or writes
-storage. Runtime adapters supply time, commits, file inspection, cleanup, and UI
+storage. Runtime adapters supply time, commits, filesystem access, cleanup, and UI
 effects.
 
 **Procedural first.** Modules of functions that take what they need and return
@@ -634,11 +813,6 @@ product tools (including `create`, whose existence check the package's write too
 does not offer), and the workspace. It does not implement a provider layer, a
 stream parser, a tool validator, a scheduler, a timer queue, a SQLite adapter, a
 terminal editor, or a transcript compactor.
-
-## 13. Open
-
-1. Which llama.cpp endpoints and fields carry the token bar's figures, and what
-   the bar shows while the server is unreachable.
 
 The model is always given the whole context. Carto does not rely on a provider
 keeping conversation state on its own side, and no swept text is presumed to be

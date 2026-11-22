@@ -1,5 +1,5 @@
 /**
- * The Atlas view (MINI.md §2.1, §6): nodes — a name and a text entry —
+ * The Atlas view (§2.1): nodes — a name and a text entry —
  * linked to other nodes or attached to any reference.
  * Navigable via vim motions (j/k, gg/G, / to filter, enter/space to expand,
  * h/l or left/right to switch between list and detail, esc to return to Chat).
@@ -42,10 +42,7 @@ export class AtlasView implements Component, Focusable {
     this.nodes = [...brain.atlas].sort((a, b) => a.createdAt - b.createdAt);
     this.staleHandles.clear();
     for (const mark of staleList) {
-      if (mark.kind === "atlas") {
-        const handle = mark.label.split(" ")[0];
-        if (handle) this.staleHandles.add(handle);
-      }
+      if (mark.kind === "atlas" && mark.label !== "") this.staleHandles.add(mark.label);
     }
     if (this.selectedIndex >= this.nodes.length) {
       this.selectedIndex = Math.max(0, this.nodes.length - 1);
@@ -285,16 +282,24 @@ export class AtlasView implements Component, Focusable {
     const lines: string[] = [];
     const filtered = this.getFilteredNodes();
 
-    // Top Header Banner
-    const filterInfo = this.filtering ? ` [filter: ${this.filterText}█]` : this.filterText ? ` [filter: ${this.filterText}]` : "";
-    const headerLeft = ` ${tokens.bold(tokens.accent("ATLAS"))} ${tokens.muted("·")} ${filtered.length} nodes ${tokens.warn(filterInfo)}`;
-    const headerRight = `${this.staleHandles.size > 0 ? tokens.warn(`!${this.staleHandles.size} stale  `) : ""}${tokens.muted("h/l panes · p pin · / filter · esc chat ")}`;
-    const pad = Math.max(1, width - visibleWidth(headerLeft) - visibleWidth(headerRight));
-    lines.push(tokens.panel(padLine(headerLeft + " ".repeat(pad) + headerRight, width)));
+    // One header row, Posting's shape: the book's name, its figure, and what the
+    // keys do here. The book itself starts one quiet line below it.
+    const name = tokens.bold(tokens.atlas("ATLAS"));
+    const figure = `${tokens.text(String(filtered.length))} ${tokens.faint("nodes")}`;
+    const filter = this.filtering
+      ? ` ${tokens.accent(`/${this.filterText}█`)}`
+      : this.filterText
+        ? ` ${tokens.accent(`/${this.filterText}`)}`
+        : "";
+    const stale = this.staleHandles.size > 0 ? ` ${tokens.warn(`!${this.staleHandles.size} stale`)}` : "";
+    const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
+    const right = `${tokens.faint("j/k move · enter open · p pin · / filter ")}`;
+    const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+    lines.push(tokens.panel(padLine(left + " ".repeat(gap) + right, width)));
     lines.push(padLine("", width));
 
     if (filtered.length === 0) {
-      lines.push(`  ${tokens.muted("(The Atlas is empty. Call the atlas tool to create nodes.)")}`);
+      lines.push(`  ${tokens.muted("The Atlas is empty. The agent creates nodes with the atlas tool.")}`);
       return lines;
     }
 

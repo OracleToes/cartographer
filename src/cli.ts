@@ -1,8 +1,7 @@
 /**
  * carto — the entry point.
  *
- * On a TTY, carto boots the workspace TUI (MINI.md §8 as re-scoped: modes,
- * sidebar, footer, the person's Input). Off a TTY — piped stdin, CI — it runs
+ * On a TTY, carto boots the workspace TUI (§8). Off a TTY — piped stdin, CI — it runs
  * the line driver instead, where the only words the person sees are the
  * agent's `chat` tool calls. `--headless` forces the line driver.
  */
@@ -12,48 +11,51 @@ import { parseArgs } from "node:util";
 import { openBrain } from "./runtime/brain-store.js";
 import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
 import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
+import { personName } from "./domain/person.js";
 import { configuredModels } from "./runtime/llama-swap-model.js";
 import { runHeadless } from "./runtime/headless.js";
 import { runTui } from "./ui/app.js";
 
-const STATUS = [
-  "carto boots the workspace TUI on a terminal; --headless runs the line driver.",
-  "The Context surgery view and the Brain views land in their own slices.",
-].join("\n");
+const STATUS = "carto opens the workspace TUI on a terminal; --headless runs the line driver instead.";
 
 function usage(): string {
   return [
-    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--root <dir>] [--headless]",
+    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--user <name>] [--root <dir>] [--headless]",
     "",
-    "Reads its global configuration from ~/.carto/config.json (override the directory",
-    "with CARTO_HOME). The llama-swap endpoint in that file is where your llama.cpp",
-    "server serves; llama-swap advertises the model's true capacity only once it has",
-    "loaded, and Carto uses its advertised capacity as the window. The --context-window",
-    "flag pins the window and always wins (even above advertised). Without either,",
-    "the window is unknown until the model loads.",
+    "Configuration lives in ~/.carto/config.json (override the directory with CARTO_HOME).",
+    "The endpoint in that file is where your llama.cpp server serves, through llama-swap;",
+    "llama-swap advertises a model's capacity once it has loaded, and Carto uses that as the",
+    "window. --context-window pins the window instead and always wins.",
     "",
     "Options:",
-    "  --model <provider/modelId>  Model to use, e.g. llama-swap/ByteShape. Creates the",
-    "                              config file when missing; applied in memory otherwise.",
+    "  --model <provider/modelId>  Model to use, e.g. llama-swap/ByteShape. Writes the config",
+    "                              file when it is missing; applies in memory otherwise.",
     "                              Only the keyless llama-swap provider is wired in this build.",
     "  --endpoint <url>            The llama-swap OpenAI-compatible base URL,",
     "                              e.g. http://localhost:8888/v1.",
-    "  --context-window <n>        Pin the context window (integer ≥ 0). It always wins — it can raise the server's number;",
-    "                              without it, the server's advertised capacity is used (unknown until the model loads).",
+    "  --context-window <n>        Pin the context window (integer ≥ 0), and it always wins — it",
+    "                              can raise the server's number. Without it, the advertised",
+    "                              capacity is used and is unknown until the model loads.",
+    "  --user <name>               What the agent calls you. Default: the account that launched",
+    "                              Carto (config: \"userName\").",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
-    "  --headless                  Run the line driver instead of the TUI.",
+    "  --headless                  Run the line driver instead of the workspace.",
     "  -h, --help                  Show this help.",
     "",
     "Quick start (ByteShape, port 8888, 75k window):",
     "  carto --model llama-swap/ByteShape --endpoint http://localhost:8888/v1 --context-window 75000",
     "",
-    "With a terminal attached, carto boots the workspace; the agent's words reach you through the chat tool only.",
-    "  ctrl+x      stop the run now · shift+tab cycles the send mode (steer / after run / now)",
-    "  ctrl+o      jump mode · ctrl+p command palette · ctrl+h sidebar · ctrl+c quit",
-    "  /help       (TUI) list the in-workspace commands — /copy, /copy-session",
-    "  /collapse   (headless) collapse the context now (the Brain rebuilds it)",
-    "  /quit       (headless) end the session",
-    "  --headless  force the line driver even on a terminal",
+    "In the workspace, the agent's words reach you through its chat tool and nothing else:",
+    "  f1          every key there is, where the cursor is; the footer lists the ones that matter now",
+    "  ctrl+p      the palette — every command, searchable, with its key",
+    "  ctrl+o      jump to a view · ctrl+x stop the run · shift+tab send mode (steer / after run / now)",
+    "  ctrl+t      swap between the context layer and the archive layer · ctrl+h sidebar",
+    "  ctrl+v      pause the run and hold it mid-reply · ctrl+g write the message in $EDITOR",
+    "  ctrl+c      clear the line, or press it twice on an empty line to leave",
+    "",
+    "Line driver commands:",
+    "  /collapse   collapse the context now — the Brain rebuilds it",
+    "  /help       the commands · /quit  end the session",
     "",
     STATUS,
   ].join("\n");
@@ -66,6 +68,7 @@ const parsed = parseArgs({
     model: { type: "string" },
     endpoint: { type: "string" },
     "context-window": { type: "string" },
+    user: { type: "string" },
     root: { type: "string" },
     headless: { type: "boolean" },
   },
@@ -93,8 +96,12 @@ try {
     ...(values.model === undefined ? {} : { modelOverride: values.model }),
     ...(values.endpoint === undefined ? {} : { llamaSwapEndpointOverride: values.endpoint }),
     ...(contextWindow === undefined ? {} : { contextWindowOverride: contextWindow }),
+    ...(values.user === undefined ? {} : { userNameOverride: values.user }),
   });
   const model = parseModelRef(config.model);
+  // One resolution, at the entry point, so the TUI, the line driver, the tool
+  // descriptions and the state block all name the same person.
+  const person = personName(config.userName);
 
   const root = resolveProjectRoot(values.root);
   const brain = await openBrain(brainDatabasePath(root));
@@ -115,6 +122,7 @@ try {
         input: process.stdin,
         output: process.stdout,
         error: process.stderr,
+        person,
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
     : await runTui({
@@ -122,6 +130,7 @@ try {
         brain,
         models,
         model,
+        person,
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });
   await brain.close();

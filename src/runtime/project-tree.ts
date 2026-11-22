@@ -1,5 +1,5 @@
 /**
- * The project tree (MINI.md §6.1, §10a).
+ * The project tree (§6.3).
  *
  * Anchored at a directory inside the project root, to a depth, rendered for
  * the state block: files, directories, sizes, and which files an Atlas node
@@ -9,7 +9,7 @@
  * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` and
  * `.git` are never shown: they are skipped everywhere they would appear, and
  * they may not be an anchor — the agent does not see the Brain or repository
- * internals (MINI.md §2.3, §7). Gitignored paths are skipped the same way (the
+ * internals (§2.3, §7). Gitignored paths are skipped the same way (the
  * project's own `.gitignore` chain — root file, `.git/info/exclude`, nested
  * files below the anchor): no line, no bytes in any aggregate, and ignored
  * directories are pruned, not merely hidden. Rendering is display-bounded by
@@ -38,18 +38,20 @@ export interface TreeEntry {
 
 export class AnchorError extends Error {}
 
-/** The internal anchor must stay inside the project root and outside `.brain` and `.git`, as MINI.md §2.3 and §7 require. */
+/** The internal anchor must stay inside the project root and outside `.brain` and `.git`, as §2.3 and §7 require. */
 export function containedAnchor(root: string, anchor: string): string {
   const r = resolve(root);
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));
   const rel = relative(r, resolved);
   if (resolved !== r && (rel === "" || rel.startsWith("..") || isAbsolute(rel))) {
-    throw new AnchorError(`anchor escapes the project root: ${anchor}`);
+    throw new AnchorError(`an anchor stays inside the project root; ${anchor} resolves outside it.`);
   }
   if (rel !== "") {
     const parts = rel.split(sep);
     if (parts.includes(".brain") || parts.includes(".git")) {
-      throw new AnchorError(`internal directory is not visible to the tree: ${anchor}`);
+      throw new AnchorError(
+        `the tree does not show ${anchor}: \`.brain\` holds the Brain's own storage and \`.git\` holds the repository, and neither is yours to look at.`,
+      );
     }
   }
   return resolved;
@@ -102,11 +104,11 @@ export function scanTree(root: string, anchor: string): TreeEntry {
     realpathSync(target);
   } catch (error) {
     if (error instanceof AnchorError) throw error;
-    throw new AnchorError(`cannot read the anchor: ${anchor}`);
+    throw new AnchorError(`the anchor \`${anchor}\` cannot be read; pick a directory that exists inside the project.`);
   }
   const stat = lstatSync(target);
   if (!stat.isDirectory()) {
-    throw new AnchorError(`anchor is not a directory: ${anchor}`);
+    throw new AnchorError(`an anchor is a directory, and \`${anchor}\` is a file. Anchor at the directory that holds it, or read the file.`);
   }
   // The chain starts at the project root, not the anchor: a `.gitignore`
   // above the anchor still governs the anchor's contents.
@@ -156,8 +158,60 @@ export function atlasAttachedPaths(brain: CartoBrain, root: string): Map<string,
   return attached;
 }
 
+/**
+ * Every file and directory the tree shows, by the handle it was given.
+ *
+ * §5.4: a file's handle comes from the tree and nowhere else, and a file the
+ * tree does not show has no handle. So the numbering is the tree's own — one
+ * pass, in the order it renders, `F` for a file and `D` for a directory — and
+ * this is the one place it happens. The tool that resolves a handle to a path
+ * uses the same map, so a handle cannot mean one file in the block and another
+ * in a tool.
+ */
+export type TreeHandles = ReadonlyMap<string, string>;
+
+export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
+  const handles = new Map<string, string>();
+  let files = 0;
+  let directories = 0;
+  const walk = (node: TreeEntry, level: number): void => {
+    if (level > depth) return;
+    for (const child of node.children ?? []) {
+      const handle = child.directory ? `D${++directories}` : `F${++files}`;
+      handles.set(child.path, handle);
+      walk(child, level + 1);
+    }
+  };
+  walk(entry, 1);
+  return handles;
+}
+
+/**
+ * The size of the subtree under one path, in bytes: what a directory actually
+ * costs. The scan already aggregates it, so this is a lookup, not a walk — the
+ * Tree view shows the per-directory figure beside a files-only aggregate
+ * without walking the disk a second time.
+ */
+function subtreeSizes(entry: TreeEntry, depth: number): Map<string, number> {
+  const sizes = new Map<string, number>();
+  const walk = (node: TreeEntry, level: number): void => {
+    if (level > depth) return;
+    for (const child of node.children ?? []) {
+      sizes.set(child.path, child.size);
+      walk(child, level + 1);
+    }
+  };
+  walk(entry, 1);
+  return sizes;
+}
+
 /** Render the entry lines (no header — the caller prints the anchor line itself). Display is bounded by depth. */
-export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<string, string[]>): string[] {
+export function renderTreeLines(
+  entry: TreeEntry,
+  depth: number,
+  attached: Map<string, string[]>,
+  handles: TreeHandles = new Map(),
+): string[] {
   const lines: string[] = [];
   const walk = (node: TreeEntry, level: number): void => {
     if (level > depth) return;
@@ -165,7 +219,10 @@ export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<s
       const indent = "  ".repeat(level);
       const name = child.directory ? `${child.name}/` : child.name;
       const marks = child.directory ? [] : (attached.get(child.path) ?? []);
-      lines.push(`${indent}${name}  ${formatSize(child.size)}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`);
+      const handle = handles.get(child.path);
+      lines.push(
+        `${indent}${name}  ${formatSize(child.size)}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
+      );
       walk(child, level + 1);
     }
   };
@@ -173,16 +230,53 @@ export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<s
   return lines;
 }
 
-/** The `tree` state as the block carries it: anchor (absolute), depth, lines. */
+/**
+ * The tree a view shows: the scanned entry, its handles, its aggregate sizes,
+ * and the Atlas nodes attached to its files. The block renders lines from the
+ * same pieces, so a handle in the view is the handle in the block (§5.4) —
+ * one numbering, computed once.
+ */
+export interface TreeProjection {
+  /** Where the anchor landed, absolute. */
+  anchor: string;
+  /** The depth actually rendered, after the same floor the block applies. */
+  depth: number;
+  entry: TreeEntry;
+  handles: TreeHandles;
+  /** Subtree bytes by path, for every entry the depth shows. */
+  sizes: ReadonlyMap<string, number>;
+  /** Atlas handles attached to each file path (§2.1). */
+  attached: ReadonlyMap<string, readonly string[]>;
+}
+
+export function projectTreeView(root: string, anchor: string, depth: number, brain: CartoBrain): TreeProjection {
+  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
+  const target = containedAnchor(root, anchor);
+  const entry = scanTree(root, target);
+  return {
+    anchor: target,
+    depth: shown,
+    entry,
+    handles: treeHandles(entry, shown),
+    sizes: subtreeSizes(entry, shown),
+    attached: atlasAttachedPaths(brain, root),
+  };
+}
+
+/** The `tree` state as the block carries it: anchor (absolute), depth, lines, and the handles it minted. */
 export function projectTreeBlock(
   root: string,
   anchor: string,
   depth: number,
   brain: CartoBrain,
-): { root: string; depth: number; lines: string[] } {
-  if (!Number.isInteger(depth) || depth < 0) throw new AnchorError(`depth must be a whole number >= 0, got ${depth}`);
+): { root: string; depth: number; lines: string[]; handles: TreeHandles } {
+  // Depth 1 is the anchor and its immediate contents; there is no rendering
+  // below that, so anything under 1 renders as 1 (§6.3). Nothing is refused:
+  // a depth below 1 is not an error, it is the same tree.
+  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
   const target = containedAnchor(root, anchor);
   const entry = scanTree(root, target);
-  const lines = renderTreeLines(entry, depth, atlasAttachedPaths(brain, root));
-  return { root: target, depth, lines };
+  const handles = treeHandles(entry, shown);
+  const lines = renderTreeLines(entry, shown, atlasAttachedPaths(brain, root), handles);
+  return { root: target, depth: shown, lines, handles };
 }

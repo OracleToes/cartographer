@@ -1,5 +1,5 @@
 /**
- * The llama-swap provider (MINI.md §11 — Pi AI owns the provider layer).
+ * The llama-swap provider (§8).
  * Rewritten fresh for the rebuild, informed by main's documented approach:
  *
  * - keyless: llama-swap serves keyless llama.cpp locally; Pi's OpenAI client
@@ -54,14 +54,14 @@ export const UNKNOWN_MAX_TOKENS = 2_147_483_647;
  * reverse of a ceiling). With no config, the server's advertised capacity is
  * the truth. With neither, 0 — unknown.
  */
-export function resolveContextWindow(configured?: number, advertised?: number): number {
+function resolveContextWindow(configured?: number, advertised?: number): number {
   if (configured !== undefined && configured > 0) return configured;
   if (advertised !== undefined && advertised > 0) return advertised;
   return 0;
 }
 
 /** pi's maxTokens for a window; the sentinel when the window is unknown. */
-export function maxTokensFor(window: number): number {
+function maxTokensFor(window: number): number {
   return window > 0 ? window : UNKNOWN_MAX_TOKENS;
 }
 

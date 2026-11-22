@@ -1,5 +1,5 @@
 /**
- * Generation-local handles (MINI.md §6).
+ * Generation-local handles (§5.4).
  *
  * A handle is short, type-prefixed, and stable within one live generation.
  * A collapse rebuilds the table from 1; nothing about a handle survives a
@@ -13,6 +13,10 @@ const PREFIX: Record<HandleKind, string> = {
   ledger: "L",
   chat: "C",
   atlas: "A",
+  // A pinned ephemeral item is ephemeral material in the head, so it keeps the
+  // `X` letter ephemera have everywhere else (§5.4); what makes it addressable
+  // is that it is carried, not that it has a letter of its own.
+  ephemera: "X",
 };
 
 interface Located {
@@ -26,8 +30,9 @@ function locate(brain: CartoBrain): Located[] {
   for (const entry of brain.ledger) located.push({ kind: "ledger", id: entry.id, createdAt: entry.createdAt });
   for (const record of brain.chat) located.push({ kind: "chat", id: record.id, createdAt: record.createdAt });
   for (const node of brain.atlas) located.push({ kind: "atlas", id: node.id, createdAt: node.createdAt });
+  for (const item of brain.ephemera) located.push({ kind: "ephemera", id: item.id, createdAt: item.createdAt });
 
-  // Collapse-time convention: creation order, ties broken by id. MINI.md §6 —
+  // Collapse-time convention: creation order, ties broken by id (§5.4) —
   // order is a convention at rebuild, not a product requirement.
   return located.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
 }

@@ -1,5 +1,5 @@
 /**
- * The live session (MINI.md §4, §5, §6, §12; docs/intent.md §34).
+ * The live session (§4, §5.7).
  *
  * One Pi Durable store per generation under `.brain/context/`, one Brain
  * per project. At open, generations are reconciled: a head missing its
@@ -28,8 +28,11 @@ import type { Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
+import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
-import { createCartoExtension, CARTO_INSTRUCTIONS, type LiveSessionState } from "./carto-extension.js";
+import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
+import { createCartoExtension, cartoInstructions, type LiveSessionState } from "./carto-extension.js";
+import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
 import {
   collapse,
@@ -40,8 +43,15 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
+import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 
 export interface LiveSessionOptions {
+  /**
+   * How the harness arms its timers. Default `setTimeout`; a test passes fake
+   * timers so a durable rest can be woken without waiting the real seconds out,
+   * which is the only way to prove the wait lives in the store (§10).
+   */
+  setTimer?: (callback: () => void, delayMs: number) => () => void;
   /** Absolute project root. */
   root: string;
   /** The open Brain. The session reads and applies through it; the caller owns its lifecycle. */
@@ -49,6 +59,12 @@ export interface LiveSessionOptions {
   /** pi-ai model access, e.g. createModels() with a provider set. */
   models: Models;
   model: ModelRef;
+  /**
+   * What the agent calls the person: the configured name, or the account that
+   * launched Carto. Resolved once, here, so every string the model reads names
+   * the same person and nothing guesses a second time.
+   */
+  person?: string;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -62,10 +78,17 @@ export interface LiveSession {
   readonly conversation: Conversation;
   /** The underlying database handle; closed by closeLiveSession. */
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
-  /** The mutable present; named fields, no hidden state (MINI.md §12). */
+  /** The mutable present; named fields, no hidden state (§5.3). */
   readonly state: LiveSessionState;
+  /** The gate every model response body passes through: `^v` holds it (§9). */
+  readonly freeze: StreamFreeze;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
   takeCollapseRequest(): string | null;
+  /**
+   * Take the `tree` tool's request to start the next turn at once, so the agent
+   * reads the tree it just set (§6.3). Cleared when read, like a collapse.
+   */
+  takeTreeReadRequest(): boolean;
 }
 
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
@@ -97,15 +120,24 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // server advertises one (the driver re-discovers after every settled run).
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
+    person: options.person ?? personName(),
     contextWindow,
+    paused: false,
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
+    treeReadNext: false,
+    readOnly: false,
     generation,
     lastReportedInput: undefined,
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
   };
+
+  // One gate per session, around every model call the session makes (§9).
+  // Opened before the harness, so the first request it makes is already gated.
+  const freeze = createStreamFreeze();
+  const gatedModels = freeze.gate(options.models);
 
   let harness: Harness | undefined;
   try {
@@ -120,9 +152,10 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       }),
     );
     harness = await Harness.open(storage, {
-      models: options.models,
+      models: gatedModels,
       registry,
       now,
+      ...(options.setTimer === undefined ? {} : { setTimer: options.setTimer }),
       // The environment the built-in bash runs through: one per conversation,
       // cwd at the project root. No policy of ours is attached to it.
       env: () => new NodeExecutionEnv({ cwd: root }),
@@ -134,7 +167,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     }, BACKGROUND_CONTEXT);
     const agent = {
       model: modelRef,
-      instructions: CARTO_INSTRUCTIONS,
+      instructions: cartoInstructions(state.person),
       // The context is gardened by collapse, never by Pi rewriting the transcript.
       compaction: { enabled: false },
       cwd: root,
@@ -150,10 +183,16 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       conversation,
       database,
       state,
+      freeze,
       takeCollapseRequest() {
         const reason = state.collapseRequested;
         state.collapseRequested = null;
         return reason;
+      },
+      takeTreeReadRequest() {
+        const wanted = state.treeReadNext === true;
+        state.treeReadNext = false;
+        return wanted;
       },
     };
   } catch (error) {
@@ -165,7 +204,157 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 
 /** Submit a person message; the submission settles when the run ends (including any continuations). */
 export async function submitInput(session: LiveSession, text: string, whenBusy: "steer" | "followUp" = "followUp") {
+  // A message from the person ends a rest early (§10) and starts its own turn.
+  // The rest is told, so when its time does come it starts nothing of its own:
+  // one message, one turn.
   return session.conversation.submit({ type: "input", content: text, whenBusy }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * Start the next turn with the state block, as the state asks for one.
+ *
+ * The submitted message is the block's own marker: `beforeRequest` replaces it
+ * with the freshly rendered block, so what starts the run is the state, not a
+ * word from the person. `tree` uses this when it ends its turn to read the tree
+ * it just set (§6.3); a woken rest reaches the same place through `SleepTask`.
+ */
+export async function resumeAfterRest(session: LiveSession) {
+  return session.conversation.submit({ type: "input", content: STATE_BLOCK_MARKER, whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * Start the next turn now, with the state block, because the agent asked to read
+ * the tree (§6.3). `tree` ends its turn so the very next thing the agent reads is
+ * the tree it just set, not the one it had before; this is the same continuation
+ * a woken rest takes, without the wait.
+ *
+ * Paused, it starts nothing (§9): the request is left where it is, and the tree
+ * is read when the person lets the run go on.
+ */
+export async function readTreeNext(session: LiveSession): Promise<{ status: string } | undefined> {
+  if (session.state.paused) return undefined;
+  if (!session.takeTreeReadRequest()) return undefined;
+  const submission = await resumeAfterRest(session);
+  return submission.wait(BACKGROUND_CONTEXT);
+}
+
+/**
+ * Apply a deletion now (§4.1): take the entry out of the model's view, and leave
+ * everything else where it is.
+ *
+ * This is a rebuild, not a collapse. Nothing is swept, the generation does not
+ * rotate, and no grace is spent; what changes is the prefill, which runs again
+ * from the changed entry through the tail. The entry itself stays in the store —
+ * "the text is gone from the model's view before it is gone from disk" (§4.1) —
+ * and the head is untouched, so the frozen part of the projection is
+ * byte-identical afterwards. A prune is an epilogue, not a head.
+ */
+export async function applyOmitNow(session: LiveSession, entryId: string): Promise<boolean> {
+  // The id the package hands out is the one it will accept back, so it is taken
+  // from the entry itself rather than rebuilt from the string the view shows.
+  const entries = await sessionTranscript(session);
+  const entry = entries.find((candidate) => String(candidate.id) === String(entryId));
+  if (entry === undefined) return false;
+  await session.conversation.submit(
+    {
+      type: "write",
+      entry: { kind: "carto.apply-now", data: { entry: String(entryId) }, edits: [{ target: entry.id, action: "omit" }] },
+    },
+    BACKGROUND_CONTEXT,
+  );
+  return true;
+}
+
+/**
+ * What a pause did, in the words the person is shown (§9).
+ *
+ * `held` and `interrupted` are both real pauses: the first caught a live
+ * response body and is still holding it, the second caught the run between
+ * requests, so nothing is being read and nothing new may start. An `interrupted`
+ * pause did cost the work in flight — that is the price of pausing between
+ * requests rather than mid-reply, and it is said plainly rather than hidden.
+ */
+export interface PauseOutcome {
+  /** Whether the agent is paused now. */
+  readonly paused: boolean;
+  /** False when the request changed nothing: the agent was already in that state. */
+  readonly changed: boolean;
+  /** The run is held mid-reply, and this same reply continues when it lets go. */
+  readonly held: boolean;
+  /** The run was caught between requests, so its work in flight was interrupted. */
+  readonly interrupted: boolean;
+  /** An unpause let a held reply go on, rather than merely letting the agent run again. */
+  readonly resumed: boolean;
+  /** One line, plain, for the transcript and the headless driver. */
+  readonly line: string;
+}
+
+/**
+ * Pause or unpause the agent (§9).
+ *
+ * Pausing is not an interrupt. When a response body is in flight the gate holds
+ * it and the same reply goes on later, token for token; nothing is committed or
+ * discarded, and the agent is not told. When nothing is in flight there is no
+ * stream to hold, so the pause lands on the round of tool calls: the run is
+ * interrupted where it stands, and nothing starts of its own accord while the
+ * pause lasts.
+ *
+ * Unpausing lets the held body go on. The agent rested while paused is a
+ * durable task, so its own timer is what wakes it; nothing here starts work
+ * the agent did not ask for.
+ */
+export async function togglePause(session: LiveSession, to?: boolean): Promise<PauseOutcome> {
+  const paused = session.state.paused;
+  const want = to ?? !paused;
+  if (want === paused) {
+    return {
+      paused,
+      changed: false,
+      held: false,
+      interrupted: false,
+      resumed: false,
+      line: paused ? "the agent is already paused" : "nothing is paused",
+    };
+  }
+  session.state.paused = want;
+  if (want) {
+    if (session.freeze.freeze()) {
+      return {
+        paused: true,
+        changed: true,
+        held: true,
+        interrupted: false,
+        resumed: false,
+        line: "paused: the agent is held in its stream, mid-sentence · ^v lets it continue · a line or command you send ends it",
+      };
+    }
+    // Nothing to hold: the pause lands on the round of tool calls instead. The
+    // run is read from the store, which is where a run exists — the same source
+    // the interrupt uses — so the host keeps no second answer to "is it working".
+    session.freeze.abandon();
+    const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+    const interrupted = live?.run !== undefined;
+    if (interrupted) await interruptRun(session);
+    return {
+      paused: true,
+      changed: true,
+      held: false,
+      interrupted,
+      resumed: false,
+      line: interrupted
+        ? "paused: the agent is interrupted where it stands · ^v lets it go on"
+        : "paused: the agent starts nothing of its own · ^v lets it go on",
+    };
+  }
+  const resumed = session.freeze.resume();
+  return {
+    paused: false,
+    changed: true,
+    held: false,
+    interrupted: false,
+    resumed,
+    line: resumed ? "on again — the agent goes on with its stream" : "on again — the agent may work again",
+  };
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
@@ -177,6 +366,50 @@ export async function interruptRun(session: LiveSession): Promise<void> {
 }
 
 /** The transcript without state-block markers — what a person-facing view may show. */
+/**
+ * Put a restored ephemeral item back into the live context (§3.3).
+ *
+ * It goes back as the kind it was, as a passive entry in the conversation's own
+ * store, which is where it came from — not in the Brain, which never held it.
+ * Restoring does not pin it: the next collapse sweeps it again unless the person
+ * pins it, and it goes back into the archive with its grace starting again.
+ *
+ * The entry carries no model messages, and that is deliberate rather than a
+ * shortcut. The context pi builds drops a tool result whose call is not present
+ * and reorders results under their calls, so a restored result submitted as a
+ * message would either vanish or answer a call that never ran. What the person
+ * gets back is the item itself, in the live context, under the kind it had; and
+ * if they want it in the head they pin it, which is the one action that puts an
+ * ephemeral item in front of the agent (§3.1).
+ */
+export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
+  const ephemeral = item.ephemeral;
+  if (ephemeral === undefined) return false;
+  const entity = ephemeral.data;
+  const callId =
+    entity !== null && typeof entity === "object" && typeof (entity as { callId?: unknown }).callId === "string"
+      ? (entity as { callId: string }).callId
+      : undefined;
+  try {
+    await session.conversation.submit(
+      {
+        type: "write",
+        entry: {
+          kind: "carto.restored",
+          ...(callId === undefined ? {} : { data: { callId } }),
+        },
+      },
+      BACKGROUND_CONTEXT,
+    );
+    return true;
+  } catch {
+    // A conversation that will not take the write — it is closing, or busy in a
+    // way that refuses one — leaves the item in the archive rather than losing
+    // it, and the person is told by the caller.
+    return false;
+  }
+}
+
 export async function sessionTranscript(session: LiveSession) {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
   return view.entries;
@@ -190,18 +423,18 @@ export async function closeLiveSession(session: LiveSession): Promise<void> {
 export interface CollapseOutcome {
   /** The fresh session on the new generation; the old session must not be used again. */
   readonly session: LiveSession;
-  /** What collapse did: the new generation, the sealed archive, the purged one. */
+  /** What collapse did: the new generation, the store it swept, and what the archive took and dropped. */
   readonly report: CollapseReport;
   /** Why the collapse happened: the agent's reason, or the person's act. */
   readonly reason: string;
 }
 
 /**
- * Collapse the live session (MINI.md §5): interrupt the run at its boundary,
- * close the store, run the ceremony — freshness marks, new snapshot from the
- * Brain, seal the old store as the archive, export-then-delete the archive
- * whose grace expired, VACUUM — and reopen on the new generation. The
- * person's path passes any reason (or none); no boundary, no warning. The
+ * Collapse the live session (§4): interrupt the run at its boundary, close the
+ * store, run the ceremony — freshness marks, new snapshot from the Brain, the
+ * marks applied, the old store swept into the archive and deleted whole, the
+ * archive's expired items dropped, VACUUM — and reopen on the new generation.
+ * The person's path passes any reason (or none); no boundary, no warning. The
  * caller shows the plain report afterwards.
  */
 export async function collapseLiveSession(
@@ -212,8 +445,16 @@ export async function collapseLiveSession(
 ): Promise<CollapseOutcome> {
   await interruptRun(session);
   await closeLiveSession(session);
-  const report = await collapse(session.root, options.brain, ceremony);
+  // The Brain moves the marked records itself; what the new generation's frozen
+  // prefill is built from is the Brain as it stands after that move (§3.3).
+  // The head the next generation freezes names the same person every other
+  // string names: one name, carried from the session that built it.
+  const report = await collapse(session.root, options.brain, { person: session.state.person, ...ceremony });
   const next = await openLiveSession(options);
+  // An ephemeral item a mark restored comes home to the live context, which is
+  // the store the collapse just built (§3.3): it goes back as the kind it was,
+  // with no pin, so the next collapse sweeps it again unless the person pins it.
+  for (const item of report.restored) await restoreEphemeral(next, item);
   return { session: next, report, reason };
 }
 

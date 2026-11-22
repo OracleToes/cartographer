@@ -1,17 +1,26 @@
 /**
- * The workspace (MINI.md §8 as re-scoped 2026-11-20 — modes, not tabs; the
- * Posting layout philosophy on pi-tui primitives).
+ * The workspace (§8).
  *
- * Chat is the boot view; Atlas, Ledger, and Context surgery views are reachable
- * via jump keys (^o a, ^o l, ^o x) and the summoned palette (^p). The token bar
- * sits above the footer on every view (docs/ui-proposal.md §7, candidate A):
- * one row, segmented by part, honest about what is estimate and what is measured.
- * The whole app carries one cell of padding on every edge.
+ * Posting's anatomy, in Carto's names: one header line that says where you are,
+ * a full-height sidebar on the left, one working area in front, one context bar
+ * spanning the bottom, and one footer that lists the keys that work *here*.
+ * Everything the person can press is declared once, in `commands.ts`; the
+ * footer, `f1`, and `^p` are all drawn from it, so no two of them can disagree.
  *
- * Pinned items and stale Atlas entries are evident directly inside their books.
+ * The books are layers of the same workspace, not separate screens:
  *
- * State is one explicit value; behaviour is functions over it (MINI.md §12).
- * Pi performs; Carto adds only the composition.
+ * - the **transcript** is the boot view and the only place you type;
+ * - the **atlas** and the **ledger** are the Brain, read and pinned;
+ * - the **context** is the prompt the model reads, and the only place surgery happens;
+ * - the **archive** is a layer over the working area, toggled by `ctrl+t`, the
+ *   sidebar's layer row, or the palette (§3.3) — it is the person's, and no
+ *   handle names it to the agent.
+ *
+ * The context bar is the one thing that is never not there: one row, spanning
+ * the whole width, its width the server's own capacity.
+ *
+ * State is one explicit value; behaviour is functions over it (§8). Pi
+ * performs; Carto adds only the composition.
  */
 import { readFile } from "node:fs/promises";
 import { Writable } from "node:stream";
@@ -20,14 +29,11 @@ import { basename } from "node:path";
 import {
   Editor,
   HStack,
-  matchesKey,
   ProcessTerminal,
   ScrollView,
-  Spacer,
   TuiAltScreen,
   VStack,
   type Component,
-  type Focusable,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -40,28 +46,41 @@ import {
   interruptRun,
   openLiveSession,
   sessionTranscript,
+  applyOmitNow,
+  readTreeNext,
   submitInput,
+  togglePause,
   type LiveSession,
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
-import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
+import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
+import { restoreEphemeral } from "../runtime/live-session.js";
+import { cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
+import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
+import { handleOf } from "../domain/handles.js";
 
-import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode, type ViewMode } from "./chrome.js";
-import { TokenBarView, type TokenBarState } from "./token-bar.js";
+import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
+import { Registry, type Command } from "./commands.js";
+import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
+import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
 import { flattenEntry } from "./dump.js";
+import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, formatToolArgs, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, formatToolArgs, isCard, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
-import { tokens } from "./tokens.js";
+import { ArchiveView } from "./archive-view.js";
+import { TreeView } from "./tree-view.js";
+import { ruleLine, tokens } from "./tokens.js";
+import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
@@ -76,11 +95,11 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
-  /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
-  sealedAgentIds: Set<string>;
   sendMode: SendMode;
   view: ViewMode;
-  /** True while at least one submission is in flight; drives the footer badge and the live timer's rebuilds. */
+  /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
+  layer: Layer;
+  /** True while at least one submission is in flight; drives the header and the footer's live hint. */
   running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
   pending: PendingItem[];
@@ -98,26 +117,67 @@ interface TuiState {
   rebuilding: boolean;
   /** Cheap change signature so the 1.5s timer does not bust the render cache when nothing moved. */
   sig: string;
+  /**
+   * When the last Ctrl-C found the line empty, if it did. A second press inside
+   * the window leaves; anything else lets the arming lapse (see `compose.ts`).
+   */
+  ctrlCArmedAt: number | undefined;
 }
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, root: string, contextTokens: number = 0): SidebarCounts {
+function countSidebar(
+  brainState: Awaited<ReturnType<BrainStore["read"]>>,
+  root: string,
+  contextTokens: number = 0,
+  archive?: { total: number; pinned: number },
+  tree?: { anchor: string; depth: number },
+): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
-  const stale: Partial<Record<"atlas" | "ledger", number>> = {};
+  const stale: Partial<Record<"atlas" | "ledger" | "chat" | "context", number>> = {};
   for (const mark of marks) {
     if (mark.kind === "atlas") {
       stale.atlas = (stale.atlas ?? 0) + 1;
     }
+  }
+  const pinned: Partial<Record<BookKind, number>> = {};
+  for (const record of brainState.chat) if (record.pinned !== undefined) pinned.chat = (pinned.chat ?? 0) + 1;
+  for (const node of brainState.atlas) if (node.pinned !== undefined) pinned.atlas = (pinned.atlas ?? 0) + 1;
+  for (const entry of brainState.ledger) if (entry.pinned !== undefined) pinned.ledger = (pinned.ledger ?? 0) + 1;
+  const marked: Partial<Record<BookKind, number>> = {};
+  for (const record of brainState.chat) {
+    if (record.mark?.action === "delete") marked.chat = (marked.chat ?? 0) + 1;
+  }
+  // The tree's figures are the rows the view shows, counted from the same
+  // projection it renders, so the sidebar and the pane cannot disagree.
+  let treeDirs = 0;
+  let treeFiles = 0;
+  if (tree !== undefined) {
+    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState);
+    const walk = (entry: TreeEntry, level: number): void => {
+      if (level > projection.depth) return;
+      for (const child of entry.children ?? []) {
+        if (child.directory) treeDirs += 1;
+        else treeFiles += 1;
+        walk(child, level + 1);
+      }
+    };
+    walk(projection.entry, 1);
   }
   return {
     chat: brainState.chat.length,
     contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
+    pinned,
+    marked,
     stale,
     staleTotal: marks.length,
+    treeDirs,
+    treeFiles,
+    archive: archive?.total ?? 0,
+    archivePinned: archive?.pinned ?? 0,
   };
 }
 
@@ -133,6 +193,12 @@ interface MessageLike {
   timestamp?: number;
   /** pi-ai's stop reason for the landed assistant turn: stop, length, toolUse, error, aborted… */
   stopReason?: string;
+}
+
+/** The call a result answers, if the message says. */
+function toolCallIdOf(message: MessageLike): string | undefined {
+  const id = (message as { toolCallId?: unknown }).toolCallId;
+  return typeof id === "string" ? id : undefined;
 }
 
 function messageOf(entry: ContextEntryLike): MessageLike | undefined {
@@ -159,13 +225,66 @@ function prettyArgs(value: unknown): string {
 }
 
 /**
+ * The prompt's ephemeral items in prompt order (§5.4): a person's message, then
+ * the agent's reasoning, text and tool calls as the model produced them. One
+ * definition, used by the transcript's numbering and by the Context view's, so
+ * a handle names the same item in both. A result is an item of its own — the
+ * prefill carries it as its own message, and pinning it pins the result (§5.5).
+ */
+function promptItemsOf(entries: readonly ContextEntryLike[]): PromptItem[] {
+  const items: PromptItem[] = [];
+  // Call id → tool name, so a result knows whether it is a shell result (`S`)
+  // or any other tool's (`R`) without a second pass.
+  const tools = new Map<string, string>();
+  for (const entry of entries) {
+    const message = messageOf(entry);
+    if (message === undefined || !Array.isArray(message.content)) continue;
+    for (const part of message.content as unknown[]) {
+      if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+        tools.set(part.id, part.name);
+      }
+    }
+  }
+  for (const entry of entries) {
+    const message = messageOf(entry);
+    if (message === undefined) continue;
+    const id = typeof entry.id === "number" ? entry.id : 0;
+    const role = typeof message.role === "string" ? message.role : "";
+    if (role === "user" && typeof message.content === "string") {
+      if (message.content.trim() === STATE_BLOCK_MARKER || message.content.trim().length === 0) continue;
+      items.push({ kind: "person", key: String(id) });
+    } else if (role === "assistant" && Array.isArray(message.content)) {
+      (message.content as unknown[]).forEach((part, partIndex) => {
+        if (!isRecord(part)) return;
+        if (part.type === "thinking") items.push({ kind: "reasoning", key: `${id}-${partIndex}` });
+        else if (part.type === "text") items.push({ kind: "text", key: `${id}-${partIndex}` });
+        else if (part.type === "toolCall" && typeof part.id === "string") {
+          items.push({ kind: "call", key: `${id}-${partIndex}` });
+        }
+      });
+    } else if (role === "toolResult") {
+      const callId = (message as Record<string, unknown>).toolCallId;
+      // The tool is on the call the result answers; the result's own message
+      // carries only the call's id.
+      const tool = tools.get(typeof callId === "string" ? callId : "");
+      items.push({ kind: "result", key: String(id), ...(tool === undefined ? {} : { tool }) });
+    }
+  }
+  return items;
+}
+
+/**
  * The in-flight partial (`pi.live`) as foldable cards: the streaming
  * thinking/text blocks in content order, then the current round's tool slots.
  */
-function liveCardsOf(live: LiveState | undefined): CardEntry[] {
+function liveCardsOf(live: LiveState | undefined, handles: PromptHandles): CardEntry[] {
   const cards: CardEntry[] = [];
   if (live === undefined) return cards;
   const attempt = live.generation?.attempt ?? 0;
+  const handleOf = (key: string | number): { handle?: string } => {
+    const handle = handles.ephemeral(String(key));
+    return handle === undefined ? {} : { handle };
+  };
   const slots = new Map((live.tools ?? []).map((slot) => [slot.callId, slot]));
   const seenCalls = new Set<string>();
   const message = live.generation?.message as { content?: unknown } | undefined;
@@ -174,9 +293,9 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
       if (!isRecord(part)) return;
       const id = `live-${attempt}-${index}`;
       if (part.type === "thinking" && typeof part.thinking === "string") {
-        if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking });
+        if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking, ...handleOf(id) });
       } else if (part.type === "text" && typeof part.text === "string") {
-        if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text });
+        if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text, ...handleOf(id) });
       } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
         if (callId !== undefined) seenCalls.add(callId);
@@ -187,7 +306,7 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
           : undefined;
         const args = rawArgs ?? formatToolArgs(part.arguments, name);
         const status = slot?.status ?? (name.length > 0 ? "running" : "pending");
-        cards.push({ kind: "tool", id, live: true, name, args, status });
+        cards.push({ kind: "tool", id, live: true, name, args, status, ...handleOf(callId ?? id) });
       }
     });
   }
@@ -200,11 +319,55 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
       live: true,
       name: slot.name,
       args: "",
+      // A slot whose call has not streamed into the message yet is still the
+      // call it is, so it is numbered by the call's id like any other.
+      ...handleOf(slot.callId),
       ...(output === undefined ? {} : { output }),
       status: slot.status,
     });
   }
   return cards;
+}
+
+/**
+ * The numbering for a generation, as the transcript shows it: the prompt's
+ * landed items, then the in-flight partial after them, numbered once. A card in
+ * flight therefore takes the next handle rather than restarting at `X1`, which
+ * is what the person sees in the two views at the same moment.
+ */
+function generationHandles(live: LiveState | undefined, landed: readonly PromptItem[]): PromptHandles {
+  if (live === undefined) return promptHandles(landed);
+  const partial: PromptItem[] = [];
+  const content = (live.generation?.message as { content?: unknown } | undefined)?.content;
+  if (Array.isArray(content)) {
+    content.forEach((part, index) => {
+      if (!isRecord(part)) return;
+      const id = `live-${index}`;
+      if (part.type === "thinking") partial.push({ kind: "reasoning", key: id });
+      else if (part.type === "text") partial.push({ kind: "text", key: id });
+      else if (part.type === "toolCall" && typeof part.id === "string") partial.push({ kind: "call", key: id });
+    });
+  }
+  const streamed = new Set<string>();
+  for (const part of (Array.isArray(content) ? content : []) as unknown[]) {
+    if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string") streamed.add(part.id);
+  }
+  for (const slot of live.tools ?? []) {
+    if (streamed.has(slot.callId)) continue;
+    partial.push({ kind: "call", key: slot.callId });
+  }
+  return promptHandles([...landed, ...partial]);
+}
+
+/** One hairline, exactly the width it is given: the seam under the header. */
+class Rule implements Component {
+  invalidate(): void {
+    // Stateless.
+  }
+
+  render(width: number): string[] {
+    return [ruleLine(width)];
+  }
 }
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
@@ -217,9 +380,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const session = await openLiveSession(options);
   const state: TuiState = {
     session,
-    sealedAgentIds: new Set((await brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
     view: "chat",
+    layer: "context",
     running: false,
     pending: [],
     sealed: [],
@@ -232,6 +395,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     rebuilding: false,
     sig: "",
     liveWatch: undefined,
+    ctrlCArmedAt: undefined,
   };
 
   const terminal = new ProcessTerminal();
@@ -239,28 +403,89 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
-  const headerState = { project, modelLabel, session: state.session, view: state.view };
+  const headerState = {
+    project,
+    modelLabel,
+    session: state.session,
+    view: state.view,
+    layer: state.layer,
+    running: state.running,
+    windowUnknown: state.session.state.contextWindow <= 0,
+  };
   const header = new HeaderView(headerState);
-  const barState: TokenBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
+  const barState: ContextBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
-  const footer = new FooterView(state);
-  const transcript = new TranscriptView();
+  const transcript = new TranscriptView({ project });
   const sidebar = new Sidebar();
-  const scroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
-  const editorTheme = { borderColor: (line: string) => tokens.muted(line), selectList: selectTheme };
-  const editor = new Editor(tui, editorTheme);
+  const transcriptScroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
+  /**
+   * The prompt's frame: Posting puts the name of the thing at the top of it, so
+   * the box says what it is for. One rule above, `message` in it, one rule below.
+   */
+  class PromptEditor extends Editor {
+    protected override renderTopBorder(width: number, hiddenLineCount: number): string {
+      const label = " message ";
+      const filler = Math.max(0, width - label.length - 1);
+      const scroll = hiddenLineCount > 0 ? `↑${hiddenLineCount} ` : "";
+      return `${tokens.rule("─")}${tokens.faint(` ${scroll}${label.trim()} `)}${tokens.rule("─".repeat(Math.max(0, filler - scroll.length)))}`;
+    }
+
+    protected override renderBottomBorder(width: number, hiddenLineCount: number): string {
+      const scroll = hiddenLineCount > 0 ? `↓${hiddenLineCount} ` : "";
+      return tokens.rule("─".repeat(width - scroll.length)) + tokens.faint(scroll);
+    }
+  }
+
+  const editorTheme = { borderColor: (line: string) => tokens.rule(line), selectList: selectTheme };
+  const editor = new PromptEditor(tui, editorTheme);
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
   const contextView = new ContextView();
+  const treeView = new TreeView();
+  const archiveView = new ArchiveView();
+
+  // Each pannable view gets its own scroll view: Posting's "one scrolling pane in
+  // front" — the wheel and the arrow keys move whatever is focused.
+  const atlasScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
+  const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
+  const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
+  // A ScrollView does not follow a child's cursor, and the tree is taller than
+  // the pane in any real project: keep the selected row in view, with a row of
+  // context on either side rather than the cursor pinned to an edge.
+  treeView.onCursorLine = (line) => {
+    const viewport = treeScroll.viewportHeight;
+    if (viewport <= 0) return;
+    const top = treeScroll.scrollTop;
+    if (line < top + 1) treeScroll.scrollTo(line - 1);
+    else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
+  };
+  const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
 
   sidebar.onSelect = (book) => void switchToView(book);
+  sidebar.onToggleLayer = (layer) => void switchLayer(layer);
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
+    const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
-    sidebar.setCounts(countSidebar(brainState, options.root, contextTokens));
+    sidebar.setCounts(
+      countSidebar(
+        brainState,
+        options.root,
+        contextTokens,
+        {
+          total: archive.items.length,
+          pinned: archive.items.filter((item) => item.pinned !== undefined).length,
+        },
+        // The same anchor and depth the `tree` tool last set: the sidebar counts
+        // what the view shows, not a second tree of its own.
+        state.session.state.tree,
+      ),
+    );
     sidebar.setActiveBook(state.view);
+    sidebar.setLayer(state.layer);
     tui.requestRender();
   };
 
@@ -271,6 +496,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    // The generation whose store these entries are in: an item's pin id is built
+    // from it, so the pin names the item the sweep will name (§3.1).
+    const generation = state.session.generation;
     const productTools = createTools({
       root: options.root,
       brain,
@@ -299,6 +527,23 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const transcriptMessages: ContextDialogueMessage[] = [];
     const toolWorkItems: ContextWorkItem[] = [];
 
+    // A tool's name is not on its result, only the call's id; walking the calls
+    // first is what lets a result say which tool produced it.
+    const callNames = new Map<string, { name: string; path?: string }>();
+    for (const entry of entries) {
+      for (const message of (entry.model ?? []) as unknown[]) {
+        if (!isRecord(message) || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+            const args = part.arguments;
+            const path =
+              isRecord(args) && typeof args.path === "string" ? args.path : undefined;
+            callNames.set(part.id, { name: part.name, ...(path === undefined ? {} : { path }) });
+          }
+        }
+      }
+    }
+
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
       if (!entry) continue;
@@ -310,23 +555,37 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (role === "user") {
         const textContent = typeof message.content === "string" ? message.content : undefined;
         if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
-          transcriptMessages.push({ id, role, text: textContent, timestamp: ts });
+          // The entry number is the order; the id may be composite for other
+          // kinds, so the view is told where the body sits rather than guessing.
+          transcriptMessages.push({ id, entry: i, order: -1, role, text: textContent, timestamp: ts });
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        // Counted per entry, the same way the sweep counts them, so `t0` means
+        // one thing on both sides. A tool call is named by its part: it has an
+        // id of its own and does not need counting.
+        let thinkingSeen = 0;
+        let textSeen = 0;
         for (let j = 0; j < content.length; j++) {
           const part = content[j];
           if (!isRecord(part)) continue;
           if (part.type === "thinking" && typeof part.thinking === "string") {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "reasoning", text: part.thinking });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `t${thinkingSeen++}`), entry: i, order: j, kind: "reasoning", text: part.thinking });
           } else if (part.type === "text" && typeof part.text === "string") {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "output", text: part.text });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `x${textSeen++}`), entry: i, order: j, kind: "output", text: part.text });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             if (part.name === "chat") {
               const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
-              transcriptMessages.push({ id: `${id}-${j}`, role: "assistant [chat]", text: textArg, timestamp: ts });
+              transcriptMessages.push({ id: `${id}-${j}`, entry: i, order: j, role: "assistant [chat]", text: textArg, timestamp: ts });
             } else {
-              toolWorkItems.push({ id: `${id}-${j}`, kind: "toolCall", name: part.name, args: prettyArgs(part.arguments) });
+              toolWorkItems.push({
+                id: ephemeralItemId(generation, id, `c${j}`),
+                entry: i,
+                order: j,
+                kind: "toolCall",
+                name: part.name,
+                args: prettyArgs(part.arguments),
+              });
             }
           }
         }
@@ -337,7 +596,24 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           if (!isRecord(part)) continue;
           const toolText = typeof part.text === "string" ? part.text : "";
           if (!toolText.startsWith("carto: ")) {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "toolResult", output: toolText });
+            // A result names the call it answers, and the call names the tool
+            // and what it was pointed at: that is how the sweep, and a pin, know
+            // a result is a `read`'s and of what file (§5.5).
+            const callId = toolCallIdOf(message);
+            const call = callId === undefined ? undefined : callNames.get(callId);
+            toolWorkItems.push({
+              id: ephemeralItemId(generation, id, "r"),
+              entry: i,
+              // A result answers the call that precedes it, so it sits after
+              // every part of the entry it answers.
+              order: Number.MAX_SAFE_INTEGER,
+              kind: "toolResult",
+              output: toolText,
+              tool: call?.name,
+              ...(callId === undefined || call === undefined
+                ? {}
+                : { payload: { callId, ...(call.name === undefined ? {} : { tool: call.name }), ...(call.path === undefined ? {} : { path: call.path }) } }),
+            });
           }
         }
       }
@@ -348,9 +624,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       messages,
     );
 
+    // Numbered by the same function the transcript uses, over the same entries,
+    // so a handle means one thing in both views (§5.4).
+    const handles = promptHandles(promptItemsOf(entries));
+    // A pin the person placed before the collapse is a promise the item stays,
+    // so the row says it is pinned rather than waiting to be pinned again.
+    for (const item of toolWorkItems) {
+      const held = brainState.ephemera.find((carried) => carried.id === String(item.id));
+      if (held === undefined) continue;
+      item.pinned = held.pinned;
+    }
     contextView.setData({
       brain: brainState,
-      systemPrompt: CARTO_INSTRUCTIONS,
+      systemPrompt: cartoInstructions(state.session.state.person),
+      person: state.session.state.person,
       // The frozen bytes the carto-context section renders; a missing file
       // falls back to re-rendering the Brain, the same fallback pi itself
       // uses — the view never fabricates a projection.
@@ -358,38 +645,98 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tools: allTools,
       transcriptMessages,
       toolWorkItems,
+      handles,
       stateBlockText: stateBlock,
+      // The tree's own numbering, so a pinned file is named in the head by the
+      // handle the tree shows it under (§5.4) and not by a second count.
+      treeHandles: Object.fromEntries(treeOf(brainState).handles),
     });
+  };
+
+  /** The tree the person is looking at, from the session's anchor and depth. */
+  const treeOf = (brainState: Awaited<ReturnType<BrainStore["read"]>>) =>
+    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState);
+
+  /** Focus follows the view: Posting's rule, and the reason the footer can be honest. */
+  const focusCurrent = () => {
+    if (!state.sidebarVisible) {
+      // nop: the sidebar is not focusable
+    }
+    if (state.layer === "archive") {
+      tui.setFocus(archiveView);
+      return;
+    }
+    if (state.view === "chat") tui.setFocus(editor);
+    else if (state.view === "atlas") tui.setFocus(atlasView);
+    else if (state.view === "ledger") tui.setFocus(ledgerView);
+    else if (state.view === "tree") tui.setFocus(treeView);
+    else tui.setFocus(contextView);
   };
 
   const switchToView = async (view: ViewMode) => {
     state.view = view;
     headerState.view = view;
-    footer.invalidate();
     sidebar.setActiveBook(view);
-
+    focusCurrent();
     const brainState = await brain.read();
-    const marks = liveStaleMarks(brainState, options.root);
 
-    if (view === "chat") {
-      tui.setFocus(editor);
-    } else if (view === "atlas") {
-      atlasView.setData(brainState, marks);
-      tui.setFocus(atlasView);
+    if (view === "atlas") {
+      atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
     } else if (view === "ledger") {
       ledgerView.setData(brainState);
-      tui.setFocus(ledgerView);
+    } else if (view === "tree") {
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: brainState });
     } else if (view === "context") {
       await syncContextView(brainState);
-      tui.setFocus(contextView);
     }
+    await refreshSidebar();
     tui.requestRender();
   };
+
+  /**
+   * The archive layer (§3.3): the same workspace, the person's layer instead of
+   * the agent-facing one. Toggling it never re-reads the archive twice; the app
+   * owns the state and both the sidebar and the header show it.
+   */
+  const refreshArchive = async () => {
+    archiveView.setData(await brain.readArchive());
+    tui.requestRender();
+  };
+  const switchLayer = async (layer: Layer) => {
+    state.layer = layer;
+    headerState.layer = layer;
+    sidebar.setLayer(layer);
+    if (layer === "archive") {
+      await refreshArchive();
+    } else if (state.view === "context") {
+      await syncContextView(await brain.read());
+    } else if (state.view === "atlas") {
+      const fresh = await brain.read();
+      atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
+    } else if (state.view === "ledger") {
+      ledgerView.setData(await brain.read());
+    } else if (state.view === "tree") {
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
+    }
+    focusCurrent();
+    await refreshSidebar();
+    tui.requestRender();
+  };
+  const toggleLayer = () => switchLayer(state.layer === "archive" ? "context" : "archive");
 
   atlasView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
   contextView.onBack = () => void switchToView("chat");
+  treeView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
+  // Keep the cursor on screen as it walks: the view knows which rendered lines
+  // its row occupies, and the pane is the only thing that can scroll to them.
+  contextView.onReveal = (start, end) => {
+    const top = contextScroll.scrollTop;
+    const height = contextScroll.viewportHeight;
+    if (start < top) contextScroll.scrollTo(start);
+    else if (end > top + height) contextScroll.scrollTo(Math.max(0, end - height));
+  };
 
   /** Person-side pin toggles: place/remove a pin as "user". Shared by every view that can toggle a pin. */
   const togglePin = async (target: "chat" | "ledger" | "atlas", id: string) => {
@@ -412,89 +759,320 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const fresh = await brain.read();
     if (state.view === "atlas") atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
     if (state.view === "ledger") ledgerView.setData(fresh);
+    if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
     if (state.view === "context") await syncContextView(fresh);
     await refreshSidebar();
     tui.requestRender();
   };
 
+  /**
+   * The person's archive operations (§3.3). There is no tool for any of these,
+   * and no handle that names an archived item: the agent does not know the
+   * archive exists.
+   */
+  archiveView.onTogglePin = (id) => {
+    void (async () => {
+      const archive = await brain.readArchive();
+      const item = archive.items.find((candidate) => candidate.id === id);
+      if (item === undefined) return;
+      await brain.applyArchive({ kind: "pin", id, pinned: item.pinned === undefined ? "user" : null });
+      pushStatus(`${item.pinned === undefined ? "pinned" : "unpinned"} an archived item`);
+      await refreshArchive();
+      await refreshSidebar();
+    })();
+  };
+  /** Mark one archived item for restore, applied by the next collapse (§4.1). */
+  archiveView.onRestore = (id) => {
+    void (async () => {
+      const result = await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
+      pushStatus(
+        result.refused
+          ? "that item is marked by the agent, and that mark is the agent's to withdraw"
+          : "marked for restore: it comes back at the next collapse",
+      );
+      await refreshArchive();
+      tui.requestRender();
+    })();
+  };
+  /**
+   * Apply an archive mark now (§4.1).
+   *
+   * Restoring an ephemeral item before the collapse it belongs to still rebuilds,
+   * because the item's home is a live store and the only one being built is the
+   * next generation's. That is the honest cost of putting it back early, and the
+   * status line says so rather than pretending the head was untouched.
+   */
+  archiveView.onApplyNow = (id, action) => {
+    void (async () => {
+      if (action === "delete") {
+        await brain.applyArchive({ kind: "drop", id });
+        pushStatus("an archived item is deleted for good");
+        await refreshArchive();
+        await refreshSidebar();
+        tui.requestRender();
+        return;
+      }
+      const pending = (await brain.readArchive()).items.find((item) => item.id === id);
+      if (pending === undefined) return;
+      if (pending.record === undefined) {
+        // An ephemeral item's home is the live context, so it is written there
+        // first and only then taken out of the archive: a store that will not
+        // take it leaves it in the archive, where it still is, rather than
+        // nowhere (§3.3).
+        if (!(await restoreEphemeral(state.session, pending))) {
+          pushStatus("the live context would not take it back; it is still in the archive");
+          tui.requestRender();
+          return;
+        }
+      }
+      await brain.applyArchive({ kind: "restore", id });
+      pushStatus(pending.record === undefined ? "put an item back into the live context" : "restored a record to the Brain");
+      await refreshArchive();
+      await rebuildTranscript();
+      await refreshSidebar();
+      if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
+      if (state.view === "context") await syncContextView(await brain.read());
+      tui.requestRender();
+    })();
+  };
+  /** Withdraw the mark on an archived item: the item stays where it is (§4.1). */
+  archiveView.onWithdrawMark = (id) => {
+    void (async () => {
+      const result = await brain.applyArchive({ kind: "mark", id, action: null, author: "user" });
+      pushStatus(result.refused ? "that mark is the agent's, and it stays until the agent withdraws it" : "mark withdrawn");
+      await refreshArchive();
+      tui.requestRender();
+    })();
+  };
+  /** Mark one archived item for delete; the next collapse is what deletes it (§4.1). */
+  archiveView.onDelete = (id) => {
+    void (async () => {
+      const result = await brain.applyArchive({ kind: "mark", id, action: "delete", author: "user" });
+      pushStatus(
+        result.refused
+          ? "that item is marked by the agent, and that mark is the agent's to withdraw"
+          : "marked for delete: it goes at the next collapse, and `d` again applies it now",
+      );
+      await refreshArchive();
+      tui.requestRender();
+    })();
+  };
+
   transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
   ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
   atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
-  contextView.onTogglePin = (_partId: string, itemId: string | number) => {
-    void (async () => {
-      const brainState = await brain.read();
-      const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
-      if (chatRecord === undefined) return;
-      await togglePin("chat", chatRecord.id);
-    })();
-  };
-  contextView.onDelete = async (partId, itemId, now) => {
-    if (partId === "transcript") {
-      const brainState = await brain.read();
-      const chatRecord = brainState.chat.find((r) => r.id === itemId || String(r.id) === String(itemId));
-      if (chatRecord) {
-        await brain.apply({ kind: "delete", target: "chat", id: chatRecord.id }, Date.now());
-        pushStatus(`deleted chat record #${chatRecord.id}`);
-      }
-    }
-    if (now) {
-      await runCollapse("context surgery (now)");
-    } else {
-      await rebuildTranscript();
-      const brainState = await brain.read();
-      await syncContextView(brainState);
+  /**
+   * Pin or unpin one ephemeral item in the live context (§3.1, §3.2). This is
+   * the person's action, and the only thing that keeps an item through a
+   * collapse: an unpinned ephemeral is swept, and the archive is where it goes.
+   */
+  const toggleEphemeralPin = async (brainState: Awaited<ReturnType<BrainStore["read"]>>, rowId: string) => {
+    const held = brainState.ephemera.find((item) => item.id === rowId);
+    if (held !== undefined) {
+      // Pinning again is how the person takes a pin over: an agent's pin
+      // becomes theirs, and their own unpins.
+      const next = held.pinned === "user" ? null : "user";
+      await brain.apply(next === null ? { kind: "ephemeral.unpin", id: held.id } : { kind: "ephemeral.pin", item: { ...held, pinned: "user" } }, Date.now());
+      pushStatus(next === null ? "unpinned an item in the live context" : "pinned an item in the live context");
       await refreshSidebar();
+      if (state.view === "context") await syncContextView(await brain.read());
+      tui.requestRender();
+      return;
     }
+    // The item is in the generation's store, not the Brain: read it from the
+    // context the way the Context view drew it and keep that text, because the
+    // store it came from is about to be gone and pinning keeps the text, not a
+    // live view of it (§5.5).
+    const drawn = contextView.nodeFor("tool-work", rowId);
+    if (drawn === undefined) return;
+    await brain.apply(
+      {
+        kind: "ephemeral.pin",
+        item: {
+          id: rowId,
+          text: drawn.body,
+          kind: drawn.kind === "reasoning" ? "reasoning" : drawn.kind === "call" ? "toolCall" : "toolResult",
+          createdAt: Date.now(),
+          pinned: "user",
+          // A pinned result that came from a `read` is a promise about that
+          // file: the collapse reads it again (§5.5), so the path has to ride
+          // with the pin. Without one the item is text, and stays text.
+          ...(drawn.payload === undefined ? {} : { entity: drawn.payload }),
+        },
+      },
+      Date.now(),
+    );
+    pushStatus("pinned an item in the live context");
+    await refreshSidebar();
+    if (state.view === "context") await syncContextView(await brain.read());
     tui.requestRender();
   };
 
+  contextView.onTogglePin = (partId: string, itemId: string | number) => {
+    void (async () => {
+      const brainState = await brain.read();
+      if (partId === "transcript") {
+        const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
+        if (chatRecord === undefined) return;
+        await togglePin("chat", chatRecord.id);
+        return;
+      }
+      if (partId === "files") {
+        // A pinned file is unpinned by the person here (§3.2): the pin is theirs
+        // or the agent's, and the person may take either off.
+        const path = String(itemId);
+        const held = brainState.files.find((file) => file.path === path);
+        if (held === undefined) return;
+        await brain.apply({ kind: "file.pin", path, pinned: null }, Date.now());
+        pushStatus(held.pinned === "user" ? `unpinned ${path}` : `took the agent's pin off ${path}`);
+        await syncContextView(await brain.read());
+        await refreshSidebar();
+        tui.requestRender();
+        return;
+      }
+      if (partId === "ephemera" || partId === "tool-work") {
+        await toggleEphemeralPin(brainState, String(itemId));
+        return;
+      }
+      // A tool row is the prompt's to describe, not the person's to pin: there
+      // is no entry to keep, only a schema in the system prompt.
+      if (partId !== "tool-work") return;
+    })();
+  };
+
+  /**
+   * Context surgery (§4.1): `d` marks one entry for delete, `!` arms apply-now,
+   * and `c` collapses. A mark is not a deletion — the entry stays visible until
+   * a collapse sweeps it — and apply-now is a rebuild, not a patch.
+   */
+  contextView.onDelete = async (partId, itemId, now) => {
+    // A mark on a Brain record, whichever view the person pointed at it from
+    // (§4.1). A chat record arrives from the transcript; the rest arrive by the
+    // id the Context view drew them under.
+    const brainState = await brain.read();
+    const found =
+      brainState.chat.find((record) => String(record.id) === String(itemId)) !== undefined
+        ? ({ kind: "chat", id: String(itemId) } as const)
+        : brainState.ledger.find((entry) => String(entry.id) === String(itemId)) !== undefined
+          ? ({ kind: "ledger", id: String(itemId) } as const)
+          : brainState.atlas.find((node) => String(node.id) === String(itemId)) !== undefined
+            ? ({ kind: "atlas", id: String(itemId) } as const)
+            : undefined;
+    if (found !== undefined) {
+      await brain.apply({ kind: "mark.set", target: found.kind, id: found.id, action: "delete", author: "user" }, Date.now());
+      pushStatus(`marked ${found.kind} record for delete${now ? " now" : " at the next collapse"}`);
+    } else if (partId !== "transcript" && partId !== "tools" && partId !== "ephemera") {
+      pushStatus("that entry is not a Brain record, so no mark applies to it; it is swept at the next collapse");
+    }
+    if (now) {
+      // §4.1: applying now is a rebuild at this point, not a collapse. The entry
+      // leaves the model's view and nothing else moves — no sweep, no rotation,
+      // no grace spent. The record's own entry is what the write omits.
+      const applied = await applyOmitNow(state.session, String(itemId));
+      pushStatus(
+        applied
+          ? "applied now: the entry is out of the model's view, and the store still holds it"
+          : "nothing in the live context matches that entry, so there is nothing to omit",
+      );
+      await rebuildTranscript();
+      await syncContextView(await brain.read());
+      await refreshSidebar();
+      tui.requestRender();
+      return;
+    }
+    await rebuildTranscript();
+    await syncContextView(await brain.read());
+    await refreshSidebar();
+    tui.requestRender();
+  };
+
+  /**
+   * Withdraw a mark on a Brain record, or leave the record alone if the mark is
+   * the agent's. The person withdraws their own marks; the Brain refuses the
+   * rest, and this is where that refusal is put into words (§4.1).
+   */
+  const withdrawRecordMark = async (target: "chat" | "ledger" | "atlas", id: string) => {
+    try {
+      await brain.apply({ kind: "mark.clear", target, id, author: "user" }, Date.now());
+      pushStatus("mark withdrawn");
+    } catch {
+      pushStatus("that mark is the agent's, and it stays until the agent withdraws it");
+    }
+    await rebuildTranscript();
+    await syncContextView(await brain.read());
+    await refreshSidebar();
+    tui.requestRender();
+  };
+
+  contextView.onWithdrawMark = (partId, itemId) => {
+    void (async () => {
+      const brainState = await brain.read();
+      const kind =
+        brainState.chat.some((record) => String(record.id) === String(itemId))
+          ? "chat"
+          : brainState.ledger.some((entry) => String(entry.id) === String(itemId))
+            ? "ledger"
+            : brainState.atlas.some((node) => String(node.id) === String(itemId))
+              ? "atlas"
+              : undefined;
+      if (kind === undefined) {
+        pushStatus(partId === "ephemera" ? "an item kept in the context carries no mark; a pin is what holds it" : "nothing here carries a mark");
+        tui.requestRender();
+        return;
+      }
+      await withdrawRecordMark(kind, String(itemId));
+    })();
+  };
+  // ── The screen ────────────────────────────────────────────────────────────
+  // Posting's map of a screen, in bands: one header row, the working area, the
+  // prompt (only where you type), the key bar, and the context bar along the
+  // very bottom of everything. The sidebar is the full height of the working
+  // bands beside them; its seam is drawn by the pane itself.
+  //
+  // Every band paints its own background, edge to edge. `VStack` sizes them by
+  // their contents and `Spacer` does not grow, so a layout that leaves a band
+  // to "fill" would show the terminal's own background through the gaps; each
+  // band here is given the height it renders at instead.
+  const footer = new FooterView(() => footerHints());
+  const workArea = new VStack([
+    { component: transcriptScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+    { component: atlasScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
+    { component: ledgerScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
+    { component: treeScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "tree" && state.layer === "context" },
+    { component: contextScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" && state.layer === "context" },
+    { component: archiveScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.layer === "archive" },
+  ]);
+  const headerBand = new VStack([{ component: header, basis: "auto" }, { component: new Rule(), basis: 1 }]);
+  const body = new HStack([
+    { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
+    {
+      component: new VStack([
+        { component: headerBand, basis: 2 },
+        { component: workArea, basis: 0, grow: 1, minSize: 3 },
+        { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
+      ]),
+      basis: 0,
+      grow: 1,
+      minSize: 20,
+    },
+  ]);
+
   tui.setLayoutRoot(
-    new HStack([
-      { component: new Spacer(0), basis: 1 },
-      {
-        component: new VStack([
-          { component: new Spacer(1), basis: 1 },
-          { component: header, basis: "auto" },
-          {
-            component: new HStack([
-              { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-              { component: scroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" },
-              { component: atlasView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" },
-              { component: ledgerView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" },
-              { component: contextView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" },
-            ]),
-            basis: 0,
-            grow: 1,
-            minSize: 3,
-          },
-          { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" },
-          { component: tokenBar, basis: 1 },
-          { component: footer, basis: 1 },
-          { component: new Spacer(1), basis: 1 },
-        ]),
-        basis: 0,
-        grow: 1,
-        minSize: 3,
-      },
-      { component: new Spacer(0), basis: 1 },
+    new VStack([
+      { component: body, basis: 0, grow: 1, minSize: 6 },
+      { component: footer, basis: 2 },
+      { component: tokenBar, basis: 1 },
     ]),
   );
   tui.start();
   tui.setFocus(editor);
 
+  // ── Input ─────────────────────────────────────────────────────────────────
   const closeOverlay = () => {
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
-    if (state.view === "chat") {
-      tui.setFocus(editor);
-    } else if (state.view === "atlas") {
-      tui.setFocus(atlasView);
-    } else if (state.view === "ledger") {
-      tui.setFocus(ledgerView);
-    } else if (state.view === "context") {
-      tui.setFocus(contextView);
-    }
+    focusCurrent();
     tui.requestRender();
   };
 
@@ -523,6 +1101,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * skips the re-render entirely when nothing moved.
    */
   const rebuildTranscript = async (): Promise<void> => {
+    // The session is closed on the way out, and a rebuild in flight at that
+    // moment reads a closed harness: there is nothing left to draw, and the
+    // frame is about to go away with the terminal.
+    if (shutdownRequested) return;
     if (state.rebuilding) return;
     state.rebuilding = true;
     try {
@@ -558,6 +1140,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const toolErrors = new Map<string, boolean>();
       const toolOutputs = new Map<string, string>();
       const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
+      // One order, one numbering, both views (§5.4).
+      const promptItems = promptItemsOf(entries);
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
         const message = messageOf(entry);
@@ -589,6 +1173,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           }
         }
       }
+      const handles = promptHandles(promptItems);
+      // Now that the items are numbered, each row takes its own: a person's
+      // line is `U1`, a card is the `X` of the item it renders, and a result is
+      // the `R` or `S` of the result it is.
+      const handleFor = (key: string): { handle?: string } => {
+        const handle = handles.ephemeral(key);
+        return handle === undefined ? {} : { handle };
+      };
+      for (const item of person) {
+        const handle = handles.person(String(item.key));
+        if (handle !== undefined && item.entry.kind === "person") item.entry.handle = handle;
+      }
 
       // The working, as cards: reasoning, plain model text, and tool calls, in
       // the order the model produced them. Landed cards default folded.
@@ -607,10 +1203,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         }
         parts.forEach((part, partIndex) => {
           const key = entryId + (partIndex + 1) * 0.0001;
+          const itemHandle = handleFor(`${entryId}-${partIndex}`);
           if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
-            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking } });
+            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking, ...itemHandle } });
           } else if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
-            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
+            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text, ...itemHandle } });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             const callId = typeof part.id === "string" ? part.id : undefined;
             const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
@@ -621,6 +1218,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
                 id: `ctx-${entryId}-${partIndex}`,
                 name: part.name,
                 args: formatToolArgs(part.arguments, part.name),
+                ...itemHandle,
                 ...(output !== undefined ? { output } : {}),
                 ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
               },
@@ -629,11 +1227,36 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         });
       }
 
+      // A tool row is the call and its result together, so it wears the
+      // result's handle: that is the text the person quotes, and pinning it
+      // pins the text that came back (§5.5).
+      for (const item of cards) {
+        const card = item.entry;
+        if (!isCard(card) || card.kind !== "tool") continue;
+        const handle = handles.result(String(card.id).replace(/^ctx-/, ""));
+        if (handle !== undefined) card.handle ??= handle;
+      }
+
+      // Agent Chat is the conversation, so every record is on screen: one
+      // written now, and one a collapse built the context with — those are in
+      // the archive once the store that held them is gone, which is why this
+      // asks the store and not the Brain alone. A record is placed by its
+      // timestamp, so Chat that came back at a collapse sits at the head of this
+      // generation, where the model reads it, and the earlier transcript stays
+      // under it.
       const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
-      for (const record of brainState.chat) {
-        if (record.author !== "agent") continue;
-        if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
-        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text, recordId: record.id, pinned: record.pinned } });
+      for (const record of await brain.readAgentChat()) {
+        const chatHandle = handleOf(brainState.handles, "chat", record.id);
+        agent.push({
+          key: anchorAt(record.createdAt) + 0.5,
+          entry: {
+            kind: "agent",
+            text: record.text,
+            recordId: record.id,
+            ...(chatHandle === undefined ? {} : { handle: chatHandle }),
+            pinned: record.pinned,
+          },
+        });
       }
 
       // Clear pending items whose placement we can now see: same text, an
@@ -671,7 +1294,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         cards.map((item) => item.key).join(","),
         stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
         agent.map((item) => `${String(item.key)}:${item.entry.kind === "agent" ? String(item.entry.recordId ?? "") + ":" + String(item.entry.pinned ?? "") : ""}`).join(","),
-        state.sealedAgentIds.size,
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),
         String(Math.round(parts.systemTokens)),
@@ -689,12 +1311,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           [...state.sealed, ...live.map((item) => item.entry)],
           state.pending.map((item) => ({ text: item.text, mode: item.mode })),
         );
+        headerState.windowUnknown = state.session.state.contextWindow <= 0;
         tui.requestRender();
       }
 
-      if (state.view === "context") {
+      if (state.view === "context" && state.layer === "context") {
         await syncContextView(brainState);
       }
+    } catch (error) {
+      // Shutdown closed the session under us; every other failure is a real
+      // one and stays visible.
+      if (!shutdownRequested) throw error;
     } finally {
       state.rebuilding = false;
     }
@@ -709,7 +1336,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     watch.start(async (call) => {
       if (call.kind !== "value") return;
       const live = call.value as LiveState;
-      const cards = liveCardsOf(live);
+      // The partial continues the prompt's numbering rather than starting a
+      // second one: a card in flight is the next item after everything the
+      // generation already holds, and it wears the handle of the item it is.
+      const landedEntries = (await sessionTranscript(state.session).catch(() => [])) as unknown as ContextEntryLike[];
+      const cards = liveCardsOf(live, generationHandles(live, promptItemsOf(landedEntries)));
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
@@ -717,7 +1348,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
         lastLiveRebuild = now;
         setImmediate(() => {
-          void rebuildTranscript();
+          void rebuildTranscript().catch(() => undefined);
         });
       }
       hadLive = hasLive;
@@ -740,20 +1371,26 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.liveWatch = undefined;
     try {
       const before = await brain.read();
-      for (const record of before.chat) if (record.author === "agent") state.sealedAgentIds.add(record.id);
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
       headerState.session = outcome.session;
       barState.session = outcome.session;
       void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
+      // What the archive did is the person's business, so it is said. Nothing
+      // here reaches the agent: the archive is not in any of its views (§3.3).
+      if (outcome.report.restored.length > 0) pushStatus(`${outcome.report.restored.length} item(s) came back out of the archive`);
+      if (outcome.report.deleted.length > 0) pushStatus(`${outcome.report.deleted.length} archived item(s) deleted for good`);
+      if (outcome.report.dropped.length > 0) pushStatus(`${outcome.report.dropped.length} archived item(s) past their grace, gone`);
       await refreshSidebar();
+      await refreshArchive();
     } catch (error) {
       pushStatus(`collapse failed: ${errorText(error)}`);
     } finally {
       state.collapsing = false;
       state.inFlight = Math.max(0, state.inFlight);
       state.running = state.inFlight > 0;
+      headerState.running = state.running;
       await rebuildTranscript();
       tui.requestRender();
     }
@@ -779,6 +1416,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight += 1;
     state.running = true;
+    headerState.running = true;
     tui.requestRender();
     try {
       if (state.sendMode === "now") await interruptRun(state.session);
@@ -794,133 +1432,573 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
+    headerState.running = state.running;
+    // The run settled after the person left: the session is closed, and every
+    // read below would raise against a harness that is already gone.
+    if (shutdownRequested) return;
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
+    // `tree` ended the turn to read the tree it just set (§6.3): the person
+    // watches the next turn happen rather than waiting to speak first.
+    //
+    // Peek, do not take: `readTreeNext` consumes the request itself, and taking
+    // it here first would leave it nothing to consume — the continuation would
+    // be skipped and the agent would stay halted until somebody spoke.
+    if (state.session.state.treeReadNext === true) {
+      state.running = true;
+      headerState.running = true;
+      tui.requestRender();
+      try {
+        await readTreeNext(state.session);
+      } finally {
+        state.running = false;
+        headerState.running = false;
+        await rebuildTranscript();
+        tui.requestRender();
+      }
+    }
+    // A timed sleep no longer needs anything here: the rest is a durable task
+    // (§10), so the next turn begins from the store, even after a restart, and
+    // the watch on the live generation shows it when it happens.
     if (options.refreshCapacity === true) await refreshAdvertisedWindow();
     await refreshSidebar();
     tui.requestRender();
   };
 
-  const slashHelp = [
-    "/help — this screen",
-    "/copy — copy the transcript to the clipboard (also a /tmp fallback file)",
-    "/copy-session — full diagnostic dump: transcript, context, counts (clipboard + /tmp)",
-    "these are the only slash commands; anything else starting with / is not sent to the agent",
-    "keys: ctrl+x stop · shift+tab send mode · ctrl+e fold cards · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+c quit",
-  ].join("\n");
+  /**
+   * The person's mode toggle (§6.1). It flips the session flag the tools read,
+   * and the block reports the new mode on the next request. Nothing else knows
+   * the mode — `bash` stays trusted, and no gate is placed anywhere.
+   */
+  const toggleReadOnly = () => {
+    state.session.state.readOnly = !state.session.state.readOnly;
+    tui.flash(
+      state.session.state.readOnly
+        ? "read only mode — create and edit will refuse"
+        : "edit mode — the agent may change the project",
+      1_800,
+    );
+    tui.requestRender();
+  };
 
-  const runSlash = async (raw: string) => {
-    const match = /^\/(\S+)(?:\s+(.*))?$/.exec(raw.trim());
-    const command = (match?.[1] ?? "").toLowerCase();
+  const copyTranscript = async () => {
+    const text = transcript.toPlainText();
+    const result = await copyWithFallback(text, "transcript");
+    pushStatus(`transcript copied — ${result.where} (${text.split("\n").length} lines)`);
+    return result;
+  };
+
+  const copySession = async () => {
+    const brainState = await brain.read();
+    const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
+    const lines: string[] = [
+      `# carto session dump — ${new Date().toISOString()}`,
+      `project: ${options.root}`,
+      `generation: ${state.session.generation}`,
+      `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
+      `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
+      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
+      "",
+      "## transcript (what the person saw)",
+      transcript.toPlainText(),
+      "",
+      "## context (what the model sees; oldest first; state-block markers stripped)",
+    ];
+    for (const entry of entries) {
+      const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
+      if (flat === undefined) continue;
+      if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
+      lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
+    }
+    const text = lines.join("\n");
+    const result = await copyWithFallback(text, "session");
+    pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);
+    return result;
+  };
+
+  /**
+   * Pause or unpause the run (§9). The one implementation is in the runtime,
+   * because the headless driver answers the same act; this only says what
+   * happened and redraws.
+   */
+  const runPause = async () => {
     try {
-      if (command === "help" || command === "h" || command === "?") {
-        pushStatus(slashHelp);
-      } else if (command === "copy") {
-        const text = transcript.toPlainText();
-        const result = await copyWithFallback(text, "transcript");
-        pushStatus(`/copy — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
-      } else if (command === "copy-session") {
-        const brainState = await brain.read();
-        const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
-        const lines: string[] = [
-          `# carto session dump — ${new Date().toISOString()}`,
-          `project: ${options.root}`,
-          `generation: ${state.session.generation}`,
-          `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
-          `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
-          `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
-          "",
-          "## transcript (what the person saw)",
-          transcript.toPlainText(),
-          "",
-          "## context (what the model sees; oldest first; state-block markers stripped)",
-        ];
-        for (const entry of entries) {
-          const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
-          if (flat === undefined) continue;
-          if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
-          lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
-        }
-        const text = lines.join("\n");
-        const result = await copyWithFallback(text, "session");
-        pushStatus(`/copy-session — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
-      } else {
-        pushStatus(`unknown command /${command} — /help lists them`);
+      const outcome = await togglePause(state.session);
+      pushStatus(outcome.line);
+      if (outcome.paused) {
+        // The pause is a statement about the run, not a message to the agent:
+        // nothing is written to the context and the agent is never told.
+        tui.flash(outcome.line, 2_400);
       }
     } catch (error) {
-      pushStatus(`/${command} failed: ${errorText(error)}`);
+      pushStatus(`pause failed: ${errorText(error)}`);
     }
     await rebuildTranscript();
+    tui.requestRender();
+  };
+
+  const submitMessage = (message: string) => {
+    // A line written while the agent is held in its stream lets go of that
+    // stream first (§9): the held reply ends here, and this line is the next
+    // thing the agent reads. Sending while merely paused is not this — nothing
+    // is held, so there is nothing to let go, and the run continues (§9: "send
+    // while paused behaves as if the run had not been paused").
+    if (state.session.freeze.frozen()) {
+      state.session.freeze.abandon();
+      pushStatus("the held reply ends here — your line is the next thing");
+    }
+    state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
+    void rebuildTranscript().catch(() => undefined);
+    // Nothing awaits a submission: the run outlives the frame that started it
+    // and settles after the person may have left, so a failure here is the
+    // status line's business, never the process's.
+    void runSubmission(message).catch((error: unknown) => {
+      if (!shutdownRequested) pushStatus(`the run failed: ${errorText(error)}`);
+    });
   };
 
   editor.onSubmit = (text: string) => {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
-    if (message.startsWith("/")) {
-      void runSlash(message);
+    submitMessage(message);
+  };
+
+  /**
+   * Ctrl-C, as bash does it: a line with text on it is cleared and nothing else
+   * happens; an empty line arms leaving, and a second press inside the window
+   * leaves. The arming is not a mode — it lapses, so an old stray Ctrl-C can
+   * never turn the next one into a quit.
+   */
+  const pressCtrlC = () => {
+    const typed = editor.getExpandedText();
+    const decision = ctrlC({ typed, armedAt: state.ctrlCArmedAt, now: Date.now() });
+    state.ctrlCArmedAt = decision.armedAt;
+    if (decision.outcome.action === "cleared") {
+      editor.setText("");
+      tui.requestRender();
       return;
     }
-    state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
-    void rebuildTranscript();
-    void runSubmission(message);
+    if (decision.outcome.action === "armed") {
+      tui.flash(
+        state.running ? "press ^c again to leave — the run stops with the session" : "press ^c again to leave",
+        Math.min(decision.outcome.windowMs, CTRL_C_ARM_WINDOW_MS),
+      );
+      tui.requestRender();
+      return;
+    }
+    void shutdown(0);
+  };
+
+  /**
+   * Ctrl-G: write the message in `$VISUAL`/`$EDITOR` (§8's editor note in
+   * `compose.ts`). The TUI is taken down first, because the editor needs the
+   * terminal in its own mode; it is brought back up afterwards, and the file's
+   * text becomes the prompt. Nothing is sent — the person still presses enter.
+   *
+   * A key the person wants and an editor that is not there are both worth
+   * saying plainly, so a failure flashes the reason instead of looking dead.
+   */
+  const composeInPrompt = async () => {
+    const before = editor.getExpandedText();
+    // A stopped TUI must always come back: if the editor throws on the way out,
+    // leaving `tui` stopped would hand the person a dead terminal with no way
+    // to type, which is worse than a failed edit.
+    let outcome: EditorOutcome;
+    let stopped = false;
+    try {
+      tui.stop();
+      stopped = true;
+      outcome = await composeInEditor(before);
+    } catch (error) {
+      outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (stopped) tui.start();
+      tui.setFocus(editor);
+      void rebuildTranscript().catch(() => undefined);
+      tui.requestRender();
+    }
+    if (!outcome.ok) {
+      tui.flash(`no editor: ${outcome.error}`, 4_000);
+      tui.requestRender();
+      return;
+    }
+    if (outcome.text === before) {
+      // Leaving the file as it was is not an edit: the prompt is left alone, so
+      // a glance in the editor cannot rewrite what was already on the line.
+      return;
+    }
+    editor.setText(outcome.text);
+    tui.requestRender();
+  };
+
+  // ── Commands ─────────────────────────────────────────────────────────────
+  // One registry. The footer, `f1` and `^p` are views of this list; see
+  // `commands.ts`. Order matters twice: input matching goes in declaration
+  // order, and the footer shows the first ones that fit.
+  const inChat = () => state.layer === "context" && state.view === "chat";
+  const inView = (view: ViewMode) => state.layer === "context" && state.view === view;
+  const onArchive = () => state.layer === "archive";
+
+  const commands = new Registry([
+    {
+      id: "help",
+      group: "anywhere",
+      label: "shortcuts",
+      key: "f1",
+      run: () => showHelp(),
+      available: () => true,
+    },
+    {
+      id: "palette",
+      group: "anywhere",
+      label: "palette",
+      key: "ctrl+p",
+      run: () => showPalette(),
+      available: () => true,
+    },
+    {
+      id: "jump",
+      group: "anywhere",
+      label: "jump to a view",
+      key: "ctrl+o",
+      run: () => showJump(),
+      available: () => true,
+    },
+    {
+      // Bash-like, and the person's ask: ^c clears the line it finds text on,
+      // and leaves when pressed again on an empty one. Both presses are the
+      // same key, so both are one command; `^c stop` is `ctrl+x` and is not
+      // this (§9: stopping is an interrupt, leaving is leaving).
+      id: "ctrl-c",
+      group: "the message",
+      label: "clear the line, twice to leave",
+      key: "ctrl+c",
+      run: () => pressCtrlC(),
+      available: () => true,
+    },
+    {
+      id: "compose",
+      group: "the message",
+      label: "write the message in your editor",
+      hint: "$VISUAL, else $EDITOR",
+      key: "ctrl+g",
+      run: () => void composeInPrompt(),
+      // Only where there is a message to write, and only with the terminal to
+      // itself: an editor opened over an overlay would fight it for the screen.
+      available: () => inChat() && !state.overlayOpen,
+    },
+    {
+      id: "quit",
+      group: "anywhere",
+      label: "quit",
+      // No key of its own: ^c twice is how a person leaves, and a separate
+      // binding that also quit would be a second way to lose a run by accident.
+      run: () => void shutdown(0),
+      available: () => true,
+    },
+    {
+      id: "stop",
+      group: "the run",
+      label: "stop the run",
+      key: "ctrl+x",
+      run: () => {
+        void interruptRun(state.session)
+          .then(
+            () => pushStatus("interrupt sent — the run stops"),
+            (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
+          )
+          .then(() => rebuildTranscript())
+          .catch(() => undefined);
+      },
+      available: () => state.running,
+    },
+    {
+      id: "pause",
+      group: "the run",
+      // The label says what pressing it does, so the palette reads as an act
+      // and the footer reads as one line (§9).
+      label: state.session.state.paused ? "let the run go on" : "pause the run",
+      hint: "holds the reply where it is; a line you send ends it",
+      key: "ctrl+v",
+      run: () => void runPause(),
+      available: () => true,
+    },
+    {
+      id: "send-mode",
+      group: "the run",
+      label: "send mode",
+      hint: "steer · after run · now",
+      key: "shift+tab",
+      run: () => {
+        state.sendMode = nextSendMode(state.sendMode);
+        tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
+        tui.requestRender();
+      },
+      available: () => inChat(),
+    },
+    {
+      id: "collapse",
+      group: "the run",
+      label: "collapse now",
+      run: () => void runCollapse("person requested (palette)"),
+      available: () => true,
+    },
+    {
+      id: "prompt-fold",
+      group: "the context",
+      label: "fold every entry",
+      hint: "enter folds one entry or a whole section",
+      key: "shift+e",
+      run: () => {
+        contextView.toggleAll();
+        tui.requestRender();
+      },
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
+      id: "fold-all",
+      group: "the transcript",
+      label: "fold the cards",
+      key: "ctrl+e",
+      run: () => {
+        transcript.toggleAllCards();
+        tui.requestRender();
+      },
+      available: () => inChat(),
+    },
+    {
+      id: "read-only",
+      group: "the workspace",
+      label: "read only mode",
+      hint: "flips whether the agent may change files",
+      run: () => toggleReadOnly(),
+      available: () => true,
+    },
+    {
+      id: "sidebar",
+      group: "the workspace",
+      label: "sidebar",
+      key: "ctrl+h",
+      run: () => {
+        state.sidebarVisible = !state.sidebarVisible;
+        focusCurrent();
+        tui.requestRender();
+      },
+      available: () => true,
+    },
+    {
+      id: "pin-context-row",
+      group: "the workspace",
+      label: "pin or unpin the entry under the cursor",
+      hint: "a pinned item in the live context goes on into the next collapse",
+      key: "p",
+      // The Context view matches the key itself, because it knows where the
+      // cursor is; the palette comes here, so it does the same act.
+      run: () => contextView.pinSelected(),
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
+      id: "archive",
+      group: "the workspace",
+      label: "the archive layer",
+      hint: "the person's, never the agent's",
+      key: "ctrl+t",
+      run: () => void toggleLayer(),
+      available: () => true,
+    },
+    // What the person can do on the archive layer, named where every other act
+    // is named: the footer, `f1` and the palette all read this list.
+    {
+      id: "archive-pin",
+      group: "the archive",
+      label: "pin or unpin the item",
+      hint: "a pinned item is never dropped",
+      // The archive view matches these itself, because it knows the cursor; they
+      // are declared here so the footer, `f1` and the palette name them (§3.3:
+      // the same UI, so the same list).
+      key: "p",
+      run: () => {
+        const item = archiveView.selectedItem();
+        if (item !== undefined) archiveView.onTogglePin?.(item.id);
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-restore",
+      group: "the archive",
+      label: "mark it for restore",
+      hint: "at the next collapse; `!r` restores it now",
+      key: "r",
+      run: () => {
+        if (archiveView.restoreSelected() === "applied") pushStatus("restored now, not at the next collapse");
+        tui.requestRender();
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-withdraw",
+      group: "the archive",
+      label: "withdraw the mark",
+      key: "u",
+      run: () => {
+        if (!archiveView.withdrawSelected()) pushStatus("nothing is marked here");
+        tui.requestRender();
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-delete",
+      group: "the archive",
+      label: "mark it for delete",
+      hint: "takes a second press to delete now",
+      key: "d",
+      run: () => {
+        // One act behind one implementation: the key, the palette and `f1` all
+        // come here, so the two presses cannot be had from a second route.
+        if (archiveView.deleteSelected() === "marked") pushStatus("marked for delete; `d` again applies it now");
+        tui.requestRender();
+      },
+      available: onArchive,
+    },
+    {
+      id: "view-chat",
+      group: "go to",
+      label: "the transcript",
+      run: () => void switchToView("chat"),
+      available: () => !inChat(),
+    },
+    {
+      id: "view-atlas",
+      group: "go to",
+      label: "the atlas",
+      run: () => void switchToView("atlas"),
+      available: () => !inView("atlas"),
+    },
+    {
+      id: "view-ledger",
+      group: "go to",
+      label: "the ledger",
+      run: () => void switchToView("ledger"),
+      available: () => !inView("ledger"),
+    },
+    {
+      id: "view-tree",
+      group: "go to",
+      label: "the tree",
+      hint: "the project under its handles, as the harness sees it",
+      run: () => void switchToView("tree"),
+      available: () => !inView("tree"),
+    },
+    {
+      id: "view-context",
+      group: "go to",
+      label: "the context",
+      hint: "what the model reads, and surgery on it",
+      run: () => void switchToView("context"),
+      available: () => !inView("context"),
+    },
+    {
+      id: "copy",
+      group: "the record",
+      label: "copy the transcript",
+      key: "ctrl+y",
+      run: () => void copyTranscript(),
+      available: () => true,
+    },
+    {
+      id: "copy-session",
+      group: "the record",
+      label: "copy a full session dump",
+      run: () => void copySession(),
+      available: () => true,
+    },
+    {
+      id: "back",
+      group: "anywhere",
+      label: "back to the transcript",
+      key: "escape",
+      run: () => void switchToView("chat"),
+      available: () => state.layer === "context" && state.view !== "chat",
+    },
+  ] satisfies Command[]);
+
+  function footerHints(): Array<{ key: string; label: string }> {
+    return commands.footer().map((command) => ({
+      key: keyText(command.key ?? ""),
+      label: command.key === "shift+tab" ? `${command.label}: ${sendModeLabel(state.sendMode)}` : command.label,
+    }));
+  }
+
+  const helpExtras = (): HelpExtra[] => [
+    { group: "type it", key: "/copy", label: "copy the transcript" },
+    { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
+    { group: "type it", key: "/help", label: "the command list in the transcript" },
+    { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
+  ];
+
+  const showHelp = () => {
+    if (state.overlayOpen) return;
+    state.overlayOpen = true;
+    const panel = new HelpPanel(commands.all(), helpExtras);
+    panel.onClose = closeOverlay;
+    state.overlayHandle = tui.showOverlay(panel, { width: "70%", maxHeight: "80%", anchor: "center" });
+    tui.setFocus(panel);
+    tui.requestRender();
+  };
+
+  const paletteCommands = (): PaletteCommand[] => {
+    const list: PaletteCommand[] = commands.all()
+      .filter((command) => {
+        try {
+          return command.available();
+        } catch {
+          return false;
+        }
+      })
+      .map((command) => ({
+        id: command.id,
+        group: command.group,
+        label: command.label,
+        ...(command.key === undefined ? {} : { key: command.key }),
+        ...(command.hint === undefined ? {} : { hint: command.hint }),
+        run: () => command.run(),
+      }));
+    // Conditional, dynamically-named entries, as Posting does: the palette names
+    // the layer it would take you to, not a fixed string.
+    list.push({
+      id: "layer-name",
+      group: "the workspace",
+      label: state.layer === "archive" ? "Layer: back to the context" : "Layer: the archive",
+      run: () => void toggleLayer(),
+    });
+    list.push({
+      id: "send-mode-name",
+      group: "the run",
+      label: `Send: ${sendModeLabel(state.sendMode)}`,
+      run: () => {
+        state.sendMode = nextSendMode(state.sendMode);
+        tui.requestRender();
+      },
+    });
+    list.push({
+      id: "read-only-name",
+      group: "the workspace",
+      label: state.session.state.readOnly ? "Mode: back to editing" : "Mode: read only",
+      run: () => toggleReadOnly(),
+    });
+    return list;
   };
 
   const showPalette = () => {
     if (state.overlayOpen) return;
     state.overlayOpen = true;
-    const commands: PaletteCommand[] = [
-      {
-        value: "chat",
-        label: "switch to chat view",
-        hint: "^o c",
-        run: () => void switchToView("chat"),
-      },
-      {
-        value: "atlas",
-        label: "switch to atlas view",
-        hint: "^o a",
-        run: () => void switchToView("atlas"),
-      },
-      {
-        value: "ledger",
-        label: "switch to ledger view",
-        hint: "^o l",
-        run: () => void switchToView("ledger"),
-      },
-      {
-        value: "context",
-        label: "switch to context surgery view",
-        hint: "^o x",
-        run: () => void switchToView("context"),
-      },
-      {
-        value: "collapse",
-        label: "collapse the context now",
-        hint: "the Brain rebuilds it",
-        run: () => void runCollapse("person requested (palette)"),
-      },
-      {
-        value: "sidebar",
-        label: "toggle the sidebar",
-        hint: "ctrl+h",
-        run: () => {
-          state.sidebarVisible = !state.sidebarVisible;
-          tui.requestRender();
-        },
-      },
-      {
-        value: "quit",
-        label: "quit carto",
-        hint: "ctrl+c",
-        run: () => void shutdown(0),
-      },
-    ];
-    const palette = new Palette(commands);
+    const palette = new Palette(paletteCommands());
     palette.onClose = closeOverlay;
-    state.overlayHandle = tui.showOverlay(palette, { width: 58, anchor: "bottom-center", offsetY: -2 });
+    state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
+    tui.requestRender();
   };
 
   const showJump = () => {
@@ -929,61 +2007,38 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const jump = new JumpOverlay(JUMP_TARGETS);
     jump.onClose = closeOverlay;
     jump.onJump = (key) => {
-      if (key === "c") void switchToView("chat");
-      else if (key === "a") void switchToView("atlas");
-      else if (key === "l") void switchToView("ledger");
-      else if (key === "x") void switchToView("context");
+      const target = JUMP_TARGETS.find((candidate) => candidate.key === key);
+      if (target === undefined) return;
+      if (state.layer === "archive") void switchLayer("context");
+      void switchToView(target.view);
     };
     state.overlayHandle = tui.showOverlay(jump, { width: 52, anchor: "center" });
     tui.setFocus(jump);
+    tui.requestRender();
   };
 
   tui.addInputListener((data) => {
     if (state.overlayOpen) return undefined;
-    if (matchesKey(data, "ctrl+c")) {
-      void shutdown(0);
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+x")) {
-      if (state.running) {
-        void interruptRun(state.session).then(
-          () => pushStatus("interrupt sent — the run stops"),
-          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
-        ).then(() => rebuildTranscript());
-      } else {
-        tui.flash("no run in flight", 1_500);
-      }
-      return { consume: true };
-    }
-    if (matchesKey(data, "shift+tab") && state.view === "chat") {
-      state.sendMode = nextSendMode(state.sendMode);
-      tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+e") && state.view === "chat") {
-      transcript.toggleAllCards();
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+o")) {
-      showJump();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+p")) {
-      showPalette();
-      return { consume: true };
-    }
-    if (matchesKey(data, "ctrl+h")) {
-      state.sidebarVisible = !state.sidebarVisible;
-      tui.requestRender();
-      return { consume: true };
-    }
+    // The registry sees keys first: a command that is not available returns the
+    // keystroke untouched, so the focused view still gets it.
+    if (commands.dispatch(data)) return { consume: true };
     return undefined;
   });
 
   liveTimer = setInterval(() => {
     void rebuildTranscript().catch(() => undefined);
+    // The tree is live too: the agent moves the anchor with the `tree` tool
+    // mid-run, and the person watching the view should see it move rather than
+    // find out at the next collapse.
+    if (state.view === "tree") {
+      void brain
+        .read()
+        .then((brainState) => {
+          treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: brainState });
+          tui.requestRender();
+        })
+        .catch(() => undefined);
+    }
   }, 1_500);
 
   void startLiveWatch();

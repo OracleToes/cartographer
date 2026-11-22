@@ -24,7 +24,10 @@ const files = readdirSync("test")
   .sort()
   .map((name) => join("test", name));
 
-const child = spawn(process.execPath, ["--test", ...files], {
+// Files run concurrently, not one after another. Every test file here owns its
+// own temp root and its own CARTO_HOME, so nothing they do can reach across;
+// what this buys is wall time, and the budget below is wall time.
+const child = spawn(process.execPath, ["--test", "--test-concurrency=4", ...files], {
   stdio: "inherit",
   detached: true,
 });

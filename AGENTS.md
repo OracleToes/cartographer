@@ -23,10 +23,9 @@ From highest to lowest:
    document is stale and the contradiction is a task.
 2. **`SPEC.md`.** The specification of record: what Carto is, what it keeps, and
    what it must do.
-3. **`docs/intent.md`.** Confirmed intent only. See §6.
-4. **This file.** Process: how to work, how to test, what to record, and how to
+3. **This file.** Process: how to work, how to test, what to record, and how to
    report.
-5. **Other `docs/`.** Plans and notes. A plan is a proposal, never authority. A
+4. **Other `docs/`.** Plans and notes. A plan is a proposal, never authority. A
    plan that has been overtaken is marked superseded, not silently edited.
 
 Nothing in a plan, a commit message, or a chat log outranks the person.
@@ -38,11 +37,12 @@ The project is built on these packages. They are dependencies, not suggestions.
 | Source | Given by | Why it is here | In use |
 | --- | --- | --- | --- |
 | [pi — `packages/tui`](https://github.com/earendil-works/pi/tree/main/packages/tui) | person | Terminal rendering, layout, focus, editors, scrolling, overlays, key parsing | `@earendil-works/pi-tui` 1.5.2 |
-| [pi — `packages/durable`](https://github.com/earendil-works/pi/tree/main/packages/durable) | person | Durable conversations, tasks, tool calls, sleeps, wakes, retries, SQLite storage | `@earendil-works/pi-durable` 1.5.2 |
+| [pi — `packages/durable`](https://github.com/earendil-works/pi/tree/main/packages/durable) | person | Durable conversations, tasks, tool calls, sleeps, resumes, retries, SQLite storage | `@earendil-works/pi-durable` 1.5.2 |
 | [pi — `packages/ai`](https://github.com/earendil-works/pi/tree/main/packages/ai) | person | Models, providers, tool validation, streams, usage, provider errors | `@earendil-works/pi-ai` 1.5.2 |
 | [pi — `packages/chord`](https://github.com/earendil-works/pi/tree/main/packages/chord) | agent | pi-durable's own substrate — documents, store, SQLite facade (`sqlite/node`) the Brain store is built on | `@earendil-works/chord` 1.5.2 |
 | [pi — `packages/schema`](https://github.com/earendil-works/pi/tree/main/packages/schema) | agent | Tool parameter validation for the product tools (`defineTool` arguments) | `@earendil-works/pi-schema` 1.5.2 |
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
+| [canop/broot](https://github.com/canop/broot) | person | Inspiration for the tree view only: how a whole hierarchy is made readable in one pane. Not a dependency and not a port target | reference only |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at

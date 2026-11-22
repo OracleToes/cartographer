@@ -10,14 +10,14 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import test from "node:test";
+import test, { describe } from "node:test";
 
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
-import { advertisedCapacityOf, catalogModel, resolveContextWindow, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
+import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
 import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
@@ -126,7 +126,7 @@ test("capacity advertisement is read from context_length, then context_window, t
 
 test("a listing entry maps to a Model: the configured pin wins, then the advertised window, else unknown", () => {
   const pinnedHigh = catalogModel({ id: "ByteShape", context_length: 131_072 }, 75_000, "http://x/v1");
-  assert.equal(pinnedHigh.contextWindow, 75_000, "the pin wins over an advertised window below it");
+  assert.equal(pinnedHigh.contextWindow, 75_000, "the pin wins over an advertised window above it");
   assert.equal(pinnedHigh.maxTokens, 75_000);
   const pinnedLow = catalogModel({ id: "ByteShape", context_length: 65_536 }, 131_072, "http://x/v1");
   assert.equal(pinnedLow.contextWindow, 131_072, "the pin can raise the server above its advertised window");
@@ -134,20 +134,12 @@ test("a listing entry maps to a Model: the configured pin wins, then the adverti
   assert.equal(silentPin.contextWindow, 75_000, "the pin serves a silent server");
   const advertised = catalogModel({ id: "ByteShape", context_length: 65_536 }, undefined, "http://x/v1");
   assert.deepEqual([advertised.contextWindow, advertised.maxTokens], [65_536, 65_536], "no pin: the server's advertised window is the truth");
+  const zeroPin = catalogModel({ id: "ByteShape", context_length: 65_536 }, 0, "http://x/v1");
+  assert.equal(zeroPin.contextWindow, 65_536, "a configured 0 means no pin, so the advertised window stands");
   const unknown = catalogModel({ id: "ByteShape" }, undefined, "http://x/v1");
   assert.deepEqual([unknown.contextWindow, unknown.maxTokens], [0, UNKNOWN_MAX_TOKENS], "no pin and no advertisement: the window is unknown and generation is uncapped");
   assert.equal(catalogModel({ context_length: 65_536 }, 75_000, "http://x/v1"), undefined);
   assert.equal(catalogModel({ id: "  " }, 75_000, "http://x/v1"), undefined);
-});
-
-test("the pin always wins — advertised capacity neither caps nor lowers it; unknown when both are absent", () => {
-  assert.equal(resolveContextWindow(75_000, undefined), 75_000);
-  assert.equal(resolveContextWindow(75_000, 65_536), 75_000);
-  assert.equal(resolveContextWindow(75_000, 131_072), 75_000);
-  assert.equal(resolveContextWindow(75_000, 0), 75_000);
-  assert.equal(resolveContextWindow(undefined, 65_536), 65_536);
-  assert.equal(resolveContextWindow(undefined, undefined), 0);
-  assert.equal(resolveContextWindow(undefined, 0), 0);
 });
 
 // ---------- the llama-swap provider ----------
@@ -230,13 +222,13 @@ test("stdin that is not a terminal and carries no lines announces itself instead
     // Readable.from with an immediately-ended stream, like a closed stdin:
     const code = await runHeadless({ root, brain, models, model: ref, input: Readable.from([]), output: out.stream, error: err.stream, now: FIXED_NOW });
     assert.equal(code, 0);
-    assert.match(err.text(), /stdin is not a terminal/);
+    assert.match(err.text(), /nothing arrived on stdin and there was no terminal to type into/);
   } finally {
     await cleanup();
   }
 });
 
-test("a person line comes back only as chat words, prefixed; a bare reply says so", async () => {
+test("a person line comes back only as chat words, prefixed", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   const factory = (build) => (context) => build(context);
@@ -249,13 +241,13 @@ test("a person line comes back only as chat words, prefixed; a bare reply says s
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["say hi", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
     assert.match(out.text(), /carto: hello person/);
-    assert.match(out.text(), /carto · headless · faux-test\/faux-model/);
+    assert.match(out.text(), /carto · faux-test\/faux-model/);
   } finally {
     await cleanup();
   }
 });
 
-test("a turn with no chat tool call reports (no chat message), never model prose", async () => {
+test("a turn with no chat tool call ends quietly: silence, never model prose", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   faux.setResponses([
@@ -265,8 +257,9 @@ test("a turn with no chat tool call reports (no chat message), never model prose
   try {
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["think out loud", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
-    assert.match(out.text(), /\(no chat message\)/);
     assert.doesNotMatch(out.text(), /some plain prose/);
+    // Nothing to say is a legitimate end of a turn, not a condition to report.
+    assert.doesNotMatch(out.text(), /no chat message|status/);
   } finally {
     await cleanup();
   }
@@ -280,7 +273,7 @@ test("/collapse runs the ceremony on the spot and reports it; /quit ends before 
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["/collapse", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
     assert.match(out.text(), /context collapsed and rebuilt from the Brain/);
-    assert.match(out.text(), /sealed gen-/);
+    assert.match(out.text(), /swept gen-/);
   } finally {
     await cleanup();
   }
@@ -358,68 +351,73 @@ const projectRoot = () => {
   return root;
 };
 
-test("--help exits 0 and names the config file and the workspace TUI", () => {
-  // The line driver is no longer "the interface"; help must say plainly what
-  // boots by default and how to force the driver.
-  const help = runCli(["--help"]);
-  assert.match(help, /~\/\.carto\/config\.json/);
-  assert.match(help, /workspace TUI/);
-  assert.match(help, /--headless/);
-  assert.match(help, /--model llama-swap\/ByteShape/);
-});
+// The four CLI tests each boot a child process, and each owns its own
+// CARTO_HOME, so they share no state: run them at once rather than paying four
+// process spawns one after another, which the suite's budget cannot afford.
+describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
+  test("--help exits 0 and names the config file and the workspace TUI", () => {
+    // The line driver is no longer "the interface"; help must say plainly what
+    // boots by default and how to force the driver.
+    const help = runCli(["--help"]);
+    assert.match(help, /~\/\.carto\/config\.json/);
+    assert.match(help, /workspace TUI/);
+    assert.match(help, /--headless/);
+    assert.match(help, /--model llama-swap\/ByteShape/);
+  });
 
-test("no config and no --model: exit 1 and the one-liner that creates it", () => {
-  const home = tempDir();
-  try {
-    let failed = null;
+  test("no config and no --model: exit 1 and the one-liner that creates it", () => {
+    const home = tempDir();
     try {
-      runCli([], { home });
-    } catch (error) {
-      failed = error;
+      let failed = null;
+      try {
+        runCli([], { home });
+      } catch (error) {
+        failed = error;
+      }
+      assert.ok(failed, "expected a non-zero exit");
+      assert.equal(failed.status, 1);
+      assert.match(String(failed.stderr), /--model llama-swap\/ByteShape/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
-    assert.ok(failed, "expected a non-zero exit");
-    assert.equal(failed.status, 1);
-    assert.match(String(failed.stderr), /--model llama-swap\/ByteShape/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
+  });
 
-test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
-  const home = tempDir();
-  const root = projectRoot();
-  try {
-    const first = runCli(
-      ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
-      { home, input: "" },
-    );
-    void first;
-    const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.equal(raw.model, "llama-swap/ByteShape");
-    assert.equal(raw.contextWindow, 75_000);
-    const second = runCli(["--root", root], { home, input: "" });
-    assert.match(second, /carto · headless · llama-swap\/ByteShape/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("an unsupported provider fails plainly, before any request is made", () => {
-  const home = tempDir();
-  const root = projectRoot();
-  try {
-    let failed = null;
+  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
+    const home = tempDir();
+    const root = projectRoot();
     try {
-      runCli(["--model", "openrouter/some-model", "--root", root], { home });
-    } catch (error) {
-      failed = error;
+      const first = runCli(
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
+        { home, input: "" },
+      );
+      void first;
+      const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+      assert.equal(raw.model, "llama-swap/ByteShape");
+      assert.equal(raw.contextWindow, 75_000);
+      const second = runCli(["--root", root], { home, input: "" });
+      assert.match(second, /carto · llama-swap\/ByteShape/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
-    assert.ok(failed);
-    assert.equal(failed.status, 1);
-    assert.match(String(failed.stderr), /llama-swap provider only/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
+  });
+
+  test("an unsupported provider fails plainly, before any request is made", () => {
+    const home = tempDir();
+    const root = projectRoot();
+    try {
+      let failed = null;
+      try {
+        runCli(["--model", "openrouter/some-model", "--root", root], { home });
+      } catch (error) {
+        failed = error;
+      }
+      assert.ok(failed);
+      assert.equal(failed.status, 1);
+      assert.match(String(failed.stderr), /llama-swap provider only/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

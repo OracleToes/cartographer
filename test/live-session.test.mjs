@@ -1,15 +1,28 @@
 import assert from "node:assert/strict";
-import { utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { closeLiveSession, interruptRun, openLiveSession, submitInput } from "../dist/runtime/live-session.js";
+import {
+  applyOmitNow,
+  closeLiveSession,
+  interruptRun,
+  openLiveSession,
+  readTreeNext,
+  sessionTranscript,
+  submitInput,
+  togglePause,
+} from "../dist/runtime/live-session.js";
+import { configuredModels } from "../dist/runtime/llama-swap-model.js";
+import { generationPaths } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -33,6 +46,8 @@ const fauxSetup = () => {
   return { faux, models, captured, factory, ref: { provider: "faux-test", modelId: "faux-model" } };
 };
 
+
+
 const blockOf = (messages) => messages.find((message) => message.role === "user" && typeof message.content === "string" && message.content.includes("<carto-state>"));
 const flatten = (messages) => JSON.stringify(messages);
 
@@ -43,7 +58,7 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-2" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "say hi");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -60,12 +75,12 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     const firstBlock = blockOf(captured[0]);
     assert.ok(firstBlock, "first request carries the block");
     assert.equal(captured[0].at(-1), firstBlock);
-    assert.match(firstBlock.content, /pending: none/);
+    assert.match(firstBlock.content, /since the rebuild: nothing written/);
     assert.ok(!flatten(captured[0]).includes(STATE_BLOCK_MARKER));
     // Request 2 (after the chat tool result): pending names the write by handle.
     const secondBlock = blockOf(captured[1]);
     assert.ok(secondBlock, "second request carries the block");
-    assert.match(secondBlock.content, /pending:\n  C1 · chat record/);
+    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to OracleToes/);
     // Exactly one block at the tail; the transcript itself never accumulates blocks.
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER), "marker never reaches the provider");
@@ -82,7 +97,7 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
     factory(() => fauxAssistantMessage([fauxText("first pass, no tools")], {}, )),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "think out loud");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -107,7 +122,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       text: "The answer is 42.",
@@ -115,7 +130,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "remember this fact");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -123,28 +138,50 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
     const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
     assert.deepEqual(nodes[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
-    assert.match(blockOf(captured[2]).content, /pending:\n  A1 · atlas create/);
+    assert.match(blockOf(captured[2]).content, /since the rebuild:\n  A1 · written/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
   }
 });
 
-test("the tree tool moves the anchor and the block renders it there", async () => {
+test("the tree tool ends its turn, and readTreeNext — alone — consumes the request to start the next one at the new anchor", async () => {
+  // §6.3: the tree call ends the turn so the agent never acts on the tree it
+  // had before it asked. The host peeks at `treeReadNext` and calls
+  // `readTreeNext`, which consumes the request once; a host that called
+  // `takeTreeReadRequest()` first left `readTreeNext` nothing to consume and
+  // halted the agent.
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
-    const submission = await submitInput(session, "look at src");
-    const settled = await submission.wait(BACKGROUND_CONTEXT);
+    const settled = await (await submitInput(session, "look at src")).wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done");
     assert.equal(session.state.tree.anchor, join(realpathSync(root), "src"));
     assert.equal(session.state.tree.depth, 1);
-    assert.match(blockOf(captured[1]).content, new RegExp(`tree: ${join(realpathSync(root), "src").replace(/[/\\]/g, "\\$&")} \\(depth 1\\)`));
+    assert.equal(captured.length, 1, "the tree call ended the run");
+    assert.equal(session.state.treeReadNext, true, "and left the request for its next turn");
+
+    // The negative half: a host that *takes* the request before calling
+    // readTreeNext leaves the continuation nothing to consume, and no second
+    // turn happens at all.
+    const consumed = session.takeTreeReadRequest();
+    assert.equal(consumed, true, "a take does report the request…");
+    assert.equal(await readTreeNext(session), undefined, "…and then the continuation has nothing left to run");
+    assert.equal(captured.length, 1, "which is exactly the halt: no second turn ever happens");
+    session.state.treeReadNext = true; // put the request back for the walk below
+
+    // The positive half: the host calls readTreeNext, which takes the request
+    // and starts the next turn at the anchor the agent just set.
+    const next = await readTreeNext(session);
+    assert.equal(next?.status, "done", "the continuation turn ran");
+    assert.equal(captured.length, 2, "and the agent went on instead of halting");
+    assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/, "with the tree it asked for");
+    assert.equal(session.state.treeReadNext, false, "and the request is spent");
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -153,55 +190,83 @@ test("the tree tool moves the anchor and the block renders it there", async () =
 
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
-  const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
+  const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", startLine: 1, endLine: 1 }, api, {}), /\.brain/);
-  const edit = byName.edit.execute({ path: "../escape.txt", oldText: "", newText: "x" }, api, {});
+  await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", offset: 1, limit: 1 }, api, {}), /\.brain/);
+  const edit = byName.edit.execute({ path: "../escape.txt", edits: [{ oldText: "", newText: "x" }] }, api, {});
   await assert.rejects(edit, /outside the project root/);
-  const editBrain = byName.edit.execute({ path: ".brain/brain.sqlite", oldText: "", newText: "x" }, api, {});
+  const editBrain = byName.edit.execute({ path: ".brain/brain.sqlite", edits: [{ oldText: "", newText: "x" }] }, api, {});
   await assert.rejects(editBrain, /\.brain/);
+  const createBrain = byName.create.execute({ path: ".brain/new.txt", content: "x" }, api, {});
+  await assert.rejects(createBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
-  await assert.rejects(tree, /anchor escapes/);
+  await assert.rejects(tree, /an anchor stays inside the project root/);
   const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
-  await assert.rejects(treeGit, /internal directory is not visible/);
+  await assert.rejects(treeGit, /the tree does not show/);
   const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
-  assert.match(validTree.output[0].text, /^tree: .* \(depth 1\)$/);
+  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1\./);
   assert.doesNotMatch(validTree.output[0].text, /\n/);
+  // §6.3: tree ends the turn, so the very next thing the agent reads is the
+  // block with the tree it asked for — not the tree it had before.
+  assert.equal(validTree.control?.terminate, true, "the tree call ends the turn");
   await cleanup();
 });
 
-test("read bounds are independently open: whole file, from a line, through a line", async () => {
+test("the file tools are the package's: read takes offset and limit", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
-  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
+  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
   const output = whole.output.map((part) => part.text).join("");
-  assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
   assert.match(output, /export const answer = 42;/);
-  const fromStart = await byName.read.execute({ path: "src/verify-me.ts", startLine: 2 }, api, {});
-  const fromStartOut = fromStart.output.map((part) => part.text).join("");
-  assert.match(fromStartOut, /src\/verify-me\.ts:2-2 \(of 2 lines\)/);
-  const throughEnd = await byName.read.execute({ path: "src/verify-me.ts", endLine: 1 }, api, {});
-  const throughEndOut = throughEnd.output.map((part) => part.text).join("");
-  assert.match(throughEndOut, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
-  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 99 }, api, {}), /past the end/);
+  const limited = await byName.read.execute({ path: "src/verify-me.ts", offset: 2, limit: 1 }, api, {});
+  const limitedOut = limited.output.map((part) => part.text).join("");
+  assert.doesNotMatch(limitedOut, /export const answer/);
+  await cleanup();
+});
+
+test("create refuses a path that exists; edit never creates", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
+  const api = { callId: "call-create", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  const created = await byName.create.execute({ path: "src/new-file.ts", content: "export const x = 1;\n" }, api, {});
+  assert.match(created.output[0].text, /Successfully wrote/);
+  await assert.rejects(byName.create.execute({ path: "src/new-file.ts", content: "replaced" }, api, {}), /already exists/);
+  await assert.rejects(byName.edit.execute({ path: "src/missing.ts", edits: [{ oldText: "", newText: "x" }] }, api, {}), /not_found|not a file/i);
+  await cleanup();
+});
+
+test("read only mode refuses create and edit, and the block says so", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: true };
+  const tools = createTools({ root, brain, session });
+  const api = { callId: "call-ro", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  await assert.rejects(byName.create.execute({ path: "src/ro.ts", content: "x" }, api, {}), /read only mode/);
+  await assert.rejects(
+    byName.edit.execute({ path: "src/verify-me.ts", edits: [{ oldText: "42", newText: "43" }] }, api, {}),
+    /read only mode/,
+  );
+  // The tools stay offered; only the call refuses.
+  assert.ok(byName.create !== undefined && byName.edit !== undefined && byName.read !== undefined);
   await cleanup();
 });
 
 test("unknown handles are explicit errors, never guesses", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   await assert.rejects(
     byName.atlas.execute({ handle: "Z9", title: "t", text: "c" }, api, {}),
-    /does not name/,
+    /No Atlas record here has the handle Z9/,
   );
   await assert.rejects(
     byName.pin.execute({ action: "pin", handle: "Q4" }, api, {}),
-    /does not name/,
+    /No Brain record here has the handle Q4/,
   );
   await cleanup();
 });
@@ -216,7 +281,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
       text: "The answer is 42.",
       attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "the map and the books diverged" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   const previousGeneration = session.generation;
@@ -224,16 +289,15 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     const submission = await submitInput(session, "remember this, then reset");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done", "the collapse tool ends the run; no continuation follows a terminate");
-    assert.equal(session.state.collapseRequested, "the map and the books diverged");
     const reason = session.takeCollapseRequest();
-    assert.equal(reason, "the map and the books diverged");
+    assert.equal(reason, "the agent collapsed");
 
     const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
     const outcome = await collapseLiveSession(session, options(), reason);
     assert.equal(outcome.reason, reason);
     assert.notEqual(outcome.report.generation, previousGeneration);
-    assert.equal(outcome.report.sealed, previousGeneration);
-    assert.equal(outcome.report.purged, undefined);
+    assert.equal(outcome.report.swept, previousGeneration);
+    assert.deepEqual(outcome.report.dropped, []);
     // The Brain survived; handles were rebuilt, not carried over.
     const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
@@ -244,10 +308,10 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     assert.equal(outcome.session.state.tree.anchor, realpathSync(root));
     assert.equal(outcome.session.markdownPath.includes(outcome.report.generation), true);
     assert.equal(readFileSync(outcome.session.markdownPath, "utf8").includes("A1 The answer"), true);
-    // The old store is sealed read-only.
+    // The old store is deleted whole, not sealed (§3.4).
     const { generationPaths } = await import("../dist/runtime/collapse.js");
     const oldStore = generationPaths(root, previousGeneration).store;
-    assert.equal((await import("node:fs")).statSync(oldStore).mode & 0o444, 0o444);
+    assert.equal((await import("node:fs")).existsSync(oldStore), false);
     // The fresh session is functional.
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-2" })], { stopReason: "toolUse" }))]);
     const second = await submitInput(outcome.session, "still here?");
@@ -266,13 +330,13 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", offset: 1, limit: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       text: "The answer is 42.",
       attachments: [{ kind: "file", path: "src/verify-me.ts" }],
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "rebuild" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   try {
@@ -291,12 +355,12 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
       { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },
       [],
     );
-    assert.match(block, /stale:\n  A1 \(stale\)/);
+    assert.match(block, /stale:\n  A1 · the file changed after this note/);
     const fresh = outcome.session;
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-3" })], { stopReason: "toolUse" }))]);
     const again = await submitInput(fresh, "and now?");
     await again.wait(BACKGROUND_CONTEXT);
-    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 \(stale\)/);
+    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 · the file changed after this note/);
     await closeLiveSession(fresh);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
@@ -313,7 +377,7 @@ test("a person-triggered collapse with no run in flight: interrupt is a no-op an
   const previousGeneration = session.generation;
   const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
   const outcome = await collapseLiveSession(session, options(), "person pressed collapse");
-  assert.equal(outcome.report.sealed, previousGeneration);
+  assert.equal(outcome.report.swept, previousGeneration);
   assert.notEqual(outcome.session.generation, previousGeneration);
   assert.deepEqual(outcome.session.state.pending, []);
   await closeLiveSession(outcome.session);
@@ -327,7 +391,7 @@ test("the bash tool runs through the conversation's environment: a real command,
     factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "printf carto-bash-ok" }, { id: "call-bash-1" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-bash-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "run a command");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -347,18 +411,408 @@ test("interrupting a run whose bash call is open settles the run instead of orph
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "call-bash-interrupt" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   const started = Date.now();
   try {
     const submission = await submitInput(session, "wait on something long");
-    // Give the bash task a moment to actually start, then interrupt.
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));
+    // Give the bash task a moment to actually start, then interrupt. The wait
+    // only has to outlast the spawn; `sleep 30` is what proves the interrupt
+    // cut the command rather than waiting it out.
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     await interruptRun(session);
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.notEqual(settled.status, "running");
     assert.ok(Date.now() - started < 20_000, "the interrupt cut the run; it did not wait out the sleep");
   } finally {
     await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("the tree is addressable: a directory handle anchors it, a file handle does not", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false };
+  const tools = createTools({ root, brain, session });
+  const api = { callId: "call-t", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  try {
+    // Which handle is the directory, and which the file, is the tree's business:
+    // ask it, rather than hard-coding a number the rendering decides (§5.4).
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const block = projectTreeBlock(root, root, 2, await brain.read());
+    const dirHandle = [...block.handles].find(([path]) => path.endsWith("src"))?.[1];
+    const fileHandle = [...block.handles].find(([path]) => /\.(ts|md|json)$/.test(path))?.[1];
+    assert.ok(dirHandle !== undefined && fileHandle !== undefined, "the tree handed out both kinds");
+
+    const moved = await byName.tree.execute({ handle: dirHandle }, api, {});
+    assert.equal(moved.control?.terminate, true, "and it ends the turn like any other tree call");
+    assert.ok(session.tree.anchor.endsWith("src"), "the tree anchored where the directory is");
+
+    await assert.rejects(byName.tree.execute({ handle: fileHandle }, api, {}), /not a directory/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("no product tool carries a bound its own description does not state", async () => {
+  const { root, brain, cleanup } = await fixture();
+  try {
+    const tools = createTools({
+      root,
+      brain,
+      session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false },
+    });
+    const BOUND_KEYS = ["minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"];
+    const boundsOf = (schema, path, found = []) => {
+      if (schema === null || typeof schema !== "object") return found;
+      for (const [key, value] of Object.entries(schema)) {
+        if (BOUND_KEYS.includes(key) && value !== undefined) found.push({ path, key, value });
+        boundsOf(value, `${path}.${key}`, found);
+      }
+      return found;
+    };
+
+    // §1: a bound is part of how a tool works and is said so in that tool's own
+    // description and nowhere else. So any bound left on a parameter has to be
+    // a number the description states — and an empty string is not a length.
+    for (const tool of tools) {
+      for (const bound of boundsOf(tool.parameters, tool.name)) {
+        assert.notEqual(bound.value, 0, `${tool.name}${bound.path} carries a ${bound.key} of 0, which asks nothing and only constrains`);
+        assert.ok(
+          (tool.description ?? "").includes(String(bound.value)),
+          `${tool.name}${bound.path} carries ${bound.key}=${bound.value}, and its description does not state it`,
+        );
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a timed rest is durable: it sleeps in the store, survives a reopen, and the agent goes on", async () => {
+  const { root, brain, cleanup } = await fixture();
+  // A clock the test moves and timers it fires, so a rest of ten seconds costs
+  // nothing and the wait cannot be mistaken for a real timer (§10).
+  let clock = 1_700_000_000_000;
+  const clockNow = () => clock;
+  const timers = [];
+  const setTimer = (callback, delayMs) => {
+    const timer = { due: clockNow() + delayMs, callback };
+    timers.push(timer);
+    return () => {
+      const at = timers.indexOf(timer);
+      if (at >= 0) timers.splice(at, 1);
+    };
+  };
+  const fireDue = async () => {
+    for (;;) {
+      const due = timers.filter((timer) => timer.due <= clock).sort((left, right) => left.due - right.due)[0];
+      if (due === undefined) return;
+      timers.splice(timers.indexOf(due), 1);
+      due.callback();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 10 }, { id: "call-rest" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-done" })], { stopReason: "toolUse" })),
+  ]);
+  let session = await openLiveSession({ root, brain, models, model: ref, now: clockNow, setTimer });
+  try {
+    const submission = await submitInput(session, "rest for a while");
+    await submission.wait(BACKGROUND_CONTEXT);
+
+    // §10: the wait is durable, so it is a sleeping task in the store, and the
+    // run never reached the model again while it rested.
+    // The after-run hook asks for the rest once the run's inputs have settled, so
+    // this waits for it rather than reading a half-finished run end.
+    const asleep = async () => {
+      const deadline = Date.now() + 1000;
+      for (;;) {
+        const tasks = (await session.harness.inspect(BACKGROUND_CONTEXT)).tasks;
+        const rest = tasks.filter((task) => task.state.kind === "sleeping" && task.record.kind === "carto.sleep");
+        if (rest.length > 0 || Date.now() > deadline) return rest;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    assert.equal((await asleep()).length, 1, "the rest is a sleep in the store");
+    assert.equal(captured.length, 1, "and the agent did not act again while it rested");
+    const due = (await asleep())[0].state.until;
+    assert.equal(due, clock + 10_000, "for as long as the call asked");
+
+    // The host goes away and comes back mid-rest.
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, now: clockNow, setTimer });
+    assert.equal((await asleep()).length, 1, "the rest survives the reopen");
+
+    // The clock passes the rest and the host's timer fires: the rest ends, and
+    // nothing is left pending.
+    clock = due + 1;
+    session.harness.resume();
+    await fireDue();
+    await session.conversation.waitForIdle(BACKGROUND_CONTEXT);
+    const deadline = Date.now() + 2000;
+    while (captured.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(captured.length, 2, "the rest ended and the agent went on, by itself");
+    assert.match(blockOf(captured[1]).content, /<carto-state>/, "starting from the state block, as any turn does");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+
+
+test("a message ends a rest early, and the rest does not then start a second turn", async () => {
+  const { root, brain, cleanup } = await fixture();
+  let clock = 1_700_000_000_000;
+  const timers = [];
+  const setTimer = (callback, delayMs) => {
+    const timer = { due: clock + delayMs, callback };
+    timers.push(timer);
+    return () => {
+      const at = timers.indexOf(timer);
+      if (at >= 0) timers.splice(at, 1);
+    };
+  };
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", { seconds: 600 }, { id: "call-rest" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-after" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
+  try {
+    await (await submitInput(session, "rest for ten minutes")).wait(BACKGROUND_CONTEXT);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(captured.length, 1);
+
+    // The rest holds nothing: the conversation is free while the agent sleeps,
+    // so the person's message is a turn of its own rather than a queued one.
+    const queued = (await session.harness.inspect(BACKGROUND_CONTEXT)).submissions;
+    assert.equal(queued.length, 0, "nothing is waiting on the rest");
+
+    const reply = await submitInput(session, "never mind, do this instead");
+    assert.equal((await reply.wait(BACKGROUND_CONTEXT)).status, "done", "the message got its turn at once");
+    assert.equal(captured.length, 2, "and the agent answered it");
+
+    // The rest's time comes and passes: it must start nothing.
+    clock += 601_000;
+    session.harness.resume();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (const timer of timers.filter((candidate) => candidate.due <= clock)) timer.callback();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(captured.length, 2, "and the rest ended quietly, with no second start");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("applying a deletion now rebuilds the context in place: no collapse, no sweep, no rotation", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "first thing said" }, { id: "call-chat" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-stop" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    await (await submitInput(session, "say something")).wait(BACKGROUND_CONTEXT);
+    const generation = session.state.generation;
+    const entries = await sessionTranscript(session);
+    const chatEntry = entries.find((entry) => JSON.stringify(entry.model ?? []).includes("first thing said"));
+    assert.ok(chatEntry !== undefined, "the chat is in the context");
+
+    // §4.1: applying a delete now changes the model's view at once, and the
+    // store still holds the entry — the text is gone from the view before it is
+    // gone from disk.
+    assert.equal(await applyOmitNow(session, String(chatEntry.id)), true);
+    const after = await sessionTranscript(session);
+    assert.ok(after.some((entry) => entry.id === chatEntry.id), "the entry is still in the store");
+
+    const view = await session.conversation.context(BACKGROUND_CONTEXT);
+    assert.equal(
+      JSON.stringify(view.messages).includes("first thing said"),
+      false,
+      "and it is out of the model's view",
+    );
+
+    // The rebuild is not a collapse: nothing was swept, and the generation is
+    // the same one, so the head prefix is untouched (§4.1, §5.6).
+    assert.equal(session.state.generation, generation, "no rotation");
+    assert.equal(existsSync(generationPaths(root, generation).markdown), true, "the same generation's snapshot is the one in use");
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+// ---------- §9: the pause holds the reply, it does not interrupt it ----------
+//
+// The gate lives at the provider's response body, so the only honest way to test
+// it is over a real socket: a stand-in server writes half a reply, the pause
+// lands, and the same HTTP response has to finish the sentence afterwards. The
+// faux provider never calls `fetch`, so it cannot show any of this.
+
+/** One chat-completions frame; `finish` closes the reply the way the server does. */
+const frame = (delta, finish = null) =>
+  `data: ${JSON.stringify({ id: "chat-1", object: "chat.completion.chunk", created: 1, model: "ByteShape", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+const sse = (pieces, { finish = true } = {}) => {
+  const body = pieces.map((piece) => frame({ content: piece })).join("");
+  return finish ? `${body}${frame({}, "stop")}data: [DONE]\n\n` : body;
+};
+
+/**
+ * A llama-swap stand-in. The first request is a reply that stops mid-sentence:
+ * it writes `before` and waits to be released before writing `after`, so the
+ * pause has a live body to hold. Later requests — the turns the harness starts
+ * on its own — answer with `sleep`, which is how a turn honestly ends (§10);
+ * without that a stand-in that never calls a tool answers forever.
+ */
+const pausedServer = async (before, after) => {
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const seen = [];
+  const server = createServer((request, response) => {
+    if (request.method !== "POST") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    const number = seen.length + 1;
+    request.resume();
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+    if (number > 1) {
+      // A turn that ends: one tool call and a finish.
+      const call = { tool_calls: [{ index: 0, id: `call-${number}`, type: "function", function: { name: "sleep", arguments: "{}" } }] };
+      response.write(frame({ role: "assistant", content: "" }));
+      response.write(frame(call));
+      response.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+      seen.push(`turn ${number}: sleep`);
+      return;
+    }
+    seen.push("turn 1: the paused reply");
+    // The opening frame, the first half of the sentence, and then the wait: the
+    // reply is open and unfinished, which is what a pause needs to find.
+    response.write(frame({ role: "assistant", content: "" }));
+    response.write(sse(before, { finish: false }));
+    void held.then(() => response.end(sse(after)));
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  return {
+    endpoint: `http://127.0.0.1:${server.address().port}/v1`,
+    release: () => release(),
+    requests: () => seen.length,
+    // Keep-alive sockets from the client would otherwise hold close() open.
+    close: () => new Promise((done) => {
+      server.closeAllConnections();
+      server.close(done);
+    }),
+  };
+};
+
+const waitUntil = async (predicate, label) => {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+};
+
+test("a pause holds the reply mid-sentence and the same response finishes it: nothing is re-requested", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const stand = await pausedServer(["The answer is "], ["forty-two."]);
+  const config = { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: stand.endpoint };
+  const models = configuredModels(config, { provider: "llama-swap", modelId: "ByteShape" });
+  const ref = { provider: "llama-swap", modelId: "ByteShape" };
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const submission = await submitInput(session, "what is the answer?");
+    // The response body is open: this is the moment ^v finds something to hold.
+    await waitUntil(() => session.freeze.live(), "the response body");
+
+    const paused = await togglePause(session);
+    assert.equal(paused.held, true, "a live body is held, not interrupted");
+    assert.equal(session.freeze.frozen(), true);
+    assert.equal(session.state.paused, true);
+
+    // §9: the pause commits and discards nothing. The reply's second half has
+    // not been written yet, and while the gate is shut it must not reach the
+    // context even once the server sends it.
+    stand.release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const heldEntries = await sessionTranscript(session);
+    assert.equal(
+      JSON.stringify(heldEntries).includes("forty-two"),
+      false,
+      "while paused the reply has not gone on, even though the server has already sent the rest",
+    );
+
+    const resumed = await togglePause(session);
+    assert.equal(resumed.resumed, true, "the held stream let go");
+    assert.equal(session.state.paused, false);
+
+    // With no tool call in the reply the run would end here, so the stand-in
+    // answers a second turn too — but it must be the SAME request that carries
+    // the second half of the sentence to the context.
+    await submission.wait(BACKGROUND_CONTEXT);
+    const entries = await sessionTranscript(session);
+    const context = JSON.stringify(entries);
+    assert.ok(context.includes("The answer is "), "the first half is in the context");
+    assert.ok(context.includes("forty-two."), "and the same response carried the second half");
+    assert.equal(stand.requests(), 2, "two requests in all: the paused one, and the turn that ended the run");
+    assert.ok(!JSON.stringify(entries).includes("The answer is The answer is"), "the reply was not replayed");
+  } finally {
+    await closeLiveSession(session);
+    await stand.close();
+    await cleanup();
+  }
+});
+
+test("pausing while nothing is in flight lands on the next round, and unpausing lets go", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-chat" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-stop" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    // §9 in the small: the flag, the same-state answer, and the words. No run
+    // is in flight here, so the pause says the agent starts nothing of its own.
+    const paused = await togglePause(session);
+    assert.equal(paused.paused, true);
+    assert.equal(paused.changed, true);
+    assert.equal(paused.held, false, "no body was in flight to hold");
+    assert.match(paused.line, /starts nothing of its own/);
+    assert.equal(session.state.paused, true);
+
+    const again = await togglePause(session, true);
+    assert.equal(again.changed, false, "asking for the state it is already in changes nothing");
+    assert.match(again.line, /already paused/);
+
+    const resumed = await togglePause(session, false);
+    assert.equal(resumed.resumed, false, "there was no held body");
+    assert.match(resumed.line, /on again/);
+    assert.equal(session.state.paused, false);
+
+    // The pause is not told to the agent (§9). Nothing was written to the
+    // context by pausing: the store holds only what the turn below writes.
+    const before = await sessionTranscript(session);
+    await togglePause(session, true);
+    await togglePause(session, false);
+    const after = await sessionTranscript(session);
+    assert.deepEqual(
+      after.map((entry) => String(entry.id)),
+      before.map((entry) => String(entry.id)),
+      "a pause and an unpause write nothing to the context, so the agent is never told it happened",
+    );
+  } finally {
+    await closeLiveSession(session);
     await cleanup();
   }
 });
