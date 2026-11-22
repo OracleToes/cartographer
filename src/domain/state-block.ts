@@ -73,7 +73,7 @@ export interface StateBlockInput {
   /** Estimated tool-work tokens added since the last provider report. */
   toolWorkSince: number;
   /** Estimated sizes of the Brain, by part — now, not at the freeze. */
-  sizes: { atlas: number; ledger: number; chat: number };
+  sizes: { atlas: number; ledger: number; chat: number; ephemera: number };
   /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
   mode: "edit" | "read only";
   /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
@@ -149,7 +149,10 @@ export function renderStateBlock(input: StateBlockInput): string {
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
-    `chat ~${thousands(input.sizes.chat)}`;
+    `chat ~${thousands(input.sizes.chat)}` +
+    // Only when something is pinned: a cost of zero is not worth a clause, and
+    // the line is already the longest in the block.
+    (input.sizes.ephemera === 0 ? "" : ` · pinned ~${thousands(input.sizes.ephemera)}`);
   // One line per write since the rebuild, named by handle. The line says what
   // the write was; the letter already says which book holds it.
   const pending: string =

@@ -63,6 +63,7 @@ export interface ContextDialogueMessage {
 }
 
 export interface ContextWorkItem {
+  /** The item's id, which is also the id a pin on it uses: the sweep names it the same way (§3.1). */
   id: string | number;
   kind: string;
   name?: string | undefined;
@@ -71,6 +72,10 @@ export interface ContextWorkItem {
   text?: string | undefined;
   /** For a result: the row id of the call it answers, so it can take that call's handle. */
   callId?: string | undefined;
+  /** The pin the Brain holds for this item, if it is being kept through a collapse. */
+  pinned?: "user" | "agent" | undefined;
+  /** The text a result carries to a `read`, which is the kind a restore has to make true again. */
+  tool?: string | undefined;
 }
 
 export interface ContextViewData {
@@ -92,7 +97,7 @@ export interface ContextViewData {
 }
 
 /** What a node can be marked: the part of the product a mark on it would touch. */
-export type MarkTarget = { part: "transcript" | "tool-work" | "tools"; id: string | number };
+export type MarkTarget = { part: "transcript" | "tool-work" | "tools" | "ephemera"; id: string | number };
 
 type NodeKind =
   | "system"
@@ -104,6 +109,7 @@ type NodeKind =
   | "reasoning"
   | "call"
   | "result"
+  | "ephemera"
   | "state";
 
 export interface PromptNode {
@@ -128,6 +134,8 @@ export interface PromptNode {
   target?: MarkTarget;
   /** The marked action already recorded on it, if any. */
   marked?: string;
+  /** Who keeps this entry in the head, for an entry the person pinned. */
+  pinned?: "user" | "agent" | undefined;
 }
 
 export interface PromptSection {
@@ -146,6 +154,7 @@ const KIND_INK: Record<NodeKind, (text: string) => string> = {
   reasoning: tokens.reasoning,
   call: tokens.tool,
   result: tokens.output,
+  ephemera: tokens.pin,
   state: tokens.warn,
 };
 
@@ -256,7 +265,7 @@ export class ContextView implements Component, Focusable {
       });
     });
 
-    const record = (kind: "atlas" | "ledger" | "chat", id: string, handle: string | undefined, body: string): PromptNode => {
+    const record = (kind: "atlas" | "ledger" | "chat" | "ephemera", id: string, handle: string | undefined, body: string): PromptNode => {
       const bytes = handle === undefined ? undefined : projection.get(handle);
       // The two views of one entry: what the person can read, and the bytes the
       // model receives. A record written since the freeze is in the Brain but not
@@ -288,6 +297,18 @@ export class ContextView implements Component, Focusable {
     for (const chat of data.brain.chat) {
       head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text)));
     }
+    // Pinned ephemera come after Chat in the head (§5.1), each under its own
+    // handle, because they are what the person kept in front of the agent.
+    for (const item of data.brain.ephemera) {
+      head.push({
+        ...record("ephemera", item.id, handleOf(handles, "ephemera", item.id), item.text),
+        label: item.kind,
+        pinned: item.pinned,
+        // The head is where a carried item is, so the head is where its pin is
+        // taken off: the store it came from is gone, and nothing else holds it.
+        target: { part: "ephemera", id: item.id },
+      });
+    }
 
     // ── body ────────────────────────────────────────────────────────────────
     // The body is never sorted by kind: the person's messages, the reasoning, the
@@ -307,13 +328,15 @@ export class ContextView implements Component, Focusable {
           key,
           order: suffix,
           node: {
-            id: `work-${String(item.id)}`,
+            id: String(item.id),
             handle: `X${workCount}`,
             kind: "reasoning",
             label: "thinking",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
             leaf: true,
+            target: { part: "tool-work", id: String(item.id) },
+            pinned: item.pinned,
           },
         });
       } else if (item.kind === "toolCall") {
@@ -321,13 +344,15 @@ export class ContextView implements Component, Focusable {
           key,
           order: suffix,
           node: {
-            id: `work-${String(item.id)}`,
+            id: String(item.id),
             handle: `X${workCount}`,
             kind: "call",
             label: item.name ?? "call",
             summary: oneLine(item.args ?? ""),
             body: item.args ?? "",
             leaf: true,
+            target: { part: "tool-work", id: String(item.id) },
+            pinned: item.pinned,
           },
         });
       } else {
@@ -335,7 +360,7 @@ export class ContextView implements Component, Focusable {
           key,
           order: suffix,
           node: {
-            id: `work-${String(item.id)}`,
+            id: String(item.id),
             // A result is its own item with its own handle (§5.4, §5.5): `R`,
             // or `S` when the shell produced it.
             handle: data.handles?.result(String(item.id)) ?? `R${resultCount}`,
@@ -344,6 +369,8 @@ export class ContextView implements Component, Focusable {
             summary: oneLine(item.output ?? ""),
             body: item.output ?? "",
             leaf: true,
+            target: { part: "tool-work", id: String(item.id) },
+            pinned: item.pinned,
           },
         });
       }
@@ -416,6 +443,20 @@ export class ContextView implements Component, Focusable {
     for (const node of foldable) this.folded.set(node.id, !anyOpen);
   }
 
+  /** Pin or unpin the row under the cursor, the same act `p` performs. The palette calls this. */
+  pinSelected(): void {
+    const target = this.selectedNode()?.target;
+    if (target === undefined || target.part === "tools") return;
+    this.onTogglePin?.(target.part, target.id);
+  }
+
+  /** One drawn row, by the part it belongs to and its id: what a pin or a mark acts on. */
+  nodeFor(part: MarkTarget["part"], id: string | number): PromptNode | undefined {
+    return this.sections
+      .flatMap((section) => section.nodes)
+      .find((node) => node.target?.part === part && String(node.target.id) === String(id));
+  }
+
   private selectedNode(): PromptNode | undefined {
     const row = this.rows[this.cursor];
     return row !== undefined && "node" in row ? row.node : undefined;
@@ -460,7 +501,10 @@ export class ContextView implements Component, Focusable {
     }
     if (matchesKey(data, "p")) {
       const node = this.selectedNode();
-      if (node !== undefined && node.target?.part === "transcript") this.onTogglePin?.("transcript", node.target.id);
+      const target = node?.target;
+      if (target !== undefined && target.part !== "tools") {
+        this.onTogglePin?.(target.part, target.id);
+      }
       return;
     }
     if (matchesKey(data, "d")) {

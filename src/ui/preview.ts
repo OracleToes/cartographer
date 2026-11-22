@@ -235,7 +235,7 @@ export function previewArchive(width = 110): string {
     { key: "↑↓", label: "move" },
     { key: "p", label: "pin" },
     { key: "r", label: "restore" },
-    { key: "x", label: "delete for good" },
+    { key: "d", label: "delete for good" },
     { key: "^t", label: "context layer" },
   ]);
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
@@ -259,6 +259,15 @@ export function previewContext(width = 110): string {
   );
   brain.ledger.push({ id: "l1", kind: "goal", text: "Rebuild the workspace UI in Posting's idiom", status: "open", answer: null, createdAt: 2, updatedAt: 2 });
   brain.chat.push({ id: "c1", author: "agent", text: "The context view is the prefill now: head, body, tail.", createdAt: 3, updatedAt: 3 });
+  // One pinned item, so the preview shows the head carrying what the person
+  // kept in front of the agent rather than only the Brain's own records.
+  brain.ephemera.push({
+    id: "gen-9d40c1:12:t0",
+    text: "The archive is the person's, and the agent never learns it exists.",
+    kind: "reasoning",
+    createdAt: 4,
+    pinned: "user",
+  });
   const data: ContextViewData = {
     brain,
     systemPrompt: "You are Carto: the working attention on one project, kept for one person.\nYour plain text is your own thinking; it reaches no one.",
@@ -276,7 +285,8 @@ export function previewContext(width = 110): string {
       { id: "4-0", kind: "toolCall", name: "read", args: "path: src/ui/context-view.ts" },
       { id: "5-0", kind: "toolResult", callId: "4-0", output: "export class ContextView implements Component, Focusable {" },
     ],
-    stateBlockText: "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\ntree: . (depth 2)\n  src/  24K\npins: none\nmarks: none\n</carto-state>",
+    stateBlockText:
+      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\ntree: . (depth 2)\n  src/  24K\npins:\n  X1 · placed by the person\nmarks: none\n</carto-state>",
   };
   const view = new ContextView();
   view.setData(data);

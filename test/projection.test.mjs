@@ -68,3 +68,31 @@ test("the projection omits nothing: all 50 ledger entries render in the frozen t
     assert.ok(frozen.includes(`note ${index} `), `entry ${index} must render; no omission list exists`);
   }
 });
+
+test("a pinned ephemeral item is in the head after Chat, under its own handle, with no raw id", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(
+    brain,
+    { kind: "ephemeral.pin", item: { id: "gen:7:t0", text: "keep this thought", kind: "reasoning", createdAt: at("2026-01-01T00:00:00Z"), pinned: "user" } },
+    at("2026-01-01T00:00:01Z"),
+  );
+  brain = applyWrite(brain, { kind: "chat.record", record: timed("c1", "user", "said this", "2025-12-31T00:00:00Z") }, at("2026-01-01T00:00:02Z"));
+
+  const projection = projectContext(brain);
+  const text = projection.text;
+  assert.match(text, /Pinned — what the person kept in front of you/);
+  assert.match(text, /X1 \[reasoning\] keep this thought/);
+  assert.ok(text.indexOf("said this") < text.indexOf("keep this thought"), "Chat comes before what was pinned after it");
+  assert.equal(text.includes("gen:7:t0"), false, "the storage id never reaches the model");
+  assert.ok(projection.sizes.ephemera > 0, "the part reports its size, so the person can see what it costs");
+});
+
+test("an unpinned partial is not in the head: a restored item waits for its pin", () => {
+  let brain = emptyBrain();
+  brain = applyWrite(
+    brain,
+    { kind: "ephemeral.pin", item: { id: "gen:7:t0", text: "restored but unpinned", kind: "reasoning", createdAt: at("2026-01-01T00:00:00Z") } },
+    at("2026-01-01T00:00:01Z"),
+  );
+  assert.equal(projectContext(brain).text.includes("restored but unpinned"), false);
+});

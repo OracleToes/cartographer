@@ -9,6 +9,8 @@ import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { collapse, discoverGenerations, reconcileGenerations, generationPaths } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { projectContext } from "../dist/domain/projection.js";
 
 const at = (n) => 1_700_000_000_000 + n * 1_000;
@@ -201,6 +203,161 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
     const brain = await store.read();
     assert.equal(brain.ledger.length, 1);
     assert.equal(brain.ledger[0].text, "a note");
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A real generation store: what pi writes, so the sweep reads what a session
+ * actually leaves behind rather than a fixture shaped like the reader.
+ */
+async function realGeneration(root, generation, mtimeSeconds, rows, brain = emptyBrain()) {
+  const paths = generationPaths(root, generation);
+  const database = await openNodeSqliteDatabase(paths.store);
+  await database.exec(
+    "CREATE TABLE live_entries (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, head INTEGER, commit_seq INTEGER NOT NULL, record TEXT NOT NULL)",
+  );
+  for (const [index, record] of rows.entries()) {
+    await database.run(
+      "INSERT INTO live_entries (id, conversation_id, commit_seq, record) VALUES (?, 1, ?, ?)",
+      index + 1,
+      index + 1,
+      JSON.stringify(record),
+    );
+  }
+  await database.close();
+  // The snapshot is the one the session would have frozen: the Brain as it
+  // stands, so a pinned item is in the head the way it would really be.
+  writeSnapshot(root, generation, projectContext(brain), at(1));
+  const when = new Date(mtimeSeconds * 1000);
+  for (const path of [paths.store, paths.markdown, paths.sidecar]) utimesSync(path, when, when);
+  return paths;
+}
+
+test("a collapse sweeps the store's ephemera into the archive, item by item, and deletes the store", async () => {
+  const root = tempRoot();
+  try {
+    const live = await realGeneration(root, "gen-20261116T020000Z-live008", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "make the dice soft" }] },
+      {
+        kind: "pi.assistant",
+        model: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "the corner needs a spring" },
+              { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/die.ts" } },
+            ],
+          },
+        ],
+      },
+      { kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "call-1", content: [{ type: "text", text: "export class Die {}" }] }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+
+    const reported = await readGenerationEphemera(live.store, "gen-20261116T020000Z-live008");
+    assert.ok(reported.length >= 2, "the sweep reads the entries the store holds");
+    assert.ok(reported.every((item) => item.layer === "ephemeral"));
+
+    await collapse(root, store);
+
+    // The store is gone, so the archive is the only place the text still exists
+    // (§3.4), and it holds what was there rather than a summary of it.
+    assert.equal(existsSync(live.store), false);
+    const items = (await store.readArchive()).items;
+    const texts = items.flatMap((item) => (item.ephemeral === undefined ? [] : [item.ephemeral.text]));
+    assert.ok(texts.some((text) => text.includes("the corner needs a spring")), "reasoning is kept as reasoning");
+    assert.ok(texts.some((text) => text.includes("make the dice soft")), "the person's message is kept");
+    const read = items.find((item) => item.ephemeral?.kind === "readResult");
+    assert.ok(read !== undefined, "a read's result keeps its own kind, so a restore can make it true again");
+    assert.deepEqual(
+      read.ephemeral.data,
+      { callId: "call-1", tool: "read", path: "src/die.ts" },
+      "the entity that produced it rides on it, path included: a restore needs to know what was read",
+    );
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unpinned ephemeral is swept; a pinned one is carried into the head instead", async () => {
+  const root = tempRoot();
+  try {
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const pinId = "gen-20261116T020000Z-live009:1:t0";
+    await store.apply(
+      {
+        kind: "ephemeral.pin",
+        item: { id: pinId, text: "this one is worth keeping", kind: "reasoning", createdAt: at(1), pinned: "user" },
+      },
+      at(1),
+    );
+    // The store holds that item, and the frozen prefill was written with the
+    // pin in it, which is where a pinned item lives (§5.1).
+    await realGeneration(
+      root,
+      "gen-20261116T020000Z-live009",
+      1_700_000_100,
+      [
+        {
+          kind: "pi.assistant",
+          model: [
+            {
+              role: "assistant",
+              content: [
+                { type: "thinking", thinking: "this one is worth keeping" },
+                { type: "thinking", thinking: "this one is not" },
+              ],
+            },
+          ],
+        },
+      ],
+      await store.read(),
+    );
+
+    const report = await collapse(root, store);
+    const archived = (await store.readArchive()).items;
+    assert.equal(
+      archived.some((item) => item.ephemeral?.text === "this one is worth keeping"),
+      false,
+      "a pin keeps its item out of the archive",
+    );
+    assert.equal(
+      archived.some((item) => item.ephemeral?.text === "this one is not"),
+      true,
+      "the pin protects the one item, not the store it was in",
+    );
+    // It went on into the rebuilt head, after Chat, under a handle of its own.
+    const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+    assert.match(markdown, /Pinned — what the person kept in front of you/);
+    assert.match(markdown, /X1 \[reasoning\] this one is worth keeping/);
+    assert.equal((await store.read()).ephemera.length, 1, "the pin survives the collapse it carried it through");
+    await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restoring an ephemeral returns it to the archive's absence and the live context's keeping, without pinning it", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live00a", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "a line worth recovering" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await collapse(root, store);
+    const item = (await store.readArchive()).items.find((candidate) => candidate.ephemeral?.text === "a line worth recovering");
+    assert.ok(item !== undefined, "the sweep put it in the archive");
+
+    const restored = await store.applyArchive({ kind: "restore", id: item.id });
+    assert.equal(restored.item?.ephemeral?.kind, "personMessage", "it comes back as the kind it was");
+    assert.equal((await store.readArchive()).items.length, 0, "it leaves the archive");
+    // It went back to the live context, which the store is not: the Brain holds
+    // no pin for it, because restoring does not also pin (§3.3).
+    assert.equal((await store.read()).ephemera.length, 0, "restoring does not pin it into the head");
     await store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

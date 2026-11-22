@@ -702,3 +702,37 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
   assert.ok(layer.includes("ARCHIVE"), "the layer says what it is");
   assert.ok(layer.includes("restore") || layer.includes("delete for good"), "the person's keys are the footer's");
 });
+
+test("the archive deletes for good only on the second press, and says so between them", async () => {
+  const { ArchiveView } = await import("../dist/ui/archive-view.js");
+  const view = new ArchiveView();
+  const deleted = [];
+  view.onDelete = (id) => deleted.push(id);
+  view.setData({
+    version: 1,
+    items: [
+      { id: "1", layer: "ephemeral", ephemeral: { kind: "plainText", text: "the first thing" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 10 },
+      { id: "2", layer: "ephemeral", ephemeral: { kind: "plainText", text: "the second thing" }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 20 },
+    ],
+  });
+
+  assert.equal(view.deleteSelected(), "armed", "the first press only arms");
+  assert.deepEqual(deleted, [], "nothing is deleted on the first press");
+  assert.match(view.render(80).join("\n"), /d again: delete for good/, "the arming is visible, or the key looks broken");
+  assert.equal(view.deleteSelected(), "deleted", "the second press deletes");
+  assert.deepEqual(deleted, ["2"], "and deletes the item the cursor named");
+
+  // Moving the cursor withdraws the arm: a person who moved on did not mean it.
+  view.deleteSelected();
+  view.handleInput("j");
+  view.handleInput("k");
+  assert.equal(view.deleteSelected(), "armed", "the arm did not survive a move");
+  assert.deepEqual(deleted, ["2"], "and nothing else was deleted");
+});
+
+test("the archive keeps a restored item's type and the author of its pin", () => {
+  const frame = plain(previewArchive(110));
+  assert.ok(frame.includes("you"), "a pin says who placed it");
+  assert.ok(frame.includes("restore"), "restoring is on the layer, in the footer");
+  assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
+});

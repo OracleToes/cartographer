@@ -17,7 +17,7 @@ import { handleOf } from "./handles.js";
 import { estimateTokens } from "./estimate.js";
 import type { CartoBrain } from "./records.js";
 
-export type ProjectionPartId = "atlas" | "ledger";
+export type ProjectionPartId = "atlas" | "ledger" | "ephemera";
 
 export interface ProjectionPart {
   id: ProjectionPartId;
@@ -87,15 +87,29 @@ export function projectContext(brain: CartoBrain): Projection {
     }
   }
 
+  // Pinned ephemera come after Chat in the head (§5.1): what the person kept in
+  // front of the agent, each item under its own handle. They are not Brain
+  // records, so they are not part of the Atlas or the Ledger part; they are the
+  // whole content of their own part, and their size is reported as `ephemera`.
+  const ephemera: string[] = [];
+  const pinned = brain.ephemera.filter((item) => item.pinned !== undefined);
+  if (pinned.length > 0) {
+    ephemera.push("Pinned — what the person kept in front of you");
+    pinned.forEach((item, index) => {
+      ephemera.push(`${partOf("ephemera", item.id) ?? `E${index + 1}`} [${item.kind}] ${item.text}`);
+    });
+  }
+
   const parts: ProjectionPart[] = [];
   if (atlas.length > 0) parts.push(makePart("atlas", "Atlas", atlas));
   if (ledger.length > 0) parts.push(makePart("ledger", "Ledger", ledger));
+  if (ephemera.length > 0) parts.push(makePart("ephemera", "Pinned", ephemera));
 
   const text =
     parts.length === 0
       ? "(the Brain is empty: nothing recorded yet. Write what you learn about the project, and the plan you are working to.)"
       : parts.map((part) => part.text).join("\n\n");
-  const sizes = { atlas: 0, ledger: 0 };
+  const sizes: Record<ProjectionPartId, number> = { atlas: 0, ledger: 0, ephemera: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
   return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes };
 }

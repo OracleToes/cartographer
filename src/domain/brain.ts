@@ -19,6 +19,7 @@ import type {
   RecordId,
   AtlasNode,
   ChatRecord,
+  PinnedEphemeral,
 } from "./records.js";
 
 export class BrainError extends Error {}
@@ -32,7 +33,10 @@ export type BrainWrite =
   | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: "user" | "agent" | null }
   | { kind: "mark.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; action: MarkAction; author: Author }
   | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId }
-  | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId };
+  | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId }
+  /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
+  | { kind: "ephemeral.pin"; item: PinnedEphemeral }
+  | { kind: "ephemeral.unpin"; id: RecordId };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   const next = doApplyWrite(brain, write, now);
@@ -41,6 +45,20 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
+    case "ephemeral.pin": {
+      // One entry per item. Pinning again replaces the pin and its author,
+      // which is what a pin being "a boolean on an entry" means (§3.2).
+      const exists = brain.ephemera.some((item) => item.id === write.item.id);
+      const ephemera = exists
+        ? brain.ephemera.map((item) => (item.id === write.item.id ? write.item : item))
+        : [...brain.ephemera, write.item];
+      return { ...brain, ephemera };
+    }
+
+    case "ephemeral.unpin": {
+      return { ...brain, ephemera: brain.ephemera.filter((item) => item.id !== write.id) };
+    }
+
     case "atlas.stale": {
       // Written only at a rebuild (§5.5). The
       // mark is a marker on the entry, like a pin — and clearing is a delete,

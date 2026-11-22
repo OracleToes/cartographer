@@ -354,7 +354,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Decide where one record ends up, or withdraw the decision: `archive` takes it out of the Brain, `delete` removes it for good, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. When you mark for delete, say what you are letting go of to the person first. A mark the person placed is theirs to withdraw.",
+        "Decide what one record is for, or withdraw the decision: `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw.",
       parameters: obj({
         handle: HandleRef,
         action: oneOf(["archive", "delete", "none"] as const),

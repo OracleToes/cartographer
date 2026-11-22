@@ -149,6 +149,13 @@ export async function renderLiveStateBlock(
     const handle = handleOf(brain.handles, "atlas", node.id);
     if (handle !== undefined) pinned.push({ handle, author: node.pinned });
   }
+  // Pinned ephemera are in the head like anything else that was pinned (§3.2,
+  // §5.1), so the block lists them by handle with who kept them.
+  for (const item of brain.ephemera) {
+    if (item.pinned === undefined) continue;
+    const handle = handleOf(brain.handles, "ephemera", item.id);
+    if (handle !== undefined) pinned.push({ handle, author: item.pinned });
+  }
   for (const entry of brain.ledger) {
     if (entry.pinned === undefined) continue;
     const handle = handleOf(brain.handles, "ledger", entry.id);
@@ -182,6 +189,7 @@ export async function renderLiveStateBlock(
       atlas: estimatePart(brain.atlas),
       ledger: estimatePart(brain.ledger),
       chat: estimatePart(brain.chat),
+      ephemera: estimatePart(brain.ephemera),
     },
     pending: options.session.pending,
     pinned,

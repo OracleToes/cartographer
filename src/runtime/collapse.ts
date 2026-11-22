@@ -137,11 +137,16 @@ export function reconcileGenerations(root: string): { live: GenerationFiles | nu
 /**
  * The ephemeral items a generation's store held, as the archive takes them.
  *
- * Read before the store is unlinked: what a sweep moves out of a store, it
- * moves out of a store that is then deleted whole (§3.4). Each item is kept as
- * what it was — a tool call, reasoning, plain text, a read's result, a tool
- * result, or the person's message — so a restore can put it back where it came
- * from as that thing (§3.3).
+ * Read from the store's own entries table (`entries`, under the `live_`
+ * prefix, one JSON `record` per row), before the store is deleted whole — what
+ * a sweep moves out of a store, it moves out of a store that is then gone
+ * (§3.4). Each item is kept as what it was, so a restore can put it back as
+ * that thing (§3.3), and the entity a result came from is derived the same way
+ * the prompt derives it (§5.4): the call it answers already carries the handle.
+ *
+ * Only what §3.1 calls ephemeral is taken. A Brain record or a Chat record is
+ * not in the store's body and is not swept here; a record leaves the Brain by
+ * its own mark (§4.1).
  */
 export async function readGenerationEphemera(storePath: string, generation: string): Promise<IncomingItem[]> {
   if (!existsSync(storePath)) return [];
@@ -153,54 +158,155 @@ export async function readGenerationEphemera(storePath: string, generation: stri
     return [];
   }
   try {
-    // A store that has never held a run has no entry table yet.
     const table = await database.get<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'pi_live_entries'",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_entries'",
     );
     if (table === undefined) return [];
-    const rows = await database.all<{ id: number; record: string }>("SELECT id, record FROM pi_live_entries ORDER BY id");
+    const rows = await database.all<{ id: string; head: number | null; record: string }>(
+      "SELECT id, head, record FROM live_entries ORDER BY id",
+    );
+    // Only what is still in the context is swept. A head marker starts a new
+    // context — a reset — and everything before it is already out of the model's
+    // view, so sweeping it would put text in the archive that the collapse did
+    // not take out of the context. Compaction is declined here and a collapse
+    // builds a new store rather than cutting, so the newest head is the whole of
+    // it; there is no second, later cut to walk.
+    const newestHead = rows.reduce<number>((latest, row) => (row.head === null ? latest : Math.max(latest, Number(row.id))), 0);
+    const tools = new Map<string, { name: string; path?: string }>();
+    const parsed = rows
+      .filter((row) => Number(row.id) >= newestHead)
+      .map((row) => ({ id: String(row.id), entry: JSON.parse(row.record) as StoredEntry }));
+    for (const { entry } of parsed) {
+      for (const call of toolCallsOf(entry)) tools.set(call.id, call);
+    }
     const incoming: IncomingItem[] = [];
-    for (const row of rows) {
-      const parsed = JSON.parse(row.record) as { kind?: string; data?: { content?: unknown; text?: unknown } };
-      const kind = ephemeralKindOf(parsed.kind ?? "");
-      if (kind === undefined) continue;
-      const text = textOf(parsed.data);
-      if (text === "") continue;
-      incoming.push({
-        id: `${generation}:${row.id}`,
-        layer: "ephemeral",
-        ephemeral: { kind, text },
-      });
+    for (const { id, entry } of parsed) {
+      // The entity is what a restore needs to put the item back where it was:
+      // the tool call's own id, and for a result the call it answers.
+      const callId = callIdOf(entry);
+      const call = callId === undefined ? undefined : tools.get(callId);
+      const tool = call?.name;
+      const path = call?.path;
+      for (const part of ephemeralPartsOf(entry, tool)) {
+        incoming.push({
+          id: ephemeralItemId(generation, id, part.key),
+          layer: "ephemeral",
+          ephemeral: {
+            ...part.value,
+            ...(callId === undefined
+              ? {}
+              : { data: { callId, ...(tool === undefined ? {} : { tool }), ...(path === undefined ? {} : { path }) } }),
+          },
+        });
+      }
     }
     return incoming;
   } catch {
+    // A store whose shape this build does not recognise is not one to guess at:
+    // the collapse still runs, and the store is still deleted whole (§3.4).
     return [];
   } finally {
     await database.close().catch(() => undefined);
   }
 }
 
-/** An entry kind as the archive names it, or undefined for the bookkeeping entries it does not keep. */
-function ephemeralKindOf(kind: string): EphemeralKind | undefined {
-  if (kind.includes("tool-result")) return "toolResult";
-  if (kind.includes("tool-call") || kind === "pi.tool") return "toolCall";
-  if (kind.includes("reasoning")) return "reasoning";
-  if (kind.includes("user")) return "personMessage";
-  if (kind.includes("assistant") || kind.includes("message")) return "plainText";
+/** One row of the store's entries table, as far as the sweep reads it. */
+interface StoredEntry {
+  kind?: string;
+  model?: Array<{ role?: string; content?: unknown }>;
+}
+
+/** A tool call in one entry, by the id the model issued and the tool's name. */
+function toolCallsOf(entry: StoredEntry): Array<{ id: string; name: string; path?: string }> {
+  const calls: Array<{ id: string; name: string; path?: string }> = [];
+  for (const message of entry.model ?? []) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part === null || typeof part !== "object" || (part as { type?: unknown }).type !== "toolCall") continue;
+      const call = part as { id?: unknown; name?: unknown; arguments?: unknown };
+      if (typeof call.id !== "string" || typeof call.name !== "string") continue;
+      // What a `read` was a read of is in the call's arguments, and the call is
+      // the last place it exists once the store is gone: a result says only
+      // what came back. Keeping it lets the archive say what restoring means.
+      const args = call.arguments;
+      const path =
+        args !== null && typeof args === "object" && typeof (args as { path?: unknown }).path === "string"
+          ? (args as { path: string }).path
+          : undefined;
+      calls.push({ id: call.id, name: call.name, ...(path === undefined ? {} : { path }) });
+    }
+  }
+  return calls;
+}
+
+/** The tool call a tool result answers, when the entry is one. */
+function callIdOf(entry: StoredEntry): string | undefined {
+  for (const message of entry.model ?? []) {
+    const id = (message as { toolCallId?: unknown }).toolCallId;
+    if (message.role === "toolResult" && typeof id === "string") return id;
+  }
   return undefined;
 }
 
-/** The text of an entry, whichever place its payload keeps it. */
-function textOf(data: { content?: unknown; text?: unknown } | undefined): string {
-  if (data === undefined) return "";
-  if (typeof data.text === "string") return data.text;
-  if (typeof data.content === "string") return data.content;
-  if (Array.isArray(data.content)) {
-    return data.content
-      .map((part) => (part !== null && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
-      .join("");
+/** The model context one entry carried, as the text a person would read. */
+function modelTexts(entry: StoredEntry): { thinking: string[]; text: string[] } {
+  const thinking: string[] = [];
+  const text: string[] = [];
+  for (const message of entry.model ?? []) {
+    if (!Array.isArray(message.content)) {
+      if (typeof message.content === "string" && message.content.trim().length > 0) text.push(message.content);
+      continue;
+    }
+    for (const part of message.content) {
+      if (part === null || typeof part !== "object") continue;
+      const piece = part as { type?: unknown; thinking?: unknown; text?: unknown };
+      if (piece.type === "thinking" && typeof piece.thinking === "string" && piece.thinking.trim().length > 0) {
+        thinking.push(piece.thinking);
+      } else if (piece.type === "text" && typeof piece.text === "string" && piece.text.trim().length > 0) {
+        text.push(piece.text);
+      }
+    }
   }
-  return "";
+  return { thinking, text };
+}
+
+/**
+ * What one entry contributes to the archive. Nothing for the bookkeeping an
+ * entry can also carry — a marker, a reset, a diagnostics payload — because
+ * none of it is something the person could have been reading.
+ */
+/**
+ * The id a swept ephemeral item goes by, and the id the person pins it under.
+ *
+ * Both sides call this: the collapse, when it writes the item into the archive
+ * and decides whether a pin keeps it here, and the Context view, which offers
+ * the pin. A pin is only a promise if it names the thing being swept, so the
+ * name is made in one place rather than each side spelling it out.
+ */
+export function ephemeralItemId(generation: string, entryId: string | number, key: string): string {
+  return `${generation}:${entryId}:${key}`;
+}
+
+export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
+  const parts: Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> = [];
+  const role = entry.model?.find((message) => typeof message.role === "string")?.role;
+  const { thinking, text } = modelTexts(entry);
+  for (const [index, value] of thinking.entries()) parts.push({ key: `t${index}`, value: { kind: "reasoning", text: value } });
+
+  if (role === "toolResult") {
+    const result = text.join("\n");
+    if (result.trim().length === 0) return parts;
+    // A read's result is its own kind, because that is the one a restore has to
+    // make true again rather than merely put back (§5.5).
+    const kind: EphemeralKind = tool === "read" ? "readResult" : "toolResult";
+    parts.push({ key: "r", value: { kind, text: result } });
+    return parts;
+  }
+  // A person's message is the one kind that is somebody's words rather than the
+  // model's own: restoring it puts a message back, so it is not `plainText`.
+  const kind: EphemeralKind = role === "user" ? "personMessage" : "plainText";
+  for (const [index, value] of text.entries()) parts.push({ key: `x${index}`, value: { kind, text: value } });
+  return parts;
 }
 
 /** Lexical resolve; returns null instead of throwing. */
@@ -275,11 +381,19 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   // The writes below take each one out of the Brain, because an applied mark is
   // a mark gone and, for archive, the record is a Brain record no longer (§4.1).
   const leaving = markedForCollapse(refreshed);
-  // What is leaving the old store. §3.4 has the store deleted whole, so only a
-  // record the person pinned in the live context survives in the archive; the
-  // rest is deleted, which is the point of deleting the store rather than
-  // hiding it. Nothing here reads the store's contents.
-  const ephemera: IncomingItem[] = [];
+  // What is leaving the old store (§3.1, §3.4).
+  //
+  // An ephemeral item survives a collapse only if it is pinned (§3.1), and a pin
+  // is a promise it stays where it is, so a pinned item is not swept: it is in
+  // the Brain, and the new generation's head is built from the Brain. Everything
+  // else the store held is swept. The store is then deleted whole, so nothing
+  // swept has been copied anywhere the context could still read it.
+  //
+  // A pin outlives the store it was placed in: the item is in the Brain, and the
+  // head is rebuilt from the Brain, so it is in the next store's head without
+  // being read out of this one.
+  const pins = new Set(refreshed.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
+  const swept = (await readGenerationEphemera(live.store, live.generation)).filter((item) => !pins.has(item.id));
 
   // The Brain the new generation is built from: the marks applied, so a record
   // that is archived or deleted is not in the head it was swept out of (§2,
@@ -311,7 +425,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     generation,
     incoming: [
       ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),
-      ...ephemera,
+      ...swept,
     ],
     now,
   });

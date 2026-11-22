@@ -16,7 +16,7 @@ const input = (overrides = {}) => ({
   transcriptTokens: 3_800,
   toolWorkTokens: 2_700,
   toolWorkSince: 2_569,
-  sizes: { atlas: 1_200, ledger: 640, chat: 980 },
+  sizes: { atlas: 1_200, ledger: 640, chat: 980, ephemera: 0 },
   pending: [
     { kind: "atlas", action: "upsert", id: "a3" },
     { kind: "chat", action: "record", id: "c7" },

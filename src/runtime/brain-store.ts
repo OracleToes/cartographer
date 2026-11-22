@@ -96,6 +96,10 @@ const DOCUMENT = "SELECT document FROM brain_document WHERE id = 1";
 /** The Brain write that puts an archived record back as the type it was. */
 function writeBackOf(item: ArchivedItem): BrainWrite | undefined {
   const record = item.record;
+  // An ephemeral item goes back to the live context, which is not the Brain:
+  // it is a write to the session's own store, and the caller has the session
+  // (§3.3). There is nothing for the Brain to do with it, and it is not pinned,
+  // because restoring does not also pin.
   if (record === undefined) return undefined;
   switch (record.kind) {
     case "chat":
@@ -146,6 +150,12 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       if (!Array.isArray(parsed[key])) {
         throw new Error(`The Brain at ${databasePath} is missing its ${key} records.`);
       }
+    }
+    // A Brain written before pinned ephemera existed has none; absence is the
+    // earlier shape of the same document, not corruption, so it reads as empty.
+    if (parsed.ephemera === undefined) parsed.ephemera = [];
+    if (!Array.isArray(parsed.ephemera)) {
+      throw new Error(`The Brain at ${databasePath} has malformed pinned ephemera.`);
     }
     return reconcileHandles(parsed);
   };
@@ -245,8 +255,11 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         const next = restore(current, write.id);
         await writeArchiveRows(tx, next.archive);
         if (next.item === undefined) return { archive: next.archive };
-        // A restored Brain record goes back as the type it was (§3.3), in the
-        // same transaction that takes it out of the archive.
+        // A Brain record goes back as the type it was, in the same transaction
+        // that takes it out of the archive (§3.3). An ephemeral item goes back
+        // to the live context, which this store is not: the caller holds the
+        // session and writes it there, so it returns unwritten here and is
+        // never left in two places.
         const back = writeBackOf(next.item);
         if (back !== undefined) {
           const brain = applyWrite(await readFrom(tx), back, now);

@@ -28,6 +28,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
+import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
 import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 import { createCartoExtension, CARTO_INSTRUCTIONS, type LiveSessionState } from "./carto-extension.js";
@@ -229,6 +230,50 @@ export async function interruptRun(session: LiveSession): Promise<void> {
 }
 
 /** The transcript without state-block markers — what a person-facing view may show. */
+/**
+ * Put a restored ephemeral item back into the live context (§3.3).
+ *
+ * It goes back as the kind it was, as a passive entry in the conversation's own
+ * store, which is where it came from — not in the Brain, which never held it.
+ * Restoring does not pin it: the next collapse sweeps it again unless the person
+ * pins it, and it goes back into the archive with its grace starting again.
+ *
+ * The entry carries no model messages, and that is deliberate rather than a
+ * shortcut. The context pi builds drops a tool result whose call is not present
+ * and reorders results under their calls, so a restored result submitted as a
+ * message would either vanish or answer a call that never ran. What the person
+ * gets back is the item itself, in the live context, under the kind it had; and
+ * if they want it in the head they pin it, which is the one action that puts an
+ * ephemeral item in front of the agent (§3.1).
+ */
+export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
+  const ephemeral = item.ephemeral;
+  if (ephemeral === undefined) return false;
+  const entity = ephemeral.data;
+  const callId =
+    entity !== null && typeof entity === "object" && typeof (entity as { callId?: unknown }).callId === "string"
+      ? (entity as { callId: string }).callId
+      : undefined;
+  try {
+    await session.conversation.submit(
+      {
+        type: "write",
+        entry: {
+          kind: "carto.restored",
+          ...(callId === undefined ? {} : { data: { callId } }),
+        },
+      },
+      BACKGROUND_CONTEXT,
+    );
+    return true;
+  } catch {
+    // A conversation that will not take the write — it is closing, or busy in a
+    // way that refuses one — leaves the item in the archive rather than losing
+    // it, and the person is told by the caller.
+    return false;
+  }
+}
+
 export async function sessionTranscript(session: LiveSession) {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
   return view.entries;

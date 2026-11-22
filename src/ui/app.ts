@@ -53,6 +53,8 @@ import {
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
+import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
+import { restoreEphemeral } from "../runtime/live-session.js";
 import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
@@ -157,6 +159,12 @@ interface MessageLike {
   timestamp?: number;
   /** pi-ai's stop reason for the landed assistant turn: stop, length, toolUse, error, aborted… */
   stopReason?: string;
+}
+
+/** The call a result answers, if the message says. */
+function toolCallIdOf(message: MessageLike): string | undefined {
+  const id = (message as { toolCallId?: unknown }).toolCallId;
+  return typeof id === "string" ? id : undefined;
 }
 
 function messageOf(entry: ContextEntryLike): MessageLike | undefined {
@@ -433,6 +441,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    // The generation whose store these entries are in: an item's pin id is built
+    // from it, so the pin names the item the sweep will name (§3.1).
+    const generation = state.session.generation;
     const productTools = createTools({
       root: options.root,
       brain,
@@ -461,6 +472,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const transcriptMessages: ContextDialogueMessage[] = [];
     const toolWorkItems: ContextWorkItem[] = [];
 
+    // A tool's name is not on its result, only the call's id; walking the calls
+    // first is what lets a result say which tool produced it.
+    const callNames = new Map<string, string>();
+    for (const entry of entries) {
+      for (const message of (entry.model ?? []) as unknown[]) {
+        if (!isRecord(message) || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+            callNames.set(part.id, part.name);
+          }
+        }
+      }
+    }
+
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
       if (!entry) continue;
@@ -476,19 +501,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        // Counted per entry, the same way the sweep counts them, so `t0` means
+        // one thing on both sides. A tool call is named by its part: it has an
+        // id of its own and does not need counting.
+        let thinkingSeen = 0;
+        let textSeen = 0;
         for (let j = 0; j < content.length; j++) {
           const part = content[j];
           if (!isRecord(part)) continue;
           if (part.type === "thinking" && typeof part.thinking === "string") {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "reasoning", text: part.thinking });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `t${thinkingSeen++}`), kind: "reasoning", text: part.thinking });
           } else if (part.type === "text" && typeof part.text === "string") {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "output", text: part.text });
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, `x${textSeen++}`), kind: "output", text: part.text });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             if (part.name === "chat") {
               const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
               transcriptMessages.push({ id: `${id}-${j}`, role: "assistant [chat]", text: textArg, timestamp: ts });
             } else {
-              toolWorkItems.push({ id: `${id}-${j}`, kind: "toolCall", name: part.name, args: prettyArgs(part.arguments) });
+              toolWorkItems.push({
+                id: ephemeralItemId(generation, id, `c${j}`),
+                kind: "toolCall",
+                name: part.name,
+                args: prettyArgs(part.arguments),
+              });
             }
           }
         }
@@ -499,7 +534,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           if (!isRecord(part)) continue;
           const toolText = typeof part.text === "string" ? part.text : "";
           if (!toolText.startsWith("carto: ")) {
-            toolWorkItems.push({ id: `${id}-${j}`, kind: "toolResult", output: toolText });
+            // A result names the call it answers, and the call names the tool:
+            // that is how the sweep knows a result is a `read`'s (§5.5).
+            const answered = toolCallIdOf(message) === undefined ? undefined : callNames.get(toolCallIdOf(message) ?? "");
+            toolWorkItems.push({ id: ephemeralItemId(generation, id, "r"), kind: "toolResult", output: toolText, tool: answered });
           }
         }
       }
@@ -513,6 +551,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // Numbered by the same function the transcript uses, over the same entries,
     // so a handle means one thing in both views (§5.4).
     const handles = promptHandles(promptItemsOf(entries));
+    // A pin the person placed before the collapse is a promise the item stays,
+    // so the row says it is pinned rather than waiting to be pinned again.
+    for (const item of toolWorkItems) {
+      const held = brainState.ephemera.find((carried) => carried.id === String(item.id));
+      if (held === undefined) continue;
+      item.pinned = held.pinned;
+    }
     contextView.setData({
       brain: brainState,
       systemPrompt: CARTO_INSTRUCTIONS,
@@ -639,13 +684,37 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   archiveView.onRestore = (id) => {
     void (async () => {
+      // An ephemeral item's home is the live context, so it is written there
+      // first and only then taken out of the archive: a store that will not take
+      // it leaves it in the archive, where it still is, rather than nowhere
+      // (§3.3). A Brain record is a transaction inside the Brain and needs no
+      // such ordering.
+      const pending = (await brain.readArchive()).items.find((item) => item.id === id);
+      if (pending === undefined) return;
+      if (pending.record === undefined && !(await restoreEphemeral(state.session, pending))) {
+        pushStatus("the live context would not take it back; it is still in the archive");
+        tui.requestRender();
+        return;
+      }
       const result = await brain.applyArchive({ kind: "restore", id });
       if (result.item === undefined) return;
       const kind = result.item.record?.kind;
-      pushStatus(kind === undefined ? "restored an ephemeral item" : `restored ${kind} record ${result.item.record?.value.id ?? ""}`.trim());
+      // A record that came back can point at a file that has drifted or gone:
+      // the same freshness pass a collapse runs marks it stale, so the person
+      // sees that its attachment no longer resolves the moment it is back
+      // (§3.3) rather than carrying an attachment that quietly lies.
+      if (kind === "atlas") await refreshFreshness(options.root, await brain.read(), brain.apply.bind(brain), Date.now());
+      // A restored ephemeral went back into the live context, which is where it
+      // came from; it is not in the Brain and not in the head (§3.3).
+      pushStatus(
+        kind === undefined
+          ? "put an item back into the live context; pin it to keep it through the next collapse"
+          : `restored ${kind} record ${result.item.record?.value.id ?? ""}`.trim(),
+      );
       await refreshArchive();
       await rebuildTranscript();
       await refreshSidebar();
+      if (state.view === "context") await syncContextView(await brain.read());
     })();
   };
   archiveView.onDelete = (id) => {
@@ -660,12 +729,65 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
   ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
   atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
-  contextView.onTogglePin = (_partId: string, itemId: string | number) => {
+  /**
+   * Pin or unpin one ephemeral item in the live context (§3.1, §3.2). This is
+   * the person's action, and the only thing that keeps an item through a
+   * collapse: an unpinned ephemeral is swept, and the archive is where it goes.
+   */
+  const toggleEphemeralPin = async (brainState: Awaited<ReturnType<BrainStore["read"]>>, rowId: string) => {
+    const held = brainState.ephemera.find((item) => item.id === rowId);
+    if (held !== undefined) {
+      // Pinning again is how the person takes a pin over: an agent's pin
+      // becomes theirs, and their own unpins.
+      const next = held.pinned === "user" ? null : "user";
+      await brain.apply(next === null ? { kind: "ephemeral.unpin", id: held.id } : { kind: "ephemeral.pin", item: { ...held, pinned: "user" } }, Date.now());
+      pushStatus(next === null ? "unpinned an item in the live context" : "pinned an item in the live context");
+      await refreshSidebar();
+      if (state.view === "context") await syncContextView(await brain.read());
+      tui.requestRender();
+      return;
+    }
+    // The item is in the generation's store, not the Brain: read it from the
+    // context the way the Context view drew it and keep that text, because the
+    // store it came from is about to be gone and pinning keeps the text, not a
+    // live view of it (§5.5).
+    const drawn = contextView.nodeFor("tool-work", rowId);
+    if (drawn === undefined) return;
+    await brain.apply(
+      {
+        kind: "ephemeral.pin",
+        item: {
+          id: rowId,
+          text: drawn.body,
+          kind: drawn.kind === "reasoning" ? "reasoning" : drawn.kind === "call" ? "toolCall" : "toolResult",
+          createdAt: Date.now(),
+          pinned: "user",
+        },
+      },
+      Date.now(),
+    );
+    pushStatus("pinned an item in the live context");
+    await refreshSidebar();
+    if (state.view === "context") await syncContextView(await brain.read());
+    tui.requestRender();
+  };
+
+  contextView.onTogglePin = (partId: string, itemId: string | number) => {
     void (async () => {
       const brainState = await brain.read();
-      const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
-      if (chatRecord === undefined) return;
-      await togglePin("chat", chatRecord.id);
+      if (partId === "transcript") {
+        const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
+        if (chatRecord === undefined) return;
+        await togglePin("chat", chatRecord.id);
+        return;
+      }
+      if (partId === "ephemera" || partId === "tool-work") {
+        await toggleEphemeralPin(brainState, String(itemId));
+        return;
+      }
+      // A tool row is the prompt's to describe, not the person's to pin: there
+      // is no entry to keep, only a schema in the system prompt.
+      if (partId !== "tool-work") return;
     })();
   };
 
@@ -1291,6 +1413,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => true,
     },
     {
+      id: "pin-context-row",
+      group: "the workspace",
+      label: "pin or unpin the entry under the cursor",
+      hint: "a pinned item in the live context goes on into the next collapse",
+      key: "p",
+      // The Context view matches the key itself, because it knows where the
+      // cursor is; the palette comes here, so it does the same act.
+      run: () => contextView.pinSelected(),
+      available: () => state.view === "context" && state.layer === "context",
+    },
+    {
       id: "archive",
       group: "the workspace",
       label: "the archive layer",
@@ -1298,6 +1431,48 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       key: "ctrl+t",
       run: () => void toggleLayer(),
       available: () => true,
+    },
+    // What the person can do on the archive layer, named where every other act
+    // is named: the footer, `f1` and the palette all read this list.
+    {
+      id: "archive-pin",
+      group: "the archive",
+      label: "pin or unpin the item",
+      hint: "a pinned item is never dropped",
+      // The archive view matches these itself, because it knows the cursor; they
+      // are declared here so the footer, `f1` and the palette name them (§3.3:
+      // the same UI, so the same list).
+      key: "p",
+      run: () => {
+        const item = archiveView.selectedItem();
+        if (item !== undefined) archiveView.onTogglePin?.(item.id);
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-restore",
+      group: "the archive",
+      label: "restore it where it came from",
+      key: "r",
+      run: () => {
+        const item = archiveView.selectedItem();
+        if (item !== undefined) archiveView.onRestore?.(item.id);
+      },
+      available: onArchive,
+    },
+    {
+      id: "archive-delete",
+      group: "the archive",
+      label: "delete it for good",
+      hint: "takes a second press",
+      key: "d",
+      run: () => {
+        // One act behind one implementation: the key, the palette and `f1` all
+        // come here, so the two presses cannot be had from a second route.
+        if (archiveView.deleteSelected() === "armed") pushStatus("press `d` again to delete it for good");
+        tui.requestRender();
+      },
+      available: onArchive,
     },
     {
       id: "view-chat",

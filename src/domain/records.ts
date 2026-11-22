@@ -94,7 +94,7 @@ export interface AtlasNode {
   updatedAt: number;
 }
 
-export type HandleKind = "ledger" | "chat" | "atlas";
+export type HandleKind = "ledger" | "chat" | "atlas" | "ephemera";
 
 /**
  * One short, type-prefixed, generation-local public handle (§5.4).
@@ -118,11 +118,37 @@ export interface HandleTable {
  * project; `history: "latest"` in spirit — the store keeps current state, not
  * an audit trail (§2.2).
  */
+/**
+ * An ephemeral item the person pinned in the live context (§3.1, §3.2).
+ *
+ * A pin is the one thing that keeps an ephemeral item through a collapse: the
+ * store is deleted whole (§3.4), so an unpinned item goes to the archive and
+ * this one goes into the head instead, after Chat, under a handle of its own.
+ * It has no mark and no place in the Atlas or the Ledger, because it is not a
+ * Brain record — it is what the person kept in front of the agent.
+ *
+ * Restoring does not put anything here. A restored item goes back to the live
+ * context, which is its home, and it is pinned only if the person pins it after
+ * that (§3.3).
+ */
+export interface PinnedEphemeral {
+  id: RecordId;
+  text: string;
+  kind: "toolCall" | "reasoning" | "plainText" | "readResult" | "toolResult" | "personMessage";
+  /** The tool call's model-issued id, or the call a result answers: how the item survives a rebuild as itself. */
+  entity?: { callId: string; tool?: string | undefined } | undefined;
+  createdAt: number;
+  /** Who keeps this item here. Only the person can unpin a pin they placed. */
+  pinned: Author;
+}
+
 export interface CartoBrain {
   version: 1;
   chat: ChatRecord[];
   ledger: LedgerEntry[];
   atlas: AtlasNode[];
+  /** Pinned ephemera: what a collapse carries into the head instead of sweeping (§3.2, §5.1). */
+  ephemera: PinnedEphemeral[];
   handles: HandleTable;
 }
 
@@ -132,6 +158,7 @@ export function emptyBrain(): CartoBrain {
     chat: [],
     ledger: [],
     atlas: [],
+    ephemera: [],
     handles: { counters: {}, entries: [] },
   };
 }
