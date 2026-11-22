@@ -813,12 +813,28 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  /**
+   * The person's mode toggle (§6.1). It flips the session flag the tools read,
+   * and the block reports the new mode on the next request. Nothing else knows
+   * the mode — `bash` stays trusted, and no gate is placed anywhere.
+   */
+  const toggleReadOnly = () => {
+    state.session.state.readOnly = !state.session.state.readOnly;
+    tui.flash(
+      state.session.state.readOnly
+        ? "read only mode — create and edit will refuse"
+        : "edit mode — the agent may change the project",
+      1_800,
+    );
+    tui.requestRender();
+  };
+
   const slashHelp = [
     "/help — this screen",
     "/copy — copy the transcript to the clipboard (also a /tmp fallback file)",
     "/copy-session — full diagnostic dump: transcript, context, counts (clipboard + /tmp)",
     "these are the only slash commands; anything else starting with / is not sent to the agent",
-    "keys: ctrl+x stop · shift+tab send mode · ctrl+e fold cards · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+c quit",
+    "keys: ctrl+x stop · shift+tab send mode · ctrl+e fold cards · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+r read only mode · ctrl+c quit",
   ].join("\n");
 
   const runSlash = async (raw: string) => {
@@ -907,6 +923,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         run: () => void switchToView("context"),
       },
       {
+        value: "read only",
+        label: "toggle read only mode",
+        hint: "^r",
+        run: () => toggleReadOnly(),
+      },
+      {
         value: "collapse",
         label: "collapse the context now",
         hint: "the Brain rebuilds it",
@@ -988,6 +1010,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (matchesKey(data, "ctrl+h")) {
       state.sidebarVisible = !state.sidebarVisible;
       tui.requestRender();
+      return { consume: true };
+    }
+    if (matchesKey(data, "ctrl+r")) {
+      toggleReadOnly();
       return { consume: true };
     }
     return undefined;
