@@ -24,7 +24,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { Writable } from "node:stream";
-import { basename } from "node:path";
+import { basename, relative, resolve } from "node:path";
 
 import {
   Editor,
@@ -873,6 +873,48 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
   ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
   atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
+
+  /** Redraw whichever view shows Brain state from the Brain as it now stands. */
+  const refreshBrainViews = async () => {
+    const fresh = await brain.read();
+    if (state.view === "atlas") atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
+    if (state.view === "ledger") ledgerView.setData(fresh);
+    if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
+    if (state.view === "context") await syncContextView(fresh);
+  };
+
+  /**
+   * Pin or unpin a file from the tree (§3.2). The person may pin or unpin any
+   * file, and a file the agent pinned is theirs to take off: one press unpins
+   * whoever's pin it is, like every other row. The pin is keyed by the absolute
+   * path the tree names, the key the agent's `pin` tool writes, so one file is
+   * one pin whichever side placed it.
+   */
+  treeView.onTogglePin = (path: string, directory: boolean) => {
+    void (async () => {
+      if (directory) {
+        pushStatus("a directory holds no bytes to keep; pin a file in it");
+        tui.requestRender();
+        return;
+      }
+      const brainState = await brain.read();
+      const held = brainState.files.find((file) => resolve(options.root, file.path) === path);
+      const shown = relative(options.root, path);
+      if (held === undefined) {
+        await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
+        pushStatus(`pinned ${shown} (you): the head holds it, read again at every collapse`);
+      } else {
+        await brain.apply({ kind: "file.pin", path: held.path, pinned: null }, Date.now());
+        pushStatus(held.pinned === "user" ? `unpinned ${shown}` : `took the agent's pin off ${shown}`);
+      }
+      await refreshBrainViews();
+      await refreshSidebar();
+      tui.requestRender();
+    })().catch((error: unknown) => {
+      pushStatus(`pin failed: ${errorText(error)}`);
+      tui.requestRender();
+    });
+  };
   /**
    * Pin or unpin one ephemeral item in the live context (§3.1, §3.2). This is
    * the person's action, and the only thing that keeps an item through a
@@ -996,6 +1038,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
       await rebuildTranscript();
       await syncContextView(await brain.read());
+      await refreshBrainViews();
       await refreshSidebar();
       tui.requestRender();
       return;
@@ -1097,9 +1140,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     await rebuildTranscript();
     await syncContextView(await brain.read());
+    await refreshBrainViews();
     await refreshSidebar();
     tui.requestRender();
   };
+
+  // Atlas and Ledger give the person the same four acts the Context view has,
+  // routed into the same functions: one mark means one thing in every view.
+  for (const [book, view] of [["atlas", atlasView], ["ledger", ledgerView]] as const) {
+    view.controls.onMark = (id, action, now) => queueContextAction(() => markRecord(book, id, action, now));
+    view.controls.onWithdraw = (id) => queueContextAction(() => withdrawRecordMark(book, id));
+  }
 
   contextView.onWithdrawMark = (partId, itemId) => {
     queueContextAction(async () => {
@@ -1839,6 +1890,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const inChat = () => state.layer === "context" && state.view === "chat";
   const inView = (view: ViewMode) => state.layer === "context" && state.view === view;
   const onArchive = () => state.layer === "archive";
+  /** The book the person is in, when it is Atlas or Ledger. */
+  const bookOf = () => (state.view === "atlas" ? atlasView : state.view === "ledger" ? ledgerView : undefined);
+  /** A book is open and not taking a `/` filter, so its command keys are commands. */
+  const bookIsOpen = () => state.layer === "context" && bookOf() !== undefined && bookOf()?.isFiltering() === false;
 
   const commands = new Registry([
     {
@@ -1997,6 +2052,76 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // cursor is; the palette comes here, so it does the same act.
       run: () => contextView.pinSelected(),
       available: () => state.view === "context" && state.layer === "context",
+    },
+    // The same acts on the other views of the Brain (§4.1, §3.2). The views match
+    // these keys too, because they know where the cursor is; the palette comes
+    // here, and the footer and `f1` read them. Each is unavailable while the
+    // view is taking a `/` filter, because then the key is a letter of it.
+    {
+      id: "pin-tree-file",
+      group: "the workspace",
+      label: "pin or unpin the file under the cursor",
+      hint: "a pinned file is read again at every collapse, so the head holds it as it stands",
+      key: "p",
+      run: () => treeView.pinSelected(),
+      available: () => inView("tree") && !treeView.isFiltering(),
+    },
+    {
+      id: "pin-book-row",
+      group: "the workspace",
+      label: "pin or unpin the entry under the cursor",
+      hint: "a pinned record goes on into the next collapse",
+      key: "p",
+      run: () => (state.view === "atlas" ? atlasView : ledgerView).pinSelected(),
+      available: () => bookIsOpen(),
+    },
+    {
+      id: "book-mark-archive",
+      group: "the context",
+      label: "mark for archive",
+      hint: "the next collapse moves it to the archive; `!` first applies it now",
+      key: "a",
+      run: () => bookOf()?.controls.mark(bookOf()?.selectedId(), "archive"),
+      available: () => bookIsOpen(),
+    },
+    {
+      id: "book-mark-delete",
+      group: "the context",
+      label: "mark for delete",
+      hint: "the next collapse removes it for good; `!` first applies it now",
+      key: "d",
+      run: () => bookOf()?.controls.mark(bookOf()?.selectedId(), "delete"),
+      available: () => bookIsOpen(),
+    },
+    {
+      id: "book-apply-now",
+      group: "the context",
+      label: "apply now",
+      hint: "the next mark is applied at once, rebuilding in place",
+      key: "!",
+      run: () => {
+        bookOf()?.controls.toggleApplyNow();
+        tui.requestRender();
+      },
+      available: () => bookIsOpen(),
+    },
+    {
+      id: "book-withdraw",
+      group: "the context",
+      label: "withdraw the mark",
+      key: "u",
+      quiet: true,
+      run: () => bookOf()?.controls.withdraw(bookOf()?.selectedId()),
+      available: () => bookIsOpen(),
+    },
+    {
+      id: "collapse-from-view",
+      group: "the run",
+      label: "collapse now (applies the marks)",
+      hint: "the same collapse the Context view's `c` runs",
+      key: "c",
+      run: () => void runCollapse("context surgery"),
+      available: () => bookIsOpen() || (inView("tree") && !treeView.isFiltering()),
     },
     // The two marks the agent's `mark` tool can place, and the act that applies
     // either of them at once (§4.1). They are declared here for the same reason

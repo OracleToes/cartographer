@@ -1255,3 +1255,75 @@ test("the tree view shows the harness's own facts: handles, attached notes, pins
   // A directory's size counts its whole subtree: it is a cost, not a listing.
   assert.match(shown, /\d+(\.\d+)?[KMG]?\s+src/, "directories carry a deep size");
 });
+
+test("the tree pins the file under the cursor with p, and a directory or a filter never does", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-pin-"));
+  mkdirSync(join(root, "src"));
+  writeFileSync(join(root, "src", "a.ts"), "export {};\n");
+  const view = new TreeView();
+  view.setData({ root, anchor: { anchor: root, depth: 3 }, brain: emptyBrain() });
+  view.render(100);
+  const asked = [];
+  view.onTogglePin = (path, directory) => asked.push([path, directory]);
+
+  // The first row is the directory: the callback hears it so it can say so, and nothing is pinned.
+  view.handleInput("p");
+  assert.deepEqual(asked, [[join(root, "src"), true]]);
+  view.handleInput("j");
+  view.handleInput("p");
+  assert.deepEqual(asked[1], [join(root, "src", "a.ts"), false], "a file is named by the absolute path the tree shows");
+  assert.match(plain(view.render(110).join("\n")), /p pin/, "the header names the key");
+
+  // While `/` takes text, p is a letter of the filter.
+  view.handleInput("/");
+  assert.equal(view.isFiltering(), true);
+  view.handleInput("p");
+  assert.equal(asked.length, 2);
+});
+
+test("Atlas and Ledger mark, withdraw and apply now from the list and from the detail pane", () => {
+  for (const [name, View, seed] of [
+    ["atlas", AtlasView, (brain) => brain.atlas.push({ id: "n1", title: "node", text: "t", links: [], attachments: [], createdAt: 1, updatedAt: 1 })],
+    ["ledger", LedgerView, (brain) => brain.ledger.push({ id: "n1", kind: "note", text: "t", status: "open", answer: null, createdAt: 1, updatedAt: 1 })],
+  ]) {
+    const brain = emptyBrain();
+    seed(brain);
+    const view = new View();
+    if (name === "atlas") view.setData(brain, []); else view.setData(brain);
+    const heard = [];
+    view.controls.onMark = (id, action, now) => heard.push(["mark", id, action, now]);
+    view.controls.onWithdraw = (id) => heard.push(["withdraw", id]);
+
+    view.handleInput("a");
+    view.handleInput("d");
+    view.handleInput("u");
+    assert.deepEqual(heard, [["mark", "n1", "archive", false], ["mark", "n1", "delete", false], ["withdraw", "n1"]], `${name}: the list's keys`);
+
+    // `!` arms the next mark only, says so in the header, and is spent by it.
+    heard.length = 0;
+    view.handleInput("!");
+    assert.match(plain(view.render(100).join("\n")), /applies NOW/, `${name}: the header says the next mark is immediate`);
+    view.handleInput("a");
+    view.handleInput("a");
+    assert.deepEqual(heard, [["mark", "n1", "archive", true], ["mark", "n1", "archive", false]], `${name}: arming is spent by one mark`);
+
+    // The detail pane has the same keys; paging moved to ctrl+d / ctrl+u.
+    heard.length = 0;
+    view.handleInput("l");
+    view.handleInput("d");
+    assert.deepEqual(heard, [["mark", "n1", "delete", false]], `${name}: the detail pane marks too`);
+    view.handleInput("h");
+
+    // A filter takes letters, so a mark key is not a mark while it is open.
+    heard.length = 0;
+    view.handleInput("/");
+    assert.equal(view.isFiltering(), true);
+    view.handleInput("a");
+    view.handleInput("d");
+    assert.deepEqual(heard, [], `${name}: a filter swallows the letters`);
+  }
+});

@@ -722,6 +722,24 @@ private annotation layer over what the model sees. Anything not kept stays
 ephemeral, and a staged change takes effect at the next collapse unless the person
 applies it now (§4.1).
 
+**The person has the same controls in every view of the Brain** (§3.2, §4.1).
+`p` pins or unpins the entry under the cursor, and it works in the Context view,
+Atlas, Ledger, the archive, and the Tree, where it pins a file: the head holds a
+pinned file as it stands, read again at every collapse. The person's press
+unpins a pin whoever placed it, and the file's pin is keyed by the same path the
+agent's `pin` writes, so one file is one pin. In the Context view, Atlas, and
+Ledger, `a` marks the record for archive, `d` marks it for delete, `u` withdraws
+the person's mark, and `!` arms the next mark to apply at once; the books route
+these into the same code as the Context view, and the header says when `!` is
+armed. In the books `d` and `u` mark and withdraw in the detail pane too, and
+the detail pages with `ctrl+d` and `ctrl+u`. `c` collapses from the Context view,
+Atlas, Ledger, and the Tree, where the marks are applied. While `/` takes a
+filter, every one of these keys is a letter of it. A file carries a pin and no
+mark: the `mark` tool is for Brain records. These keys are commands in the same
+list as everything else, so the footer, `f1`, and the palette show them.
+In Chat, a click on the agent's block toggles its pin; its marks are placed from
+the Context view.
+
 **The transcript renders everything the model does.** The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than

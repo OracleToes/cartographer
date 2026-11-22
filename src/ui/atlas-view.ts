@@ -20,12 +20,15 @@ import {
 import { handleOf } from "../domain/handles.js";
 import type { AtlasNode, CartoBrain } from "../domain/records.js";
 import { padLine, tokens, pinBadgeText } from "./tokens.js";
+import { RecordControls } from "./record-controls.js";
 
 export class AtlasView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
   /** Fired on `p`: toggle the pin marker on the selected node. */
   onTogglePin?: (id: string) => void;
+  /** The person's marks on the selected record: `a` archive, `d` delete, `u` withdraw, `!` apply now (§4.1). */
+  readonly controls = new RecordControls();
 
   private focusedPane: "list" | "detail" = "list";
   private brain: CartoBrain | undefined;
@@ -47,6 +50,22 @@ export class AtlasView implements Component, Focusable {
     if (this.selectedIndex >= this.nodes.length) {
       this.selectedIndex = Math.max(0, this.nodes.length - 1);
     }
+  }
+
+  /** True while `/` is taking text: a command key is a letter of the filter then. */
+  isFiltering(): boolean {
+    return this.filtering;
+  }
+
+  /** The id the cursor is on, which the marks and the pin act on. */
+  selectedId(): string | undefined {
+    return this.getFilteredNodes()[this.selectedIndex]?.id;
+  }
+
+  /** Pin or unpin the selected record, the act `p` performs. */
+  pinSelected(): void {
+    const id = this.selectedId();
+    if (id !== undefined) this.onTogglePin?.(id);
   }
 
   handleInput(data: string): void {
@@ -71,6 +90,9 @@ export class AtlasView implements Component, Focusable {
       }
       return;
     }
+
+    // The marks are the same in both panes; paging the detail is ctrl+d/ctrl+u.
+    if (this.controls.handleKey(data, this.selectedId())) return;
 
     if (this.focusedPane === "list") {
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
@@ -136,11 +158,11 @@ export class AtlasView implements Component, Focusable {
         this.scrollOffset = Math.max(0, this.scrollOffset - 1);
         return;
       }
-      if (matchesKey(data, "d") || matchesKey(data, "pageDown")) {
+      if (matchesKey(data, "ctrl+d") || matchesKey(data, "pageDown")) {
         this.scrollOffset += 10;
         return;
       }
-      if (matchesKey(data, "u") || matchesKey(data, "pageUp")) {
+      if (matchesKey(data, "ctrl+u") || matchesKey(data, "pageUp")) {
         this.scrollOffset = Math.max(0, this.scrollOffset - 10);
         return;
       }
@@ -296,7 +318,7 @@ export class AtlasView implements Component, Focusable {
         : "";
     const stale = this.staleHandles.size > 0 ? ` ${tokens.warn(`!${this.staleHandles.size} stale`)}` : "";
     const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
-    const right = `${tokens.faint("j/k move · enter open · p pin · / filter ")}`;
+    const right = `${tokens.faint(this.controls.nowArmed ? "next mark applies NOW " : "p pin · a/d mark · u withdraw · ! now · / filter ")}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(left + " ".repeat(gap) + right, width)));
     lines.push(padLine("", width));
