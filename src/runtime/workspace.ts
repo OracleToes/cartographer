@@ -23,7 +23,9 @@ export function refuseBrainPath(rootReal: string, real: string): void {
   const rel = relative(rootReal, real);
   if (rel === "") return;
   if (rel.split(sep).includes(".brain")) {
-    throw new BrainWallError("`.brain` is Carto's own storage; no tool touches it.");
+    throw new BrainWallError(
+      "`.brain` is the Brain's own storage, and no tool reads, lists, or writes it. Work with the project files, and with the records your handles name.",
+    );
   }
 }
 
@@ -33,7 +35,9 @@ export function lexicalProjectPath(root: string, path: string): string {
   const candidate = resolve(rootReal, path);
   const rel = relative(rootReal, candidate);
   if (rel.startsWith("..") || isAbsolute(rel)) {
-    throw new WorkspaceError(`path resolves outside the project root: ${candidate}`);
+    throw new WorkspaceError(
+      `that path resolves outside the project root (${candidate}), and everything you touch is inside it. Name a path relative to the root.`,
+    );
   }
   refuseBrainPath(rootReal, candidate);
   return candidate;

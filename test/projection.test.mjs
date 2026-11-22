@@ -41,7 +41,7 @@ test("a link to a deleted node renders as (gone), never as a raw id", () => {
 
 test("ledger answers render; empty brain renders the placeholder", () => {
   let brain = emptyBrain();
-  assert.equal(projectContext(brain).text, "(the Brain is empty)");
+  assert.match(projectContext(brain).text, /^\(the Brain is empty/);
   brain = applyWrite(brain, { kind: "ledger.upsert", entry: { id: "l1", kind: "goal", text: "finish R2", status: "answered", answer: { text: "projection lands" }, createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:05:00.000Z") } }, at("2026-11-16T04:05:00.000Z"));
   const projection = projectContext(brain);
   assert.match(projection.text, /L1 \[goal · answered\] finish R2 — 2026-11-16T04:05:00.000Z/);
@@ -53,7 +53,7 @@ test("pins render inline on their entries", () => {
   brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "n1", title: "The collapse boundary", text: "Collapse is person-triggered or agent-triggered", links: [], attachments: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
   brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: "agent" }, at("2026-11-16T04:00:00.000Z"));
   const projection = projectContext(brain);
-  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned:agent\]/);
+  assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned by you\]/);
   assert.doesNotMatch(projection.text, /Pins/);
 });
 

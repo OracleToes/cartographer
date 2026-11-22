@@ -11,27 +11,30 @@
  * It is also the continuation (§5.7): a run that ends without a tool call ends,
  * and the block arrives as the next turn.
  *
- * The block is plain text:
+ * The block is plain text, in the order §5.3 lists what it reports:
  *
  *   <carto-state>
  *   [EDIT MODE]
- *   context: 12,410 / 32,768 tokens (last reported 9,841 + tool work since +2,569)
- *   space: system+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
- *   pending:
- *     A3 · atlas upsert
- *   marks:
- *     A5 archive [u]
- *   pinned:
- *     A1 [a]
+ *   context: ~12,410 / 32,768 tokens · the provider counted 9,841; tool work since +2,569
+ *   space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
+ *   since the rebuild:
+ *     A3 · created
+ *     C1 · declared to the person
  *   stale:
- *     A7 (stale)
- *   tree: /abs/path (depth 2)
- *     ./
- *     src  4K  D1
+ *     A5 · the file changed after this note
+ *   tree: . (depth 2)
+ *     src/  4K
+ *       cli.ts  3K  A1
+ *   pins:
+ *     A1 · you
+ *   marks:
+ *     C3 · delete · the person
  *   </carto-state>
  *
- * Every item that names a record names it by handle. Empty sections say
- * `none` rather than lying by omission, and nothing is omitted.
+ * Every item that names a record names it by handle, and a line adds only what
+ * the handle does not already say: no line repeats the kind its letter gives.
+ * Empty sections say `none` rather than lying by omission, and nothing is
+ * omitted. No section asks for anything; the block reports.
  */
 import { estimateSerialized, estimateTokens } from "./estimate.js";
 
@@ -73,7 +76,7 @@ export interface StateBlockInput {
   sizes: { atlas: number; ledger: number; chat: number };
   /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
   mode: "edit" | "read only";
-  /** Pending Brain writes since the projection was rebuilt. Ephemeral (§34). */
+  /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
   pending: PendingWrite[];
   /** Handles of Atlas entries whose file attachment has drifted, as labelled (e.g. "A5 (stale)"). */
   stale: string[];
@@ -83,42 +86,93 @@ export interface StateBlockInput {
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
   /** Every entry carrying a mark, with its action and its author (§4.1). */
   marks: MarkLine[];
+  /** The project root, so the tree's anchor reads `.` where the agent stands rather than an absolute path. */
+  projectRoot?: string;
   tree: { root: string; depth: number; lines: string[] };
 }
 
 const thousands = (value: number): string => Math.round(value).toLocaleString("en-US");
 
+/** Who placed a pin or a mark, in the block's own voice: the person, or the agent reading it. */
+const authorName = (author: "user" | "agent"): string => (author === "user" ? "the person" : "you");
+
+/**
+ * What a pending line adds beyond the handle: the write, in words a reader
+ * understands without decoding a kind it can already read off the letter.
+ */
+const pendingWord = (write: PendingWrite): string => {
+  switch (`${write.kind} ${write.action}`) {
+    case "atlas create":
+    case "atlas upsert":
+      return "written";
+    case "atlas update":
+      return "updated";
+    case "ledger create":
+    case "ledger upsert":
+      return "written";
+    case "ledger update":
+      return "updated";
+    case "chat record":
+      return "said to the person";
+    case "pin":
+      return "pinned";
+    case "unpin":
+      return "unpinned";
+    case "unmark":
+      return "mark withdrawn";
+    default:
+      return write.action.startsWith("mark ") ? `marked for ${write.action.slice(5)}` : write.action;
+  }
+};
+
+/** The project root as the agent thinks of it: `.` at the root, else the path inside it. */
+const treeLabel = (root: string, projectRoot: string | undefined): string => {
+  if (projectRoot === undefined) return root;
+  const inside = root.startsWith(projectRoot);
+  if (!inside) return root;
+  const rest = root.slice(projectRoot.length).replace(/^[/\\]/, "");
+  return rest === "" ? "." : rest;
+};
+
 export function renderStateBlock(input: StateBlockInput): string {
   const reported = input.lastReportedInput;
+  // The provider's own count is the only number here that is not an estimate,
+  // and a window nobody advertised is unknown rather than a made-up figure.
   const fullness =
     input.contextWindow <= 0
       ? reported === undefined
-        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} tokens (window unknown)`
-        : `context: ~${thousands(reported + input.toolWorkSince)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)}; window unknown)`
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} tokens · the window is unknown until the server advertises one`
+        : `context: ~${thousands(reported + input.toolWorkSince)} tokens · the provider counted ${thousands(reported)}, tool work since +${thousands(input.toolWorkSince)} · the window is unknown`
       : reported === undefined
-        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens (not yet reported by the provider)`
-        : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)})`;
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
+        : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)}, tool work since +${thousands(input.toolWorkSince)}`;
   const space =
-    `space: system+tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
+    `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
     `chat ~${thousands(input.sizes.chat)}`;
-  const pending =
+  // One line per write since the rebuild, named by handle. The line says what
+  // the write was; the letter already says which book holds it.
+  const pending: string =
     input.pending.length === 0
-      ? "pending: none"
-      : ["pending:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${write.kind} ${write.action}`)].join("\n");
-  const stale =
-    input.stale.length === 0 ? "stale: none" : ["stale:", ...input.stale.map((item) => `  ${item}`)].join("\n");
-  const pinned =
+      ? "since the rebuild: nothing written"
+      : ["since the rebuild:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${pendingWord(write)}`)].join("\n");
+  // Staleness is a fact about the note, not about the file: the file moved on
+  // after the note was written.
+  const stale: string =
+    input.stale.length === 0
+      ? "stale: nothing"
+      : ["stale:", ...input.stale.map((item) => `  ${item.split(" ")[0]} · the file changed after this note`)].join("\n");
+  const pinned: string =
     input.pinned.length === 0
-      ? "pinned: none"
-      : ["pinned:", ...input.pinned.map((item) => `  ${item.handle} [${item.author === "user" ? "u" : "a"}]`)].join("\n");
-  const marks =
+      ? "pins: none"
+      : ["pins:", ...input.pinned.map((item) => `  ${item.handle} · placed by ${authorName(item.author)}`)].join("\n");
+  const marks: string =
     input.marks.length === 0
       ? "marks: none"
-      : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} ${mark.action} [${mark.author === "user" ? "u" : "a"}]`)].join("\n");
-  const treeLines = [`tree: ${input.tree.root} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
+      : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author)}`)].join("\n");
+  const treeLines = [`tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
-  return [STATE_BLOCK_OPEN, mode, fullness, space, pending, marks, pinned, stale, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
+  return [STATE_BLOCK_OPEN, mode, fullness, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

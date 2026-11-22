@@ -1,19 +1,18 @@
 /**
- * The headless driver — a placeholder, not the designed interface
- * (§8). A bare line-based stdin/stdout loop
- * so the agent can be driven and tested without a screen.
+ * The headless driver: a bare line-based stdin/stdout loop, for driving the
+ * agent where there is no screen.
  *
- * Line semantics (placeholders, to be replaced by §8):
+ * Line semantics:
  *   /collapse  — the person collapses the context on the spot: run the
  *                ceremony, print the plain report, keep going.
+ *   /help      — the commands.
  *   /quit      — end the session (also on stdin EOF).
  *   anything else — a person message to the agent.
  *
  * The only words the person sees are the agent's `chat` tool calls: plain
- * model text never reaches the person (§7). A run that ends
- * without a chat message prints one quiet parenthetical saying so. When the
- * agent asks to collapse (the collapse tool), the driver performs the
- * ceremony at once and says what happened.
+ * model text never reaches the person, and a turn with nothing to say ends
+ * with nothing to print. When the agent asks to collapse (the collapse tool),
+ * the driver performs the ceremony at once and says what happened.
  *
  * If `capacity` is given, the window is re-discovered after every settled run;
  * the active window follows the provider's catalog — the configured pin
@@ -51,8 +50,9 @@ export interface HeadlessOptions extends LiveSessionOptions {
 }
 
 const HELP = [
-  "Lines go to the agent. Placeholder commands:",
-  "  /collapse  collapse the context now (the Brain rebuilds it)",
+  "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
+  "  /collapse  collapse the context now — the Brain rebuilds it",
+  "  /help      see this",
   "  /quit      end the session",
 ].join("\n");
 
@@ -113,7 +113,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   let session = await openLiveSession(options);
   const seenChat = new Set<string>((await options.brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id));
 
-  writeLine(output, `carto · headless · ${options.model.provider}/${options.model.modelId} · project ${options.root}`);
+  writeLine(output, `carto · ${options.model.provider}/${options.model.modelId} · ${options.root}`);
   writeLine(output, HELP);
 
   const inputIsTTY = (options.input as Readable & { isTTY?: boolean }).isTTY === true;
@@ -142,14 +142,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         const submission = await submitInput(session, line);
         const settled = await submission.wait(BACKGROUND_CONTEXT);
         if (settled.status !== "done") {
-          writeLine(error, `(the run ended with status "${settled.status}")`);
+          writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
         }
       } catch (err) {
         writeLine(error, `(the run failed: ${err instanceof Error ? err.message : String(err)})`);
       }
-      const said = await drainAgentChat(options.brain, seenChat);
-      if (said.length === 0) writeLine(output, "(no chat message)");
-      else for (const text of said) writeLine(output, `carto: ${text}`);
+      // Silence is a real answer: an agent with nothing to say ends its turn
+      // without a chat call, and that needs no remark from the driver.
+      for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
 
       const reason = session.takeCollapseRequest();
       if (reason !== null) {
@@ -165,7 +165,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     await closeLiveSession(session);
   }
   if (linesSeen === 0 && !inputIsTTY) {
-    writeLine(error, "(stdin is not a terminal and carried no lines; there was nothing to type into. Pipe input on stdin, or run carto interactively.)");
+    writeLine(error, "(nothing arrived on stdin and there was no terminal to type into. Pipe the person's messages in, or run carto in a terminal.)");
   }
   return 0;
 }

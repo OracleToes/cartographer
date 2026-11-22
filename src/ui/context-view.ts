@@ -355,7 +355,7 @@ export class ContextView implements Component, Focusable {
         handle: "B",
         kind: "state",
         label: "state block",
-        summary: "fullness, space, pending, marks, pins, stale, tree — always current",
+        summary: "what is true right now: mode, fullness, writes, staleness, tree, pins, marks",
         body: data.stateBlockText,
         real: data.stateBlockText,
         open: false,

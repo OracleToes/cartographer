@@ -40,13 +40,14 @@ test("the block carries the confirmed contents and the delimiters", () => {
   const block = renderStateBlock(input());
   assert.match(block, /^<carto-state>\n/);
   assert.match(block, /\n<\/carto-state>$/);
-  assert.match(block, /context: ~12,410 \/ 32,768 tokens \(last reported 9,841 \+ tool work since \+2,569\)/);
-  assert.match(block, /space: system\+tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
-  assert.match(block, /pending:\n  A3 · atlas upsert\n  C7 · chat record/);
-  // A mark carries its action and its author (§4.1).
-  assert.match(block, /marks:\n  A8 archive \[u\]\n  C3 delete \[a\]/);
-  assert.match(block, /pinned:\n  L2 \[u\]\n  A6 \[a\]/);
-  assert.match(block, /stale:\n  A5 \(stale\)/);
+  assert.match(block, /context: ~12,410 \/ 32,768 tokens · the provider counted 9,841, tool work since \+2,569/);
+  assert.match(block, /space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
+  // A pending line adds the write; the handle's letter already says the book.
+  assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to the person/);
+  // A mark carries its action, when it lands, and its author (§4.1).
+  assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by the person\n  C3 · delete at the next collapse · marked by you/);
+  assert.match(block, /pins:\n  L2 · placed by the person\n  A6 · placed by you/);
+  assert.match(block, /stale:\n  A5 · the file changed after this note/);
   assert.match(block, /tree: \/project \(depth 2\)/);
   // The mode is stated in the block's own words (§6.1).
   assert.match(block, /^<carto-state>\n\[EDIT MODE\]\n/);
@@ -55,19 +56,19 @@ test("the block carries the confirmed contents and the delimiters", () => {
 
 test("empty pending, marks, and stale say none; missing provider report is explicit", () => {
   const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], marks: [], lastReportedInput: undefined }));
-  assert.match(block, /pending: none/);
+  assert.match(block, /since the rebuild: nothing written/);
   assert.match(block, /marks: none/);
-  assert.match(block, /pinned: none/);
-  assert.match(block, /stale: none/);
-  assert.match(block, /context: ~[\d,]+ \/ 32,768 tokens \(not yet reported by the provider\)/);
+  assert.match(block, /pins: none/);
+  assert.match(block, /stale: nothing/);
+  assert.match(block, /context: ~[\d,]+ \/ 32,768 tokens · no provider count yet/);
 });
 
 test("an unknown window renders as unknown, never as a number; a pin or advertisement renders normally", () => {
   const unknown = renderStateBlock(input({ contextWindow: 0 }));
-  assert.match(unknown, /context: ~12,410 tokens \(last reported 9,841 \+ tool work since \+2,569; window unknown\)/);
+  assert.match(unknown, /context: ~12,410 tokens · the provider counted 9,841, tool work since \+2,569 · the window is unknown/);
   assert.doesNotMatch(unknown, /32,768|0 tokens \//);
   const unknownUnreported = renderStateBlock(input({ contextWindow: 0, lastReportedInput: undefined }));
-  assert.match(unknownUnreported, /context: ~[\d,]+ tokens \(window unknown\)/);
+  assert.match(unknownUnreported, /context: ~[\d,]+ tokens · the window is unknown until the server advertises one/);
   const known = renderStateBlock(input({ contextWindow: 131_072 }));
   assert.match(known, /context: ~12,410 \/ 131,072 tokens/);
 });

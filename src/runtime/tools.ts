@@ -1,10 +1,11 @@
 /**
  * The product tools (§7).
  *
- * Plain model text is not Chat. Every tool is scoped and unique; the tool
- * descriptions are the authority on what each does. A Brain write appears
- * here as the tool's result and as a pending-change line in the state
- * block — never as a projection patch (§5.6).
+ * Plain model text is not Chat. Every tool is scoped and unique; a tool's own
+ * description is the authority on what it does and on any bound it carries
+ * (§1, §7). A Brain write appears here as the tool's result and as a line in
+ * the state block's record of writes since the rebuild — never as a patch to
+ * the frozen projection (§5.6).
  */
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
@@ -51,7 +52,9 @@ const normalizeHandle = (handle: string): string => handle.trim().toUpperCase();
 function resolveKnown(brain: CartoBrain, handle: string, kinds: readonly string[], what: string): { kind: string; id: string } {
   const found = findByHandle(brain.handles, normalizeHandle(handle));
   if (found === undefined || !kinds.includes(found.kind)) {
-    throw new Error(`The handle ${normalizeHandle(handle)} does not name ${what}. Use a handle from the current context.`);
+    throw new Error(
+      `No ${what} here has the handle ${normalizeHandle(handle)}. Handles are minted from what is in your context; take one from there, or leave the handle out to create a new record.`,
+    );
   }
   return { kind: found.kind, id: found.id };
 }
@@ -61,7 +64,7 @@ function resolveRecord(
   brain: CartoBrain,
   handle: string,
 ): { kind: "ledger" | "chat" | "atlas"; id: string; mark?: { action: string; author: "user" | "agent" }; pinned?: "user" | "agent" } {
-  const target = resolveKnown(brain, handle, ["ledger", "chat", "atlas"], "a Brain record");
+  const target = resolveKnown(brain, handle, ["ledger", "chat", "atlas"], "Brain record");
   const kind = target.kind as "ledger" | "chat" | "atlas";
   const record =
     kind === "ledger"
@@ -69,7 +72,9 @@ function resolveRecord(
       : kind === "atlas"
         ? brain.atlas.find((node) => node.id === target.id)
         : brain.chat.find((entry) => entry.id === target.id);
-  if (record === undefined) throw new Error(`The handle ${normalizeHandle(handle)} does not name a Brain record.`);
+  if (record === undefined) {
+    throw new Error(`${normalizeHandle(handle)} is not in the Brain any more, so no tool can reach it. Nothing to do: it is gone.`);
+  }
   return {
     kind,
     id: target.id,
@@ -98,7 +103,9 @@ function resolveAttachment(
   }
   const found = findByHandle(current.handles, normalizeHandle(attachment.handle));
   if (found === undefined) {
-    throw new Error(`The handle ${normalizeHandle(attachment.handle)} does not name a record. Use a handle from the current context.`);
+    throw new Error(
+      `No record has the handle ${normalizeHandle(attachment.handle)}. Attach by the handle of a record in your context, or give a file path with \`kind: "file"\`.`,
+    );
   }
   return { kind: "record", id: found.id };
 }
@@ -127,6 +134,9 @@ function scopedRead(root: string): ToolRegistration {
   const base = createReadTool();
   return defineTool({
     ...base,
+    // The package's sentence states the tool's own bounds (§1) and stays; what
+    // Carto adds is how the file is named and what the result becomes.
+    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project. The result is an item in the context with a handle of its own, and pinning it keeps that reading rather than the file. Read before you write about a file.`,
     async execute(args, api, context) {
       guardedPath(root, pathOf(args));
       return base.execute(args, api, context);
@@ -139,16 +149,20 @@ function scopedRead(root: string): ToolRegistration {
  * file, all or nothing, and a path that must be an existing file. Creating is
  * `create`'s job, so the package tool's behaviour is the spec's (§7).
  */
-const scopedEdit = (root: string, readOnly: () => boolean) =>
-  defineTool({
-    ...createEditTool(),
+function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
+  const base = createEditTool();
+  return defineTool({
+    ...base,
+    // The package's sentence states the tool's own bounds (§1) and stays; what
+    // Carto adds is how the file is named and what the mode means here.
+    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project, and it must already exist: making one is \`create\`'s job. Every replacement is matched against the file as it is now, and the call lands all of them or none. Read the part you are changing first. Read only mode refuses this call.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       guardedPath(root, pathOf(args));
-      const base = createEditTool();
       return base.execute(args, api, context);
     },
   });
+}
 
 /**
  * `create`: a file that must not exist. The package's `write` creates or
@@ -160,7 +174,7 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
     ...write,
     name: "create",
     description:
-      "Create a new file. The path must not already exist — overwriting a file is not a step toward a goal and discards text you never read; to change an existing file, use `edit`. Refused in read only mode.",
+      "Create a file at a path that is free. It never overwrites: a path that already exists is an error, because changing a file is `edit`'s job and an overwrite would discard text you may never have read. Parent directories are made as needed. Read only mode refuses this call.",
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = pathOf(args);
@@ -169,7 +183,7 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
       guardedPath(envRoot, path);
       const absolute = getOrThrow(await env.absolutePath(path, context));
       if (getOrThrow(await env.exists(absolute, context))) {
-        throw new Error(`${path} already exists; change it with 'edit', or choose a new path.`);
+        throw new Error(`${path} already exists, and creating a file never overwrites one. Change it with \`edit\`, or choose a path that is free.`);
       }
       return write.execute(args, api, context);
     },
@@ -187,7 +201,7 @@ const pathOf = (args: object): string => String((args as { path?: unknown }).pat
 function refuseWhenReadOnly(readOnly: boolean): void {
   if (readOnly) {
     throw new Error(
-      "The project is in read only mode: you may not make edits or any other destructive change. Read, answer, and say what you would change if you were asked.",
+      "The project is in read only mode: you make no edit and no other destructive change while it is on. Read, answer, and say what you would change when you are asked for it — there is nothing to queue or to ask permission for.",
     );
   }
 }
@@ -198,24 +212,25 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
   return [
     defineTool({
       name: "chat",
-      description: "Declare something person-facing. Plain model text is not Chat; this tool is the only channel that reaches the person.",
+      description:
+        "Say something to the person. This is the only channel that reaches them: your plain text is your own reasoning and they never see it. One thought per call, in your own words, without reporting the call. An empty turn needs no call at all.",
       parameters: obj({ text: Text }),
       replay: "safe",
       execute: async (args, api) => {
         const id = `chat:${api.callId}`;
         await brain.apply({ kind: "chat.record", record: { id, author: "agent", text: args.text, createdAt: api.now(), updatedAt: api.now() } }, api.now());
         pendingWrite(session, { kind: "chat", action: "record", id });
-        return textOutput("Chat message saved.");
+        return textOutput("Said to the person.");
       },
     }),
 
     defineTool({
       name: "atlas",
       description:
-        "Create or update one Atlas node: a name and a text entry. A node may be linked to other Atlas nodes, or attached to any other reference in Carto — a file by path, or a record by handle. Pass the handle of an existing node to update it; links and attachments are re-written wholesale. Omit the handle to create a new node.",
+        "Write what you understand about the project: one node, a name and the understanding itself. A node may link to other nodes and may attach to what it is about — a file by path, or a record by handle. Pass a handle to rewrite that node; links and attachments are replaced wholesale, so send the whole set you want. Without a handle it is a new node. Nothing requires a node to connect to anything.",
       parameters: obj({
         handle: opt(HandleRef),
-        title: str({ minLength: 1 }),
+        title: str({ minLength: 1, description: "The node's name: what this understanding is about." }),
         text: Text,
         links: opt(arr(HandleRef)),
         attachments: opt(
@@ -231,13 +246,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args, api) => {
         const current = await brain.read();
         const handleArg = args.handle;
-        const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["atlas"], "an Atlas record");
+        const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["atlas"], "Atlas record");
         const previous = updateTarget === undefined ? undefined : current.atlas.find((node) => node.id === updateTarget.id);
-        if (updateTarget !== undefined && previous === undefined) {
-          throw new Error(`The handle ${normalizeHandle(handleArg ?? "")} does not name an Atlas record.`);
-        }
         const id = previous?.id ?? `atlas:${api.callId}`;
-        const links = (args.links ?? []).map((link) => resolveKnown(current, link, ["atlas"], "an Atlas record").id);
+        const links = (args.links ?? []).map((link) => resolveKnown(current, link, ["atlas"], "Atlas record").id);
         const attachments = (args.attachments ?? []).map((attachment) => resolveAttachment(current, root, attachment));
         const next = await brain.apply(
           {
@@ -255,14 +267,14 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           api.now(),
         );
         pendingWrite(session, { kind: "atlas", action: previous === undefined ? "create" : "update", id });
-        return textOutput(`Atlas ${handleOf(next.handles, "atlas", id) ?? "record"} saved.`);
+        return textOutput(`Atlas node ${handleOf(next.handles, "atlas", id) ?? "(unnamed)"} is written.`);
       },
     }),
 
     defineTool({
       name: "ledger",
       description:
-        "Create or update one durable Ledger record: a goal, a note, a question, an instruction, or progress. Pass the handle to update, or leave it out to create.",
+        "Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one the person asked is the same call as writing it.",
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),
@@ -274,11 +286,8 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args, api) => {
         const current = await brain.read();
         const handleArg = args.handle;
-        const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["ledger"], "a Ledger record");
+        const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["ledger"], "Ledger record");
         const previous = updateTarget === undefined ? undefined : current.ledger.find((entry) => entry.id === updateTarget.id);
-        if (updateTarget !== undefined && previous === undefined) {
-          throw new Error(`The handle ${normalizeHandle(handleArg ?? "")} does not name a Ledger record.`);
-        }
         const id = previous?.id ?? `ledger:${api.callId}`;
         const next = await brain.apply(
           {
@@ -296,14 +305,14 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           api.now(),
         );
         pendingWrite(session, { kind: "ledger", action: previous === undefined ? "create" : "update", id });
-        return textOutput(`Ledger ${handleOf(next.handles, "ledger", id) ?? "record"} saved.`);
+        return textOutput(`Ledger record ${handleOf(next.handles, "ledger", id) ?? "(unnamed)"} is written.`);
       },
     }),
 
     defineTool({
       name: "pin",
       description:
-        "Pin or remove one Brain record — “keep it here”. A pin is a marker on the entry; no reason or source. Pinned records stay close at collapse. A pin placed by the agent is the agent's; the person may remove any pin, but the agent may not remove a pin the person placed. Unpin by handle.",
+        "Pin one Brain record, or take your pin off it: \"keep this here\". A pin is a marker on the entry, with no reason attached, and pinned records go on into the rebuilt context. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: HandleRef,
@@ -311,7 +320,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       replay: "safe",
       execute: async (args, api) => {
         const current = await brain.read();
-        const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "a Brain record");
+        const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "Brain record");
         const kind = target.kind as "ledger" | "chat" | "atlas";
         const record =
           kind === "ledger"
@@ -319,11 +328,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
             : kind === "atlas"
               ? current.atlas.find((node) => node.id === target.id)
               : current.chat.find((entry) => entry.id === target.id);
-        if (args.action === "pin" && record?.pinned === "user") {
-          throw new Error(`${normalizeHandle(args.handle)} is pinned by the person — the agent may not take the person's pin.`);
-        }
-        if (args.action === "unpin" && record?.pinned === "user") {
-          throw new Error(`${normalizeHandle(args.handle)} is pinned by the person — only the person may remove it; leave it alone.`);
+        if (record?.pinned === "user") {
+          throw new Error(
+            `${normalizeHandle(args.handle)} carries the person's pin, and a pin the person placed is theirs to remove. Leave it where it is.`,
+          );
         }
         await brain.apply(
           { kind: "pin.set", target: kind, id: target.id, pinned: args.action === "pin" ? "agent" : null },
@@ -331,14 +339,14 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         );
         pendingWrite(session, { kind, action: args.action, id: target.id });
         const placed = args.action === "pin";
-        const note =
-          placed && record?.pinned === "agent"
+        const was = record?.pinned === "agent";
+        const note = placed
+          ? was
             ? `${normalizeHandle(args.handle)} was already pinned by you.`
-            : placed
-              ? `Pinned ${normalizeHandle(args.handle)}.`
-              : record?.pinned === "agent"
-                ? `Unpinned ${normalizeHandle(args.handle)}.`
-                : `${normalizeHandle(args.handle)} was not pinned.`;
+            : `${normalizeHandle(args.handle)} is pinned.`
+          : was
+            ? `${normalizeHandle(args.handle)} is unpinned.`
+            : `${normalizeHandle(args.handle)} carried no pin of yours, so nothing changed.`;
         return textOutput(note);
       },
     }),
@@ -346,7 +354,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Mark one Brain record for archive or delete, or withdraw a mark. A mark applies at the next collapse: a marked entry stays in the context until then, and marking again with a different action replaces it. Pass action \"none\" to withdraw a mark you placed. You may not withdraw a mark the person placed, only your own.",
+        "Decide where one record ends up, or withdraw the decision: `archive` takes it out of the Brain, `delete` removes it for good, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context until the next collapse, and a later mark replaces an earlier one. When you mark for delete, say what you are letting go of to the person first. A mark the person placed is theirs to withdraw.",
       parameters: obj({
         handle: HandleRef,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -356,16 +364,20 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         const current = await brain.read();
         const target = resolveRecord(current, args.handle);
         if (target.mark?.author === "user" && args.action === "none") {
-          throw new Error(`${normalizeHandle(args.handle)} is marked by the person — only the person may withdraw that mark; leave it alone.`);
+          throw new Error(
+            `${normalizeHandle(args.handle)} is marked by the person, and only the person withdraws that mark. Leave it; it is applied at the next collapse.`,
+          );
         }
         if (args.action === "none") {
           await brain.apply({ kind: "mark.clear", target: target.kind, id: target.id }, api.now());
           pendingWrite(session, { kind: target.kind, action: "unmark", id: target.id });
-          return textOutput(`Withdrew the mark on ${normalizeHandle(args.handle)}.`);
+          return textOutput(`The mark on ${normalizeHandle(args.handle)} is withdrawn.`);
         }
         await brain.apply({ kind: "mark.set", target: target.kind, id: target.id, action: args.action, author: "agent" }, api.now());
         pendingWrite(session, { kind: target.kind, action: `mark ${args.action}`, id: target.id });
-        return textOutput(`Marked ${normalizeHandle(args.handle)} for ${args.action}. It applies at the next collapse.`);
+        return textOutput(
+          `${normalizeHandle(args.handle)} is marked for ${args.action}. It stays in the context until the next collapse, and another mark before then replaces this one.`,
+        );
       },
     }),
 
@@ -378,10 +390,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Set the anchor and depth of the project tree in your state block. Both are optional: the anchor defaults to the project root, the depth to 2. A depth of 1 is the anchor and its immediate contents; anything below 1 renders the same as 1. The anchor stays inside the project and never inside `.brain` or `.git`; `.brain` and `.git` are never listed. Move it where your attention is. The tree marks the Atlas nodes attached to each file.",
+        "Move the project tree in your state block to where your attention is. Both arguments are optional and stick: an anchor inside the project, and how many levels below it to render. A file the tree shows carries the handles of the Atlas nodes attached to it. The tree is not returned here; the state block carries it from your next request on, so set the anchor and read it there.",
       parameters: obj({
         anchor: opt(str({ minLength: 1 })),
-        depth: opt(int({ description: "How many levels below the anchor to render. Defaults to 2." })),
+        depth: opt(int({ description: "How many levels below the anchor to render. One is the anchor's own contents, and less than one renders the same as one." })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -389,35 +401,40 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         const depth = args.depth ?? session.tree.depth;
         const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
-        return textOutput(`tree: ${block.root} (depth ${block.depth})`);
+        // The tree itself is not the result (§6.3): the state block carries it,
+        // rendered at this anchor from the next request on.
+        return textOutput(`Anchored at ${block.root}, depth ${block.depth}. The tree is in your state block from the next request on.`);
       },
     }),
 
     defineTool({
       name: "collapse",
       description:
-        "End this context and rebuild it from the Brain. Collapse at a task boundary: when the work is done and the Brain is current, or before a long piece of work, after pinning what you will need so you start inside a context built for the problem. No approval is involved, from either side. Chat anything the person must see first.",
+        "End this context and rebuild it from the Brain. Collapse at a task boundary: the work is finished and the Brain holds it, or a long piece of work is about to start and you have pinned what you will need to begin inside a context built for it. Nothing needs approval from either side. Say anything the person must see first, because this context is about to be gone and whatever you did not write down goes with it.",
       parameters: obj({}),
       replay: "safe",
       execute: async () => {
         session.collapseRequested = "the agent collapsed";
-        return { output: [{ type: "text" as const, text: "Collapse noted. This run ends; the context rebuilds from the Brain." }], control: { terminate: true } };
+        return {
+          output: [{ type: "text" as const, text: "This run ends here. The context rebuilds from the Brain, and the state block is your next turn." }],
+          control: { terminate: true },
+        };
       },
     }),
 
     defineTool({
       name: "sleep",
       description:
-        "Rest. With no argument the run ends and stays ended until the person sends you a message. With a whole number of seconds, you rest that long and then start again on your own, reading the state block as your next turn. A message from the person ends a rest early either way.",
+        "End the turn and rest — the honest way to stop. With no argument you stay stopped until the person messages you. With whole seconds you rest that long, then start again on your own from the state block. Either way a message from the person brings you back sooner. Nothing is said to the person by this call.",
       parameters: obj({ seconds: opt(int({ minimum: 1, description: "Whole seconds to rest before starting again. Omit to rest until the person messages you." })) }),
       replay: "safe",
       execute: async (args) => {
         if (args.seconds === undefined) {
-          return { output: [{ type: "text" as const, text: "Carto is asleep." }], control: { terminate: true } };
+          return { output: [{ type: "text" as const, text: "Resting until the person messages you." }], control: { terminate: true } };
         }
         session.sleepSeconds = args.seconds;
         return {
-          output: [{ type: "text" as const, text: `Carto is asleep for ${args.seconds} second${args.seconds === 1 ? "" : "s"}.` }],
+          output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },
         };
       },

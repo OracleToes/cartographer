@@ -57,10 +57,10 @@ export function projectContext(brain: CartoBrain): Projection {
 
   const atlas: string[] = [];
   if (brain.atlas.length > 0) {
-    atlas.push("Atlas");
+    atlas.push("Atlas — what you understand about the project");
     for (const node of brain.atlas) {
       atlas.push(
-        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned:${node.pinned}]` : ""}${node.stale ? " · [stale]" : ""}`,
+        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned by ${node.pinned === "user" ? "the person" : "you"}]` : ""}${node.stale ? " · [stale: the file changed after this note]" : ""}`,
       );
       atlas.push(`  ${node.text}`);
       for (const link of node.links) atlas.push(`  link: ${resolveHandle(brain, link)}`);
@@ -76,10 +76,10 @@ export function projectContext(brain: CartoBrain): Projection {
 
   const ledger: string[] = [];
   if (brain.ledger.length > 0) {
-    ledger.push("Ledger");
+    ledger.push("Ledger — what you are working on");
     for (const entry of brain.ledger) {
       ledger.push(
-        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned:${entry.pinned}]` : ""}`,
+        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned by ${entry.pinned === "user" ? "the person" : "you"}]` : ""}`,
       );
       if (entry.answer !== null) {
         ledger.push(`  → answered: ${entry.answer.text}`);
@@ -91,7 +91,10 @@ export function projectContext(brain: CartoBrain): Projection {
   if (atlas.length > 0) parts.push(makePart("atlas", "Atlas", atlas));
   if (ledger.length > 0) parts.push(makePart("ledger", "Ledger", ledger));
 
-  const text = parts.length === 0 ? "(the Brain is empty)" : parts.map((part) => part.text).join("\n\n");
+  const text =
+    parts.length === 0
+      ? "(the Brain is empty: nothing recorded yet. Write what you learn, and what you are working on.)"
+      : parts.map((part) => part.text).join("\n\n");
   const sizes = { atlas: 0, ledger: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
   return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes };

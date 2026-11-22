@@ -61,12 +61,12 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     const firstBlock = blockOf(captured[0]);
     assert.ok(firstBlock, "first request carries the block");
     assert.equal(captured[0].at(-1), firstBlock);
-    assert.match(firstBlock.content, /pending: none/);
+    assert.match(firstBlock.content, /since the rebuild: nothing written/);
     assert.ok(!flatten(captured[0]).includes(STATE_BLOCK_MARKER));
     // Request 2 (after the chat tool result): pending names the write by handle.
     const secondBlock = blockOf(captured[1]);
     assert.ok(secondBlock, "second request carries the block");
-    assert.match(secondBlock.content, /pending:\n  C1 · chat record/);
+    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to the person/);
     // Exactly one block at the tail; the transcript itself never accumulates blocks.
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER), "marker never reaches the provider");
@@ -124,7 +124,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
     const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
     assert.deepEqual(nodes[0].attachments, [{ kind: "file", path: "src/verify-me.ts" }]);
-    assert.match(blockOf(captured[2]).content, /pending:\n  A1 · atlas create/);
+    assert.match(blockOf(captured[2]).content, /since the rebuild:\n  A1 · written/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -145,7 +145,8 @@ test("the tree tool moves the anchor and the block renders it there", async () =
     assert.equal(settled.status, "done");
     assert.equal(session.state.tree.anchor, join(realpathSync(root), "src"));
     assert.equal(session.state.tree.depth, 1);
-    assert.match(blockOf(captured[1]).content, new RegExp(`tree: ${join(realpathSync(root), "src").replace(/[/\\]/g, "\\$&")} \\(depth 1\\)`));
+    // The anchor reads as the path inside the project, not as an absolute path.
+    assert.match(blockOf(captured[1]).content, /tree: src \(depth 1\)/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -165,11 +166,11 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   const createBrain = byName.create.execute({ path: ".brain/new.txt", content: "x" }, api, {});
   await assert.rejects(createBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
-  await assert.rejects(tree, /anchor escapes/);
+  await assert.rejects(tree, /an anchor stays inside the project root/);
   const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
-  await assert.rejects(treeGit, /internal directory is not visible/);
+  await assert.rejects(treeGit, /the tree does not show/);
   const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
-  assert.match(validTree.output[0].text, /^tree: .* \(depth 1\)$/);
+  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1\./);
   assert.doesNotMatch(validTree.output[0].text, /\n/);
   await cleanup();
 });
@@ -223,11 +224,11 @@ test("unknown handles are explicit errors, never guesses", async () => {
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   await assert.rejects(
     byName.atlas.execute({ handle: "Z9", title: "t", text: "c" }, api, {}),
-    /does not name/,
+    /No Atlas record here has the handle Z9/,
   );
   await assert.rejects(
     byName.pin.execute({ action: "pin", handle: "Q4" }, api, {}),
-    /does not name/,
+    /No Brain record here has the handle Q4/,
   );
   await cleanup();
 });
@@ -316,12 +317,12 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
       { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },
       [],
     );
-    assert.match(block, /stale:\n  A1 \(stale\)/);
+    assert.match(block, /stale:\n  A1 · the file changed after this note/);
     const fresh = outcome.session;
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-3" })], { stopReason: "toolUse" }))]);
     const again = await submitInput(fresh, "and now?");
     await again.wait(BACKGROUND_CONTEXT);
-    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 \(stale\)/);
+    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 · the file changed after this note/);
     await closeLiveSession(fresh);
   } finally {
     await closeLiveSession(session).catch(() => undefined);

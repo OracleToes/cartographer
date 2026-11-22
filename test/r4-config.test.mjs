@@ -230,13 +230,13 @@ test("stdin that is not a terminal and carries no lines announces itself instead
     // Readable.from with an immediately-ended stream, like a closed stdin:
     const code = await runHeadless({ root, brain, models, model: ref, input: Readable.from([]), output: out.stream, error: err.stream, now: FIXED_NOW });
     assert.equal(code, 0);
-    assert.match(err.text(), /stdin is not a terminal/);
+    assert.match(err.text(), /nothing arrived on stdin and there was no terminal to type into/);
   } finally {
     await cleanup();
   }
 });
 
-test("a person line comes back only as chat words, prefixed; a bare reply says so", async () => {
+test("a person line comes back only as chat words, prefixed", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   const factory = (build) => (context) => build(context);
@@ -249,13 +249,13 @@ test("a person line comes back only as chat words, prefixed; a bare reply says s
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["say hi", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
     assert.match(out.text(), /carto: hello person/);
-    assert.match(out.text(), /carto · headless · faux-test\/faux-model/);
+    assert.match(out.text(), /carto · faux-test\/faux-model/);
   } finally {
     await cleanup();
   }
 });
 
-test("a turn with no chat tool call reports (no chat message), never model prose", async () => {
+test("a turn with no chat tool call ends quietly: silence, never model prose", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   faux.setResponses([
@@ -265,8 +265,9 @@ test("a turn with no chat tool call reports (no chat message), never model prose
   try {
     const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["think out loud", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
-    assert.match(out.text(), /\(no chat message\)/);
     assert.doesNotMatch(out.text(), /some plain prose/);
+    // Nothing to say is a legitimate end of a turn, not a condition to report.
+    assert.doesNotMatch(out.text(), /no chat message|status/);
   } finally {
     await cleanup();
   }
@@ -398,7 +399,7 @@ test("--model creates the config; a bare run then boots the headless driver and 
     assert.equal(raw.model, "llama-swap/ByteShape");
     assert.equal(raw.contextWindow, 75_000);
     const second = runCli(["--root", root], { home, input: "" });
-    assert.match(second, /carto · headless · llama-swap\/ByteShape/);
+    assert.match(second, /carto · llama-swap\/ByteShape/);
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });

@@ -42,10 +42,7 @@ export class AtlasView implements Component, Focusable {
     this.nodes = [...brain.atlas].sort((a, b) => a.createdAt - b.createdAt);
     this.staleHandles.clear();
     for (const mark of staleList) {
-      if (mark.kind === "atlas") {
-        const handle = mark.label.split(" ")[0];
-        if (handle) this.staleHandles.add(handle);
-      }
+      if (mark.kind === "atlas" && mark.label !== "") this.staleHandles.add(mark.label);
     }
     if (this.selectedIndex >= this.nodes.length) {
       this.selectedIndex = Math.max(0, this.nodes.length - 1);

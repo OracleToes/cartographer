@@ -44,12 +44,14 @@ export function containedAnchor(root: string, anchor: string): string {
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));
   const rel = relative(r, resolved);
   if (resolved !== r && (rel === "" || rel.startsWith("..") || isAbsolute(rel))) {
-    throw new AnchorError(`anchor escapes the project root: ${anchor}`);
+    throw new AnchorError(`an anchor stays inside the project root; ${anchor} resolves outside it.`);
   }
   if (rel !== "") {
     const parts = rel.split(sep);
     if (parts.includes(".brain") || parts.includes(".git")) {
-      throw new AnchorError(`internal directory is not visible to the tree: ${anchor}`);
+      throw new AnchorError(
+        `the tree does not show ${anchor}: \`.brain\` holds the Brain's own storage and \`.git\` holds the repository, and neither is yours to look at.`,
+      );
     }
   }
   return resolved;
@@ -102,11 +104,11 @@ export function scanTree(root: string, anchor: string): TreeEntry {
     realpathSync(target);
   } catch (error) {
     if (error instanceof AnchorError) throw error;
-    throw new AnchorError(`cannot read the anchor: ${anchor}`);
+    throw new AnchorError(`the anchor \`${anchor}\` cannot be read; pick a directory that exists inside the project.`);
   }
   const stat = lstatSync(target);
   if (!stat.isDirectory()) {
-    throw new AnchorError(`anchor is not a directory: ${anchor}`);
+    throw new AnchorError(`an anchor is a directory, and \`${anchor}\` is a file. Anchor at the directory that holds it, or read the file.`);
   }
   // The chain starts at the project root, not the anchor: a `.gitignore`
   // above the anchor still governs the anchor's contents.

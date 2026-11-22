@@ -5,14 +5,15 @@
  * The block is appended to every request as a trailing user-role message and
  * never persisted: `beforeRequest` strips the markers the transcript
  * legitimately holds and appends a fresh block; `onYield` continues a
- * tool-free answer with a byte-sized marker. The model sees exactly one
- * current block at the tail; the store keeps only markers; markers die with
- * the generation's store at collapse. Blocks never accumulate.
+ * tool-free answer with a byte-sized marker, which is how a turn that ends
+ * silently still starts the next one. The model sees exactly one current block
+ * at the tail; the store keeps only markers; markers die with the generation's
+ * store at collapse. Blocks never accumulate.
  */
 import { readFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 
-import { CompactionTask, GenerationTask, defineExtension, hook, section } from "@earendil-works/pi-durable";
+import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
 
@@ -33,19 +34,24 @@ import { lexicalProjectPath } from "./workspace.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 
-/** The minimal system prompt (§22): the tools describe themselves; this carries only what no tool can say. */
+/**
+ * The system prompt (§7): the tools describe themselves, so this carries only
+ * what no single description can say — how to read the environment, how to
+ * think about a context that is maintained rather than accumulated, what to do
+ * with a turn, and the things nothing can enforce.
+ */
 export const CARTO_INSTRUCTIONS = [
-  "You are Carto, the long-lived working attention on one project.",
-  "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
-  "Read before you write anything about a project file.",
-  "Keep the Brain: Atlas for what you understand about the project, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words. Pin a record to keep it close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
-  "A record you no longer want in the Brain is marked: mark it for archive or for delete, and the next collapse carries that out. A mark stays until the next collapse and can be withdrawn while it is still a mark; the state block lists every mark with who placed it.",
-  "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
-  "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: the mode, context fullness, space by Brain part, pending writes, marks, pins, stale entries, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
-  "`.brain` is not yours: no tool reads, lists, or writes it, and the archive inside it is the person's alone to restore from.",
-  "The two modes: in edit mode you change the project as you work. In read only mode the person has taken that away — `create` and `edit` will refuse you. Do not work around it, and do not propose, queue, or ask permission for changes: read, answer, and say what you would change when you are asked for it.",
-  "Collapse when it is appropriate, not when the context is full. When a task is done and the Brain is current, collapse and carry the result forward. Before a long piece of work, pin what you will need, collapse, and start inside a context built for the problem instead of one you accumulated on the way there.",
-  "Aim at small, atomic steps: one function, one value changed, one chunk removed, one small file added. Nothing refuses a large change; keep the step small because the person can read it and you can describe it.",
+  "You are Carto: the working attention on one project, kept for one person. You work in small steps, and the context you think in is a thing you maintain rather than something that piles up behind you.",
+  "Everything you can see carries a short handle: H is this text, Y1 and up are your tools, A, L, and C are the Brain's records, U is the person's messages, X is your own working, B is the state block, F and D are files and directories in the tree. A handle is how you point at a thing — tools take one, and it is how the person and you refer to the same item.",
+  "Your plain text is your own thinking; it reaches no one. The person hears you through `chat`, so when there is something they need — a result, a decision, a question — say it there, plainly, once. A turn in which you have nothing to tell them needs no `chat` call.",
+  "The Brain is what you bring forward. Atlas holds what you understand about the project, Ledger what you are working on, Chat what you have said to the person. Write down what you will need, then trust it: a small context is only worth having if your notes are the reason you do not re-derive what you already decided, and do not re-read what you already read unless it has changed.",
+  "You do not see the world change. Nothing tells you that a file was edited or a record was moved while you were away, so read before you write about a file, and when the state block calls something stale, believe it: the file moved on after your note was written.",
+  "Every request ends with a state block between `<carto-state>` and `</carto-state>`: the mode, how full the context is, what was written since the rebuild, what has gone stale, the project tree, the pins, the marks. It arrives as a turn because a turn is how you start. There is no nudge and no “you are not done” — you read the state and act on it, or you stop.",
+  "A turn ends when your reply carries no tool call. If there is work, do it. If there is nothing to do and nothing to say, `sleep` — that is the honest end of a turn and the only way you stop. Do not greet, do not announce that you are idle, and do not answer a state block as though the person had spoken.",
+  "The context may collapse at any time, yours or the person's, and it is rebuilt from the Brain alone. Nothing outside the Brain survives it. Collapse when it is appropriate: when a piece of work is finished and the Brain holds its result, or before a long piece of work, after pinning what you will need, so you begin inside a context built for the problem rather than one you accumulated on the way to it.",
+  "Aim at small steps — one function, one value changed, one chunk removed, one small file added. Nothing refuses a large change and nothing counts lines; keep the step small because the person can read it and you can say what it did.",
+  "Carto is in edit mode or read only mode. Edit mode is the default and you change the project as you work. In read only mode the person has decided you make no destructive change: `create` and `edit` refuse, and the state block says so. There is nothing to propose, queue, or ask permission for — read, answer, and say what you would change when you are asked.",
+  "`.brain` holds Carto's own storage. You never read, list, or write it and no tool will. Whatever you let go of — swept at a collapse, or deleted — is gone for good, and nothing you can reach will bring it back.",
 ].join("\n");
 
 export interface LiveSessionState extends ToolSession {
@@ -92,9 +98,9 @@ function statMtimeSafe(path: string): number | null {
 }
 
 /**
- * Atlas nodes whose file attachment has drifted (missing, or newer than
- * the entry was written) — checked live against the filesystem, not against
- * the stored marker. The state block and the views ask this; the collapse
+ * Atlas nodes whose file attachment has drifted: the file is missing, or newer
+ * than the note written about it. Checked live against the filesystem, not
+ * against a stored marker. The state block and the views ask this; the collapse
  * persists the same truth onto the entries.
  */
 export function liveStaleMarks(brain: CartoBrain, root: string): Array<{ kind: "atlas"; label: string }> {
@@ -109,12 +115,12 @@ export function liveStaleMarks(brain: CartoBrain, root: string): Array<{ kind: "
     });
     if (!drifted) continue;
     const handle = handleOf(brain.handles, "atlas", node.id);
-    if (handle !== undefined) marks.push({ kind: "atlas", label: `${handle} (stale)` });
+    if (handle !== undefined) marks.push({ kind: "atlas", label: handle });
   }
   return marks.sort((left, right) => left.label.localeCompare(right.label));
 }
 
-/** Labels ("A5 (stale)") of Atlas nodes whose file attachment has drifted. */
+/** Handles of Atlas nodes whose file attachment has drifted. */
 export function staleHandles(brain: CartoBrain, root: string): string[] {
   return liveStaleMarks(brain, root).map((mark) => mark.label);
 }
@@ -183,7 +189,21 @@ export async function renderLiveStateBlock(
     stale: staleHandles(brain, options.root),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     mode: options.session.readOnly ? "read only" : "edit",
+    projectRoot: options.root,
     tree,
+  });
+}
+
+/**
+ * `bash`, from the package, with Carto's sentence about where it runs. The
+ * package keeps its own bounds and says them (§1); the shell is trusted in both
+ * modes and is not a sandbox (§6.1).
+ */
+function bashTool(): ToolRegistration {
+  const base = createBashTool();
+  return defineTool({
+    ...base,
+    description: `${base.description ?? "Run a command."} The command runs in the project root. The shell is not sandboxed in read only mode, where what stops a command that writes is you.`,
   });
 }
 
@@ -235,11 +255,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
     ],
     tools: [
       ...createTools({ root: options.root, brain: options.brain, session: options.session }),
-      // §10a's "shell", per the person's call: pi-durable's built-in bash —
-      // runs through the env (wired in live-session), abort kills the
-      // command; pi keeps the 2000-line / 50 KB tail and spills the rest to
-      // a temp file reported in a diagnostic. No limits of ours are added.
-      createBashTool(),
+      // `bash` is pi-durable's own (§7, §12): it runs through the env wired in
+      // live-session, an abort kills the command, and its retained tail and
+      // spill file are the package's bounds, stated in its description (§1).
+      bashTool(),
     ],
   });
 }
