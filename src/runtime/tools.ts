@@ -114,6 +114,20 @@ const textOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "t
 const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "text", text }], isError: true });
 
 /**
+ * The path a tree handle names, or `undefined` when the handle is not a file's.
+ *
+ * Files are handled by the tree (§5.4), and the tree is the only place their
+ * handles come from, so this walks the same rendering the state block shows. A
+ * handle from a different anchor or depth may not be in the map: then it is not
+ * a file the agent can see, and nothing here will pretend it is.
+ */
+function treePathOf(root: string, brain: CartoBrain, session: ToolSession, handle: string): string | undefined {
+  const block = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
+  for (const [path, named] of block.handles) if (named === handle) return path;
+  return undefined;
+}
+
+/**
  * The path a file tool is about to touch, resolved against the project root:
  * `.brain` is refused here, before the package's tool sees it. Paths outside
  * the root are the env's business — its cwd is the root, and its own
@@ -312,7 +326,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        "Pin one Brain record, or take your pin off it: \"keep this here\". A pin is a marker on the entry, with no reason attached, and pinned records go on into the rebuilt context. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
+        "Pin one entry, or take your pin off it: \"keep this here\". The entry is a Brain record named by its handle, or a file named by the handle the tree gives it; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: HandleRef,
@@ -320,6 +334,31 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       replay: "safe",
       execute: async (args, api) => {
         const current = await brain.read();
+        // A file is pinned by the handle the tree gave it (§5.1, §5.4): pinning
+        // a file means "read it again every collapse", which is how the head
+        // holds the file rather than a quotation of a read of it.
+        const named = normalizeHandle(args.handle);
+        const filePath = treePathOf(root, current, session, named);
+        if (filePath !== undefined) {
+          const held = current.files.find((file) => file.path === filePath);
+          if (held?.pinned === "user") {
+            throw new Error(
+              `${named} carries the person's pin, and a pin the person placed is theirs to remove. Leave it where it is.`,
+            );
+          }
+          await brain.apply(
+            { kind: "file.pin", path: filePath, pinned: args.action === "pin" ? "agent" : null },
+            api.now(),
+          );
+          // A pin is not a Brain write, so it has no pending line: the state
+          // block lists pins separately, by handle, and a second line would be
+          // the same fact twice.
+          return textOutput(
+            args.action === "pin"
+              ? `${named} is pinned: the head holds this file, read again at every collapse, so you always see it as it is.`
+              : `${named} is unpinned: the head stops holding a copy of that file.`,
+          );
+        }
         const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "Brain record");
         const kind = target.kind as "ledger" | "chat" | "atlas";
         const record =

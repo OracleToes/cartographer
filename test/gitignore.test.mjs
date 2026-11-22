@@ -58,8 +58,10 @@ test("an anchored pattern matches only at the .gitignore's own level", () => {
     writeFileSync(join(root, ".gitignore"), "/dist/\n");
   }, (root) => {
     const rendered = lines(root, root);
-    assert.ok(!rendered.includes("  dist/  100B"), "the root dist is gone");
-    assert.ok(rendered.includes("    dist/  200B"), "src/dist survives: /dist anchored at the root only");
+    // Lines carry the tree's handle after the size (§5.4), so these match the
+    // size and indentation and not the handle, which is the tree's numbering.
+    assert.ok(!rendered.some((line) => line === "  dist/  100B" || line.startsWith("  dist/  100B  D")), "the root dist is gone");
+    assert.ok(rendered.some((line) => line.startsWith("    dist/  200B")), "src/dist survives: /dist anchored at the root only");
   });
 });
 
@@ -96,7 +98,7 @@ test("a nested .gitignore governs only its own subtree", () => {
     writeFileSync(join(root, "src", ".gitignore"), "gen/\n");
   }, (root) => {
     const rendered = lines(root, root);
-    assert.ok(rendered.some((line) => line.trim() === "gen/  100B"), "the root gen is outside the src/.gitignore");
+    assert.ok(rendered.some((line) => line.trim().startsWith("gen/  100B")), "the root gen is outside the src/.gitignore");
     assert.ok(!rendered.some((line) => line.includes("nested.bin")), "src/gen is pruned by src/.gitignore");
   });
 });

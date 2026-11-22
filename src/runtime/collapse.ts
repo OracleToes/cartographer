@@ -22,7 +22,7 @@
  * Anything beyond the newest live store and its archive is purged the same
  * way, crash remainders included.
  */
-import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -32,6 +32,7 @@ import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
 import type { ArchivedItem, ArchivedRecord, EphemeralKind, IncomingItem } from "../domain/archive.js";
+import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { lexicalProjectPath } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
@@ -309,6 +310,22 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined): 
   return parts;
 }
 
+/**
+ * A pinned file's text as it stands, or `undefined` when it cannot be read:
+ * outside the project, missing, or not a text file this can hold. The head says
+ * so in its place, and the pin's stale mark does the same in the state block.
+ */
+function readPinnedFile(root: string, path: string): string | undefined {
+  const real = safeResolve(root, path);
+  if (real === null) return undefined;
+  try {
+    if (statSync(real).isDirectory()) return undefined;
+    return readFileSync(real, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /** Lexical resolve; returns null instead of throwing. */
 function safeResolve(root: string, path: string): string | null {
   try {
@@ -412,9 +429,33 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
     writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });
   }
+  // A pinned file is read again here, at the collapse, so the head holds the
+  // file as it now stands rather than a quotation of an earlier read (§5.1,
+  // §5.5). A pinned `read` result is made true the same way (§5.5): its text
+  // becomes what the file holds now, and if the file is gone it keeps its text
+  // and is marked stale, because a pin that silently kept the old bytes would
+  // be the stale quotation the pin exists to prevent.
+  const fileTexts = new Map<string, string | undefined>();
+  for (const file of refreshed.files) {
+    const text = readPinnedFile(root, file.path);
+    fileTexts.set(file.path, text);
+    const stale = text === undefined;
+    const already = file.stale === true;
+    if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
+  }
+  for (const item of refreshed.ephemera) {
+    if (item.pinned === undefined) continue;
+    const path = item.kind === "readResult" ? item.entity?.path : undefined;
+    if (path === undefined) continue;
+    const text = readPinnedFile(root, path);
+    if (text === undefined) continue;
+    const refreshedItem: PinnedEphemeral = { ...item, text };
+    writes.push({ write: { kind: "ephemeral.pin", item: refreshedItem }, now });
+  }
+
   let next = refreshed;
   for (const step of writes) next = applyWrite(next, step.write, step.now);
-  const projection = projectContext(next);
+  const projection = projectContext(next, fileTexts);
 
   // 1. Snapshot first: no store exists for the new generation until the bytes
   //    are frozen on disk.

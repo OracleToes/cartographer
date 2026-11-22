@@ -467,3 +467,85 @@ test("the live generation's frozen prefill stays byte-stable, and the old one go
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a pinned file is read again at the collapse, so the head holds the file and not a quotation", async () => {
+  const root = tempRoot();
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-live011", 1_700_000_100);
+    writeFileSync(join(root, "notes.md"), "first draft\n");
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "file.pin", path: "notes.md", pinned: "user" }, at(1));
+
+    // The file moves on after the pin: the collapse must carry the new text,
+    // because a pin is a promise the head holds the file (§5.1, §5.5).
+    writeFileSync(join(root, "notes.md"), "second draft\n");
+    const report = await collapse(root, store);
+
+    const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+    assert.ok(markdown.includes("second draft"), "the head holds the file as it now stands");
+    assert.ok(!markdown.includes("first draft"), "and not the text from before the pin");
+    assert.match(markdown, /notes\.md · pinned by the person/, "the pin says who placed it");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pinned file that is gone is carried as stale, not dropped in silence", async () => {
+  const root = tempRoot();
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-live012", 1_700_000_100);
+    writeFileSync(join(root, "gone.md"), "here for now\n");
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "file.pin", path: "gone.md", pinned: "user" }, at(1));
+    rmSync(join(root, "gone.md"));
+
+    const report = await collapse(root, store);
+    const brain = await store.read();
+    assert.equal(brain.files[0]?.stale, true, "the pin records that the file is gone");
+
+    const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+    assert.match(markdown, /gone\.md · pinned by the person · \[stale/, "the head says so where the file would be");
+    assert.match(markdown, /could not be read at the collapse/, "and says what is missing rather than nothing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pinned read result is refreshed at the collapse, and says so when the file is gone", async () => {
+  const root = tempRoot();
+  try {
+    writeFileSync(join(root, "src.txt"), "the first thing\n");
+    const live = fakeGeneration(root, "gen-20261116T020000Z-live013", 1_700_000_100);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    // A pinned result of a `read`, carrying the path it read (§5.5).
+    await store.apply(
+      {
+        kind: "ephemeral.pin",
+        item: {
+          id: `${"gen-20261116T020000Z-live013"}:e1:r`,
+          text: "the first thing\n",
+          kind: "readResult",
+          createdAt: at(1),
+          pinned: "user",
+          entity: { callId: "call-1", tool: "read", path: "src.txt" },
+        },
+      },
+      at(1),
+    );
+
+    writeFileSync(join(root, "src.txt"), "the second thing\n");
+    const report = await collapse(root, store);
+    const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+    assert.ok(markdown.includes("the second thing"), "the pin kept the file, not the reading");
+
+    // The file disappears: the pin keeps the text it last had and the item is
+    // still there, rather than a pin quietly vanishing (§5.5).
+    rmSync(join(root, "src.txt"));
+    const second = await collapse(root, store);
+    const after = readFileSync(generationPaths(root, second.generation).markdown, "utf8");
+    assert.ok(after.includes("the second thing"), "the last true reading survives");
+    void live;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -78,8 +78,13 @@ export interface StateBlockInput {
   mode: "edit" | "read only";
   /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
   pending: PendingWrite[];
-  /** Handles of Atlas entries whose file attachment has drifted, as labelled (e.g. "A5 (stale)"). */
-  stale: string[];
+  /**
+   * Whatever has drifted, each with its own reason: an Atlas note whose file
+   * moved on, a pinned file that is gone, a pinned `read` result gone stale
+   * (§5.5). The reason belongs to the entry, so the block does not put one
+   * sentence on three different facts.
+   */
+  stale: Array<{ handle: string; why: string }>;
   /** Handles for the write-resolution of pending entries (the Brain's table). */
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
   /** Every record carrying a pin marker, as handle + who placed it, in template order. */
@@ -164,7 +169,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const stale: string =
     input.stale.length === 0
       ? "stale: nothing"
-      : ["stale:", ...input.stale.map((item) => `  ${item.split(" ")[0]} · the file changed after this note`)].join("\n");
+      : ["stale:", ...input.stale.map((item) => `  ${item.handle} · ${item.why}`)].join("\n");
   const pinned: string =
     input.pinned.length === 0
       ? "pins: none"
@@ -173,7 +178,9 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.marks.length === 0
       ? "marks: none"
       : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author)}`)].join("\n");
-  const treeLines = [`tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
+  // `T1` names the tree itself (§5.4): the block carries a handle for the
+  // thing the block renders, so the agent can point at what it is looking at.
+  const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
   return [STATE_BLOCK_OPEN, mode, fullness, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
 }

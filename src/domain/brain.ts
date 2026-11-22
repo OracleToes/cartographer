@@ -20,6 +20,7 @@ import type {
   AtlasNode,
   ChatRecord,
   PinnedEphemeral,
+  PinnedFile,
 } from "./records.js";
 
 export class BrainError extends Error {}
@@ -34,6 +35,10 @@ export type BrainWrite =
   | { kind: "mark.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; action: MarkAction; author: Author }
   | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId; author?: Author }
   | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId }
+  /** Pin or unpin a file: the head holds the file, not a quotation of a read of it (§5.1, §5.5). */
+  | { kind: "file.pin"; path: string; pinned: Author | null }
+  /** The collapse-time staleness of a pinned file, like an Atlas node's (§5.5). */
+  | { kind: "file.stale"; path: string; stale: boolean }
   /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
   | { kind: "ephemeral.pin"; item: PinnedEphemeral }
   | { kind: "ephemeral.unpin"; id: RecordId };
@@ -53,6 +58,34 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
         ? brain.ephemera.map((item) => (item.id === write.item.id ? write.item : item))
         : [...brain.ephemera, write.item];
       return { ...brain, ephemera };
+    }
+
+    case "file.pin": {
+      // A pin is a boolean on the thing it marks (§3.2), so pinning again
+      // replaces the pin and its author, and unpinning takes the entry away.
+      const exists = brain.files.find((file) => file.path === write.path);
+      if (write.pinned === null) return { ...brain, files: brain.files.filter((file) => file.path !== write.path) };
+      const pinned: Author = write.pinned;
+      const files: PinnedFile[] =
+        exists === undefined
+          ? [...brain.files, { path: write.path, pinned, createdAt: now }]
+          : brain.files.map((file) => (file.path === write.path ? { ...file, pinned } : file));
+      return { ...brain, files };
+    }
+
+    case "file.stale": {
+      return {
+        ...brain,
+        files: brain.files.map((file) => {
+          if (file.path !== write.path) return file;
+          if (!write.stale) {
+            const copy: Record<string, unknown> = { ...file };
+            delete copy.stale;
+            return copy as unknown as PinnedFile;
+          }
+          return { ...file, stale: true };
+        }),
+      };
     }
 
     case "ephemeral.unpin": {

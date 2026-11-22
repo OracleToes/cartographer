@@ -36,13 +36,15 @@ test("the tree renders directories first, with honest aggregated sizes", () => {
     assert.equal(block.root, root);
     assert.equal(block.depth, 2);
     const linkSize = lstatSync(join(root, "linked-dir")).size;
+    // Every line carries the handle the tree minted for it (§5.4): files are
+    // numbered as they render, and so are directories, each in its own run.
     assert.deepEqual(block.lines, [
-      "  empty/  0B",
-      "  src/  2K",
-      "    domain/  2K",
-      "    cli.ts  512B",
-      `  linked-dir  ${formatSize(linkSize)}`,
-      "  MINI.md  2K",
+      "  empty/  0B  D1",
+      "  src/  2K  D2",
+      "    domain/  2K  D3",
+      "    cli.ts  512B  F1",
+      `  linked-dir  ${formatSize(linkSize)}  F2`,
+      "  MINI.md  2K  F3",
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -55,8 +57,8 @@ test("depth bounds the display; depth 1 is the anchor's contents", () => {
     const brain = emptyBrain();
     assert.deepEqual(projectTreeBlock(root, root, 1, brain).lines, projectTreeBlock(root, root, 0, brain).lines);
     assert.deepEqual(projectTreeBlock(root, join(root, "src"), 1, brain).lines, [
-      "  domain/  2K",
-      "  cli.ts  512B",
+      "  domain/  2K  D1",
+      "  cli.ts  512B  F1",
     ]);
     assert.equal(projectTreeBlock(root, join(root, "src"), 1, brain).root, join(root, "src"));
   } finally {
@@ -75,10 +77,10 @@ test("Atlas-attached files are marked by handle; relative and absolute attachmen
     assert.deepEqual(attached.get(join(root, "src/cli.ts")), ["A1", "A3"]);
     const block = projectTreeBlock(root, root, 1, brain);
     const mine = block.lines.find((line) => line.includes("MINI.md"));
-    assert.match(mine, /MINI\.md  2K  A2$/);
+    assert.match(mine, /MINI\.md  2K  F2  A2$/);
     assert.ok(!block.lines.some((line) => line.includes("cli.ts")), "depth 1 does not show cli.ts");
     const deep = projectTreeBlock(root, root, 2, brain);
-    assert.match(deep.lines.find((line) => line.includes("cli.ts")), /cli\.ts  512B  A1 A3$/);
+    assert.match(deep.lines.find((line) => line.includes("cli.ts")), /cli\.ts  512B  F1  A1 A3$/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -162,6 +164,29 @@ test("an anchor into `.brain` or `.git`, at any depth, is rejected", () => {
     assert.throws(() => projectTreeBlock(root, join(root, ".git"), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, join(root, "src", ".git"), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, ".git", 1, brain), AnchorError);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("every file and directory the tree shows carries the handle the block draws, and the map agrees with it", () => {
+  const root = makeProject();
+  try {
+    const block = projectTreeBlock(root, root, 3, emptyBrain());
+    const byHandle = new Map([...block.handles].map(([path, handle]) => [handle, path]));
+    assert.ok(block.handles.size > 0, "the tree handed out handles");
+
+    // §5.4: a file's handle comes from the tree. Every handle in the map is on
+    // the line for its path, so a handle in the block means one thing.
+    for (const [path, handle] of block.handles) {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      assert.ok(/^[FD]\d+$/.test(handle), `${handle} is a file or directory handle`);
+      const line = block.lines.find((candidate) => candidate.trim().startsWith(name + (handle.startsWith("D") ? "/" : "")));
+      assert.ok(line !== undefined, `${name} is drawn`);
+      assert.ok(line.includes(handle), `${name}'s line carries ${handle}`);
+    }
+    // A directory and a file never share a handle: the prefixes differ.
+    assert.ok(byHandle.size === block.handles.size, "no handle names two paths");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

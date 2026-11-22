@@ -759,3 +759,20 @@ test("the archive keeps a restored item's type and the author of its pin", () =>
   assert.ok(frame.includes("restore"), "restoring is on the layer, in the footer");
   assert.ok(frame.includes("ledger") && frame.includes("atlas") && frame.includes("toolResult"), "records keep their kind and swept items keep theirs");
 });
+
+test("a pinned file is in the head, under the tree's handle, with the person who pinned it", () => {
+  const view = new ContextView();
+  view.setData({
+    brain: { ...emptyBrain(), files: [{ path: "notes.md", pinned: "user", createdAt: 1 }] },
+    systemPrompt: "you are carto",
+    tools: [],
+    transcriptMessages: [],
+    toolWorkItems: [],
+    stateBlockText: "<carto-state>\n</carto-state>",
+    treeHandles: { "notes.md": "F7" },
+  });
+  const frame = plain(view.render(110).join("\n"));
+  assert.ok(frame.includes("notes.md"), "the file is in the head");
+  assert.match(frame, /F7/, "under the handle the tree gave it");
+  assert.match(frame, /pinned by the person/, "and says whose pin it is");
+});

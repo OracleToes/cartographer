@@ -158,8 +158,41 @@ export function atlasAttachedPaths(brain: CartoBrain, root: string): Map<string,
   return attached;
 }
 
+/**
+ * Every file and directory the tree shows, by the handle it was given.
+ *
+ * §5.4: a file's handle comes from the tree and nowhere else, and a file the
+ * tree does not show has no handle. So the numbering is the tree's own — one
+ * pass, in the order it renders, `F` for a file and `D` for a directory — and
+ * this is the one place it happens. The tool that resolves a handle to a path
+ * uses the same map, so a handle cannot mean one file in the block and another
+ * in a tool.
+ */
+export type TreeHandles = ReadonlyMap<string, string>;
+
+export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
+  const handles = new Map<string, string>();
+  let files = 0;
+  let directories = 0;
+  const walk = (node: TreeEntry, level: number): void => {
+    if (level > depth) return;
+    for (const child of node.children ?? []) {
+      const handle = child.directory ? `D${++directories}` : `F${++files}`;
+      handles.set(child.path, handle);
+      walk(child, level + 1);
+    }
+  };
+  walk(entry, 1);
+  return handles;
+}
+
 /** Render the entry lines (no header — the caller prints the anchor line itself). Display is bounded by depth. */
-export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<string, string[]>): string[] {
+export function renderTreeLines(
+  entry: TreeEntry,
+  depth: number,
+  attached: Map<string, string[]>,
+  handles: TreeHandles = new Map(),
+): string[] {
   const lines: string[] = [];
   const walk = (node: TreeEntry, level: number): void => {
     if (level > depth) return;
@@ -167,7 +200,10 @@ export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<s
       const indent = "  ".repeat(level);
       const name = child.directory ? `${child.name}/` : child.name;
       const marks = child.directory ? [] : (attached.get(child.path) ?? []);
-      lines.push(`${indent}${name}  ${formatSize(child.size)}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`);
+      const handle = handles.get(child.path);
+      lines.push(
+        `${indent}${name}  ${formatSize(child.size)}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
+      );
       walk(child, level + 1);
     }
   };
@@ -175,19 +211,20 @@ export function renderTreeLines(entry: TreeEntry, depth: number, attached: Map<s
   return lines;
 }
 
-/** The `tree` state as the block carries it: anchor (absolute), depth, lines. */
+/** The `tree` state as the block carries it: anchor (absolute), depth, lines, and the handles it minted. */
 export function projectTreeBlock(
   root: string,
   anchor: string,
   depth: number,
   brain: CartoBrain,
-): { root: string; depth: number; lines: string[] } {
+): { root: string; depth: number; lines: string[]; handles: TreeHandles } {
   // Depth 1 is the anchor and its immediate contents; there is no rendering
   // below that, so anything under 1 renders as 1 (§6.3). Nothing is refused:
   // a depth below 1 is not an error, it is the same tree.
   const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
   const target = containedAnchor(root, anchor);
   const entry = scanTree(root, target);
-  const lines = renderTreeLines(entry, shown, atlasAttachedPaths(brain, root));
-  return { root: target, depth: shown, lines };
+  const handles = treeHandles(entry, shown);
+  const lines = renderTreeLines(entry, shown, atlasAttachedPaths(brain, root), handles);
+  return { root: target, depth: shown, lines, handles };
 }

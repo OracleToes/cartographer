@@ -91,6 +91,13 @@ never reported stale.
   node. `staleAtlasNodeIds` grows a sibling for results rather than a second
   mechanism.
 
+**Status: done.** `brain.files` holds pinned files; the tree mints `F`/`D`
+handles and `pin` accepts one; the collapse reads every pinned file and every
+pinned `read` result again and the head carries the text, with a file that
+cannot be read said so in its place. The state block lists each stale entry with
+its own reason. `F`/`D` handles on tree rows landed here because a pin has to
+name a file, which is stage 3's job, done early and once.
+
 **Test.** Pin a file, change it, collapse: the head holds the new text. Pin a
 read result, change the file, collapse: the head holds the new text and the
 state block named it stale before the collapse.

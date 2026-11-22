@@ -56,6 +56,7 @@ import { createTools } from "../runtime/tools.js";
 import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
+import { projectTreeBlock } from "../runtime/project-tree.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
@@ -474,13 +475,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
     // A tool's name is not on its result, only the call's id; walking the calls
     // first is what lets a result say which tool produced it.
-    const callNames = new Map<string, string>();
+    const callNames = new Map<string, { name: string; path?: string }>();
     for (const entry of entries) {
       for (const message of (entry.model ?? []) as unknown[]) {
         if (!isRecord(message) || !Array.isArray(message.content)) continue;
         for (const part of message.content) {
           if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
-            callNames.set(part.id, part.name);
+            const args = part.arguments;
+            const path =
+              isRecord(args) && typeof args.path === "string" ? args.path : undefined;
+            callNames.set(part.id, { name: part.name, ...(path === undefined ? {} : { path }) });
           }
         }
       }
@@ -534,10 +538,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           if (!isRecord(part)) continue;
           const toolText = typeof part.text === "string" ? part.text : "";
           if (!toolText.startsWith("carto: ")) {
-            // A result names the call it answers, and the call names the tool:
-            // that is how the sweep knows a result is a `read`'s (§5.5).
-            const answered = toolCallIdOf(message) === undefined ? undefined : callNames.get(toolCallIdOf(message) ?? "");
-            toolWorkItems.push({ id: ephemeralItemId(generation, id, "r"), kind: "toolResult", output: toolText, tool: answered });
+            // A result names the call it answers, and the call names the tool
+            // and what it was pointed at: that is how the sweep, and a pin, know
+            // a result is a `read`'s and of what file (§5.5).
+            const callId = toolCallIdOf(message);
+            const call = callId === undefined ? undefined : callNames.get(callId);
+            toolWorkItems.push({
+              id: ephemeralItemId(generation, id, "r"),
+              kind: "toolResult",
+              output: toolText,
+              tool: call?.name,
+              ...(callId === undefined || call === undefined
+                ? {}
+                : { payload: { callId, ...(call.name === undefined ? {} : { tool: call.name }), ...(call.path === undefined ? {} : { path: call.path }) } }),
+            });
           }
         }
       }
@@ -570,8 +584,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       toolWorkItems,
       handles,
       stateBlockText: stateBlock,
+      // The tree's own numbering, so a pinned file is named in the head by the
+      // handle the tree shows it under (§5.4) and not by a second count.
+      treeHandles: Object.fromEntries(treeOf(brainState).handles),
     });
   };
+
+  /** The tree the person is looking at, from the session's anchor and depth. */
+  const treeOf = (brainState: Awaited<ReturnType<BrainStore["read"]>>) =>
+    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState);
 
   /** Focus follows the view: Posting's rule, and the reason the footer can be honest. */
   const focusCurrent = () => {
@@ -794,6 +815,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           kind: drawn.kind === "reasoning" ? "reasoning" : drawn.kind === "call" ? "toolCall" : "toolResult",
           createdAt: Date.now(),
           pinned: "user",
+          // A pinned result that came from a `read` is a promise about that
+          // file: the collapse reads it again (§5.5), so the path has to ride
+          // with the pin. Without one the item is text, and stays text.
+          ...(drawn.payload === undefined ? {} : { entity: drawn.payload }),
         },
       },
       Date.now(),
@@ -811,6 +836,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
         if (chatRecord === undefined) return;
         await togglePin("chat", chatRecord.id);
+        return;
+      }
+      if (partId === "files") {
+        // A pinned file is unpinned by the person here (§3.2): the pin is theirs
+        // or the agent's, and the person may take either off.
+        const path = String(itemId);
+        const held = brainState.files.find((file) => file.path === path);
+        if (held === undefined) return;
+        await brain.apply({ kind: "file.pin", path, pinned: null }, Date.now());
+        pushStatus(held.pinned === "user" ? `unpinned ${path}` : `took the agent's pin off ${path}`);
+        await syncContextView(await brain.read());
+        await refreshSidebar();
+        tui.requestRender();
         return;
       }
       if (partId === "ephemera" || partId === "tool-work") {

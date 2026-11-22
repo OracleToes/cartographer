@@ -146,7 +146,7 @@ test("the tree tool moves the anchor and the block renders it there", async () =
     assert.equal(session.state.tree.anchor, join(realpathSync(root), "src"));
     assert.equal(session.state.tree.depth, 1);
     // The anchor reads as the path inside the project, not as an absolute path.
-    assert.match(blockOf(captured[1]).content, /tree: src \(depth 1\)/);
+    assert.match(blockOf(captured[1]).content, /T1 tree: src \(depth 1\)/);
   } finally {
     await closeLiveSession(session);
     await cleanup();

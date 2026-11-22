@@ -76,6 +76,8 @@ export interface ContextWorkItem {
   pinned?: "user" | "agent" | undefined;
   /** The text a result carries to a `read`, which is the kind a restore has to make true again. */
   tool?: string | undefined;
+  /** The entity a pin on this item records: the call, its tool, and the path a `read` read. */
+  payload?: { callId: string; tool?: string | undefined; path?: string | undefined } | undefined;
 }
 
 export interface ContextViewData {
@@ -94,10 +96,19 @@ export interface ContextViewData {
    */
   handles?: PromptHandles | undefined;
   stateBlockText: string;
+  /**
+   * The handles the tree minted, path to handle (§5.4): a pinned file is named
+   * in the head by the handle the tree gave it, and re-deriving the numbering
+   * here would let the two disagree.
+   */
+  treeHandles?: Record<string, string> | undefined;
 }
 
 /** What a node can be marked: the part of the product a mark on it would touch. */
-export type MarkTarget = { part: "transcript" | "tool-work" | "tools" | "ephemera"; id: string | number };
+export type MarkTarget = {
+  part: "transcript" | "tool-work" | "tools" | "ephemera" | "files";
+  id: string | number;
+};
 
 type NodeKind =
   | "system"
@@ -105,6 +116,7 @@ type NodeKind =
   | "atlas"
   | "ledger"
   | "chat"
+  | "files"
   | "person"
   | "reasoning"
   | "call"
@@ -134,6 +146,8 @@ export interface PromptNode {
   target?: MarkTarget;
   /** The marked action already recorded on it, if any. */
   marked?: string;
+  /** What a pin on this row records, for an item that came from a tool call. */
+  payload?: { callId: string; tool?: string | undefined; path?: string | undefined } | undefined;
   /** Who keeps this entry in the head, for an entry the person pinned. */
   pinned?: "user" | "agent" | undefined;
 }
@@ -150,6 +164,7 @@ const KIND_INK: Record<NodeKind, (text: string) => string> = {
   atlas: tokens.atlas,
   ledger: tokens.ledger,
   chat: tokens.chat,
+  files: tokens.pin,
   person: tokens.person,
   reasoning: tokens.reasoning,
   call: tokens.tool,
@@ -299,6 +314,24 @@ export class ContextView implements Component, Focusable {
     for (const chat of data.brain.chat) {
       head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text)));
     }
+    // Pinned files come before pinned ephemera in the head (§5.1), each under
+    // the handle the tree gave it (§5.4), so the person can see what is being
+    // carried and take the pin off.
+    for (const file of data.brain.files) {
+      const name = file.path === "" ? "." : file.path;
+      head.push({
+        id: `file-${file.path}`,
+        handle: data.treeHandles?.[file.path] ?? "F?",
+        kind: "files",
+        label: "file",
+        summary: `${name} · pinned by ${file.pinned === "user" ? "the person" : "the agent"}${file.stale === true ? " · stale" : ""}`,
+        body: `${name}\n\nread again at every collapse, so the head holds the file and not a quotation of a reading of it.`,
+        real: "(read at the next collapse: a pinned file is the file, not a copy frozen here)",
+        open: false,
+        pinned: file.pinned,
+        target: { part: "files", id: file.path },
+      } satisfies PromptNode);
+    }
     // Pinned ephemera come after Chat in the head (§5.1), each under its own
     // handle, because they are what the person kept in front of the agent.
     for (const item of data.brain.ephemera) {
@@ -373,6 +406,7 @@ export class ContextView implements Component, Focusable {
             leaf: true,
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
+            payload: item.payload,
           },
         });
       }

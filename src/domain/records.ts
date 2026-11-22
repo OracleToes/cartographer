@@ -135,11 +135,35 @@ export interface PinnedEphemeral {
   id: RecordId;
   text: string;
   kind: "toolCall" | "reasoning" | "plainText" | "readResult" | "toolResult" | "personMessage";
-  /** The tool call's model-issued id, or the call a result answers: how the item survives a rebuild as itself. */
-  entity?: { callId: string; tool?: string | undefined } | undefined;
+  /**
+   * The tool call's model-issued id, or the call a result answers: how the item
+   * survives a rebuild as itself. A `read` result also carries the path it read,
+   * because a pin on one is a promise about that file and the collapse reads it
+   * again (§5.5).
+   */
+  entity?: { callId: string; tool?: string | undefined; path?: string | undefined } | undefined;
   createdAt: number;
   /** Who keeps this item here. Only the person can unpin a pin they placed. */
   pinned: Author;
+}
+
+/**
+ * A pin on a file (§5.1, §5.5).
+ *
+ * A file is not a Brain record (§2.1) and this is not a record of one: it is the
+ * pin on it, which the head needs somewhere to live. At every collapse the file
+ * is read again and its text goes into the head as the file now stands, so what
+ * the head holds is the file and not a quotation of a read. The pin carries its
+ * author like any other (§3.2), and the file keeps the handle the tree gave it:
+ * a pin does not rename a file (§5.4).
+ */
+export interface PinnedFile {
+  /** The path inside the project, as the tree shows it. */
+  path: string;
+  pinned: Author;
+  createdAt: number;
+  /** The collapse-time marker: the file is gone or has drifted since it was pinned. */
+  stale?: boolean;
 }
 
 export interface CartoBrain {
@@ -149,6 +173,8 @@ export interface CartoBrain {
   atlas: AtlasNode[];
   /** Pinned ephemera: what a collapse carries into the head instead of sweeping (§3.2, §5.1). */
   ephemera: PinnedEphemeral[];
+  /** Pinned files, read again at every collapse so the head holds the file (§5.1). */
+  files: PinnedFile[];
   handles: HandleTable;
 }
 
@@ -159,6 +185,7 @@ export function emptyBrain(): CartoBrain {
     ledger: [],
     atlas: [],
     ephemera: [],
+    files: [],
     handles: { counters: {}, entries: [] },
   };
 }

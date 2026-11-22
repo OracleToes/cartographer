@@ -45,7 +45,7 @@ export const CARTO_INSTRUCTIONS = [
   "Everything you can see carries a short handle: H is this text, Y1 and up are your tools, A, L, and C are the Brain's records, U is the person's messages, X is your own working, B is the state block, F and D are files and directories in the tree. A handle is how you point at a thing — tools take one, and it is how the person and you refer to the same item.",
   "Your plain text is your own thinking; it reaches no one. The person hears you through `chat`, so when there is something they need — a result, a decision, a question — say it there, plainly, once. A turn in which you have nothing to tell them needs no `chat` call.",
   "The Brain is what you bring forward. Atlas holds what you understand about the project, Ledger what you are working on, Chat what you have said to the person. A plan lives here before it is code: the goal, then the steps in order, written where the next step can read them. Write down what you will need, then trust it: a small context is only worth having if your notes are the reason you do not re-derive what you already decided, and do not re-read what you already read unless it has changed.",
-  "You do not see the world change. Nothing tells you that a file was edited or a record was moved while you were away, so read before you write about a file, and when the state block calls something stale, believe it: the file moved on after your note was written.",
+  "You do not see the world change. Nothing tells you that a file was edited or a record was moved while you were away, so read before you write about a file, and when the state block calls something stale, believe it: the file moved on after your note was written, or after you read it. A pinned file is the exception and the reason to pin one: it is read again at every collapse, so the head holds the file as it now stands, where a pinned reading of it holds the bytes of that reading until it is called stale.",
   "Every request ends with a state block between `<carto-state>` and `</carto-state>`: the mode, how full the context is, what was written since the rebuild, what has gone stale, the project tree, the pins, the marks. It arrives as a turn because a turn is how you start. There is no nudge and no “you are not done” — you read the state and act on it, or you stop.",
   "A turn ends when your reply carries no tool call. If there is work, do it. If there is nothing to do and nothing to say, `sleep` — that is the honest end of a turn and the only way you stop. Do not greet, do not announce that you are idle, and do not answer a state block as though the person had spoken.",
   "The context may collapse at any time, yours or the person's, and it is rebuilt from the Brain alone. Nothing outside the Brain survives it. Collapse when it is appropriate: when a piece of work is finished and the Brain holds its result, or before a long piece of work, after pinning what you will need, so you begin inside a context built for the problem rather than one you accumulated on the way to it.",
@@ -120,6 +120,70 @@ export function liveStaleMarks(brain: CartoBrain, root: string): Array<{ kind: "
   return marks.sort((left, right) => left.label.localeCompare(right.label));
 }
 
+/**
+ * Everything the block lists as stale, each with the reason it is: the one place
+ * the three kinds of drift are gathered (§5.5).
+ */
+function staleMarksFor(
+  brain: CartoBrain,
+  root: string,
+  session: CartoExtensionOptions["session"],
+): Array<{ handle: string; why: string }> {
+  const marks: Array<{ handle: string; why: string }> = [];
+  for (const mark of liveStaleMarks(brain, root)) {
+    marks.push({ handle: mark.label, why: "the file changed after this note" });
+  }
+  for (const handle of staleFileHandles(brain, root, session)) {
+    marks.push({ handle, why: "pinned, and the file is gone" });
+  }
+  for (const handle of staleReadResultHandles(brain, root)) {
+    marks.push({ handle, why: "a pinned reading, and the file has changed since" });
+  }
+  return marks;
+}
+
+/**
+ * Handles of pinned files that cannot be read as they were pinned: gone, or not
+ * a text file. A pin is a promise the head holds the file, so a pin that cannot
+ * be kept says so (§5.1, §5.5).
+ */
+function staleFileHandles(brain: CartoBrain, root: string, session: CartoExtensionOptions["session"]): string[] {
+  if (brain.files.length === 0) return [];
+  const tree = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
+  const names: string[] = [];
+  for (const file of brain.files) {
+    const real = lexicalProjectPathSafe(root, file.path);
+    const readable = real !== null && statMtimeSafe(real) !== null;
+    if (readable) continue;
+    for (const [path, handle] of tree.handles) if (path === file.path) names.push(handle);
+  }
+  return names.sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Handles of pinned `read` results whose file has changed since the read.
+ *
+ * This is the sibling §5.5 asks for: a read result carries the path it read, so
+ * a pin on it is a promise about that file, and a file that moved on makes the
+ * text a stale quotation. Nothing blocks; the block says which handles are stale.
+ */
+function staleReadResultHandles(brain: CartoBrain, root: string): string[] {
+  const names: string[] = [];
+  for (const item of brain.ephemera) {
+    if (item.pinned === undefined) continue;
+    if (item.kind !== "readResult") continue;
+    const path = item.entity?.path;
+    if (path === undefined) continue;
+    const real = lexicalProjectPathSafe(root, path);
+    const mtime = real === null ? null : statMtimeSafe(real);
+    if (mtime !== null && mtime <= item.createdAt) continue;
+    // Ephemera have no Brain handle; the state block names them by id, which is
+    // the handle the Context view draws them under.
+    names.push(item.id);
+  }
+  return names.sort((left, right) => left.localeCompare(right));
+}
+
 /** Handles of Atlas nodes whose file attachment has drifted. */
 export function staleHandles(brain: CartoBrain, root: string): string[] {
   return liveStaleMarks(brain, root).map((mark) => mark.label);
@@ -166,6 +230,19 @@ export async function renderLiveStateBlock(
     const handle = handleOf(brain.handles, "chat", record.id);
     if (handle !== undefined) pinned.push({ handle, author: record.pinned });
   }
+  // A pinned file is a pin like any other and the block lists every pin with
+  // its author (§3.2). It is named by the handle the tree gave it, because that
+  // is the one handle a file has (§5.4).
+  if (brain.files.length > 0) {
+    // The tree is rendered from the same anchor and depth the block shows, so
+    // the handle a pin is listed under is the one the tree drew for that file.
+    const block = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
+    for (const file of brain.files) {
+      let handle: string | undefined;
+      for (const [path, named] of block.handles) if (path === file.path) handle = named;
+      pinned.push({ handle: handle ?? file.path, author: file.pinned });
+    }
+  }
   const marks: MarkLine[] = [];
   const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; mark?: { action: string; author: "user" | "agent" } }>): void => {
     for (const record of records) {
@@ -194,7 +271,9 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
-    stale: staleHandles(brain, options.root),
+    // Atlas notes drift, a pinned file that is gone drifts, and a pinned `read`
+    // result whose file changed is the same fact about a quotation (§5.5).
+    stale: staleMarksFor(brain, options.root, options.session),
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     mode: options.session.readOnly ? "read only" : "edit",
     projectRoot: options.root,

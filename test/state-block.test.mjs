@@ -29,10 +29,10 @@ const input = (overrides = {}) => ({
     { handle: "A8", action: "archive", author: "user" },
     { handle: "C3", action: "delete", author: "agent" },
   ],
-  stale: ["A5 (stale)"],
+  stale: [{ handle: "A5", why: "the file changed after this note" }],
   resolveHandle: (kind, id) => ({ "atlas:a3": "A3", "chat:c7": "C7" })[`${kind}:${id}`],
   mode: "edit",
-  tree: { root: "/project", depth: 2, lines: ["./", "src/  24K", "  cli.ts  3K  A9"] },
+  tree: { root: "/project", depth: 2, lines: ["./", "src/  24K  D1", "  cli.ts  3K  F1  A9"] },
   ...overrides,
 });
 
@@ -48,7 +48,18 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by the person\n  C3 · delete at the next collapse · marked by you/);
   assert.match(block, /pins:\n  L2 · placed by the person\n  A6 · placed by you/);
   assert.match(block, /stale:\n  A5 · the file changed after this note/);
-  assert.match(block, /tree: \/project \(depth 2\)/);
+  // Each stale entry carries its own reason: a pinned file that is gone is not
+  // the same fact as an Atlas note whose file moved on (§5.5).
+  const mixed = renderStateBlock(
+    input({
+      stale: [
+        { handle: "A5", why: "the file changed after this note" },
+        { handle: "F3", why: "pinned, and the file is gone" },
+      ],
+    }),
+  );
+  assert.match(mixed, /  F3 · pinned, and the file is gone/);
+  assert.match(block, /T1 tree: \/project \(depth 2\)/);
   // The mode is stated in the block's own words (§6.1).
   assert.match(block, /^<carto-state>\n\[EDIT MODE\]\n/);
   assert.match(renderStateBlock(input({ mode: "read only" })), /^<carto-state>\n\[READ ONLY MODE\]\n/);
