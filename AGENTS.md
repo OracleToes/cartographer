@@ -61,6 +61,10 @@ Rules:
   why it does not fit. Building behaviour a dependency already supplies is the
   defect this section exists to prevent, and it has already happened here.
 
+### Model references
+
+- [nokeepai Inkling-2-Mini-Unbound GGUF](https://huggingface.co/bartowski/nokeepai_Inkling-2-Mini-Unbound-GGUF) — person; model under investigation for a llama.cpp grammar-stack error. This is a reference, not a project dependency.
+
 ## 3. Glossary
 
 Words the person has defined. Use the meaning, not the common one. A word enters
