@@ -58,7 +58,7 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-2" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "say hi");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -80,7 +80,7 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     // Request 2 (after the chat tool result): pending names the write by handle.
     const secondBlock = blockOf(captured[1]);
     assert.ok(secondBlock, "second request carries the block");
-    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to the person/);
+    assert.match(secondBlock.content, /since the rebuild:\n  C1 · said to OracleToes/);
     // Exactly one block at the tail; the transcript itself never accumulates blocks.
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER), "marker never reaches the provider");
@@ -97,7 +97,7 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
     factory(() => fauxAssistantMessage([fauxText("first pass, no tools")], {}, )),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "think out loud");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -130,7 +130,7 @@ test("read feeds atlas attachments; the node carries the reference", async () =>
     }, { id: "call-atlas" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "remember this fact");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -152,7 +152,7 @@ test("the tree tool ends its turn, and the host starts the next one at the new a
     factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "look at src");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -179,7 +179,7 @@ test("the tree tool ends its turn, and the host starts the next one at the new a
 
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", offset: 1, limit: 1 }, api, {}), /\.brain/);
@@ -204,7 +204,7 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
 
 test("the file tools are the package's: read takes offset and limit", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
@@ -218,7 +218,7 @@ test("the file tools are the package's: read takes offset and limit", async () =
 
 test("create refuses a path that exists; edit never creates", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-create", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   const created = await byName.create.execute({ path: "src/new-file.ts", content: "export const x = 1;\n" }, api, {});
@@ -230,7 +230,7 @@ test("create refuses a path that exists; edit never creates", async () => {
 
 test("read only mode refuses create and edit, and the block says so", async () => {
   const { root, brain, cleanup } = await fixture();
-  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: true };
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: true };
   const tools = createTools({ root, brain, session });
   const api = { callId: "call-ro", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -246,7 +246,7 @@ test("read only mode refuses create and edit, and the block says so", async () =
 
 test("unknown handles are explicit errors, never guesses", async () => {
   const { root, brain, cleanup } = await fixture();
-  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false } });
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   await assert.rejects(
@@ -380,7 +380,7 @@ test("the bash tool runs through the conversation's environment: a real command,
     factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "printf carto-bash-ok" }, { id: "call-bash-1" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-bash-sleep" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   try {
     const submission = await submitInput(session, "run a command");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
@@ -400,12 +400,14 @@ test("interrupting a run whose bash call is open settles the run instead of orph
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "call-bash-interrupt" })], { stopReason: "toolUse" })),
   ]);
-  const session = await openLiveSession({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   const started = Date.now();
   try {
     const submission = await submitInput(session, "wait on something long");
-    // Give the bash task a moment to actually start, then interrupt.
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_500));
+    // Give the bash task a moment to actually start, then interrupt. The wait
+    // only has to outlast the spawn; `sleep 30` is what proves the interrupt
+    // cut the command rather than waiting it out.
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     await interruptRun(session);
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.notEqual(settled.status, "running");
@@ -418,7 +420,7 @@ test("interrupting a run whose bash call is open settles the run instead of orph
 
 test("the tree is addressable: a directory handle anchors it, a file handle does not", async () => {
   const { root, brain, cleanup } = await fixture();
-  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false };
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false };
   const tools = createTools({ root, brain, session });
   const api = { callId: "call-t", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -447,7 +449,7 @@ test("no product tool carries a bound its own description does not state", async
     const tools = createTools({
       root,
       brain,
-      session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", readOnly: false },
+      session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false },
     });
     const BOUND_KEYS = ["minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"];
     const boundsOf = (schema, path, found = []) => {

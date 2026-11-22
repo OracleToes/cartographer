@@ -163,7 +163,7 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       // applying, which is not a withdrawal by either party (§4.1).
       const marked = findMarked(brain, write.target, write.id);
       if (write.author === "agent" && marked?.mark?.author === "user") {
-        throw new BrainError(`That mark was placed by the person, and only the person withdraws it.`);
+        throw new BrainError("That mark was placed by the person at the keyboard, and only they withdraw it.");
       }
       return clearMark(brain, write.target, write.id);
     }

@@ -10,6 +10,8 @@ import {
 } from "../dist/domain/state-block.js";
 
 const input = (overrides = {}) => ({
+  // The name the agent reads for the person at the keyboard: a name, never a role.
+  person: "OracleToes",
   contextWindow: 32_768,
   lastReportedInput: 9_841,
   systemTokens: 5_900,
@@ -43,11 +45,11 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(block, /context: ~12,410 \/ 32,768 tokens · the provider counted 9,841, tool work since \+2,569/);
   assert.match(block, /space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   // A pending line adds the write; the handle's letter already says the book.
-  assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to the person/);
+  assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to OracleToes/);
   // A mark carries its action, when it lands, and its author (§4.1).
-  assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by the person\n  C3 · delete at the next collapse · marked by you/);
+  assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by OracleToes\n  C3 · delete at the next collapse · marked by you/);
   // §5.4: a pin is named by its own letter and the handle of what it marks.
-  assert.match(block, /pins:\n  P L2 · placed by the person\n  P A6 · placed by you/);
+  assert.match(block, /pins:\n  P L2 · placed by OracleToes\n  P A6 · placed by you/);
   assert.match(block, /stale:\n  A5 · the file changed after this note/);
   // Each stale entry carries its own reason: a pinned file that is gone is not
   // the same fact as an Atlas note whose file moved on (§5.5).

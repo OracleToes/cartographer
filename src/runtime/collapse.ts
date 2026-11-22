@@ -28,6 +28,7 @@ import { randomBytes } from "node:crypto";
 
 import { staleAtlasNodeIds } from "../domain/freshness.js";
 import { projectContext } from "../domain/projection.js";
+import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
@@ -366,6 +367,12 @@ export async function refreshFreshness(root: string, brain: CartoBrain, apply: B
 export interface CollapseOptions {
   /** The collapse's own clock; defaults to now. */
   now?: () => number;
+  /**
+   * The name the agent calls the person, written into the head this collapse
+   * freezes. Absent: the launching account, resolved here — the head is what
+   * the agent reads after the collapse, so it must name somebody either way.
+   */
+  person?: string;
 }
 
 export interface CollapseReport {
@@ -455,7 +462,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
 
   let next = refreshed;
   for (const step of writes) next = applyWrite(next, step.write, step.now);
-  const projection = projectContext(next, fileTexts);
+  const projection = projectContext(next, fileTexts, options.person ?? personName());
 
   // 1. Snapshot first: no store exists for the new generation until the bytes
   //    are frozen on disk.

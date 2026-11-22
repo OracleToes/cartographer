@@ -400,7 +400,7 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
       await store.read(),
     );
 
-    const report = await collapse(root, store);
+    const report = await collapse(root, store, { person: "OracleToes" });
     const archived = (await store.readArchive()).items;
     assert.equal(
       archived.some((item) => item.ephemeral?.text === "this one is worth keeping"),
@@ -414,7 +414,7 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
     );
     // It went on into the rebuilt head, after Chat, under a handle of its own.
     const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
-    assert.match(markdown, /Pinned — what the person kept in front of you/);
+    assert.match(markdown, /Pinned — what OracleToes kept in front of you/);
     assert.match(markdown, /X1 \[reasoning\] this one is worth keeping/);
     assert.equal((await store.read()).ephemera.length, 1, "the pin survives the collapse it carried it through");
     await store.close();
@@ -479,12 +479,12 @@ test("a pinned file is read again at the collapse, so the head holds the file an
     // The file moves on after the pin: the collapse must carry the new text,
     // because a pin is a promise the head holds the file (§5.1, §5.5).
     writeFileSync(join(root, "notes.md"), "second draft\n");
-    const report = await collapse(root, store);
+    const report = await collapse(root, store, { person: "OracleToes" });
 
     const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
     assert.ok(markdown.includes("second draft"), "the head holds the file as it now stands");
     assert.ok(!markdown.includes("first draft"), "and not the text from before the pin");
-    assert.match(markdown, /notes\.md · pinned by the person/, "the pin says who placed it");
+    assert.match(markdown, /notes\.md · pinned by OracleToes/, "the pin says who placed it");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -499,12 +499,12 @@ test("a pinned file that is gone is carried as stale, not dropped in silence", a
     await store.apply({ kind: "file.pin", path: "gone.md", pinned: "user" }, at(1));
     rmSync(join(root, "gone.md"));
 
-    const report = await collapse(root, store);
+    const report = await collapse(root, store, { person: "OracleToes" });
     const brain = await store.read();
     assert.equal(brain.files[0]?.stale, true, "the pin records that the file is gone");
 
     const markdown = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
-    assert.match(markdown, /gone\.md · pinned by the person · \[stale/, "the head says so where the file would be");
+    assert.match(markdown, /gone\.md · pinned by OracleToes · \[stale/, "the head says so where the file would be");
     assert.match(markdown, /could not be read at the collapse/, "and says what is missing rather than nothing");
   } finally {
     rmSync(root, { recursive: true, force: true });

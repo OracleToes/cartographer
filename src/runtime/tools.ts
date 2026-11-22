@@ -27,6 +27,11 @@ import { SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
+  /**
+   * What the agent calls the person: the configured name, or the account that
+   * launched Carto. Every string a tool shows the agent names this person.
+   */
+  person: string;
   /** Pending Brain writes since the last rebuild; ephemeral, cleared at collapse. */
   pending: PendingWrite[];
   /** Where the state block renders the tree. */
@@ -234,19 +239,22 @@ function refuseWhenReadOnly(readOnly: boolean): void {
 
 export function createTools(deps: ToolDeps): ToolRegistration[] {
   const { root, brain, session } = deps;
+  // Said once, then read from here: a tool description is something the agent
+  // reads, so it names the person it works for rather than a role.
+  const them = session.person;
 
   return [
     defineTool({
       name: "chat",
       description:
-        "Say something to the person. This is the only channel that reaches them: your plain text is your own reasoning and they never see it. One thought per call, in your own words, without reporting the call. An empty turn needs no call at all.",
+        `Say something to ${them}. This is the only channel that reaches them: your plain text is your own reasoning and they never see it. One thought per call, in your own words, without reporting the call. An empty turn needs no call at all.`,
       parameters: obj({ text: Text }),
       replay: "safe",
       execute: async (args, api) => {
         const id = `chat:${api.callId}`;
         await brain.apply({ kind: "chat.record", record: { id, author: "agent", text: args.text, createdAt: api.now(), updatedAt: api.now() } }, api.now());
         pendingWrite(session, { kind: "chat", action: "record", id });
-        return textOutput("Said to the person.");
+        return textOutput(`Said to ${them}.`);
       },
     }),
 
@@ -300,7 +308,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "ledger",
       description:
-        "Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one the person asked is the same call as writing it. A plan is made of these records: the goal, then one record per step in the order you will take them, with progress naming the step it moved. A plan written here reaches the person in their Ledger, and is in your head at the next collapse without your reading it again.",
+        `Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one ${them} asked is the same call as writing it. A plan is made of these records: the goal, then one record per step in the order you will take them, with progress naming the step it moved. A plan written here reaches ${them} in their Ledger, and is in your head at the next collapse without your reading it again.`,
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),
@@ -338,7 +346,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        "Pin one entry, or take your pin off it: \"keep this here\". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a Brain record's, or a file's from the tree; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin the person placed is theirs alone, and the state block says who placed each one.",
+        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a Brain record's, or a file's from the tree; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -355,7 +363,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           const held = current.files.find((file) => file.path === filePath);
           if (held?.pinned === "user") {
             throw new Error(
-              `${named} carries the person's pin, and a pin the person placed is theirs to remove. Leave it where it is.`,
+              `${named} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
             );
           }
           await brain.apply(
@@ -381,7 +389,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               : current.chat.find((entry) => entry.id === target.id);
         if (record?.pinned === "user") {
           throw new Error(
-            `${normalizeHandle(args.handle)} carries the person's pin, and a pin the person placed is theirs to remove. Leave it where it is.`,
+            `${normalizeHandle(args.handle)} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
           );
         }
         await brain.apply(
@@ -405,7 +413,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        "Decide what one record is for, or withdraw the decision. The record is named by a handle of at least 1 character: an empty handle names nothing, and there is nothing else to act on. `archive` retires it from the Brain, `delete` removes it for good and leaves nothing behind, `none` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. `delete` is the heavier of the two, so when you mark for delete, tell the person what you are letting go of first. A mark the person placed is theirs to withdraw, so leave it.",
+        `Decide what one record is for, or withdraw the decision. The record is named by a handle of at least 1 character: an empty handle names nothing, and there is nothing else to act on. \`archive\` retires it from the Brain, \`delete\` removes it for good and leaves nothing behind, \`none\` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. \`delete\` is the heavier of the two, so when you mark for delete, tell ${them} what you are letting go of first. A mark ${them} placed is theirs to withdraw, so leave it.`,
       parameters: obj({
         handle: ExistingHandle,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -423,7 +431,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
             await brain.apply({ kind: "mark.clear", target: target.kind, id: target.id, author: "agent" }, api.now());
           } catch {
             throw new Error(
-              `${normalizeHandle(args.handle)} is marked by the person, and only the person withdraws that mark. Leave it; it is applied at the next collapse.`,
+              `${normalizeHandle(args.handle)} is marked by ${them}, and only ${them} withdraws that mark. Leave it; it is applied at the next collapse.`,
             );
           }
           pendingWrite(session, { kind: target.kind, action: "unmark", id: target.id });
@@ -490,7 +498,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        "End this context and rebuild it from the Brain. Collapse at a task boundary: the work is finished and the Brain holds it, or a long piece of work is about to start and you have pinned what you will need to begin inside a context built for it. Nothing needs approval from either side. Say anything the person must see first, because this context is about to be gone and whatever you did not write down goes with it.",
+        `End this context and rebuild it from the Brain. Collapse at a task boundary: the work is finished and the Brain holds it, or a long piece of work is about to start and you have pinned what you will need to begin inside a context built for it. Nothing needs approval from either side. Say anything ${them} must see first, because this context is about to be gone and whatever you did not write down goes with it.`,
       parameters: obj({}),
       replay: "safe",
       execute: async () => {
@@ -505,15 +513,15 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "sleep",
       description:
-        "End the turn and rest — the honest way to stop. With no argument you stay stopped until the person messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from the person brings you back sooner. Nothing is said to the person by this call.",
-      parameters: obj({ seconds: opt(int({ minimum: 1, description: "Whole seconds to rest before starting again. Omit to rest until the person messages you." })) }),
+        `End the turn and rest — the honest way to stop. With no argument you stay stopped until ${them} messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from ${them} brings you back sooner. Nothing is said to ${them} by this call.`,
+      parameters: obj({ seconds: opt(int({ minimum: 1, description: `Whole seconds to rest before starting again. Omit to rest until ${them} messages you.` })) }),
       replay: "safe",
       execute: async (args, api, context) => {
         if (args.seconds === undefined) {
           // No time: stop, and stay stopped until the person says something. A
           // turn from the person is the only thing that starts the next run, so
           // nothing is stored and nothing is pending (§10).
-          return { output: [{ type: "text" as const, text: "Resting until the person messages you." }], control: { terminate: true } };
+          return { output: [{ type: "text" as const, text: `Resting until ${them} messages you.` }], control: { terminate: true } };
         }
         // A timed rest is durable (§10): the seconds are kept on the session for
         // the run's end to turn into a sleep in the store, so a restart during a

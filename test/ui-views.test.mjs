@@ -768,6 +768,7 @@ test("a pinned file is in the head, under the tree's handle, with the person who
   const view = new ContextView();
   view.setData({
     brain: { ...emptyBrain(), files: [{ path: "notes.md", pinned: "user", createdAt: 1 }] },
+    person: "OracleToes",
     systemPrompt: "you are carto",
     tools: [],
     transcriptMessages: [],
@@ -778,7 +779,7 @@ test("a pinned file is in the head, under the tree's handle, with the person who
   const frame = plain(view.render(110).join("\n"));
   assert.ok(frame.includes("notes.md"), "the file is in the head");
   assert.match(frame, /F7/, "under the handle the tree gave it");
-  assert.match(frame, /pinned by the person/, "and says whose pin it is");
+  assert.match(frame, /pinned by OracleToes/, "and says whose pin it is");
 });
 
 test("a pin reads the same in the block and in the view: P and the handle of what it marks", () => {
@@ -789,6 +790,7 @@ test("a pin reads the same in the block and in the view: P and the handle of wha
   const handle = brain.handles.entries.find((entry) => entry.id === "a3").handle;
 
   const block = renderStateBlock({
+    person: "OracleToes",
     contextWindow: 32768,
     lastReportedInput: 9000,
     systemTokens: 500,
@@ -804,7 +806,7 @@ test("a pin reads the same in the block and in the view: P and the handle of wha
     mode: "edit",
     tree: { root: "/project", depth: 1, lines: [] },
   });
-  assert.match(block, new RegExp(`pins:\\n  P ${handle} · placed by the person`));
+  assert.match(block, new RegExp(`pins:\\n  P ${handle} · placed by OracleToes`));
 
   const view = new ContextView();
   view.setData({
@@ -814,6 +816,8 @@ test("a pin reads the same in the block and in the view: P and the handle of wha
     transcriptMessages: [],
     toolWorkItems: [],
     stateBlockText: block,
+    person: "OracleToes",
   });
-  assert.match(plain(view.render(120).join("\n")), new RegExp(`P ${handle} you`), "the view names the pin the block names");
+  // Same person, same handle: the view and the block agree on both.
+  assert.match(plain(view.render(120).join("\n")), new RegExp(`P ${handle} OracleToes`), "the view names the pin the block names");
 });

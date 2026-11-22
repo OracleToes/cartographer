@@ -60,6 +60,12 @@ export interface MarkLine {
 }
 
 export interface StateBlockInput {
+  /**
+   * The name the agent calls the person by: the configured name, or the
+   * account that launched Carto. Every line that would have said "the person"
+   * says this instead, so the block names somebody rather than a role.
+   */
+  person: string;
   /** The server's advertised window; 0 = unknown, never a made-up number. */
   contextWindow: number;
   /** Provider's own count for the last response, if one has arrived. */
@@ -98,14 +104,14 @@ export interface StateBlockInput {
 
 const thousands = (value: number): string => Math.round(value).toLocaleString("en-US");
 
-/** Who placed a pin or a mark, in the block's own voice: the person, or the agent reading it. */
-const authorName = (author: "user" | "agent"): string => (author === "user" ? "the person" : "you");
+/** Who placed a pin or a mark, in the block's own voice: the person by name, or the agent reading it. */
+const authorName = (author: "user" | "agent", person: string): string => (author === "user" ? person : "you");
 
 /**
  * What a pending line adds beyond the handle: the write, in words a reader
  * understands without decoding a kind it can already read off the letter.
  */
-const pendingWord = (write: PendingWrite): string => {
+const pendingWord = (write: PendingWrite, person: string): string => {
   switch (`${write.kind} ${write.action}`) {
     case "atlas create":
     case "atlas upsert":
@@ -118,7 +124,7 @@ const pendingWord = (write: PendingWrite): string => {
     case "ledger update":
       return "updated";
     case "chat record":
-      return "said to the person";
+      return `said to ${person}`;
     case "pin":
       return "pinned";
     case "unpin":
@@ -163,7 +169,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const pending: string =
     input.pending.length === 0
       ? "since the rebuild: nothing written"
-      : ["since the rebuild:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${pendingWord(write)}`)].join("\n");
+      : ["since the rebuild:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${pendingWord(write, input.person)}`)].join("\n");
   // Staleness is a fact about the note, not about the file: the file moved on
   // after the note was written.
   const stale: string =
@@ -173,11 +179,11 @@ export function renderStateBlock(input: StateBlockInput): string {
   const pinned: string =
     input.pinned.length === 0
       ? "pins: none"
-      : ["pins:", ...input.pinned.map((item) => `  P ${item.handle} · placed by ${authorName(item.author)}`)].join("\n");
+      : ["pins:", ...input.pinned.map((item) => `  P ${item.handle} · placed by ${authorName(item.author, input.person)}`)].join("\n");
   const marks: string =
     input.marks.length === 0
       ? "marks: none"
-      : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author)}`)].join("\n");
+      : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author, input.person)}`)].join("\n");
   // `T1` names the tree itself (§5.4): the block carries a handle for the
   // thing the block renders, so the agent can point at what it is looking at.
   const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];

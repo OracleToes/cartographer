@@ -31,7 +31,8 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
 import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
-import { createCartoExtension, CARTO_INSTRUCTIONS, type LiveSessionState } from "./carto-extension.js";
+import { createCartoExtension, cartoInstructions, type LiveSessionState } from "./carto-extension.js";
+import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
 import {
   collapse,
@@ -58,6 +59,12 @@ export interface LiveSessionOptions {
   /** pi-ai model access, e.g. createModels() with a provider set. */
   models: Models;
   model: ModelRef;
+  /**
+   * What the agent calls the person: the configured name, or the account that
+   * launched Carto. Resolved once, here, so every string the model reads names
+   * the same person and nothing guesses a second time.
+   */
+  person?: string;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -113,6 +120,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // server advertises one (the driver re-discovers after every settled run).
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
+    person: options.person ?? personName(),
     contextWindow,
     paused: false,
     pending: [],
@@ -159,7 +167,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     }, BACKGROUND_CONTEXT);
     const agent = {
       model: modelRef,
-      instructions: CARTO_INSTRUCTIONS,
+      instructions: cartoInstructions(state.person),
       // The context is gardened by collapse, never by Pi rewriting the transcript.
       compaction: { enabled: false },
       cwd: root,
@@ -439,7 +447,9 @@ export async function collapseLiveSession(
   await closeLiveSession(session);
   // The Brain moves the marked records itself; what the new generation's frozen
   // prefill is built from is the Brain as it stands after that move (§3.3).
-  const report = await collapse(session.root, options.brain, ceremony);
+  // The head the next generation freezes names the same person every other
+  // string names: one name, carried from the session that built it.
+  const report = await collapse(session.root, options.brain, { person: session.state.person, ...ceremony });
   const next = await openLiveSession(options);
   // An ephemeral item a mark restored comes home to the live context, which is
   // the store the collapse just built (§3.3): it goes back as the kind it was,

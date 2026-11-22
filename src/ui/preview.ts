@@ -278,10 +278,11 @@ export function previewContext(width = 110): string {
   });
   const data: ContextViewData = {
     brain,
-    systemPrompt: "You are Carto: the working attention on one project, kept for one person.\nYour plain text is your own thinking; it reaches no one.",
+    person: "OracleToes",
+    systemPrompt: "You are Carto: the working attention on one project, kept for OracleToes.\nYour plain text is your own thinking; it reaches no one.",
     projectionText: "Atlas — what you understand about the project\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z\n  The context is rebuilt from it at every collapse.\n  attach: src/domain/brain.ts\nA2 The context bar is the server's own capacity — 1970-01-01T00:00:00.001Z\n  Not a budget: a picture.\n\nLedger — what you are working on\nL1 [goal · open] Rebuild the workspace UI in Posting's idiom — 1970-01-01T00:00:00.002Z",
     tools: [
-      { name: "chat", description: "Say something to the person. This is the only channel that reaches them.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+      { name: "chat", description: "Say something to OracleToes. This is the only channel that reaches them.", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
       { name: "read", description: "Read a file: its handle from the tree, or a path inside the project.", parameters: { type: "object", properties: { path: { type: "string" } } } },
     ],
     transcriptMessages: [
@@ -294,7 +295,7 @@ export function previewContext(width = 110): string {
       { id: "5-0", kind: "toolResult", callId: "4-0", output: "export class ContextView implements Component, Focusable {" },
     ],
     stateBlockText:
-      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by the person\nmarks: none\n</carto-state>",
+      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by OracleToes\nmarks: none\n</carto-state>",
   };
   const view = new ContextView();
   view.setData(data);

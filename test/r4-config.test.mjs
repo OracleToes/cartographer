@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import test from "node:test";
+import test, { describe } from "node:test";
 
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -359,68 +359,73 @@ const projectRoot = () => {
   return root;
 };
 
-test("--help exits 0 and names the config file and the workspace TUI", () => {
-  // The line driver is no longer "the interface"; help must say plainly what
-  // boots by default and how to force the driver.
-  const help = runCli(["--help"]);
-  assert.match(help, /~\/\.carto\/config\.json/);
-  assert.match(help, /workspace TUI/);
-  assert.match(help, /--headless/);
-  assert.match(help, /--model llama-swap\/ByteShape/);
-});
+// The four CLI tests each boot a child process, and each owns its own
+// CARTO_HOME, so they share no state: run them at once rather than paying four
+// process spawns one after another, which the suite's budget cannot afford.
+describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
+  test("--help exits 0 and names the config file and the workspace TUI", () => {
+    // The line driver is no longer "the interface"; help must say plainly what
+    // boots by default and how to force the driver.
+    const help = runCli(["--help"]);
+    assert.match(help, /~\/\.carto\/config\.json/);
+    assert.match(help, /workspace TUI/);
+    assert.match(help, /--headless/);
+    assert.match(help, /--model llama-swap\/ByteShape/);
+  });
 
-test("no config and no --model: exit 1 and the one-liner that creates it", () => {
-  const home = tempDir();
-  try {
-    let failed = null;
+  test("no config and no --model: exit 1 and the one-liner that creates it", () => {
+    const home = tempDir();
     try {
-      runCli([], { home });
-    } catch (error) {
-      failed = error;
+      let failed = null;
+      try {
+        runCli([], { home });
+      } catch (error) {
+        failed = error;
+      }
+      assert.ok(failed, "expected a non-zero exit");
+      assert.equal(failed.status, 1);
+      assert.match(String(failed.stderr), /--model llama-swap\/ByteShape/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
-    assert.ok(failed, "expected a non-zero exit");
-    assert.equal(failed.status, 1);
-    assert.match(String(failed.stderr), /--model llama-swap\/ByteShape/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
+  });
 
-test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
-  const home = tempDir();
-  const root = projectRoot();
-  try {
-    const first = runCli(
-      ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
-      { home, input: "" },
-    );
-    void first;
-    const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.equal(raw.model, "llama-swap/ByteShape");
-    assert.equal(raw.contextWindow, 75_000);
-    const second = runCli(["--root", root], { home, input: "" });
-    assert.match(second, /carto · llama-swap\/ByteShape/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("an unsupported provider fails plainly, before any request is made", () => {
-  const home = tempDir();
-  const root = projectRoot();
-  try {
-    let failed = null;
+  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
+    const home = tempDir();
+    const root = projectRoot();
     try {
-      runCli(["--model", "openrouter/some-model", "--root", root], { home });
-    } catch (error) {
-      failed = error;
+      const first = runCli(
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
+        { home, input: "" },
+      );
+      void first;
+      const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+      assert.equal(raw.model, "llama-swap/ByteShape");
+      assert.equal(raw.contextWindow, 75_000);
+      const second = runCli(["--root", root], { home, input: "" });
+      assert.match(second, /carto · llama-swap\/ByteShape/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     }
-    assert.ok(failed);
-    assert.equal(failed.status, 1);
-    assert.match(String(failed.stderr), /llama-swap provider only/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
+  });
+
+  test("an unsupported provider fails plainly, before any request is made", () => {
+    const home = tempDir();
+    const root = projectRoot();
+    try {
+      let failed = null;
+      try {
+        runCli(["--model", "openrouter/some-model", "--root", root], { home });
+      } catch (error) {
+        failed = error;
+      }
+      assert.ok(failed);
+      assert.equal(failed.status, 1);
+      assert.match(String(failed.stderr), /llama-swap provider only/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

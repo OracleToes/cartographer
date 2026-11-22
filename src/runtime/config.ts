@@ -24,6 +24,11 @@ export interface GlobalConfig {
   llamaSwapEndpoint?: string;
   /** The pinned context window: it always wins (it can raise the server's advertised capacity). Unset: the server's advertised capacity is used. */
   contextWindow?: number;
+  /**
+   * What the agent calls the person at the keyboard. Unset: the account that
+   * launched Carto, resolved at run time — a name, never a role word.
+   */
+  userName?: string;
 }
 
 export interface ModelRef {
@@ -73,6 +78,17 @@ function parseEndpoint(value: unknown, where: string): string | undefined {
   return value.replace(/\/+$/, "");
 }
 
+function parseUserName(value: unknown, where: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new ConfigError(`${where}: userName must be a string, the name the agent calls you; got ${typeof value}.`);
+  }
+  if (value.trim().length === 0) {
+    throw new ConfigError(`${where}: userName must not be empty — leave it out to use the account that launched Carto, or give a name.`);
+  }
+  return value.trim();
+}
+
 export function parseConfig(input: unknown, where = "config.json"): GlobalConfig {
   if (typeof input !== "object" || input === null) {
     throw new ConfigError(`${where}: expected a JSON object.`);
@@ -87,11 +103,13 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
   parseModelRef(record.model); // validates shape
   const llamaSwapEndpoint = parseEndpoint(record.llamaSwapEndpoint, where);
   const contextWindow = parseContextWindow(record.contextWindow, where);
+  const userName = parseUserName(record.userName, where);
   return {
     version: 1,
     model: record.model,
     ...(llamaSwapEndpoint === undefined ? {} : { llamaSwapEndpoint }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
+    ...(userName === undefined ? {} : { userName }),
   };
 }
 
@@ -114,6 +132,8 @@ export interface LoadOptions {
   llamaSwapEndpointOverride?: string;
   /** Applies in memory; written to disk only when the file is being created. */
   contextWindowOverride?: number;
+  /** Applies in memory; written to disk only when the file is being created. Overrides `userName`. */
+  userNameOverride?: string;
   environment?: NodeJS.ProcessEnv;
 }
 
@@ -145,6 +165,7 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
         model: options.modelOverride,
         ...(options.llamaSwapEndpointOverride === undefined ? {} : { llamaSwapEndpoint: options.llamaSwapEndpointOverride }),
         ...(options.contextWindowOverride === undefined ? {} : { contextWindow: options.contextWindowOverride }),
+        ...(options.userNameOverride === undefined ? {} : { userName: options.userNameOverride }),
       },
       path,
     );
@@ -161,11 +182,14 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
   const config = parseConfig(parsed, path);
   const endpoint = options.llamaSwapEndpointOverride === undefined ? undefined : parseEndpoint(options.llamaSwapEndpointOverride, "--endpoint");
   const contextWindow = options.contextWindowOverride === undefined ? undefined : parseContextWindow(options.contextWindowOverride, "--context-window");
+  const userName = options.userNameOverride === undefined ? undefined : parseUserName(options.userNameOverride, "--user");
   const merged: GlobalConfig = { version: 1, model: config.model };
   const llamaSwapEndpoint = endpoint ?? config.llamaSwapEndpoint;
   const effectiveWindow = contextWindow ?? config.contextWindow;
   if (llamaSwapEndpoint !== undefined) merged.llamaSwapEndpoint = llamaSwapEndpoint;
   if (effectiveWindow !== undefined) merged.contextWindow = effectiveWindow;
+  const effectiveName = userName ?? config.userName;
+  if (effectiveName !== undefined) merged.userName = effectiveName;
   return { config: merged, path, created: false };
 }
 

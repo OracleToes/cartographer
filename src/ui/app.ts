@@ -57,7 +57,7 @@ import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
 import { ephemeralItemId, refreshFreshness } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
-import { CARTO_INSTRUCTIONS, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
+import { cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { projectTreeBlock } from "../runtime/project-tree.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
@@ -583,7 +583,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     contextView.setData({
       brain: brainState,
-      systemPrompt: CARTO_INSTRUCTIONS,
+      systemPrompt: cartoInstructions(state.session.state.person),
+      person: state.session.state.person,
       // The frozen bytes the carto-context section renders; a missing file
       // falls back to re-rendering the Brain, the same fallback pi itself
       // uses — the view never fabricates a projection.

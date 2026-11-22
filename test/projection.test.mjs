@@ -78,9 +78,9 @@ test("a pinned ephemeral item is in the head after Chat, under its own handle, w
   );
   brain = applyWrite(brain, { kind: "chat.record", record: timed("c1", "user", "said this", "2025-12-31T00:00:00Z") }, at("2026-01-01T00:00:02Z"));
 
-  const projection = projectContext(brain);
+  const projection = projectContext(brain, new Map(), "OracleToes");
   const text = projection.text;
-  assert.match(text, /Pinned — what the person kept in front of you/);
+  assert.match(text, /Pinned — what OracleToes kept in front of you/);
   assert.match(text, /X1 \[reasoning\] keep this thought/);
   assert.ok(text.indexOf("said this") < text.indexOf("keep this thought"), "Chat comes before what was pinned after it");
   assert.equal(text.includes("gen:7:t0"), false, "the storage id never reaches the model");

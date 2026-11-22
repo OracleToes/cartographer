@@ -14,6 +14,7 @@
  * (§2.1, §2.3).
  */
 import { handleOf } from "./handles.js";
+import { personName } from "./person.js";
 import { estimateTokens } from "./estimate.js";
 import type { CartoBrain } from "./records.js";
 
@@ -68,7 +69,16 @@ function makePart(id: ProjectionPartId, label: string, lines: string[]): Project
  */
 export type PinnedFileText = ReadonlyMap<string, string | undefined>;
 
-export function projectContext(brain: CartoBrain, fileTexts: PinnedFileText = new Map()): Projection {
+export function projectContext(
+  brain: CartoBrain,
+  fileTexts: PinnedFileText = new Map(),
+  /**
+   * The name the agent calls the person: the session's resolved name. Absent
+   * when a caller renders a head outside a session (a test, a preview), where
+   * the launching account is still the honest answer.
+   */
+  person: string = personName(),
+): Projection {
   const handles = brain.handles;
   const partOf = (kind: Parameters<typeof handleOf>[1], id: string) =>
     handleOf(handles, kind, id) ?? "?";
@@ -78,7 +88,7 @@ export function projectContext(brain: CartoBrain, fileTexts: PinnedFileText = ne
     atlas.push("Atlas — what you understand about the project");
     for (const node of brain.atlas) {
       atlas.push(
-        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned by ${node.pinned === "user" ? "the person" : "you"}]` : ""}${node.stale ? " · [stale: the file changed after this note]" : ""}`,
+        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned by ${node.pinned === "user" ? person : "you"}]` : ""}${node.stale ? " · [stale: the file changed after this note]" : ""}`,
       );
       atlas.push(`  ${node.text}`);
       for (const link of node.links) atlas.push(`  link: ${resolveHandle(brain, link)}`);
@@ -97,7 +107,7 @@ export function projectContext(brain: CartoBrain, fileTexts: PinnedFileText = ne
     ledger.push("Ledger — what you are working on");
     for (const entry of brain.ledger) {
       ledger.push(
-        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned by ${entry.pinned === "user" ? "the person" : "you"}]` : ""}`,
+        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned by ${entry.pinned === "user" ? person : "you"}]` : ""}`,
       );
       if (entry.answer !== null) {
         ledger.push(`  → answered: ${entry.answer.text}`);
@@ -112,7 +122,7 @@ export function projectContext(brain: CartoBrain, fileTexts: PinnedFileText = ne
   const ephemera: string[] = [];
   const pinned = brain.ephemera.filter((item) => item.pinned !== undefined);
   if (pinned.length > 0) {
-    ephemera.push("Pinned — what the person kept in front of you");
+    ephemera.push(`Pinned — what ${person} kept in front of you`);
     pinned.forEach((item, index) => {
       ephemera.push(`${partOf("ephemera", item.id) ?? `E${index + 1}`} [${item.kind}] ${item.text}`);
     });
@@ -129,7 +139,7 @@ export function projectContext(brain: CartoBrain, fileTexts: PinnedFileText = ne
       const text = fileTexts.get(file.path);
       const name = file.path === "" ? "." : file.path;
       const stale = file.stale === true ? " · [stale: the file is gone or has changed since this pin]" : "";
-      files.push(`${name} · pinned by ${file.pinned === "user" ? "the person" : "you"}${stale}`);
+      files.push(`${name} · pinned by ${file.pinned === "user" ? person : "you"}${stale}`);
       files.push(text === undefined ? "  (this file could not be read at the collapse)" : indent(text));
     }
   }

@@ -11,6 +11,7 @@ import { parseArgs } from "node:util";
 import { openBrain } from "./runtime/brain-store.js";
 import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
 import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
+import { personName } from "./domain/person.js";
 import { configuredModels } from "./runtime/llama-swap-model.js";
 import { runHeadless } from "./runtime/headless.js";
 import { runTui } from "./ui/app.js";
@@ -19,7 +20,7 @@ const STATUS = "carto opens the workspace TUI on a terminal; --headless runs the
 
 function usage(): string {
   return [
-    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--root <dir>] [--headless]",
+    "Usage: carto [--help] [--model <provider/modelId>] [--endpoint <url>] [--context-window <n>] [--user <name>] [--root <dir>] [--headless]",
     "",
     "Configuration lives in ~/.carto/config.json (override the directory with CARTO_HOME).",
     "The endpoint in that file is where your llama.cpp server serves, through llama-swap;",
@@ -35,6 +36,8 @@ function usage(): string {
     "  --context-window <n>        Pin the context window (integer ≥ 0), and it always wins — it",
     "                              can raise the server's number. Without it, the advertised",
     "                              capacity is used and is unknown until the model loads.",
+    "  --user <name>               What the agent calls you. Default: the account that launched",
+    "                              Carto (config: \"userName\").",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
     "  --headless                  Run the line driver instead of the workspace.",
     "  -h, --help                  Show this help.",
@@ -65,6 +68,7 @@ const parsed = parseArgs({
     model: { type: "string" },
     endpoint: { type: "string" },
     "context-window": { type: "string" },
+    user: { type: "string" },
     root: { type: "string" },
     headless: { type: "boolean" },
   },
@@ -92,8 +96,12 @@ try {
     ...(values.model === undefined ? {} : { modelOverride: values.model }),
     ...(values.endpoint === undefined ? {} : { llamaSwapEndpointOverride: values.endpoint }),
     ...(contextWindow === undefined ? {} : { contextWindowOverride: contextWindow }),
+    ...(values.user === undefined ? {} : { userNameOverride: values.user }),
   });
   const model = parseModelRef(config.model);
+  // One resolution, at the entry point, so the TUI, the line driver, the tool
+  // descriptions and the state block all name the same person.
+  const person = personName(config.userName);
 
   const root = resolveProjectRoot(values.root);
   const brain = await openBrain(brainDatabasePath(root));
@@ -114,6 +122,7 @@ try {
         input: process.stdin,
         output: process.stdout,
         error: process.stderr,
+        person,
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
     : await runTui({
@@ -121,6 +130,7 @@ try {
         brain,
         models,
         model,
+        person,
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });
   await brain.close();

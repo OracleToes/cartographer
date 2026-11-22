@@ -97,6 +97,11 @@ export interface ContextViewData {
   handles?: PromptHandles | undefined;
   stateBlockText: string;
   /**
+   * The name the agent calls the person. Used only where this view renders a
+   * head of its own (no frozen bytes to show), so the words match the agent's.
+   */
+  person?: string | undefined;
+  /**
    * The handles the tree minted, path to handle (§5.4): a pinned file is named
    * in the head by the handle the tree gave it, and re-deriving the numbering
    * here would let the two disagree.
@@ -251,7 +256,7 @@ export class ContextView implements Component, Focusable {
 
   private build(data: ContextViewData): PromptSection[] {
     const handles = data.brain.handles;
-    const projection = projectionEntries(data.projectionText ?? projectContext(data.brain).text);
+    const projection = projectionEntries(data.projectionText ?? projectContext(data.brain, new Map(), data.person).text);
 
     // ── head ────────────────────────────────────────────────────────────────
     const head: PromptNode[] = [
@@ -331,7 +336,7 @@ export class ContextView implements Component, Focusable {
         handle: data.treeHandles?.[file.path] ?? "F?",
         kind: "files",
         label: "file",
-        summary: `${name} · pinned by ${file.pinned === "user" ? "the person" : "the agent"}${file.stale === true ? " · stale" : ""}`,
+        summary: `${name} · pinned by ${file.pinned === "user" ? (data.person ?? "the person") : "the agent"}${file.stale === true ? " · stale" : ""}`,
         body: `${name}\n\nread again at every collapse, so the head holds the file and not a quotation of a reading of it.`,
         real: "(read at the next collapse: a pinned file is the file, not a copy frozen here)",
         open: false,
@@ -656,6 +661,9 @@ export class ContextView implements Component, Focusable {
 
   /** One entry: handle, name; then its body when it is open. */
   private renderNode(node: PromptNode, width: number, selected: boolean): string[] {
+    // The pin badge names who placed it; a view with no person of its own says
+    // "you", which is what a stand-alone frame means.
+    const who = this.data?.person ?? "you";
     const open = this.isOpen(node);
     const ink = KIND_INK[node.kind];
     const cursor = selected ? tokens.accent("▌") : " ";
@@ -670,7 +678,7 @@ export class ContextView implements Component, Focusable {
     const pinned =
       node.pinned === undefined
         ? ""
-        : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? "you" : "agent"}`)} `;
+        : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? who : "agent"}`)} `;
     const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
     const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}${pinned}`;
