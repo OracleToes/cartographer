@@ -294,3 +294,27 @@ export const partTokens = {
 
 /** Raw palette read, for the bar's blended cells and for anything drawing a track. */
 export const rawPalette = palette;
+
+/**
+ * Scrollbar cell styles for a given pane background: a hairline track, a quiet
+ * thumb that steps up in weight and accent when hovered or dragged, and a blank
+ * gutter cell painted in the pane's own background when the pane fits without
+ * scrolling.
+ */
+export function scrollbarStyles(bgHex: string = palette.background): {
+  track: (glyph: string) => string;
+  thumb: (glyph: string) => string;
+  activeThumb: (glyph: string) => string;
+  blank: () => string;
+} {
+  const track = both(palette.rule, bgHex);
+  const thumb = both(palette.textFaint, bgHex);
+  const activeThumb = both(palette.focus, bgHex);
+  const blank = background(bgHex);
+  return {
+    track,
+    thumb,
+    activeThumb,
+    blank: () => blank(" "),
+  };
+}

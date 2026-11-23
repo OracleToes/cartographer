@@ -1990,3 +1990,97 @@ test("estimate.ts delegates to pi-ai/utils/estimate", async () => {
     "Pi messages use estimateMessageTokens rather than JSON stringification",
   );
 });
+
+test("PaneScrollView renders a dynamic-size scrollbar when overflowing and stays blank when content fits", async () => {
+  const { stripTerminalSequences, TuiAltScreen } = await import("@earendil-works/pi-tui");
+  const { Column, PaneScrollView } = await import("../dist/ui/frame.js");
+  const { rawPalette, canvasLine } = await import("../dist/ui/tokens.js");
+  const { readFileSync } = await import("node:fs");
+
+  const terminal = {
+    columns: 40,
+    rows: 10,
+    kittyProtocolActive: false,
+    start() {},
+    stop() {},
+    async drainInput() {},
+    write() {},
+    moveBy() {},
+    hideCursor() {},
+    showCursor() {},
+    clearLine() {},
+    clearFromCursor() {},
+    clearScreen() {},
+    setTitle() {},
+    setProgress() {},
+    setProgramStatus() {},
+  };
+
+  let lineCount = 5;
+  const doc = {
+    invalidate() {},
+    render(width) {
+      return Array.from({ length: lineCount }, (_, i) => canvasLine(`line ${i + 1}`, width));
+    },
+  };
+
+  const scroll = new PaneScrollView(doc, { primary: true, backgroundHex: rawPalette.surface });
+  const tui = new TuiAltScreen(terminal, false, undefined, { mouse: false });
+  tui.setLayoutRoot(new Column([{ component: scroll, basis: 0, grow: 1, minSize: 1 }]));
+
+  const renderFrame = async () => {
+    tui.requestRender(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    return tui.getScreenLines().map(stripTerminalSequences);
+  };
+
+  try {
+    tui.start();
+
+    // 1. Content fits (5 lines in 10 rows): gutter is blank, no scrollbar glyphs.
+    const shortFrame = await renderFrame();
+    assert.equal(scroll.isScrollable, false);
+    const shortGutter = shortFrame.map((line) => line.at(-1) ?? "");
+    assert.ok(shortGutter.every((ch) => ch !== "┃" && ch !== "│" && ch !== "█"), "no scrollbar when content fits");
+
+    // 2. Content is 2x viewport (20 lines in 10 rows): proportional thumb is ~5 rows at top.
+    lineCount = 20;
+    const mediumFrame = await renderFrame();
+    assert.equal(scroll.isScrollable, true);
+    const mediumGutter = mediumFrame.map((line) => line.at(-1) ?? "");
+    const mediumThumbCount = mediumGutter.filter((ch) => ch === "┃").length;
+    const mediumTrackCount = mediumGutter.filter((ch) => ch === "│").length;
+    assert.equal(mediumThumbCount, 5, "thumb is 50% of track when content is 2x viewport");
+    assert.equal(mediumTrackCount, 5, "remaining track cells render track hairline");
+    assert.equal(mediumGutter[0], "┃", "thumb starts at top when scrollTop is 0");
+    assert.equal(mediumGutter[9], "│", "track sits at bottom when scrollTop is 0");
+
+    // 3. Content grows to 5x viewport (50 lines in 10 rows): thumb shrinks dynamically to 2 rows.
+    lineCount = 50;
+    const tallFrame = await renderFrame();
+    const tallGutter = tallFrame.map((line) => line.at(-1) ?? "");
+    const tallThumbCount = tallGutter.filter((ch) => ch === "┃").length;
+    assert.equal(tallThumbCount, 2, "thumb shrinks proportionally as content grows");
+    assert.ok(tallThumbCount < mediumThumbCount, "dynamic thumb is smaller for taller content");
+
+    // 4. Scrolling to end moves the thumb to the bottom of the track.
+    scroll.scrollToEnd();
+    const bottomFrame = await renderFrame();
+    const bottomGutter = bottomFrame.map((line) => line.at(-1) ?? "");
+    assert.equal(bottomGutter[0], "│", "track sits at top when scrolled to end");
+    assert.equal(bottomGutter[9], "┃", "thumb reaches bottom when scrolled to end");
+
+    // 5. Hover/active state swaps thumb glyph to solid block.
+    scroll.setScrollbarActive(true);
+    const activeFrame = await renderFrame();
+    const activeGutter = activeFrame.map((line) => line.at(-1) ?? "");
+    assert.equal(activeGutter.filter((ch) => ch === "█").length, 2, "active/hovered scrollbar highlights thumb");
+  } finally {
+    tui.stop();
+  }
+
+  // Every ScrollView mounted in app.ts uses PaneScrollView so no view lacks a scrollbar.
+  const appSource = readFileSync("src/ui/app.ts", "utf8");
+  assert.doesNotMatch(appSource, /new ScrollView\(/, "all views in app.ts mount PaneScrollView");
+  assert.match(appSource, /new PaneScrollView\(/);
+});

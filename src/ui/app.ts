@@ -31,10 +31,10 @@ import { basename, relative, resolve } from "node:path";
 import {
   Editor,
   ProcessTerminal,
-  ScrollView,
   TuiAltScreen,
   type Component,
   type OverlayHandle,
+  type ScrollView,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ConversationTranscript, LiveDoc, type LiveState } from "@earendil-works/pi-durable";
@@ -96,7 +96,7 @@ import { ContextView, type ContextDialogueMessage, type ContextToolItem, type Co
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
-import { Column, Fill, Inset, margin, Row, type Viewport } from "./frame.js";
+import { Column, Fill, Inset, margin, PaneScrollView, Row, type Viewport } from "./frame.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -450,7 +450,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
   const sidebar = new Sidebar();
-  const transcriptScroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
+  const transcriptScroll = new PaneScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
   /**
    * The prompt's frame: Posting puts the name of the thing at the top of it, so
    * the box says what it is for. One rule above, `message` in it, one rule below.
@@ -484,29 +484,30 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const treeView = new TreeView();
   const archiveView = new ArchiveView();
 
-  // Each pannable view gets its own scroll view; Atlas, Ledger, and Jobs mount
-  // their list and detail panes in independent ScrollViews on wide viewports.
-  const atlasListScroll = new ScrollView(atlasView.listPane, { primary: false, overscroll: "contain" });
-  const atlasDetailScroll = new ScrollView(atlasView.detailPane, { primary: false, overscroll: "contain", scrollbar: "auto" });
-  const atlasNarrowScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
+  // Each pannable view gets its own scroll view with a dynamic-size scrollbar
+  // matching its surface; Atlas, Ledger, and Jobs mount their list and detail
+  // panes in independent ScrollViews on wide viewports.
+  const atlasListScroll = new PaneScrollView(atlasView.listPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.panel });
+  const atlasDetailScroll = new PaneScrollView(atlasView.detailPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.surface });
+  const atlasNarrowScroll = new PaneScrollView(atlasView, { primary: false, overscroll: "contain" });
   atlasView.attachScrolls(atlasListScroll, atlasDetailScroll);
   atlasView.onFocus = () => tui.setFocus(atlasView);
 
-  const ledgerListScroll = new ScrollView(ledgerView.listPane, { primary: false, overscroll: "contain" });
-  const ledgerDetailScroll = new ScrollView(ledgerView.detailPane, { primary: false, overscroll: "contain", scrollbar: "auto" });
-  const ledgerNarrowScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  const ledgerListScroll = new PaneScrollView(ledgerView.listPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.panel });
+  const ledgerDetailScroll = new PaneScrollView(ledgerView.detailPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.surface });
+  const ledgerNarrowScroll = new PaneScrollView(ledgerView, { primary: false, overscroll: "contain" });
   ledgerView.attachScrolls(ledgerListScroll, ledgerDetailScroll);
   ledgerView.onFocus = () => tui.setFocus(ledgerView);
 
-  const jobsListScroll = new ScrollView(jobsView.listPane, { primary: false, overscroll: "contain" });
-  const jobsDetailScroll = new ScrollView(jobsView.detailPane, { primary: false, follow: "end", overscroll: "contain", scrollbar: "auto" });
-  const jobsNarrowScroll = new ScrollView(jobsView, { primary: false, overscroll: "contain" });
+  const jobsListScroll = new PaneScrollView(jobsView.listPane, { primary: false, overscroll: "contain" });
+  const jobsDetailScroll = new PaneScrollView(jobsView.detailPane, { primary: false, follow: "end", overscroll: "contain" });
+  const jobsNarrowScroll = new PaneScrollView(jobsView, { primary: false, overscroll: "contain" });
   jobsView.attachScrolls(jobsListScroll, jobsDetailScroll);
   jobsView.onFocus = () => tui.setFocus(jobsView);
   jobsView.onChange = () => tui.requestRender();
 
-  const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
-  const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
+  const contextScroll = new PaneScrollView(contextView, { primary: false, overscroll: "contain" });
+  const treeScroll = new PaneScrollView(treeView, { primary: false, overscroll: "contain" });
   // A ScrollView does not follow a child's cursor, and the tree is taller than
   // the pane in any real project: keep the selected row in view, with a row of
   // context on either side rather than the cursor pinned to an edge.
@@ -517,7 +518,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (line < top + 1) treeScroll.scrollTo(line - 1);
     else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
   };
-  const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
+  const archiveScroll = new PaneScrollView(archiveView, { primary: false, overscroll: "contain" });
 
   sidebar.onSelect = (book) => void switchToView(book);
   sidebar.onToggleLayer = (layer) => void switchLayer(layer);
@@ -1307,6 +1308,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     detailScroll: ScrollView,
     narrowScroll: ScrollView,
     listBasis: number,
+    listFloorHex: string = rawPalette.panel,
+    detailFloorHex: string = rawPalette.surface,
   ) =>
     new Column([
       {
@@ -1317,7 +1320,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
               {
                 component: new Column([
                   { component: listScroll, basis: "auto", shrink: 1, minSize: 1 },
-                  { ...pane(0, rawPalette.panel), grow: 1 },
+                  { ...pane(0, listFloorHex), grow: 1 },
                 ]),
                 basis: listBasis,
                 minSize: 24,
@@ -1327,7 +1330,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
               {
                 component: new Column([
                   { component: detailScroll, basis: "auto", shrink: 1, minSize: 1 },
-                  { ...pane(0, rawPalette.surface), grow: 1 },
+                  { ...pane(0, detailFloorHex), grow: 1 },
                 ]),
                 basis: 0,
                 grow: 1,
@@ -1357,7 +1360,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     ]);
   const atlasSplit = bookSplit(atlasView.headerPane, atlasListScroll, atlasDetailScroll, atlasNarrowScroll, 36);
   const ledgerSplit = bookSplit(ledgerView.headerPane, ledgerListScroll, ledgerDetailScroll, ledgerNarrowScroll, 38);
-  const jobsSplit = bookSplit(jobsView.headerPane, jobsListScroll, jobsDetailScroll, jobsNarrowScroll, 32);
+  const jobsSplit = bookSplit(
+    jobsView.headerPane,
+    jobsListScroll,
+    jobsDetailScroll,
+    jobsNarrowScroll,
+    32,
+    rawPalette.background,
+    rawPalette.background,
+  );
   const inSplitBook = () => state.layer === "context" && (state.view === "atlas" || state.view === "ledger" || state.view === "jobs");
   const workArea = new Column([
     scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
