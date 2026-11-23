@@ -37,7 +37,7 @@ import {
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
+import { ConversationTranscript, LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 
 import {
   applyOmitNow,
@@ -1639,26 +1639,41 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return transcriptRebuild;
   };
 
-  let lastLiveRebuild = 0;
   const startLiveWatch = async (): Promise<void> => {
-    const watch = await state.session.harness.watchDoc(LiveDoc, state.session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+    const session = state.session;
+    const watch = await session.conversation.watch(BACKGROUND_CONTEXT).catch(() => undefined);
     if (watch === undefined) return;
+    if (session !== state.session) {
+      await watch.stop().catch(() => undefined);
+      return;
+    }
     state.liveWatch = watch;
+    const entryStream = new ConversationTranscript((query, limit, ctx) =>
+      session.conversation.entries(query, limit, undefined, ctx),
+    );
+    let lastItems: readonly unknown[] | undefined = watch.value === undefined ? undefined : entryStream.merge(watch.value).items;
+    let cachedPromptItems: PromptItem[] | undefined;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value") return;
-      const live = call.value as LiveState;
+      if (call.kind !== "value" || session !== state.session) return;
+      const merged = entryStream.merge(call.value);
+      const entriesChanged = merged.items !== lastItems;
+      lastItems = merged.items;
+      if (entriesChanged || cachedPromptItems === undefined) {
+        // Reload landed contributions only when committed entries change (including
+        // apply-now edits), rather than re-reading SQLite on every streaming token.
+        const landedEntries = (await sessionTranscript(session).catch(() => [])) as unknown as ContextEntryLike[];
+        cachedPromptItems = promptItemsOf(landedEntries);
+      }
+      const live = (call.value.docs[LiveDoc.definition.kind] as LiveState | undefined) ?? LiveDoc.definition.initial();
       // The partial continues the prompt's numbering rather than starting a
       // second one: a card in flight is the next item after everything the
       // generation already holds, and it wears the handle of the item it is.
-      const landedEntries = (await sessionTranscript(state.session).catch(() => [])) as unknown as ContextEntryLike[];
-      const cards = liveCardsOf(live, generationHandles(live, promptItemsOf(landedEntries)));
+      const cards = liveCardsOf(live, generationHandles(live, cachedPromptItems));
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
-      const now = Date.now();
-      if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
-        lastLiveRebuild = now;
+      if (entriesChanged || (hadLive && !hasLive)) {
         setImmediate(() => {
           void rebuildTranscript().catch(() => undefined);
         });
@@ -1666,7 +1681,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hadLive = hasLive;
       // The agent runs without a line from the person — a rest wakes it — so a
       // collapse it asked for is carried out here, when its run has ended.
-      if (live.run === undefined && state.session.state.collapseRequested !== null) {
+      if (live.run === undefined && session.state.collapseRequested !== null) {
         void serviceCollapseRequest().catch(() => undefined);
       }
     });

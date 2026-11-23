@@ -74,6 +74,9 @@ export class HelpPanel implements Component, Focusable {
       for (const extra of extraGroup) rows.push({ key: extra.key, label: extra.label });
     }
 
+    // Overlays in pi-tui are rendered via `render(width)` directly rather than
+    // through `ScrollView` layout, so HelpPanel clamps its own scroll offset.
+    this.offset = Math.max(0, Math.min(this.offset, Math.max(0, rows.length - 1)));
     const visible = rows.slice(this.offset);
     for (const row of visible) {
       if (row.group !== undefined) {

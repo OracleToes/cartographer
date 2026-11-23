@@ -1826,3 +1826,82 @@ test("a pane's margin, floor and seam are one box, and a click lands on the row 
   inset.handleMouse({ type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 20, height: 5, shift: false, alt: false, ctrl: false });
   assert.deepEqual(clicks, [[3, 1, 17]], "the pane sees the click as its own, shifted by the margin");
 });
+
+test("HelpPanel clamps its scroll offset to the last row instead of scrolling into empty space", async () => {
+  const { HelpPanel } = await import("../dist/ui/help-panel.js");
+  const panel = new HelpPanel(
+    [
+      { id: "a", group: "one", label: "first", key: "ctrl+a", available: () => true, run: () => undefined },
+      { id: "b", group: "one", label: "second", key: "ctrl+b", available: () => true, run: () => undefined },
+    ],
+    () => [],
+  );
+  for (let i = 0; i < 50; i += 1) panel.handleInput("j");
+  const lines = panel.render(60).map(plain);
+  assert.ok(lines.some((line) => line.includes("second")), "clamped at the final row");
+});
+
+test("Atlas, Ledger, and Tree filter bars use pi-tui Input and fuzzyFilter", async () => {
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const brain = emptyBrain();
+  brain.atlas.push(
+    { id: "a1", title: "SessionStorage", text: "sqlite backing", links: [], attachments: [], createdAt: 1, updatedAt: 1 },
+    { id: "a2", title: "ColorTokens", text: "palette", links: [], attachments: [], createdAt: 2, updatedAt: 2 },
+  );
+  brain.ledger.push(
+    { id: "l1", kind: "goal", text: "AdoptInputFilter", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+    { id: "l2", kind: "note", text: "UnrelatedNote", status: "open", answer: null, createdAt: 2, updatedAt: 2 },
+  );
+  brain.handles.entries.push(
+    { kind: "atlas", id: "a1", handle: "A1", timestamp: 1 },
+    { kind: "atlas", id: "a2", handle: "A2", timestamp: 2 },
+    { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 },
+    { kind: "ledger", id: "l2", handle: "L2", timestamp: 2 },
+  );
+
+  // Atlas: fuzzy match "ssg" matches SessionStorage and not ColorTokens; Esc clears.
+  const atlas = new AtlasView();
+  atlas.setData(brain, []);
+  atlas.handleInput("/");
+  assert.equal(atlas.isFiltering(), true);
+  for (const ch of "ssg") atlas.handleInput(ch);
+  assert.equal(atlas.selectedId(), "a1");
+  atlas.handleInput("\r");
+  assert.equal(atlas.isFiltering(), false);
+  assert.equal(atlas.selectedId(), "a1", "Enter commits the filter");
+  atlas.handleInput("/");
+  atlas.handleInput("\x1b");
+  assert.equal(atlas.isFiltering(), false);
+
+  // Ledger: fuzzy match "aif" matches AdoptInputFilter.
+  const ledger = new LedgerView();
+  ledger.setData(brain);
+  ledger.handleInput("/");
+  for (const ch of "aif") ledger.handleInput(ch);
+  assert.equal(ledger.selectedId(), "l1");
+  ledger.handleInput("\x1b");
+  assert.equal(ledger.isFiltering(), false);
+
+  // Tree: fuzzy match "ctx" matches context-bar.ts.
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-filter-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "context-bar.ts"), "export {};\n");
+    writeFileSync(join(root, "src", "readme.md"), "hi\n");
+    const tree = new TreeView();
+    tree.setData({ root, anchor: { anchor: root, depth: 2 }, brain });
+    tree.handleInput("/");
+    for (const ch of "ctxb") tree.handleInput(ch);
+    const rendered = tree.render(100).map(plain).join("\n");
+    assert.match(rendered, /context-bar\.ts/);
+    assert.doesNotMatch(rendered, /readme\.md/);
+    tree.handleInput("\x1b");
+    assert.match(tree.render(100).map(plain).join("\n"), /readme\.md/, "Esc clears the filter");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

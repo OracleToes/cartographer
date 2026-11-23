@@ -186,8 +186,9 @@ test("timed sleep creation survives replay and respects an already queued messag
         if (!receipts.has(id)) receipts.set(id, { handled: false });
         return receipts.get(id);
       },
-      createTask: async (definition, input) => {
+      createTask: async (definition, input, taskOptions) => {
         assert.equal(definition, SleepTask);
+        assert.equal(taskOptions?.background, true, "timed rests are background tasks so waitForIdle does not wait for them");
         created.push(input);
         return 40 + created.length;
       },

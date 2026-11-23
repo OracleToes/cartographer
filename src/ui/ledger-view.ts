@@ -7,6 +7,8 @@
  * Pinned items are visible directly inside the book.
  */
 import {
+  fuzzyFilter,
+  Input,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -31,7 +33,7 @@ export class LedgerView implements Component, Focusable {
   private entries: LedgerEntry[] = [];
   private selectedIndex = 0;
   private scrollOffset = 0;
-  private filterText = "";
+  private readonly filterInput = new Input({ prompt: "/" });
   private filtering = false;
   private detailExpanded = true;
 
@@ -55,24 +57,20 @@ export class LedgerView implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.filtering) {
+      this.filterInput.focused = this.focused;
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
         this.filtering = false;
-        this.filterText = "";
+        this.filterInput.setValue("");
+        this.selectedIndex = 0;
         return;
       }
       if (matchesKey(data, "enter")) {
         this.filtering = false;
         return;
       }
-      if (matchesKey(data, "backspace")) {
-        this.filterText = this.filterText.slice(0, -1);
-        this.selectedIndex = 0;
-        return;
-      }
-      if (data.length === 1 && !matchesKey(data, "tab")) {
-        this.filterText += data.toLowerCase();
-        this.selectedIndex = 0;
-      }
+      if (matchesKey(data, "tab")) return;
+      this.filterInput.handleInput(data);
+      this.selectedIndex = 0;
       return;
     }
 
@@ -86,7 +84,7 @@ export class LedgerView implements Component, Focusable {
       }
       if (data === "/") {
         this.filtering = true;
-        this.filterText = "";
+        this.filterInput.setValue("");
         return;
       }
       if (matchesKey(data, "l") || matchesKey(data, "right") || matchesKey(data, "enter")) {
@@ -190,16 +188,11 @@ export class LedgerView implements Component, Focusable {
   }
 
   private getFilteredEntries(): LedgerEntry[] {
-    if (this.filterText.trim().length === 0) return this.entries;
-    const q = this.filterText.toLowerCase();
-    return this.entries.filter((entry) => {
+    const query = this.filterInput.getValue().trim();
+    if (query.length === 0) return this.entries;
+    return fuzzyFilter(this.entries, query, (entry) => {
       const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? "";
-      return (
-        handle.toLowerCase().includes(q) ||
-        entry.kind.toLowerCase().includes(q) ||
-        entry.status.toLowerCase().includes(q) ||
-        entry.text.toLowerCase().includes(q)
-      );
+      return `${handle} ${entry.kind} ${entry.status} ${entry.text}`;
     });
   }
 
@@ -256,11 +249,15 @@ export class LedgerView implements Component, Focusable {
     // keys do here. The book itself starts one quiet line below it.
     const name = tokens.bold(tokens.ledger("LEDGER"));
     const figure = `${tokens.text(String(filtered.length))} ${tokens.faint("entries")}`;
-    const filter = this.filtering
-      ? ` ${tokens.accent(`/${this.filterText}█`)}`
-      : this.filterText
-        ? ` ${tokens.accent(`/${this.filterText}`)}`
-        : "";
+    const query = this.filterInput.getValue();
+    let filter = "";
+    if (this.filtering) {
+      this.filterInput.focused = this.focused;
+      const filterWidth = Math.min(24, Math.max(6, visibleWidth(query) + 2));
+      filter = ` ${tokens.accent((this.filterInput.render(filterWidth)[0] ?? `/${query}`).trimEnd())}`;
+    } else if (query.length > 0) {
+      filter = ` ${tokens.accent(`/${query}`)}`;
+    }
     const stale = "";
     const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
     const right = `${tokens.faint(this.controls.nowArmed ? "next mark applies NOW " : "a/d mark · u withdraw · ! now · / filter ")}`;

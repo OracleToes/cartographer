@@ -15,7 +15,12 @@ Each stage ends with a single `npm test` (≤ 10s total) and a push (`AGENTS.md`
 
 ### Stage 1 — `pi-tui` text utilities, dead scroll state, and `HelpPanel` scroll
 
-**Status: open.**
+**Status: done.** `padLine` delegates to `truncateToWidth(..., pad = true)`;
+`preview.ts` uses `CURSOR_MARKER` and drops dead regexes; dead `scrollOffset`
+removed from `ArchiveView`; `HelpPanel` clamps its scroll offset to the final
+row (`pi-tui`'s `showOverlay` calls `component.render(width)` directly rather
+than running `ScrollView` layout, so `ScrollView` cannot drive an overlay's
+scrolling).
 
 **What is hand-rolled.**
 - `src/ui/tokens.ts:103–107` implements `padLine(str, width)` over `visibleWidth`
@@ -51,7 +56,8 @@ Each stage ends with a single `npm test` (≤ 10s total) and a push (`AGENTS.md`
 
 ### Stage 2 — `pi-tui` `Input` + `fuzzyFilter` for filter bars in Atlas, Ledger, and Tree
 
-**Status: open.**
+**Status: done.** `AtlasView`, `LedgerView`, and `TreeView` now use `pi-tui`'s
+`Input` component for `/` filter editing and `fuzzyFilter` for matching.
 
 **What is hand-rolled.**
 - `src/ui/atlas-view.ts:64–82`, `src/ui/ledger-view.ts:57–75`, and
@@ -80,7 +86,9 @@ Tree.
 
 ### Stage 3 — `pi-durable` `background: true` for `SleepTask` + `conversation.waitForIdle`
 
-**Status: open.**
+**Status: done.** `SleepTask` is created with `background: true`,
+`waitForRunEnd` delegates to `conversation.waitForIdle(BACKGROUND_CONTEXT)`,
+and automatic collapse aborts with `{ background: true }`.
 
 **What is hand-rolled.**
 - `src/runtime/live-session.ts:273–291` hand-rolls `waitForRunEnd` by opening a
@@ -111,7 +119,10 @@ must pass unchanged and within the 10s suite budget.
 
 ### Stage 4 — `pi-durable` `conversation.watch()` + `ConversationTranscript` in `startLiveWatch`
 
-**Status: open.**
+**Status: done.** `startLiveWatch` now watches `session.conversation.watch()`
+with `ConversationTranscript`, reading `docs["pi.live"]` from the same stream
+and reloading `sessionTranscript()` only when committed entries change rather
+than on every streaming chunk or 400ms timer.
 
 **What is hand-rolled.**
 - `src/ui/app.ts:1636–1668` watches only `LiveDoc`, and on **every** streaming

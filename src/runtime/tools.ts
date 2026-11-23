@@ -505,7 +505,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           const hasInput = inbox.items.some((item) => item.mode !== "write");
           rest.legacyAllowed = false;
           if (!hasInput) {
-            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" } });
+            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" }, background: true });
           } else {
             rest.active = null;
           }

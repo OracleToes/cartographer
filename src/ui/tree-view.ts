@@ -25,6 +25,8 @@ import { statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
 import {
+  fuzzyFilter,
+  Input,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -125,7 +127,7 @@ export class TreeView implements Component, Focusable {
   /** Which note the detail pane is showing: the selection, or a note the cursor was opened onto. */
   private detailNote: string | undefined;
   private showPinnedOnly = false;
-  private filterText = "";
+  private readonly filterInput = new Input({ prompt: "/" });
   private filtering = false;
   /** Files the head is holding, by absolute path, and whether the copy is stale (§5.5). */
   private pinnedFiles = new Map<string, { stale: boolean }>();
@@ -240,9 +242,9 @@ export class TreeView implements Component, Focusable {
 
   private visibleRows(): Row[] {
     const rows = this.buildRows();
-    if (this.filterText.trim().length === 0) return rows;
-    const query = this.filterText.toLowerCase();
-    return rows.filter((row) => row.entry.name.toLowerCase().includes(query));
+    const query = this.filterInput.getValue().trim();
+    if (query.length === 0) return rows;
+    return fuzzyFilter(rows, query, (row) => row.entry.name);
   }
 
   private selectedRow(): Row | undefined {
@@ -302,9 +304,10 @@ export class TreeView implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.filtering) {
+      this.filterInput.focused = this.focused;
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
         this.filtering = false;
-        this.filterText = "";
+        this.filterInput.setValue("");
         this.selectAfter(0);
         return;
       }
@@ -312,15 +315,9 @@ export class TreeView implements Component, Focusable {
         this.filtering = false;
         return;
       }
-      if (matchesKey(data, "backspace")) {
-        this.filterText = this.filterText.slice(0, -1);
-        this.selectAfter(0);
-        return;
-      }
-      if (data.length === 1) {
-        this.filterText += data;
-        this.selectAfter(0);
-      }
+      if (matchesKey(data, "tab")) return;
+      this.filterInput.handleInput(data);
+      this.selectAfter(0);
       return;
     }
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
@@ -329,7 +326,7 @@ export class TreeView implements Component, Focusable {
     }
     if (data === "/") {
       this.filtering = true;
-      this.filterText = "";
+      this.filterInput.setValue("");
       return;
     }
     if (matchesKey(data, "j") || matchesKey(data, "down")) {
@@ -550,11 +547,15 @@ export class TreeView implements Component, Focusable {
     const files = this.rows.filter((row) => !row.entry.directory).length;
     const folders = this.rows.filter((row) => row.entry.directory).length;
     const figure = `${tokens.faint(`${folders} ${folders === 1 ? "dir" : "dirs"} · ${files} ${files === 1 ? "file" : "files"}`)}`;
-    const filter = this.filtering
-      ? ` ${tokens.accent(`/${this.filterText}█`)}`
-      : this.filterText.length > 0
-        ? ` ${tokens.accent(`/${this.filterText}`)}`
-        : "";
+    const query = this.filterInput.getValue();
+    let filter = "";
+    if (this.filtering) {
+      this.filterInput.focused = this.focused;
+      const filterWidth = Math.min(24, Math.max(6, visibleWidth(query) + 2));
+      filter = ` ${tokens.accent((this.filterInput.render(filterWidth)[0] ?? `/${query}`).trimEnd())}`;
+    } else if (query.length > 0) {
+      filter = ` ${tokens.accent(`/${query}`)}`;
+    }
     const pinnedOnly = this.showPinnedOnly ? ` ${tokens.pin("· pinned only")}` : "";
     const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${filter}${pinnedOnly}`;
     const right = `${tokens.faint("j/k move · h/l fold · p pin · t note · f pinned · / filter ")}`;
@@ -570,8 +571,8 @@ export class TreeView implements Component, Focusable {
     if (this.rows.length === 0) {
       lines.push(
         `  ${tokens.muted(
-          this.filterText.length > 0
-            ? `Nothing here matches “${this.filterText}”.`
+          query.length > 0
+            ? `Nothing here matches “${query}”.`
             : this.showPinnedOnly
               ? "Nothing in this tree is pinned."
               : "This directory is empty, or everything in it is ignored.",

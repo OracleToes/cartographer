@@ -12,6 +12,8 @@
  */
 import { HeaderView, FooterView } from "./chrome.js";
 import { Registry, type Command } from "./commands.js";
+import { CURSOR_MARKER } from "@earendil-works/pi-tui";
+
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { Sidebar } from "./sidebar.js";
 import { TranscriptView } from "./transcript.js";
@@ -26,8 +28,6 @@ import { emptyBrain } from "../domain/records.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 /**
  * The transcript as it sits in the working column: a seam under the header, the
@@ -447,10 +447,7 @@ export function previewPalette(width = 64): string {
   ]);
   // The input renders with a software cursor marker; a frame of text has no cursor.
   return frame(
-    palette
-      .render(width)
-      .map((line) => line.replace(/\x1b_pi:[a-z/]+\x07/g, ""))
-      .map((line) => line.replace(/\x1b\[[0-9;]*m/g, (escape) => escape)),
+    palette.render(width).map((line) => line.replaceAll(CURSOR_MARKER, "")),
     width,
   );
 }
@@ -489,4 +486,4 @@ export const previews = (width = 110): Record<string, string> => ({
   palette: previewPalette(64),
 });
 
-export { plain };
+export { stripTerminalSequences as plain } from "@earendil-works/pi-tui";

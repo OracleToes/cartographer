@@ -9,6 +9,8 @@
  * evident directly inside the book entries.
  */
 import {
+  fuzzyFilter,
+  Input,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -33,7 +35,7 @@ export class AtlasView implements Component, Focusable {
   private nodes: AtlasNode[] = [];
   private selectedIndex = 0;
   private scrollOffset = 0;
-  private filterText = "";
+  private readonly filterInput = new Input({ prompt: "/" });
   private filtering = false;
   private detailExpanded = true;
   private staleHandles = new Set<string>();
@@ -62,24 +64,20 @@ export class AtlasView implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.filtering) {
+      this.filterInput.focused = this.focused;
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
         this.filtering = false;
-        this.filterText = "";
+        this.filterInput.setValue("");
+        this.selectedIndex = 0;
         return;
       }
       if (matchesKey(data, "enter")) {
         this.filtering = false;
         return;
       }
-      if (matchesKey(data, "backspace")) {
-        this.filterText = this.filterText.slice(0, -1);
-        this.selectedIndex = 0;
-        return;
-      }
-      if (data.length === 1 && !matchesKey(data, "tab")) {
-        this.filterText += data.toLowerCase();
-        this.selectedIndex = 0;
-      }
+      if (matchesKey(data, "tab")) return;
+      this.filterInput.handleInput(data);
+      this.selectedIndex = 0;
       return;
     }
 
@@ -93,7 +91,7 @@ export class AtlasView implements Component, Focusable {
       }
       if (data === "/") {
         this.filtering = true;
-        this.filterText = "";
+        this.filterInput.setValue("");
         return;
       }
       if (matchesKey(data, "l") || matchesKey(data, "right") || matchesKey(data, "enter")) {
@@ -197,15 +195,11 @@ export class AtlasView implements Component, Focusable {
   }
 
   private getFilteredNodes(): AtlasNode[] {
-    if (this.filterText.trim().length === 0) return this.nodes;
-    const q = this.filterText.toLowerCase();
-    return this.nodes.filter((node) => {
+    const query = this.filterInput.getValue().trim();
+    if (query.length === 0) return this.nodes;
+    return fuzzyFilter(this.nodes, query, (node) => {
       const handle = (this.brain ? handleOf(this.brain.handles, "atlas", node.id) : "") ?? "";
-      return (
-        handle.toLowerCase().includes(q) ||
-        node.title.toLowerCase().includes(q) ||
-        node.text.toLowerCase().includes(q)
-      );
+      return `${handle} ${node.title} ${node.text}`;
     });
   }
 
@@ -292,11 +286,15 @@ export class AtlasView implements Component, Focusable {
     // keys do here. The book itself starts one quiet line below it.
     const name = tokens.bold(tokens.atlas("ATLAS"));
     const figure = `${tokens.text(String(filtered.length))} ${tokens.faint("nodes")}`;
-    const filter = this.filtering
-      ? ` ${tokens.accent(`/${this.filterText}█`)}`
-      : this.filterText
-        ? ` ${tokens.accent(`/${this.filterText}`)}`
-        : "";
+    const query = this.filterInput.getValue();
+    let filter = "";
+    if (this.filtering) {
+      this.filterInput.focused = this.focused;
+      const filterWidth = Math.min(24, Math.max(6, visibleWidth(query) + 2));
+      filter = ` ${tokens.accent((this.filterInput.render(filterWidth)[0] ?? `/${query}`).trimEnd())}`;
+    } else if (query.length > 0) {
+      filter = ` ${tokens.accent(`/${query}`)}`;
+    }
     const stale = this.staleHandles.size > 0 ? ` ${tokens.warn(`!${this.staleHandles.size} stale`)}` : "";
     const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
     const right = `${tokens.faint(this.controls.nowArmed ? "next mark applies NOW " : "a/d mark · u withdraw · ! now · / filter ")}`;

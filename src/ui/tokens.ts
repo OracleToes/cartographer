@@ -97,16 +97,12 @@ export const bandLine = (line: string, width: number): string => fillLine(line, 
 
 export { visibleWidth, truncateToWidth };
 /**
- * Fit a line to the width: pad it, and clip it only when it is genuinely too
- * long. `>=` here was a real defect — a body line that filled the column
- * exactly was handed to `truncateToWidth`, which reserves room for its
- * ellipsis and so ate three characters out of the middle of a paragraph that
- * had nothing wrong with it. A line already at the width is left alone.
+ * Fit a line to the width: truncate with ellipsis when wider than `width`,
+ * pad with spaces when narrower, and leave exact-width lines untouched.
+ * Delegates to pi-tui's `truncateToWidth(..., pad = true)`.
  */
 export function padLine(str: string, width: number): string {
-  const w = visibleWidth(str);
-  if (w > width) return truncateToWidth(str, width);
-  return w === width ? str : str + " ".repeat(width - w);
+  return truncateToWidth(str, width, "...", true);
 }
 
 /**

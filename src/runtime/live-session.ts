@@ -272,28 +272,12 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 }
 
 /**
- * Wait for the current chain of runs to end, without waiting for a sleeping
- * conversation-owned task. Submission.wait settles before Pi's after-run tasks
- * have queued their follow-ups; the live run remains present until they finish.
+ * Wait for the current chain of runs (and any non-background after-run tasks
+ * such as `TreeReadTask`) to settle, without waiting for a sleeping
+ * background rest (`SleepTask`).
  */
 export async function waitForRunEnd(session: LiveSession): Promise<void> {
-  const watch = await session.harness.watchDoc(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
-  if (watch === undefined) return;
-  try {
-    if (watch.value?.run === undefined) return;
-    await new Promise<void>((resolve, reject) => {
-      watch.start(async (call) => {
-        if (call.kind === "failed") reject(call.error);
-        else if (call.value.run === undefined) resolve();
-      });
-      void watch.closed.then((end) => {
-        if (end.kind === "failed" || end.kind === "listener_error") reject(end.error);
-        else resolve();
-      });
-    });
-  } finally {
-    await watch.stop();
-  }
+  await session.conversation.waitForIdle(BACKGROUND_CONTEXT);
 }
 
 /** Submit a person message; the submission settles when its run answers. */
@@ -734,7 +718,7 @@ export async function collapseLiveSession(
   // sweep removes the store that holds the rest.
   const carry = automatic ? await unansweredInputs(session) : [];
   const paused = session.state.paused;
-  if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT);
+  if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT, { background: true });
   else await interruptRun(session);
   await closeLiveSession(session);
   // The Brain moves the marked records itself; what the new generation's frozen
