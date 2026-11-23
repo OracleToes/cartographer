@@ -180,7 +180,7 @@ function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
     // Carto adds is how the file is named, atomic pacing, and read-only mode.
-    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step — a function, a value, a small block — after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
+    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       guardedPath(root, pathOf(args));
@@ -226,7 +226,7 @@ const pathOf = (args: object): string => String((args as { path?: unknown }).pat
 function refuseWhenReadOnly(readOnly: boolean): void {
   if (readOnly) {
     throw new Error(
-      "The project is in read only mode: you make no edit and no other destructive change while it is on. Read, answer, and say what you would change when you are asked for it — there is nothing to queue or to ask permission for.",
+      "The project is in read only mode: you make no edit and no other destructive change while it is on. Read, answer, and say what you would change when you are asked for it. There is nothing to queue or to ask permission for.",
     );
   }
 }
@@ -241,7 +241,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "chat",
       description:
-        `Say something to ${them}. This is the only channel ${them} sees; your plain text is private reasoning. Speak plainly when you have a result, question, or decision — no call needed on quiet working turns.`,
+        `Say something to ${them}. This is the only channel ${them} sees; your plain text is private reasoning. Speak plainly when you have a result, question, or decision. No call is needed on quiet working turns.`,
       parameters: obj({ text: Text }),
       replay: "safe",
       execute: async (args, api) => {
@@ -255,7 +255,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Create or update an Atlas node — either lasting project understanding or a node in your task/plan graph (goals linked to steps down to atomic leaves, worked leaves-before-stems, attached to the files they touch). Pass `handle` to update an existing node in place as work progresses; omit `handle` for a new node. Links and attachments replace the existing set on update, and nodes need not connect to anything.",
+        "Create or update an Atlas node: either lasting project understanding or a node in your task/plan graph (goals linked to steps down to atomic leaves, worked leaves-before-stems, attached to the files they touch). Pass `handle` to update an existing node in place as work progresses; omit `handle` for a new node. Links and attachments replace the existing set on update, and nodes need not connect to anything.",
       parameters: obj({
         handle: opt(HandleRef),
         title: str({ description: "The node's name: what this understanding or task node is about." }),
@@ -466,7 +466,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries — after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work — as well as when context fills. Update Atlas/Ledger and send any \`chat\` ${them} needs first; everything unpinned outside the Brain is swept.`,
+        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries (after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work) as well as when context fills. Update Atlas/Ledger and send any \`chat\` ${them} needs first; everything unpinned outside the Brain is swept.`,
       parameters: obj({}),
       replay: "safe",
       execute: async () => {
