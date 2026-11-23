@@ -477,9 +477,13 @@ export class ContextView implements Component, Focusable {
         summary,
         body,
         real: entry.lines.join("\n"),
+        // A file the head holds is a row you can act on whether or not it is still
+        // pinned: `p` unpins it, and on the row that says it is leaving, `p` pins it
+        // again, so the head keeps it.
+        target: { part: "files" as const, id: file?.path ?? entry.key },
         ...(file === undefined
           ? { marked: "unpinned since the freeze · leaves the head at the next collapse" }
-          : { pinned: file.pinned, target: { part: "files" as const, id: file.path } }),
+          : { pinned: file.pinned }),
       } satisfies PromptNode);
     }
     // Pinned ephemera come after Chat in the head (§5.1), each under its own

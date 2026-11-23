@@ -979,13 +979,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         return;
       }
       if (partId === "files") {
-        // A pinned file is unpinned by the person here (§3.2): the pin is theirs
-        // or the agent's, and the person may take either off.
+        // The head's file row toggles (§3.2). A pinned file is unpinned by the
+        // person, whoever pinned it; a row the head still holds after its pin was
+        // taken off pins it again, as the person's, under the same path.
         const path = String(itemId);
         const held = brainState.files.find((file) => file.path === path);
-        if (held === undefined) return;
-        await brain.apply({ kind: "file.pin", path, pinned: null }, Date.now());
-        pushStatus(held.pinned === "user" ? `unpinned ${path}` : `took the agent's pin off ${path}`);
+        if (held === undefined) {
+          await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
+          pushStatus(`pinned ${path} (you): the head keeps it, read again at every collapse`);
+        } else {
+          await brain.apply({ kind: "file.pin", path, pinned: null }, Date.now());
+          pushStatus(held.pinned === "user" ? `unpinned ${path}` : `took the agent's pin off ${path}`);
+        }
         await syncContextView(await brain.read());
         await refreshSidebar();
         tui.requestRender();

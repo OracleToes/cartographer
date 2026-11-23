@@ -1433,6 +1433,22 @@ test("a file pinned since the freeze is not in the head's rows; the tail carries
   assert.match(shown, /unpinned since the freeze/, "with the reason it is leaving");
 });
 
+test("`p` toggles a file the head holds, pinned or not: unpinned, its row stays and p pins it again", () => {
+  const brain = frozenBrain();
+  brain.files = [{ path: "notes.md", pinned: "user", createdAt: 1 }];
+  const view = contextOf({ brain });
+  const pressed = [];
+  view.onTogglePin = (part, id) => pressed.push([part, id]);
+  for (let step = 0; step < 40; step += 1) {
+    view.handleInput("p");
+    view.handleInput("j");
+  }
+  const files = pressed.filter(([part]) => part === "files").map(([, id]) => id);
+  assert.ok(files.includes("notes.md"), "p on a pinned file's row reaches the pin toggle");
+  assert.ok(files.includes("src/gone.ts"), "and so does p on the row of a file whose pin was taken off since the freeze, which pins it again");
+  assert.match(plain(view.render(100).join("\n")), /unpinned since the freeze/, "that row says it is leaving until then");
+});
+
 test("a record is the head's bytes, even after the Brain's copy changed; a pinned item is too", () => {
   const view = contextOf();
   const human = plain(view.render(100).join("\n"));
