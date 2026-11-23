@@ -46,6 +46,7 @@ import {
   collapseLiveSession,
   interruptRun,
   openLiveSession,
+  resumeSession,
   sessionTranscript,
   submitInput,
   switchSessionModel,
@@ -2091,6 +2092,59 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  /**
+   * Start or resume the agent without sending a person message (`ctrl+r` / `/resume`).
+   * Unpauses a held stream without injecting a state block; non-action when
+   * already running; otherwise sends a fresh `<carto-state/>` marker.
+   */
+  const runResume = async () => {
+    if (state.collapsing) {
+      pushStatus("collapsing — hold on");
+      tui.requestRender();
+      return;
+    }
+    if (state.running && !state.session.state.paused) return;
+    const epoch = state.collapseEpoch;
+    try {
+      const outcome = await resumeSession(state.session);
+      if (outcome.kind === "running") return;
+      if (outcome.kind === "unpaused") {
+        pushStatus(outcome.line);
+        await rebuildTranscript();
+        tui.requestRender();
+        return;
+      }
+      if (outcome.submission === undefined) return;
+      state.notes = [];
+      state.inFlight += 1;
+      state.running = true;
+      headerState.running = true;
+      pushStatus(outcome.line);
+      tui.requestRender();
+      try {
+        const settled = await outcome.submission.wait(BACKGROUND_CONTEXT);
+        await waitForRunEnd(state.session);
+        if (settled.status !== "done" && epoch === state.collapseEpoch && !state.collapsing && state.session.state.collapseRequested === null) {
+          pushStatus(`the run ended with status "${settled.status}"`);
+        }
+      } catch (error) {
+        if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
+      }
+      state.inFlight = Math.max(0, state.inFlight - 1);
+      state.running = state.inFlight > 0;
+      headerState.running = state.running;
+      if (shutdownRequested) return;
+      await rebuildTranscript();
+      await serviceCollapseRequest();
+      if (options.refreshCapacity === true) await refreshAdvertisedWindow();
+      await refreshSidebar();
+      tui.requestRender();
+    } catch (error) {
+      if (!shutdownRequested) pushStatus(`resume failed: ${errorText(error)}`);
+      tui.requestRender();
+    }
+  };
+
   const submitMessage = (message: string) => {
     // A line written while the agent is held in its stream lets go of that
     // stream first (§9): the held reply ends here, and this line is the next
@@ -2164,6 +2218,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    if (message === "/resume") {
+      void runResume();
+      return;
+    }
     if (message === "/model" || message.startsWith("/model ")) {
       void handleModelSlash(message.slice("/model".length)).catch((error: unknown) => {
         if (!shutdownRequested) pushStatus(`model switch failed: ${errorText(error)}`);
@@ -2325,6 +2383,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           .catch(() => undefined);
       },
       available: () => state.running,
+    },
+    {
+      id: "resume",
+      group: "the run",
+      label: "resume",
+      hint: "start or resume with a fresh state block (or let a held reply finish)",
+      key: "ctrl+r",
+      run: () => void runResume(),
+      available: () => !state.running || state.session.state.paused,
     },
     {
       id: "pause",
@@ -2787,6 +2854,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
     { group: "type it", key: "/help", label: "the command list in the transcript" },
     { group: "type it", key: "/model", label: "pick or switch the model (/model <name>)" },
+    { group: "type it", key: "/resume", label: "start or resume the agent with a fresh state block" },
     { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 

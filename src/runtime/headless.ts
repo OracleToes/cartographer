@@ -36,6 +36,7 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  resumeSession,
   submitInput,
   switchSessionModel,
   togglePause,
@@ -68,6 +69,7 @@ const HELP = [
   "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
   "  /model     list provider models (/model <name> switches at the next step)",
   "  /jobs      list persistent piped jobs",
+  "  /resume    start or resume the agent with a fresh state block (no message)",
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /help      see this",
@@ -277,6 +279,36 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         } catch (err) {
           writeLine(error, `(the pause failed: ${err instanceof Error ? err.message : String(err)})`);
         }
+        continue;
+      }
+      if (line === "/resume") {
+        // Unfreezing a held mid-stream reply must run outside `exclusive`,
+        // because the held run is currently holding that lock.
+        if (session.state.paused && session.freeze.frozen()) {
+          try {
+            writeLine(output, (await resumeSession(session)).line);
+          } catch (err) {
+            writeLine(error, `(resume failed: ${err instanceof Error ? err.message : String(err)})`);
+          }
+          continue;
+        }
+        // Strict non-action when already running and not held.
+        const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+        if (live?.run !== undefined) continue;
+        await exclusive(async () => {
+          try {
+            const outcome = await resumeSession(session);
+            if (outcome.kind !== "started" || outcome.submission === undefined) return;
+            const settled = await outcome.submission.wait(BACKGROUND_CONTEXT);
+            await waitForRunEnd(session);
+            if (settled.status !== "done" && session.state.collapseRequested === null) {
+              writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
+            }
+          } catch (err) {
+            writeLine(error, `(resume failed: ${err instanceof Error ? err.message : String(err)})`);
+          }
+          await settle();
+        });
         continue;
       }
       if (line === "/model" || line.startsWith("/model ")) {

@@ -557,6 +557,49 @@ export async function togglePause(session: LiveSession, to?: boolean): Promise<P
   };
 }
 
+export interface ResumeOutcome {
+  /**
+   * - `"running"`: a run is already active (not held) — strict non-action.
+   * - `"unpaused"`: a held mid-stream reply was unpaused without sending a state block.
+   * - `"started"`: admitted `STATE_BLOCK_MARKER` to start/resume the agent without a person message.
+   */
+  readonly kind: "running" | "unpaused" | "started";
+  readonly submission?: Awaited<ReturnType<typeof admitInput>>;
+  readonly line: string;
+}
+
+/**
+ * Start or resume the agent without sending a person message.
+ *
+ * - If held mid-stream (`^v`), unpauses the held stream without admitting a
+ *   state block (sending a block would break the stream).
+ * - If already running (and not paused/held), returns `"running"` as a strict
+ *   non-action.
+ * - Otherwise (idle, sleeping, stopped, or paused while idle), clears pause
+ *   and the automatic-collapse stall guard, cancels any dormant `SleepTask`,
+ *   and admits `STATE_BLOCK_MARKER` so the agent starts from a fresh
+ *   `<carto-state>` with no Chat record written to the Brain.
+ */
+export async function resumeSession(session: LiveSession): Promise<ResumeOutcome> {
+  if (session.state.paused && session.freeze.frozen()) {
+    const outcome = await togglePause(session, false);
+    return { kind: "unpaused", line: outcome.line };
+  }
+  const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+  if (live?.run !== undefined) {
+    return { kind: "running", line: "already running" };
+  }
+  const wasPaused = session.state.paused;
+  session.state.paused = false;
+  session.state.rebuiltAutomatically = false;
+  const submission = await admitInput(session, STATE_BLOCK_MARKER, "followUp");
+  return {
+    kind: "started",
+    submission,
+    line: wasPaused ? "resumed — state block sent" : "started — state block sent",
+  };
+}
+
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
 export async function interruptRun(session: LiveSession): Promise<void> {
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
