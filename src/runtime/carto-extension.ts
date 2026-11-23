@@ -344,6 +344,13 @@ export function createCartoExtension(options: CartoExtensionOptions) {
     tasks: [SleepTask, TreeReadTask],
     sections: [
       /**
+       * The instructions, first: §5.1 puts the system prompt ahead of the tools
+       * and the Brain. pi appends an agent's own `instructions` after every
+       * extension section, which would put them last, so they are a section of
+       * this extension and sit before the projection.
+       */
+      section("carto-instructions", () => cartoInstructions(options.session.person), { tag: false }),
+      /**
        * The frozen projection for this generation: written once at creation,
        * read verbatim ever since, so the prompt prefix stays byte-stable
        * between collapses. A crash reopens the identical bytes.

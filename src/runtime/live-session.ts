@@ -35,7 +35,7 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
 import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
-import { createCartoExtension, cartoInstructions, generationProgressed, newGenerationWork, type LiveSessionState } from "./carto-extension.js";
+import { createCartoExtension, generationProgressed, newGenerationWork, type LiveSessionState } from "./carto-extension.js";
 import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
 import {
@@ -197,7 +197,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     }, BACKGROUND_CONTEXT);
     const agent = {
       model: modelRef,
-      instructions: cartoInstructions(state.person),
       // The context is gardened by collapse, never by Pi rewriting the transcript.
       compaction: { enabled: false },
       cwd: root,

@@ -90,6 +90,28 @@ export type TranscriptEntry =
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
 
+/** Below every context entry's key: where the Chat the head holds is drawn. */
+const HEAD_CHAT_KEY = -1_000_000;
+
+/**
+ * Where a Chat record is drawn among the generation's entries. A record the
+ * frozen head holds is in the head, which is before everything the generation
+ * did, so it is drawn first, in the head's order, whatever its timestamp says.
+ * Any other record sits after the last entry that was written at or before it;
+ * an entry with no message of its own has no time and anchors nothing.
+ */
+export function chatKeyOf(
+  record: { id: string; createdAt: number },
+  head: readonly string[],
+  frame: ReadonlyArray<{ id: number; t: number }>,
+): number {
+  const at = head.indexOf(record.id);
+  if (at >= 0) return HEAD_CHAT_KEY + at;
+  let anchor = 0;
+  for (const slot of frame) if (slot.t > 0 && slot.t <= record.createdAt) anchor = Math.max(anchor, slot.id);
+  return anchor + 0.5;
+}
+
 /** Retain dialogue and only the work that actually survived a collapse. */
 export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: readonly PinnedEphemeral[]): TranscriptEntry[] {
   const held = new Map(pins.filter((item) => item.pinned !== undefined).map((item) => [item.id, item]));

@@ -23,6 +23,7 @@
  * performs; Carto adds only the composition.
  */
 import { readFile } from "node:fs/promises";
+import { snapshotPaths } from "../runtime/projection-files.js";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { basename, relative, resolve } from "node:path";
@@ -74,7 +75,7 @@ import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
@@ -1280,14 +1281,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const message = messageOf(entry);
         frame.push({ id, t: message === undefined ? 0 : timestampOf(message) });
       }
-      /** Largest frame id at or before `t` — where a non-entry event sits in the frame's order. */
-      const anchorAt = (t: number): number => {
-        let anchor = 0;
-        for (const slot of frame) {
-          if (slot.t <= t) anchor = Math.max(anchor, slot.id);
-        }
-        return anchor;
-      };
 
       const visibleMessages: BlockMessageLike[] = [];
       for (const entry of entries) {
@@ -1415,6 +1408,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       state.sealed = retained;
       const retainedChat = new Set(retained.flatMap((entry) => entry.kind === "agent" && entry.recordId !== undefined ? [entry.recordId] : []));
       const chatRecords = await brain.readChat();
+      // The Chat the frozen head holds, in the head's order: it is drawn where
+      // the head is, before the generation's work, as the Context view lists it.
+      const headChat: string[] = await readFile(snapshotPaths(options.root, state.session.generation).sidecar, "utf8")
+        .then((text) => {
+          const sidecar = JSON.parse(text) as { chat?: unknown };
+          return Array.isArray(sidecar.chat) ? sidecar.chat.filter((id): id is string => typeof id === "string") : [];
+        })
+        .catch(() => []);
       const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
       // The person's own Chat is a record too (§2.3), and the transcript is a
       // view of the same records the Context view lists, so none is missing
@@ -1453,14 +1454,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           if (left > 0) {
             shownPerson.set(record.text, left - 1);
           } else {
-            agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "person", text: record.text, ...recordFields(record.id) } });
+            agent.push({ key: chatKeyOf(record, headChat, frame), entry: { kind: "person", text: record.text, ...recordFields(record.id) } });
           }
           continue;
         }
         if (retainedChat.has(record.id)) continue;
         const chatHandle = handleOf(brainState.handles, "chat", record.id);
         agent.push({
-          key: anchorAt(record.createdAt) + 0.5,
+          key: chatKeyOf(record, headChat, frame),
           entry: {
             kind: "agent",
             text: record.text,

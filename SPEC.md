@@ -750,9 +750,9 @@ collapse, because the model still reads it. A Brain record the head does not hol
 yet shows its text and says, specifically, that the model does not have it and
 when it will. The body holds every message the model receives, the agent's `chat`
 calls and its plain text included; the tail is the state block as sent. The
-system prompt is shown in the tag the harness puts around it, after the
-projection it follows; the tools are shown as registered, `bash` with Carto's
-sentence. The token count covers what is shown.
+head is listed in §5.1's order, the system prompt first (it is the first
+section of the system message, ahead of the projection); the tools are shown as
+registered, `bash` with Carto's sentence. The token count covers what is shown.
 
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
@@ -794,7 +794,10 @@ sidebar's counts with it, judged by a digest of what the books show so a quiet
 Brain costs a read and a comparison, not a redraw. The Context view and the Tree
 follow on the same drain.
 
-**The transcript renders everything the model does.** The person's lines land
+**The transcript renders everything the model does.** The Chat the head holds is
+drawn first, in the head's order, before anything the generation did — after a
+reload as before it, and whatever the entries' timestamps say; Chat written since
+sits where it was written. The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
 Chat, in their own hues, never mistaken for Chat. A card streams while the run is

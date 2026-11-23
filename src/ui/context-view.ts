@@ -345,7 +345,7 @@ export class ContextView implements Component, Focusable {
   private totalTokens(): number {
     if (this.data === undefined) return 0;
     return (
-      estimateTokens(`<instructions>\n${this.data.systemPrompt}\n</instructions>`) +
+      estimateTokens(this.data.systemPrompt) +
       estimateSerialized(this.data.tools) +
       estimateTokens(this.headText(this.data)) +
       estimateSerialized(this.data.transcriptMessages) +
@@ -371,10 +371,33 @@ export class ContextView implements Component, Focusable {
     const person = data.person ?? "you";
 
     // ── head ────────────────────────────────────────────────────────────────
-    // The head is the system message: the frozen projection first, then the
-    // instructions the harness wraps in their own tag. The tool definitions are
-    // declared to the provider alongside it, not written into it.
+    // The head, in §5.1's order: the system prompt, the tool definitions, then
+    // the frozen projection. The tools are declared to the provider alongside
+    // the system message; the rest is the message itself.
     const head: PromptNode[] = [];
+
+    // The system prompt, then the tool definitions (§5.1): the instructions are the first section of the system message.
+    head.push({
+      id: "system",
+      handle: "H",
+      kind: "system",
+      label: "system prompt",
+      summary: oneLine(data.systemPrompt),
+      body: data.systemPrompt,
+      real: data.systemPrompt,
+    });
+    data.tools.forEach((tool, index) => {
+      head.push({
+        id: `tool-${tool.name}`,
+        handle: `Y${index + 1}`,
+        kind: "tool",
+        label: tool.name,
+        summary: tool.description,
+        body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
+        real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
+        target: { part: "tools", id: tool.name },
+      });
+    });
 
     // A row for what the head holds that the Brain no longer does, or holds
     // differently: the head is frozen, so the model still reads it.
@@ -527,29 +550,6 @@ export class ContextView implements Component, Focusable {
         }),
       );
     }
-
-    // The instructions, in the tag the harness puts around them.
-    head.push({
-      id: "system",
-      handle: "H",
-      kind: "system",
-      label: "system prompt",
-      summary: oneLine(data.systemPrompt),
-      body: data.systemPrompt,
-      real: `<instructions>\n${data.systemPrompt}\n</instructions>`,
-    });
-    data.tools.forEach((tool, index) => {
-      head.push({
-        id: `tool-${tool.name}`,
-        handle: `Y${index + 1}`,
-        kind: "tool",
-        label: tool.name,
-        summary: tool.description,
-        body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
-        real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
-        target: { part: "tools", id: tool.name },
-      });
-    });
 
     // ── body ────────────────────────────────────────────────────────────────
     // The body is never sorted by kind: the person's messages, the reasoning, the

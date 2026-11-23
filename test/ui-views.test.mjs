@@ -5,7 +5,7 @@ import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
-import { TranscriptView, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
+import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
@@ -445,13 +445,12 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   assert.equal(gutter(), true, "and opens again");
 
   // Folding, and `tab` between the human and the real view of schema-shaped content.
-  view.handleInput("j"); // the second entry of the head
+  view.handleInput("j"); // the system row (head's first entry)
   lines = view.render(90);
   view.handleInput("\t");
   shown = plain(view.render(90).join("\n"));
   assert.ok(shown.includes("as the model receives it"), "tab swaps to the real view");
   view.handleInput("\t");
-  view.handleInput("k"); // back to the head's first entry
 
   // A mark is a mark, not a deletion (§4.1): `d` reports it and `!` arms it.
   const marks = [];
@@ -463,9 +462,9 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   // Walk down to the person's line: the head's Brain records and tools are
   // markable too, so the walk reaches them first and names each of them.
   for (let step = 0; step < 20; step += 1) {
+    view.handleInput("j");
     view.handleInput("d");
     if (marks.some((mark) => mark.part === "transcript")) break;
-    view.handleInput("j");
   }
   assert.ok(marks.some((mark) => mark.part === "atlas" && mark.id === "a1"), "an atlas record in the head can be marked");
   assert.ok(marks.some((mark) => mark.part === "ledger" && mark.id === "l1"), "a ledger record in the head can be marked");
@@ -930,6 +929,7 @@ test("a Brain delete mark appears on the Context row until withdrawn", () => {
   const view = new ContextView();
   const refresh = () => view.setData({ brain, systemPrompt: "system", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "state" });
   refresh();
+  view.handleInput("j");
   view.onDelete = (part, id, now) => {
     assert.deepEqual({ part, id, now }, { part: "chat", id: "c1", now: false });
     brain = applyWrite(brain, { kind: "mark.set", target: "chat", id, action: "delete", author: "user" }, 2);
@@ -1463,10 +1463,10 @@ test("the model's own text is a body row with its words; the system prompt and t
   assert.ok(!/result\s+\(empty\)/.test(human), "and is not an empty result");
   view.handleInput("\t");
   const real = plain(view.render(100).join("\n"));
-  assert.ok(real.includes("<instructions>") && real.includes("</instructions>"), "the system prompt is in the tag the harness wraps it in");
+  assert.ok(real.includes("you are carto"), "the system prompt is shown as sent");
   assert.ok(!human.includes("what is true right now: mode"), "the tail's row is the block, not a description of it");
-  // The head is the projection and then the instructions, as the system message is.
-  assert.ok(real.indexOf("A1") < real.indexOf("<instructions>"), "the projection comes before the instructions");
+  // §5.1: the system prompt first, then the Brain.
+  assert.ok(real.indexOf("you are carto") < real.indexOf("A1"), "the system prompt comes before the atlas");
 });
 
 test("the token count includes a head that was rendered from the Brain when no frozen file exists", () => {
@@ -1476,4 +1476,32 @@ test("the token count includes a head that was rendered from the Brain when no f
     return Number(/~([\d,]+) tokens/.exec(plain(view.render(100)[0]))[1].replace(/,/g, ""));
   };
   assert.ok(count(undefined) > count(""), "the fallback head is counted");
+});
+
+test("the system message is the instructions first and the frozen projection second (§5.1)", async () => {
+  const { createCartoExtension, cartoInstructions } = await import("../dist/runtime/carto-extension.js");
+  const extension = createCartoExtension({
+    root: "/nonexistent-root",
+    brain: { read: async () => emptyBrain() },
+    session: { person: "OracleToes", pending: [], tree: { anchor: "", depth: 1 }, collapseRequested: null, readOnly: false, generation: "g" },
+    markdownPath: "/nonexistent-root/projection.md",
+  });
+  const keys = extension.sections.map((entry) => entry.key);
+  assert.deepEqual(keys, ["carto-instructions", "carto-context"], "pi puts an agent's own instructions last, so they are a section here");
+  const first = await extension.sections[0].render({}, {});
+  assert.equal(first, cartoInstructions("OracleToes"));
+});
+
+test("Chat the head holds is drawn before the generation's work, whatever the entries' times say", () => {
+  // A reloaded generation: its entries are all newer than the Chat the head holds,
+  // and two of them (a system entry, a result) carry no time of their own.
+  const frame = [{ id: 1, t: 0 }, { id: 2, t: 5_000 }, { id: 3, t: 6_000 }, { id: 9, t: 0 }];
+  const head = ["c-first", "c-second"];
+  const first = chatKeyOf({ id: "c-first", createdAt: 1_000 }, head, frame);
+  const second = chatKeyOf({ id: "c-second", createdAt: 2_000 }, head, frame);
+  assert.ok(first < second, "in the head's own order");
+  for (const entryId of [1, 2, 3, 9]) assert.ok(second < entryId, `before entry ${entryId}`);
+  // Not in the head: after the last entry written before it. An entry with no time anchors nothing.
+  assert.equal(chatKeyOf({ id: "later", createdAt: 5_500 }, head, frame), 2.5);
+  assert.equal(chatKeyOf({ id: "older", createdAt: 100 }, [], frame), 0.5, "older than every entry: before them all, not after a timeless one");
 });
