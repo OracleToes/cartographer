@@ -6,10 +6,11 @@
  * agent's `chat` tool calls. `--headless` forces the line driver.
  */
 
+import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
 import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
-import { loadGlobalConfig, parseModelRef, ConfigError } from "./runtime/config.js";
+import { ConfigError, loadGlobalConfig, parseModelRef, updateConfigModel, type ModelRef } from "./runtime/config.js";
 import { personName } from "./domain/person.js";
 import { COLLAPSE_WARNING_PERCENT } from "./domain/state-block.js";
 
@@ -124,8 +125,13 @@ try {
   }
 
   const { configuredModels } = await import("./runtime/llama-swap-model.js");
-  const models = configuredModels(config, model);
+  let activeModel: ModelRef = model;
+  const models = configuredModels(config, model, { activeModelId: () => activeModel.modelId });
   const refreshCapacity = config.llamaSwapEndpoint === undefined ? undefined : true;
+  const onModelChange = async (next: ModelRef): Promise<void> => {
+    activeModel = { ...next };
+    await updateConfigModel(`${next.provider}/${next.modelId}`, dirname(configPath));
+  };
 
   const stdinIsTty = (process.stdin as { isTTY?: boolean }).isTTY === true;
   const code = values.headless === true || !stdinIsTty
@@ -138,6 +144,7 @@ try {
         output: process.stdout,
         error: process.stderr,
         person,
+        onModelChange,
         ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
@@ -147,6 +154,7 @@ try {
         models,
         model,
         person,
+        onModelChange,
         ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });

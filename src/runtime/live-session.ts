@@ -209,6 +209,15 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
+    // `harness.root` skips `configure` when reopening an existing generation
+    // store, leaving the persisted `pi.agent` stuck on the previous model.
+    // Reconcile the persisted model with the configured one immediately so a
+    // `config.json` or `--model` change takes effect on restart without a
+    // collapse.
+    const persisted = (await conversation.agent(BACKGROUND_CONTEXT)).model;
+    if (persisted?.provider !== modelRef.provider || persisted?.modelId !== modelRef.modelId) {
+      await conversation.configure({ model: modelRef }, BACKGROUND_CONTEXT);
+    }
     // The latest response is durable in Pi's context. Rehydrate its reported
     // usage on reopen instead of resetting the bar to an unrelated estimate.
     const prior = (await conversation.context(BACKGROUND_CONTEXT)).messages;
@@ -746,4 +755,42 @@ export async function collapseLiveSession(
   for (const input of carry) await admitInput(next, input.content, input.whenBusy);
   return { session: next, report, reason, carried: carry.length, resumed: carry.length > 0 || !paused };
 }
+
+export interface SwitchModelResult {
+  readonly model: ModelRef;
+  readonly changed: boolean;
+  readonly contextWindow: number;
+}
+
+/**
+ * Switch the live session's active model.
+ *
+ * Pi resolves `agent.model` in `generation`'s `prepare` phase at the start of
+ * each LLM request and fixes it for that request, so updating `AgentDoc` via
+ * `conversation.configure({ model })` leaves any in-flight request undisturbed
+ * and takes effect at the next natural boundary (the next step or next turn).
+ */
+export async function switchSessionModel(
+  session: LiveSession,
+  models: Models,
+  model: ModelRef,
+): Promise<SwitchModelResult> {
+  const resolved = models.getModel(model.provider, model.modelId);
+  if (resolved === undefined) {
+    throw new Error(`Model "${model.provider}/${model.modelId}" is not in the provider catalog.`);
+  }
+  const current = (await session.conversation.agent(BACKGROUND_CONTEXT)).model;
+  const changed = current?.provider !== model.provider || current?.modelId !== model.modelId;
+  if (changed) {
+    await session.conversation.configure({ model }, BACKGROUND_CONTEXT);
+  }
+  session.state.contextWindow = resolved.contextWindow;
+  session.state.desiredMaxOutput = resolved.maxTokens;
+  return {
+    model,
+    changed,
+    contextWindow: resolved.contextWindow,
+  };
+}
+
 

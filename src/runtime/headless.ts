@@ -37,11 +37,14 @@ import {
   collapseLiveSession,
   openLiveSession,
   submitInput,
+  switchSessionModel,
   togglePause,
   waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
+import type { ModelRef } from "./config.js";
+import { formatModelRef, indexModels, resolveIndexedModel } from "./model-catalog.js";
 
 export interface HeadlessOptions extends LiveSessionOptions {
   input: Readable;
@@ -56,10 +59,13 @@ export interface HeadlessOptions extends LiveSessionOptions {
    * known window stands.
    */
   refreshCapacity?: boolean;
+  /** Called after `/model` switches models so the host can persist or track the selection. */
+  onModelChange?: (model: ModelRef) => Promise<void> | void;
 }
 
 const HELP = [
   "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
+  "  /model     list provider models (/model <name> switches at the next step)",
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /help      see this",
@@ -125,17 +131,19 @@ async function runCollapse(
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
+  let activeModel: ModelRef = { ...options.model };
+  const sessionOptions = (): HeadlessOptions => ({ ...options, model: activeModel });
   const refresh = async () => {
     // Silent on failure: an unreachable server leaves the last known window standing.
-    await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
+    await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
   };
   if (options.refreshCapacity === true) await refresh();
-  let session = await openLiveSession(options);
+  let session = await openLiveSession(sessionOptions());
   let capacityRefreshFlight: Promise<void> | undefined;
   const refreshWindow = async () => {
     if (options.refreshCapacity !== true) return;
     if (capacityRefreshFlight !== undefined) return capacityRefreshFlight;
-    const work = applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
+    const work = applyCapacityRefresh(session, refresh, options.models, activeModel.provider, activeModel.modelId, output);
     capacityRefreshFlight = work;
     try {
       await work;
@@ -192,7 +200,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         break;
       }
       try {
-        session = await runCollapse(session, options, output, verdict.reason, true);
+        session = await runCollapse(session, sessionOptions(), output, verdict.reason, true);
       } catch (err) {
         writeLine(error, `(the collapse failed: ${err instanceof Error ? err.message : String(err)})`);
         break;
@@ -251,9 +259,42 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         }
         continue;
       }
+      if (line === "/model" || line.startsWith("/model ")) {
+        const argument = line.slice("/model".length).trim();
+        const indexed = await indexModels(options.models, { refresh: true, active: activeModel });
+        if (argument === "") {
+          if (indexed.errors.length > 0) {
+            for (const err of indexed.errors) writeLine(error, `(model refresh ${err.provider}: ${err.message})`);
+          }
+          for (const entry of indexed.models) {
+            const mark = entry.active ? "*" : " ";
+            const window = entry.contextWindow > 0 ? entry.contextWindow.toLocaleString() : "window unknown";
+            writeLine(output, `${mark} ${entry.provider}/${entry.modelId} (${window})`);
+          }
+          continue;
+        }
+        const resolved = resolveIndexedModel(options.models, argument, activeModel.provider);
+        if (resolved === undefined) {
+          writeLine(error, `(unknown model "${argument}"; run /model to list indexed models)`);
+          continue;
+        }
+        try {
+          await switchSessionModel(session, options.models, resolved);
+          activeModel = { ...resolved };
+          try {
+            await options.onModelChange?.(resolved);
+          } catch (persistErr) {
+            writeLine(error, `(model switched, could not save config: ${persistErr instanceof Error ? persistErr.message : String(persistErr)})`);
+          }
+          writeLine(output, `model → ${formatModelRef(resolved)}`);
+        } catch (err) {
+          writeLine(error, `(model switch failed: ${err instanceof Error ? err.message : String(err)})`);
+        }
+        continue;
+      }
       if (line === "/collapse") {
         await exclusive(async () => {
-          session = await runCollapse(session, options, output, "person requested (/collapse)");
+          session = await runCollapse(session, sessionOptions(), output, "person requested (/collapse)");
           await watchSession();
           for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
         });

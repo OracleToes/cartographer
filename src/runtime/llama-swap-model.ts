@@ -76,6 +76,8 @@ export const LLAMA_SWAP_COMPAT = {
 type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status?: number; json(): Promise<unknown> }>;
 export interface LlamaSwapDeps {
   fetchImpl?: FetchLike;
+  /** Returns the currently active model id (for bare llama-server mirroring and `/props` fallback after mid-session switches). */
+  activeModelId?: () => string;
 }
 
 /** Capacity advertised by one listing entry; field order per llama-swap and legacy llama.cpp. */
@@ -216,12 +218,13 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
         .filter((candidate): candidate is Model<"openai-completions"> => candidate !== undefined);
       // A bare llama-server reports its GGUF filename in /v1/models while
       // answering requests for the configured route name; mirror its advertised
-      // capacity onto the configured model id when no exact id match exists.
-      let target = models.find((candidate) => candidate.id === model.modelId);
+      // capacity onto the active model id when no exact id match exists.
+      const activeId = deps.activeModelId?.() ?? model.modelId;
+      let target = models.find((candidate) => candidate.id === activeId);
       if (target === undefined && data.length === 1) {
         const lone = data[0];
         if (typeof lone === "object" && lone !== null && (lone as Record<string, unknown>).owned_by === "llamacpp") {
-          const mirrored = catalogModel({ ...(lone as Record<string, unknown>), id: model.modelId }, configured, endpoint);
+          const mirrored = catalogModel({ ...(lone as Record<string, unknown>), id: activeId }, configured, endpoint);
           if (mirrored !== undefined) {
             models.push(mirrored);
             target = mirrored;
@@ -233,7 +236,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
       if (baselineWindow === 0 && (target === undefined || target.contextWindow === 0)) {
         const propsCapacity = await fetchPropsCapacity(fetchImpl, base, context.signal);
         if (propsCapacity !== undefined) {
-          const entry = catalogModel({ id: model.modelId, context_length: propsCapacity }, configured, endpoint);
+          const entry = catalogModel({ id: activeId, context_length: propsCapacity }, configured, endpoint);
           if (entry !== undefined) {
             if (target !== undefined) {
               models[models.indexOf(target)] = entry;

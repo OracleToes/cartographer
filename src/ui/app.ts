@@ -48,11 +48,14 @@ import {
   openLiveSession,
   sessionTranscript,
   submitInput,
+  switchSessionModel,
   togglePause,
   waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
+import type { ModelRef } from "../runtime/config.js";
+import { formatModelRef, indexModels, listIndexedModels, resolveIndexedModel } from "../runtime/model-catalog.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
@@ -71,6 +74,7 @@ import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
+import { ModelPicker } from "./model-picker.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
 import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
@@ -86,6 +90,8 @@ import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-han
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
   refreshCapacity?: boolean;
+  /** Called after the person switches models in the UI so the host can persist or track the selection. */
+  onModelChange?: (model: ModelRef) => Promise<void> | void;
 }
 
 interface PendingItem {
@@ -96,6 +102,7 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
+  model: ModelRef;
   sendMode: SendMode;
   view: ViewMode;
   /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
@@ -359,14 +366,16 @@ function generationHandles(live: LiveState | undefined, landed: readonly PromptI
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
   const brain = options.brain;
+  let activeModel: ModelRef = { ...options.model };
   const refresh = async () => {
-    await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
+    await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
   };
   if (options.refreshCapacity === true) await refresh();
 
   const session = await openLiveSession(options);
   const state: TuiState = {
     session,
+    model: activeModel,
     sendMode: "steer",
     view: "chat",
     layer: "context",
@@ -396,10 +405,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
-  const modelLabel = `${options.model.provider}/${options.model.modelId}`;
+  const modelLabel = () => formatModelRef(state.model);
+  const sessionOptions = (): LiveSessionOptions => ({ ...options, model: state.model });
   const headerState = {
     project,
-    modelLabel,
+    modelLabel: modelLabel(),
     session: state.session,
     view: state.view,
     layer: state.layer,
@@ -1354,7 +1364,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   tui.setFocus(editor);
 
   // ── Input ─────────────────────────────────────────────────────────────────
+  let activeModelPicker: ModelPicker | undefined;
   const closeOverlay = () => {
+    activeModelPicker = undefined;
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
@@ -1823,7 +1835,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await rebuildTranscript(true);
       transcript.setLive([]);
       oldTranscript = transcript.snapshot();
-      const outcome = await collapseLiveSession(state.session, options, reason, {}, { automatic });
+      const outcome = await collapseLiveSession(state.session, sessionOptions(), reason, {}, { automatic });
       state.collapseEpoch += 1;
       state.session = outcome.session;
       state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
@@ -1851,7 +1863,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // harness (or guessing which generation survived).
       try {
         await closeLiveSession(state.session).catch(() => undefined);
-        const recovered = await openLiveSession(options);
+        const recovered = await openLiveSession(sessionOptions());
         if (recovered.generation !== previous && oldTranscript !== undefined) {
           state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
         }
@@ -1889,7 +1901,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           callback();
         },
       });
-      await applyCapacityRefresh(state.session, refresh, options.models, options.model.provider, options.model.modelId, sink);
+      await applyCapacityRefresh(state.session, refresh, options.models, state.model.provider, state.model.modelId, sink);
       if (shutdownRequested) return;
       headerState.windowUnknown = state.session.state.contextWindow <= 0;
       tui.requestRender();
@@ -1974,7 +1986,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       `# carto session dump — ${new Date().toISOString()}`,
       `project: ${options.root}`,
       `generation: ${state.session.generation}`,
-      `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
+      `model: ${modelLabel()} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
       `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
       `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
       "",
@@ -2032,10 +2044,65 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     });
   };
 
+  const switchModel = async (next: ModelRef) => {
+    const label = formatModelRef(next);
+    if (next.provider === state.model.provider && next.modelId === state.model.modelId) {
+      pushStatus(`already using ${label}`);
+      tui.requestRender();
+      return;
+    }
+    try {
+      await switchSessionModel(state.session, options.models, next);
+      activeModel = { ...next };
+      state.model = activeModel;
+      headerState.modelLabel = modelLabel();
+      headerState.windowUnknown = state.session.state.contextWindow <= 0;
+      try {
+        await options.onModelChange?.(next);
+      } catch (persistError) {
+        pushStatus(`model → ${label} (could not save config: ${errorText(persistError)})`);
+        await rebuildTranscript();
+        tui.requestRender();
+        return;
+      }
+      pushStatus(state.running ? `model → ${label} (takes effect at the next step)` : `model → ${label}`);
+      await rebuildTranscript();
+      tui.requestRender();
+    } catch (error) {
+      pushStatus(`model switch failed: ${errorText(error)}`);
+      tui.requestRender();
+    }
+  };
+
+  const handleModelSlash = async (argument: string) => {
+    const query = argument.trim();
+    if (query.length === 0) {
+      showModelPicker();
+      return;
+    }
+    let resolved = resolveIndexedModel(options.models, query, state.model.provider);
+    if (resolved === undefined) {
+      await indexModels(options.models, { refresh: true, active: state.model });
+      if (shutdownRequested) return;
+      resolved = resolveIndexedModel(options.models, query, state.model.provider);
+    }
+    if (resolved !== undefined) {
+      await switchModel(resolved);
+      return;
+    }
+    showModelPicker(query);
+  };
+
   editor.onSubmit = (text: string) => {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    if (message === "/model" || message.startsWith("/model ")) {
+      void handleModelSlash(message.slice("/model".length)).catch((error: unknown) => {
+        if (!shutdownRequested) pushStatus(`model switch failed: ${errorText(error)}`);
+      });
+      return;
+    }
     submitMessage(message);
   };
 
@@ -2221,6 +2288,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       group: "the run",
       label: "collapse now",
       run: () => void runCollapse("person requested (palette)"),
+      available: () => true,
+    },
+    {
+      id: "model",
+      group: "the run",
+      label: "switch model",
+      hint: "pick a model from the provider catalog",
+      key: "ctrl+l",
+      quiet: true,
+      run: () => showModelPicker(),
       available: () => true,
     },
     {
@@ -2590,6 +2667,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { group: "type it", key: "/copy", label: "copy the transcript" },
     { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
     { group: "type it", key: "/help", label: "the command list in the transcript" },
+    { group: "type it", key: "/model", label: "pick or switch the model (/model <name>)" },
     { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 
@@ -2615,7 +2693,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       .map((command) => ({
         id: command.id,
         group: command.group,
-        label: command.label,
+        label: command.id === "model" ? `Model: ${modelLabel()}` : command.label,
         ...(command.key === undefined ? {} : { key: command.key }),
         ...(command.hint === undefined ? {} : { hint: command.hint }),
         run: () => command.run(),
@@ -2654,6 +2732,42 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
     tui.requestRender();
+  };
+
+  const showModelPicker = (initialQuery?: string) => {
+    if (state.overlayOpen) return;
+    state.overlayOpen = true;
+    const picker = new ModelPicker({
+      models: listIndexedModels(options.models, state.model),
+      activeLabel: modelLabel(),
+      running: state.running,
+      loading: true,
+      ...(initialQuery === undefined ? {} : { initialQuery }),
+    });
+    activeModelPicker = picker;
+    const refreshCatalog = () => {
+      picker.setLoading(true);
+      tui.requestRender();
+      void indexModels(options.models, { refresh: true, active: state.model }).then((result) => {
+        if (shutdownRequested || activeModelPicker !== picker) return;
+        const firstError = result.errors[0];
+        picker.setModels(result.models, {
+          activeLabel: modelLabel(),
+          running: state.running,
+          loading: false,
+          ...(firstError === undefined ? {} : { error: `${firstError.provider}: ${firstError.message}` }),
+        });
+        tui.requestRender();
+      });
+    };
+    picker.onClose = closeOverlay;
+    picker.onRefresh = refreshCatalog;
+    picker.onSelect = (picked) => {
+      void switchModel({ provider: picked.provider, modelId: picked.modelId });
+    };
+    state.overlayHandle = tui.showOverlay(picker, { width: 72, anchor: "bottom-center", offsetY: -3 });
+    tui.setFocus(picker);
+    refreshCatalog();
   };
 
   const showJump = () => {

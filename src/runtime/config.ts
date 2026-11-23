@@ -196,6 +196,12 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
     throw new ConfigError(`${path}: not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
   }
   const config = parseConfig(parsed, path);
+  let model = config.model;
+  if (options.modelOverride !== undefined) {
+    const trimmed = options.modelOverride.trim();
+    parseModelRef(trimmed);
+    model = trimmed;
+  }
   const endpoint = options.llamaSwapEndpointOverride === undefined ? undefined : parseEndpoint(options.llamaSwapEndpointOverride, "--endpoint");
   const contextWindow = options.contextWindowOverride === undefined ? undefined : parseContextWindow(options.contextWindowOverride, "--context-window");
   const collapseWarningPercent =
@@ -203,7 +209,7 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
       ? undefined
       : parseCollapseWarningPercent(options.collapseWarningPercentOverride, "--collapse-warning");
   const userName = options.userNameOverride === undefined ? undefined : parseUserName(options.userNameOverride, "--user");
-  const merged: GlobalConfig = { version: 1, model: config.model };
+  const merged: GlobalConfig = { version: 1, model };
   const llamaSwapEndpoint = endpoint ?? config.llamaSwapEndpoint;
   const effectiveWindow = contextWindow ?? config.contextWindow;
   const effectiveCollapseWarning = collapseWarningPercent ?? config.collapseWarningPercent;
@@ -213,6 +219,36 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
   const effectiveName = userName ?? config.userName;
   if (effectiveName !== undefined) merged.userName = effectiveName;
   return { config: merged, path, created: false };
+}
+
+/**
+ * Update only `model` in an existing global config file, preserving all other
+ * fields on disk. No-op if the config file does not exist.
+ */
+export async function updateConfigModel(
+  model: string,
+  home: string = cartoHome(),
+): Promise<boolean> {
+  const trimmed = model.trim();
+  parseModelRef(trimmed);
+  const path = cartoConfigPath(home);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw new ConfigError(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ConfigError(`${path}: not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const current = parseConfig(parsed, path);
+  if (current.model === trimmed) return false;
+  await saveTo(path, { ...current, model: trimmed });
+  return true;
 }
 
 function isMissingFile(error: unknown): boolean {
