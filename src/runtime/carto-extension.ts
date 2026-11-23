@@ -292,9 +292,11 @@ export async function renderLiveStateBlock(
     }
   }
   const marks: MarkLine[] = [];
-  const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; mark?: { action: string; author: "user" | "agent" } }>): void => {
+  const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; pinned?: "user" | "agent"; mark?: { action: string; author: "user" | "agent" } }>): void => {
     for (const record of records) {
-      if (record.mark === undefined) continue;
+      // A pin holds an archive mark back (§3.2): the collapse will not act on
+      // it, so "at the next collapse" would be untrue. The pin is listed above.
+      if (record.mark === undefined || record.pinned !== undefined) continue;
       const handle = handleOf(brain.handles, kind, record.id);
       if (handle === undefined) continue;
       marks.push({ handle, action: record.mark.action as MarkLine["action"], author: record.mark.author });

@@ -23,6 +23,7 @@
  * performs; Carto adds only the composition.
  */
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { basename, relative, resolve } from "node:path";
 
@@ -678,7 +679,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.setFocus(archiveView);
       return;
     }
-    if (state.view === "chat") tui.setFocus(editor);
+    if (state.view === "chat") tui.setFocus(transcript.isSelecting() ? transcript : editor);
     else if (state.view === "atlas") tui.setFocus(atlasView);
     else if (state.view === "ledger") tui.setFocus(ledgerView);
     else if (state.view === "tree") tui.setFocus(treeView);
@@ -686,6 +687,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const switchToView = async (view: ViewMode) => {
+    if (view !== "chat") transcript.stopSelecting();
     state.view = view;
     headerState.view = view;
     sidebar.setActiveBook(view);
@@ -715,6 +717,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
   const switchLayer = async (layer: Layer) => {
+    if (layer === "archive") transcript.stopSelecting();
     state.layer = layer;
     headerState.layer = layer;
     sidebar.setLayer(layer);
@@ -760,6 +763,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           ? brainState.ledger.find((e) => e.id === id)
           : brainState.atlas.find((n) => n.id === id);
     if (record === undefined) return;
+    // A pin only holds an archive mark back from a collapse (§3.2): a Brain
+    // record that is not marked for archive has nothing to hold back.
+    if (record.pinned === undefined && record.mark?.action !== "archive") {
+      pushStatus("pin holds an archive mark back: mark it for archive (a) first");
+      tui.requestRender();
+      return;
+    }
     if (record.pinned === undefined) {
       await brain.apply({ kind: "pin.set", target, id: record.id, pinned: "user" }, Date.now());
       pushStatus(`pinned ${target} record #${record.id} (you)`);
@@ -870,7 +880,53 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     })();
   };
 
-  transcript.onTogglePin = (recordId: string) => void togglePin("chat", recordId);
+  // Block selection in the transcript acts through the Context view's own
+  // handlers: a Chat block is its Brain record, a card is an ephemeral item, and
+  // a pin or a mark means the same thing here as on that view's row (§3.2, §4.1).
+  // A card's id names an item in the live store until it is pinned and carried,
+  // and then the Brain's copy.
+  const blockPart = async (part: "chat" | "tool-work", id: string): Promise<"chat" | "tool-work" | "ephemera"> =>
+    part === "chat" || !(await brain.read()).ephemera.some((item) => item.id === id) ? part : "ephemera";
+  const onBlock = (act: (part: "chat" | "tool-work" | "ephemera") => void, part: "chat" | "tool-work", id: string) =>
+    void blockPart(part, id)
+      .then(act)
+      .catch((error: unknown) => {
+        pushStatus(`that block could not be changed: ${errorText(error)}`);
+        tui.requestRender();
+      });
+  transcript.onTogglePin = (part, id) =>
+    onBlock(async (routed) => {
+      // A pin keeps the text the Context view drew for the row, and that view
+      // draws only while it is open: bring it up to date first.
+      if (routed === "tool-work") await syncContextView(await brain.read());
+      contextView.onTogglePin?.(routed, id);
+    }, part, id);
+  transcript.onArchive = (part, id, now) => onBlock((routed) => contextView.onArchive?.(routed, id, now), part, id);
+  transcript.onDelete = (part, id, now) => onBlock((routed) => contextView.onDelete?.(routed, id, now), part, id);
+  transcript.onWithdrawMark = (part, id) => onBlock((routed) => contextView.onWithdrawMark?.(routed, id), part, id);
+  transcript.onReveal = (start, end) => {
+    const top = transcriptScroll.scrollTop;
+    const height = transcriptScroll.viewportHeight;
+    // Moving the cursor is reading back: stay where it is rather than snapping to the end.
+    if (start < top) transcriptScroll.scrollTo(start, { disableFollow: true });
+    else if (end > top + height) transcriptScroll.scrollTo(Math.max(0, end - height), { disableFollow: true });
+  };
+  const enterBlockSelection = () => {
+    if (!transcript.startSelecting()) {
+      pushStatus("nothing in the transcript to select yet");
+      tui.requestRender();
+      return;
+    }
+    focusCurrent();
+    tui.requestRender();
+  };
+  const leaveBlockSelection = () => {
+    transcript.stopSelecting();
+    transcriptScroll.scrollToEnd();
+    focusCurrent();
+    tui.requestRender();
+  };
+  transcript.onLeave = leaveBlockSelection;
   ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
   atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
 
@@ -1254,6 +1310,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * enough to run after every settle and on a 1.5s timer; it skips the
    * re-render entirely when nothing moved.
    */
+  const shownBookSig: { atlas: string; ledger: string } = { atlas: "", ledger: "" };
+  let shownSidebarSig = "";
   const performTranscriptRebuild = async (): Promise<void> => {
     // The session is closed on the way out, and a rebuild in flight at that
     // moment reads a closed harness: there is nothing left to draw, and the
@@ -1418,13 +1476,33 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       for (const entry of retained) if (entry.kind === "person") showing(entry.text);
       for (const item of person) if (item.entry.kind === "person") showing(item.entry.text);
       for (const item of state.pending) showing(item.text);
+      // A shown line is its record, so the keys can act on it (pin, mark). The
+      // pairing is the one above, by text and in order: the first records of a
+      // text are the lines the history and the context already show.
+      const liveChat = new Map(brainState.chat.map((chat) => [chat.id, chat]));
+      const unclaimed = new Map<string, string[]>();
+      for (const record of chatRecords) {
+        if (record.author === "user") unclaimed.set(record.text, [...(unclaimed.get(record.text) ?? []), record.id]);
+      }
+      const recordFields = (id: string) => ({ recordId: id, pinned: liveChat.get(id)?.pinned, mark: liveChat.get(id)?.mark });
+      const sealedPerson = new Map<TranscriptEntry, string>();
+      for (const entry of retained) {
+        if (entry.kind !== "person") continue;
+        const id = unclaimed.get(entry.text)?.shift();
+        if (id !== undefined) sealedPerson.set(entry, id);
+      }
+      for (const item of person) {
+        if (item.entry.kind !== "person") continue;
+        const id = unclaimed.get(item.entry.text)?.shift();
+        if (id !== undefined) item.entry = { ...item.entry, ...recordFields(id) };
+      }
       for (const record of chatRecords) {
         if (record.author === "user") {
           const left = shownPerson.get(record.text) ?? 0;
           if (left > 0) {
             shownPerson.set(record.text, left - 1);
           } else {
-            agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "person", text: record.text } });
+            agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "person", text: record.text, ...recordFields(record.id) } });
           }
           continue;
         }
@@ -1474,6 +1552,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           const handle = pinned === undefined ? undefined : handleOf(brainState.handles, "ephemera", pinned);
           return handle === undefined ? entry : { ...entry, handle };
         }
+        if (entry.kind === "person") {
+          const id = sealedPerson.get(entry);
+          return id === undefined ? entry : { ...entry, ...recordFields(id) };
+        }
         if (entry.kind !== "agent" || entry.recordId === undefined) return entry;
         const record = recordsById.get(entry.recordId);
         const handle = handleOf(brainState.handles, "chat", entry.recordId);
@@ -1513,6 +1595,25 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
       if (state.view === "context" && state.layer === "context") {
         await syncContextView(brainState);
+      }
+
+      // The books follow the Brain on this same drain: Chat streams, and the
+      // agent writes Atlas and Ledger mid-run, so the open book and the
+      // sidebar's counts move when the Brain does rather than when the person
+      // next opens the view. One hash of what the books show decides it, so a
+      // quiet Brain costs a read and a digest, and only a changed one redraws.
+      const brainSig = createHash("sha1")
+        .update(JSON.stringify([brainState.chat, brainState.ledger, brainState.atlas, brainState.files, brainState.ephemera]))
+        .digest("hex");
+      if (state.layer === "context" && (state.view === "atlas" || state.view === "ledger") && shownBookSig[state.view] !== brainSig) {
+        shownBookSig[state.view] = brainSig;
+        if (state.view === "atlas") atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
+        else ledgerView.setData(brainState);
+        tui.requestRender();
+      }
+      if (brainSig !== shownSidebarSig) {
+        shownSidebarSig = brainSig;
+        await refreshSidebar();
       }
     } catch (error) {
       // Shutdown closed the session under us; every other failure is a real
@@ -2042,6 +2143,76 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       },
       available: () => inChat(),
     },
+    // Block selection: Escape from the prompt walks the transcript a block at a
+    // time, and the keys are the ones every other view has (§3.2, §4.1). They
+    // are commands in the same list, so the footer, `f1` and the palette name
+    // them; the cursor keys are the view's own.
+    {
+      id: "block-select",
+      group: "the transcript",
+      label: "select a block",
+      hint: "walk the Chat and the cards with j/k, then pin, mark or withdraw as in any other view",
+      key: "escape",
+      run: () => enterBlockSelection(),
+      // Escape closes the prompt's completion list first.
+      available: () => inChat() && !transcript.isSelecting() && !editor.isShowingAutocomplete(),
+    },
+    {
+      id: "block-leave",
+      group: "the transcript",
+      label: "back to the prompt",
+      key: "escape",
+      run: () => leaveBlockSelection(),
+      available: () => inChat() && transcript.isSelecting(),
+    },
+    {
+      id: "block-pin",
+      group: "the transcript",
+      label: "pin or unpin the block",
+      hint: "a Chat record can be pinned once it is marked for archive: the pin holds that mark back",
+      key: "p",
+      run: () => transcript.pinSelected(),
+      available: () => inChat() && transcript.isSelecting(),
+    },
+    {
+      id: "block-mark-archive",
+      group: "the transcript",
+      label: "mark for archive",
+      hint: "the next collapse moves it to the archive; `!` first applies it now",
+      key: "a",
+      run: () => transcript.markSelected("archive"),
+      available: () => inChat() && transcript.isSelecting(),
+    },
+    {
+      id: "block-mark-delete",
+      group: "the transcript",
+      label: "mark for delete",
+      hint: "the next collapse removes it for good; `!` first applies it now",
+      key: "d",
+      run: () => transcript.markSelected("delete"),
+      available: () => inChat() && transcript.isSelecting(),
+    },
+    {
+      id: "block-apply-now",
+      group: "the transcript",
+      label: "apply now",
+      hint: "the next mark is applied at once, rebuilding in place",
+      key: "!",
+      run: () => {
+        transcript.toggleApplyNow();
+        tui.requestRender();
+      },
+      available: () => inChat() && transcript.isSelecting(),
+    },
+    {
+      id: "block-withdraw",
+      group: "the transcript",
+      label: "withdraw the mark",
+      key: "u",
+      quiet: true,
+      run: () => transcript.withdrawSelected(),
+      available: () => inChat() && transcript.isSelecting(),
+    },
     {
       id: "read-only",
       group: "the workspace",
@@ -2066,7 +2237,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       id: "pin-context-row",
       group: "the workspace",
       label: "pin or unpin the entry under the cursor",
-      hint: "a pinned item in the live context goes on into the next collapse",
+      hint: "a pinned item in the live context goes on into the next collapse; a Brain record is pinned only once marked for archive",
       key: "p",
       // The Context view matches the key itself, because it knows where the
       // cursor is; the palette comes here, so it does the same act.
@@ -2090,7 +2261,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       id: "pin-book-row",
       group: "the workspace",
       label: "pin or unpin the entry under the cursor",
-      hint: "a pinned record goes on into the next collapse",
+      hint: "a record can be pinned once it is marked for archive: the pin holds that mark back",
       key: "p",
       run: () => (state.view === "atlas" ? atlasView : ledgerView).pinSelected(),
       available: () => bookIsOpen(),

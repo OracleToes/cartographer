@@ -161,7 +161,9 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
         throw new BrainError("Restore is for an entry in the archive; a Brain record is not in the archive.");
       }
       const marked = setMark(brain, write.target, write.id, { action: write.action, author: write.author });
-      return marked;
+      // A pin on a Brain record only holds an archive mark back from a collapse
+      // (§3.2), so a mark that is not archive leaves nothing for it to do.
+      return write.action === "archive" ? marked : dropPin(marked, write.target, write.id);
     }
 
     case "mark.clear": {
@@ -172,7 +174,7 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       if (write.author === "agent" && marked?.mark?.author === "user") {
         throw new BrainError("That mark was placed by the person at the keyboard, and only they withdraw it.");
       }
-      return clearMark(brain, write.target, write.id);
+      return dropPin(clearMark(brain, write.target, write.id), write.target, write.id);
     }
 
     case "pin.set": {
@@ -180,6 +182,16 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       // reason, no source, no bookkeeping. The marker records who placed it:
       // "user" | "agent" — the person may remove either kind of pin, the agent
       // may remove only its own.
+      //
+      // A pin only stops a collapse sweeping what it was about to sweep, and a
+      // Brain record is swept only when it is marked for archive (§3.1). A pin
+      // on a record that is not marked for archive would hold back nothing, so
+      // it is refused rather than stored as a promise about nothing.
+      if (write.pinned !== null && findMarked(brain, write.target, write.id)?.mark?.action !== "archive") {
+        throw new BrainError(
+          "Pin only holds back an archive mark, and this record is not marked for archive. Mark it for archive first.",
+        );
+      }
       return setPin(brain, write.target, write.id, write.pinned);
     }
 
@@ -213,7 +225,7 @@ function findMarked(
   brain: CartoBrain,
   target: "chat" | "ledger" | "atlas",
   id: RecordId,
-): { mark?: Mark } | undefined {
+): { mark?: Mark; pinned?: "user" | "agent" } | undefined {
   switch (target) {
     case "chat":
       return brain.chat.find((record) => record.id === id);
@@ -261,6 +273,12 @@ function clearMark(brain: CartoBrain, target: MarkTarget, id: RecordId): CartoBr
 }
 
 type MarkTarget = "chat" | "ledger" | "atlas";
+
+/** Takes the pin off one record whose archive mark has gone (a pin is the archive mark's hold). */
+function dropPin(brain: CartoBrain, target: MarkTarget, id: RecordId): CartoBrain {
+  const record = findMarked(brain, target, id);
+  return record?.pinned === undefined ? brain : setPin(brain, target, id, null);
+}
 
 /** Places or clears the pin marker on one record; a cleared pin removes the key, never leaves `pinned: undefined` lying around. */
 /** A re-written node re-asserts its text and attachments; the stale marker is collapse-time truth and is cleared. */

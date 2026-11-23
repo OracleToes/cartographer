@@ -165,6 +165,17 @@ or the agent.
 The person may pin or unpin any entry. The agent may pin any entry and may unpin
 only its own pins; it may not remove a pin the person placed.
 
+**A Brain record is pinned only while it is marked for archive.** A pin stops a
+collapse from sweeping what it was about to sweep, and a Brain record (Atlas,
+Ledger, Chat) is swept only by an archive mark (§3.1), so a pin on an unmarked
+record would hold nothing back. The Brain refuses it, for the person and the
+agent alike, and withdrawing the archive mark, or turning it into a delete mark,
+takes the pin with it. A pinned record's archive mark stays placed and waits: the
+record stays in the Brain and in the head until the pin comes off, and the state
+block lists the pin rather than a mark that will not be acted on. Ephemeral items
+and files keep their pins: an ephemeral item is swept by default and a pin is how
+it stays, and a file has no mark to hold back.
+
 A pin renders inline on the entry it marks. It is not a record of its own and
 takes no place in the prefill's order.
 
@@ -733,8 +744,9 @@ ephemeral, and a staged change takes effect at the next collapse unless the pers
 applies it now (§4.1).
 
 **The person has the same controls in every view of the Brain** (§3.2, §4.1).
-`p` pins or unpins the entry under the cursor, and it works in the Context view,
-Atlas, Ledger, the archive, and the Tree, where it pins a file: the head holds a
+`p` pins or unpins the entry under the cursor (a Brain record only while it is
+marked for archive, §3.2), and it works in the Context view,
+Atlas, Ledger, the archive, the Tree, and the transcript's selected block, where it pins a file: the head holds a
 pinned file as it stands, read again at every collapse. The person's press
 unpins a pin whoever placed it, and the file's pin is keyed by the same path the
 agent's `pin` writes, so one file is one pin. In the Context view, Atlas, and
@@ -747,8 +759,21 @@ Atlas, Ledger, and the Tree, where the marks are applied. While `/` takes a
 filter, every one of these keys is a letter of it. A file carries a pin and no
 mark: the `mark` tool is for Brain records. These keys are commands in the same
 list as everything else, so the footer, `f1`, and the palette show them.
-In Chat, a click on the agent's block toggles its pin; its marks are placed from
-the Context view.
+In Chat, `escape` leaves the prompt and selects a block (the last one); `j`/`k`
+(or the arrows) walk the Chat blocks, the person's and the agent's, and the cards;
+`g` and `G` go to the first and last; and `p`, `a`, `d`, `u` and `!` do what they do
+everywhere else, through the same handlers as the Context view's rows: a Chat block
+is its Brain record, a card is the ephemeral item it renders (a tool row is its
+result), and an ephemeral card asks before it archives. `escape` or `enter` returns
+to the prompt. A card still streaming is not an item anything holds and cannot be
+selected. A click folds a card; it never pins or marks.
+
+**The open book follows the Brain.** The drain that rebuilds the transcript, on
+every run boundary, on a throttled live-watch tick and on a slow timer, also
+redraws the open Atlas or Ledger when the Brain's records changed, and the
+sidebar's counts with it, judged by a digest of what the books show so a quiet
+Brain costs a read and a comparison, not a redraw. The Context view and the Tree
+follow on the same drain.
 
 **The transcript renders everything the model does.** The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its

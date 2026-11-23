@@ -647,51 +647,57 @@ test("the p key toggles the pin on the selected entry (ledger and atlas)", () =>
   assert.equal(atlasToggled, "n-a");
 });
 
-test("an agent block in the transcript renders the pin badge and click toggles the pin", () => {
+test("a click never pins; block selection acts with the same keys on Chat blocks and cards", () => {
   const transcript = new TranscriptView();
-  let toggled = null;
-  transcript.onTogglePin = (id) => { toggled = id; };
+  const acts = [];
+  transcript.onTogglePin = (part, id) => acts.push(["pin", part, id]);
+  transcript.onArchive = (part, id, now) => acts.push(["archive", part, id, now]);
+  transcript.onDelete = (part, id, now) => acts.push(["delete", part, id, now]);
+  transcript.onWithdrawMark = (part, id) => acts.push(["withdraw", part, id]);
   transcript.setEntries([
+    { kind: "person", text: "you said this", recordId: "c-p" },
     { kind: "agent", text: "a durable agent statement", recordId: "c-a", pinned: "user", handle: "C3" },
-    { kind: "agent", text: "another agent statement", recordId: "c-b" },
+    { kind: "tool", id: "ctx-1-0", name: "read", args: "{}", sourceId: "gen:1:t0", resultId: "gen:1:r0" },
+    { kind: "agent", text: "boot burst, no record" },
   ]);
   const lines = transcript.render(120);
   // §5.4: a pin is named by the handle of the entry it marks, so the row reads
   // `P C3 you` — the pin's handle, the entry's, and who placed it.
   assert.match(plain(lines.join("\n")), /P C3 you/, "the pin renders with its own handle, and says who placed it");
-  assert.ok(transcript.length >= 2, "two agent blocks rendered");
 
-  // Click the first agent block (line 0 is its first line)
-  const click = transcript.handleMouse({
-    type: "click",
-    x: 5,
-    y: 0,
-    screenX: 5,
-    screenY: 0,
-    width: 120,
-    height: 20,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(click?.handled, "agent block click is handled");
-  assert.equal(toggled, "c-a");
+  const click = transcript.handleMouse({ type: "click", x: 5, y: 2, screenX: 5, screenY: 2, width: 120, height: 20, shift: false, alt: false, ctrl: false });
+  assert.equal(click, undefined, "a click on a Chat block is not handled: pinning is a key");
+  assert.deepEqual(acts, []);
 
-  // The second agent block (line 2) toggles its own pin
-  const click2 = transcript.handleMouse({
-    type: "click",
-    x: 5,
-    y: 2,
-    screenX: 5,
-    screenY: 2,
-    width: 120,
-    height: 20,
-    shift: false,
-    alt: false,
-    ctrl: false,
-  });
-  assert.ok(click2?.handled, "second agent block click is handled");
-  assert.equal(toggled, "c-b");
+  assert.equal(transcript.startSelecting(), true);
+  assert.ok(plain(transcript.render(120).join("\n")).split("\n").some((line) => line.startsWith("▌")), "the selected block carries a cursor in the margin");
+  // The cursor starts on the last block that has an item behind it: the card.
+  transcript.pinSelected();
+  assert.deepEqual(acts.pop(), ["pin", "tool-work", "gen:1:r0"], "a card is its result, the item a pin keeps");
+  transcript.handleInput("k");
+  transcript.pinSelected();
+  assert.deepEqual(acts.pop(), ["pin", "chat", "c-a"]);
+  transcript.markSelected("delete");
+  assert.deepEqual(acts.pop(), ["delete", "chat", "c-a", false]);
+  transcript.toggleApplyNow();
+  transcript.markSelected("archive");
+  assert.deepEqual(acts.pop(), ["archive", "chat", "c-a", true], "! applies the next mark now");
+  transcript.withdrawSelected();
+  assert.deepEqual(acts.pop(), ["withdraw", "chat", "c-a"]);
+  transcript.handleInput("g");
+  transcript.markSelected("archive");
+  assert.deepEqual(acts.pop(), ["archive", "chat", "c-p", false], "a person's line is a record too");
+  transcript.handleInput("G");
+  transcript.markSelected("archive");
+  assert.deepEqual(acts, [], "an ephemeral card asks before it archives");
+  transcript.markSelected("archive");
+  assert.deepEqual(acts.pop(), ["archive", "tool-work", "gen:1:r0", true]);
+  let left = false;
+  transcript.onLeave = () => { left = true; };
+  transcript.handleInput("\u001b");
+  assert.ok(left, "escape leaves selection");
+  transcript.stopSelecting();
+  assert.equal(transcript.isSelecting(), false);
 });
 
 test("the context bar spans the bottom, reports the server's window, and greys what is no longer live", () => {

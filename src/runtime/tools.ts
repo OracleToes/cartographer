@@ -341,7 +341,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a Brain record's, or a file's from the tree; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
+        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree, or a Brain record's that you have already marked for archive; a pin on a record holds that archive mark back from the collapse, and one on a record with no archive mark is refused; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,

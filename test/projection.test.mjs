@@ -62,6 +62,7 @@ test("ledger answers render; empty brain renders the placeholder", () => {
 test("pins render inline on their entries", () => {
   let brain = emptyBrain();
   brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "n1", title: "The collapse boundary", text: "Collapse is person-triggered or agent-triggered", links: [], attachments: [], createdAt: at("2026-11-16T04:00:00.000Z"), updatedAt: at("2026-11-16T04:00:00.000Z") } }, at("2026-11-16T04:00:00.000Z"));
+  brain = applyWrite(brain, { kind: "mark.set", target: "atlas", id: "n1", action: "archive", author: "agent" }, at("2026-11-16T04:00:00.000Z"));
   brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "n1", pinned: "agent" }, at("2026-11-16T04:00:00.000Z"));
   const projection = projectContext(brain);
   assert.match(projection.text, /A1 The collapse boundary — 2026-11-16T04:00:00.000Z · \[pinned by you\]/);
