@@ -37,6 +37,18 @@ export interface Projection {
   total: number;
   /** Sizes by part, for the state block's space accounting (§5.3). */
   sizes: Record<ProjectionPartId, number>;
+  /**
+   * The Chat records this head holds, by id. A head is frozen, so a record
+   * written after it is not in it, and the host needs the list to rebuild the
+   * head without gathering in what the live body already shows (§2.3).
+   */
+  chatIds: string[];
+}
+
+/** What a caller may choose about the head it is building. */
+export interface ProjectionChoices {
+  /** Only these Chat records go in: the rest are in the body, said since the freeze. Absent: all of them. */
+  chat?: ReadonlySet<string>;
 }
 
 const tokens = estimateTokens;
@@ -80,6 +92,7 @@ export function projectContext(
    * the launching account is still the honest answer.
    */
   person: string = personName(),
+  choices: ProjectionChoices = {},
 ): Projection {
   const handles = brain.handles;
   const partOf = (kind: Parameters<typeof handleOf>[1], id: string) =>
@@ -122,9 +135,10 @@ export function projectContext(
   // its handle. A record the person or the agent deleted is not here, and one
   // marked for archive left the Brain before this was built.
   const chat: string[] = [];
-  if (brain.chat.length > 0) {
+  const held = brain.chat.filter((record) => choices.chat === undefined || choices.chat.has(record.id));
+  if (held.length > 0) {
     chat.push(`Chat — what you and ${person} have said to each other`);
-    for (const record of brain.chat) {
+    for (const record of held) {
       chat.push(
         `${partOf("chat", record.id)} [${record.author === "user" ? person : "you"}] — ${iso(record.createdAt)}${record.pinned ? ` · [pinned by ${record.pinned === "user" ? person : "you"}]` : ""}`,
       );
@@ -174,5 +188,5 @@ export function projectContext(
       : parts.map((part) => part.text).join("\n\n");
   const sizes: Record<ProjectionPartId, number> = { atlas: 0, ledger: 0, chat: 0, files: 0, ephemera: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
-  return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes };
+  return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes, chatIds: held.map((record) => record.id) };
 }

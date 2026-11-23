@@ -1327,3 +1327,42 @@ test("Atlas and Ledger mark, withdraw and apply now from the list and from the d
     assert.deepEqual(heard, [], `${name}: a filter swallows the letters`);
   }
 });
+
+test("a person's line said since the freeze is one row, the body's, and it acts on its Chat record", () => {
+  const view = new ContextView();
+  const brain = emptyBrain();
+  brain.handles = {
+    counters: { C: 3 },
+    entries: [
+      { kind: "chat", id: "c1", handle: "C1", timestamp: 1 },
+      { kind: "chat", id: "c2", handle: "C2", timestamp: 2 },
+      { kind: "chat", id: "c3", handle: "C3", timestamp: 3 },
+    ],
+  };
+  brain.chat.push({ id: "c1", author: "user", text: "said before the collapse", createdAt: 1, updatedAt: 1 });
+  brain.chat.push({ id: "c2", author: "user", text: "said just now", pinned: "user", createdAt: 2, updatedAt: 2 });
+  brain.chat.push({ id: "c3", author: "agent", text: "the agent answered", createdAt: 3, updatedAt: 3 });
+  const pinned = [];
+  view.onTogglePin = (part, id) => pinned.push([part, id]);
+  view.setData({
+    brain,
+    systemPrompt: "system",
+    // The frozen head holds only the first record.
+    projectionText: "Chat — what you and x have said to each other\nC1 [x] — 1970-01-01T00:00:00.001Z\n  said before the collapse",
+    tools: [],
+    transcriptMessages: [{ id: 5, entry: 5, order: -1, role: "user", text: "said just now" }],
+    toolWorkItems: [],
+    stateBlockText: "state",
+  });
+  const shown = view.render(100).map(plain).join("\n");
+  assert.equal(shown.split("said just now").length - 1, 1, "the live line is shown once");
+  assert.ok(shown.includes("said before the collapse"), "the frozen record is in the head");
+  assert.ok(shown.includes("the agent answered"), "the agent's own, with no body row, is still listed");
+  // The body row is the record: the cursor on it pins that record.
+  for (let step = 0; step < 12; step += 1) {
+    view.handleInput("j");
+    view.handleInput("p");
+  }
+  assert.ok(pinned.some(([part, id]) => part === "chat" && id === "c2"), "p on the live line reaches the Chat record");
+  assert.ok(!pinned.some(([part]) => part === "transcript"), "and not a swept copy");
+});

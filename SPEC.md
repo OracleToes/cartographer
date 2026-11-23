@@ -143,7 +143,14 @@ the `chat` tool's result; the head does not repeat either until a collapse ends
 that body. Both are Chat records in the Brain, so they stay until someone deletes
 them, and the collapse places them in the head (§3.2, §5.1): the conversation
 goes on across a collapse, and the transcript and the Context view are two views
-of the same records. Only a delete or an archive mark removes one.
+of the same records. Chat is swept like every Brain record: only a delete or an
+archive mark removes one, and an archived record moves out as the record, never
+also as a swept line. A rebuild in the middle of a generation (an apply-now)
+keeps to the Chat the head held at the freeze, and a message handed on as the new
+generation's first turn is left out of that head; either way each record is read
+once, and joins the head at the next collapse. The Context view lists a record
+once: in the head when it is frozen there, and for the person's words said since,
+as the live row, which pins and marks the record.
 
 ### 3.2 Pins
 

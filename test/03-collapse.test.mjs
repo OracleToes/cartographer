@@ -10,7 +10,7 @@ import test from "node:test";
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths } from "../dist/runtime/collapse.js";
+import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths, rewriteHeadSnapshot } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readGenerationEphemera } from "../dist/runtime/collapse.js";
@@ -690,6 +690,41 @@ test("deferred ephemeral deletion bypasses archive and removes a pin", async () 
       const brain = await store.read();
       assert.ok(!brain.ephemera.some((item) => item.id === target.id));
       assert.ok(!brain.ephemeralDeletes.includes(target.id));
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Chat is swept like any Brain record: a recorded message is not archived as a line, and a carried one is not in the head", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live0c1", 1_700_000_100, [
+      { kind: "pi.user", model: [{ role: "user", content: "said and recorded" }] },
+      { kind: "pi.user", model: [{ role: "user", content: "carried on" }] },
+      { kind: "pi.user", model: [{ role: "user", content: "never recorded" }] },
+    ]);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      for (const [id, text, n] of [["c1", "said and recorded", 1], ["c2", "carried on", 2]]) {
+        await store.apply({ kind: "chat.record", record: { id, author: "user", text, createdAt: at(n), updatedAt: at(n) } }, at(n));
+      }
+      const report = await collapse(root, store, { person: "OracleToes", carriedTexts: ["carried on"] });
+      const archived = (await store.readArchive()).items.map((item) => item.ephemeral?.text).filter((text) => text !== undefined);
+      assert.deepEqual(archived, ["never recorded"], "only the line with no record behind it is swept as a line");
+      assert.equal((await store.read()).chat.length, 2, "no Chat leaves the Brain without a mark");
+      const head = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+      assert.match(head, /said and recorded/);
+      assert.doesNotMatch(head, /carried on/, "the carried message is the new generation's first turn, so it is not also in the head");
+
+      // A rebuild in the middle of the generation keeps to the Chat the head held.
+      const later = applyWrite(await store.read(), { kind: "chat.record", record: { id: "c3", author: "user", text: "said since the freeze", createdAt: at(5), updatedAt: at(5) } }, at(5));
+      rewriteHeadSnapshot(root, report.generation, later, "OracleToes", at(6));
+      const rebuilt = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
+      assert.match(rebuilt, /said and recorded/);
+      assert.doesNotMatch(rebuilt, /said since the freeze|carried on/, "the body holds what was said since; the head waits for the next collapse");
     } finally {
       await store.close();
     }

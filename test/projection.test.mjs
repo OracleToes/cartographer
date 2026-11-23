@@ -33,6 +33,11 @@ test("the head holds every Chat record, the person's and the agent's, in the ord
   // A deleted record is not in the head: only a delete removes Chat, and it is gone.
   const gone = projectContext(applyWrite(brain, { kind: "delete", target: "chat", id: "raw-chat-id" }, 1), new Map(), "OracleToes");
   assert.doesNotMatch(gone.text, /the person's words/);
+  // A head keeps to the records it was asked to hold, and says which they are.
+  const only = projectContext(brain, new Map(), "OracleToes", { chat: new Set(["raw-chat-id-2"]) });
+  assert.doesNotMatch(only.text, /the person's words/);
+  assert.deepEqual(only.chatIds, ["raw-chat-id-2"]);
+  assert.deepEqual(projection.chatIds, ["raw-chat-id", "raw-chat-id-2"]);
 });
 
 test("a link to a deleted node renders as (gone), never as a raw id", () => {

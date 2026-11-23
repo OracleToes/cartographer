@@ -736,7 +736,11 @@ export async function collapseLiveSession(
   // prefill is built from is the Brain as it stands after that move (§3.3).
   // The head the next generation freezes names the same person every other
   // string names: one name, carried from the session that built it.
-  const report = await collapse(session.root, options.brain, { person: session.state.person, ...ceremony });
+  const report = await collapse(session.root, options.brain, {
+    person: session.state.person,
+    carriedTexts: carry.map((input) => inputText(input.content)),
+    ...ceremony,
+  });
   const next = await openLiveSession(options);
   // Opening retries committed ephemeral restores and acknowledges each one
   // only after placement. Do not submit the report's items a second time.

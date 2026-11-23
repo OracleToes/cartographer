@@ -514,6 +514,12 @@ export interface CollapseOptions {
    * the agent reads after the collapse, so it must name somebody either way.
    */
   person?: string;
+  /**
+   * The text of the person's messages this collapse hands straight to the new
+   * generation as its first turn. Their Chat records stay in the Brain but are
+   * left out of the head, so each is read once: as that turn (§2.3).
+   */
+  carriedTexts?: readonly string[];
 }
 
 export interface CollapseReport {
@@ -582,7 +588,22 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // being read out of this one.
   const pins = new Set(refreshed.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
   const deletions = new Set(refreshed.ephemeralDeletes ?? []);
-  const swept = (await readGenerationEphemera(live.store, live.generation)).filter((item) => !pins.has(item.id) && !deletions.has(item.id));
+  // A person's message is Chat once it is sent (§2.3), and Chat is swept like
+  // any Brain record: only when it is marked for archive, and then as the
+  // record. Its copy in the old store is the same words, so it is not swept a
+  // second time as an ephemeral. A line with no record behind it still is.
+  const recorded = new Map<string, number>();
+  for (const record of refreshed.chat) if (record.author === "user") recorded.set(record.text, (recorded.get(record.text) ?? 0) + 1);
+  const isRecordedPerson = (item: IncomingItem): boolean => {
+    if (item.ephemeral?.kind !== "personMessage") return false;
+    const left = recorded.get(item.ephemeral.text) ?? 0;
+    if (left === 0) return false;
+    recorded.set(item.ephemeral.text, left - 1);
+    return true;
+  };
+  const swept = (await readGenerationEphemera(live.store, live.generation)).filter(
+    (item) => !pins.has(item.id) && !deletions.has(item.id) && !isRecordedPerson(item),
+  );
 
   // The Brain the new generation is built from: the marks applied, so a record
   // that is archived or deleted is not in the head it was swept out of (§2,
@@ -629,7 +650,17 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     const write = writeBackOf(item);
     if (write !== undefined) next = applyWrite(next, write, now);
   }
-  const projection = projectContext(next, fileTexts, options.person ?? personName());
+  // The messages handed on as the new generation's first turn are not in its
+  // head as well: the newest record with that text is the one sent, and it
+  // joins the head at the next collapse, from the body it will be in then.
+  const handedOn = new Set<string>();
+  for (const text of options.carriedTexts ?? []) {
+    const record = [...next.chat].reverse().find((candidate) => candidate.author === "user" && candidate.text === text && !handedOn.has(candidate.id));
+    if (record !== undefined) handedOn.add(record.id);
+  }
+  const projection = projectContext(next, fileTexts, options.person ?? personName(), {
+    chat: new Set(next.chat.filter((record) => !handedOn.has(record.id)).map((record) => record.id)),
+  });
 
   // Reserve the handoff before creating any destination files. Recovery can
   // distinguish a partial destination from a committed sweep even if the
@@ -700,7 +731,18 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
 export function rewriteHeadSnapshot(root: string, generation: string, brain: CartoBrain, person: string, now: number): void {
   const fileTexts = new Map<string, string | undefined>();
   for (const file of brain.files) fileTexts.set(file.path, readPinnedFile(root, file.path));
-  writeSnapshot(root, generation, projectContext(brain, fileTexts, person), now);
+  // Chat said since the freeze is in the body, and a rebuilt head keeps to the
+  // records the frozen one held: the head gathers in new Chat at a collapse,
+  // not before, or the model would read the same words twice (§2.3). A
+  // snapshot from before Chat was in the head listed none, so it holds none.
+  let held: ReadonlySet<string> | undefined;
+  try {
+    const sidecar = JSON.parse(readFileSync(snapshotPaths(root, generation).sidecar, "utf8")) as { chat?: unknown };
+    held = new Set(Array.isArray(sidecar.chat) ? sidecar.chat.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    held = undefined;
+  }
+  writeSnapshot(root, generation, projectContext(brain, fileTexts, person, held === undefined ? {} : { chat: held }), now);
 }
 
 /** A Brain record a collapse is about to act on, and the archive row it becomes when it is archived. */

@@ -43,7 +43,7 @@ import {
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
-import type { CartoBrain, Mark } from "../domain/records.js";
+import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
@@ -364,7 +364,24 @@ export class ContextView implements Component, Focusable {
     for (const entry of data.brain.ledger) {
       head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned, entry.mark));
     }
+    // A Chat record is in the context once (§2.3). One in the frozen head is
+    // listed here; the person's words said since the freeze are the live body
+    // rows below, which act on the record. The agent's own have no body row,
+    // so they are listed here, marked as not yet frozen, until a collapse.
+    const liveSaid = data.transcriptMessages.filter((message) => message.role === "user");
+    const recordOfLine = new Map<number, ChatRecord>();
     for (const chat of data.brain.chat) {
+      const frozen = projection.has(handleOf(handles, "chat", chat.id) ?? "");
+      if (!frozen && chat.author === "user") {
+        // The live line it was recorded as, matched in the order said. A
+        // record with no line left in the body (the line was removed) is
+        // listed here, so no Chat is missing from the view.
+        const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+        if (line !== -1) {
+          recordOfLine.set(line, chat);
+          continue;
+        }
+      }
       head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned, chat.mark));
     }
     // Pinned files come before pinned ephemera in the head (§5.1), each under
@@ -468,6 +485,9 @@ export class ContextView implements Component, Focusable {
     for (const message of data.transcriptMessages) {
       if (message.role !== "user") continue;
       personCount += 1;
+      // A pin or a mark placed on the live line lands on the record it was.
+      const chatRecord = recordOfLine.get(personCount - 1);
+      const chatMark = chatRecord?.mark;
       candidates.push({
         key: message.entry ?? Number.MAX_SAFE_INTEGER,
         // A person's message precedes the work its entry produced.
@@ -479,7 +499,9 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
-          target: { part: "transcript", id: message.targetId ?? message.id },
+          target: chatRecord === undefined ? { part: "transcript", id: message.targetId ?? message.id } : { part: "chat", id: chatRecord.id },
+          ...(chatRecord?.pinned === undefined ? {} : { pinned: chatRecord.pinned }),
+          ...(chatMark === undefined ? {} : { marked: `${chatMark.action} on collapse · ${chatMark.author === "user" ? (data.person ?? "you") : "agent"}` }),
         },
       });
     }

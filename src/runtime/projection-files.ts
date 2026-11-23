@@ -41,6 +41,9 @@ export function writeSnapshot(root: string, generation: string, projection: Proj
     createdAt,
     parts: projection.parts.map((part) => ({ id: part.id, label: part.label, tokens: part.tokens })),
     total: projection.total,
+    // Which Chat records the head holds: a rebuild in the middle of a
+    // generation keeps to these, so a message said since is not read twice.
+    chat: projection.chatIds,
   };
   writeFileSync(tempMarkdown, projection.text, { mode: 0o644 });
   writeFileSync(tempSidecar, `${JSON.stringify(sidecar, null, 2)}\n`, { mode: 0o644 });
