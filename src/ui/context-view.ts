@@ -43,7 +43,7 @@ import {
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
-import type { CartoBrain, Mark } from "../domain/records.js";
+import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
@@ -56,6 +56,8 @@ export interface ContextToolItem {
 
 export interface ContextDialogueMessage {
   id: string | number;
+  /** Generation-scoped sweep identity for a live person message. */
+  targetId?: string | undefined;
   /**
    * The context entry this message is, and where it sits in the body. A message
    * id can be a composite (`"7-0"` for a chat call's part), so the order comes
@@ -138,6 +140,7 @@ type NodeKind =
   | "files"
   | "person"
   | "reasoning"
+  | "output"
   | "call"
   | "result"
   | "ephemera"
@@ -182,6 +185,7 @@ const KIND_INK: Record<NodeKind, (text: string) => string> = {
   files: tokens.pin,
   person: tokens.person,
   reasoning: tokens.reasoning,
+  output: tokens.output,
   call: tokens.tool,
   result: tokens.output,
   ephemera: tokens.pin,
@@ -197,24 +201,85 @@ const BODY_INSET = 7;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
+/** One entry of the frozen head, as the bytes the model reads. */
+interface FrozenEntry {
+  /** `A3`, `L1`, `C2`, `X1` for a record; the path for a pinned file. */
+  key: string;
+  kind: "atlas" | "ledger" | "chat" | "ephemera" | "files";
+  /** The entry's own lines, exactly as they sit in the head. */
+  lines: string[];
+}
+
 /**
  * The frozen projection, as entries. The projection is one section of the
  * system message, so the bytes are what the model reads; splitting it back into
- * its entries is a read of those bytes, never a re-render of the Brain.
+ * its entries is a read of those bytes, never a re-render of the Brain. Records
+ * are found by their handle; a pinned file by its header line, since every line
+ * of a file's text is indented and only its header is not.
  */
-function projectionEntries(text: string): Map<string, string[]> {
-  const entries = new Map<string, string[]>();
-  let current: string[] | undefined;
+function parseProjection(text: string): FrozenEntry[] {
+  const entries: FrozenEntry[] = [];
+  let region: FrozenEntry["kind"] | undefined;
+  let current: FrozenEntry | undefined;
+  const REGIONS: Array<[RegExp, FrozenEntry["kind"]]> = [
+    [/^Atlas — what you understand about the project$/, "atlas"],
+    [/^Ledger — what you are working on$/, "ledger"],
+    [/^Chat — what you and .* have said to each other$/, "chat"],
+    [/^Pinned files — read again at this collapse$/, "files"],
+    [/^Pinned — what .* kept in front of you$/, "ephemera"],
+  ];
+  const HEADER: Partial<Record<FrozenEntry["kind"], RegExp>> = {
+    atlas: /^(A\d+) /,
+    ledger: /^(L\d+) /,
+    chat: /^(C\d+) /,
+    ephemera: /^(X\d+) /,
+  };
   for (const line of text.split("\n")) {
-    const match = /^([ALC]\d+)\b/.exec(line);
-    if (match !== null && match[1] !== undefined) {
-      current = [line];
-      entries.set(match[1], current);
-    } else if (current !== undefined) {
-      current.push(line);
+    const heading = REGIONS.find(([pattern]) => pattern.test(line));
+    if (heading !== undefined) {
+      region = heading[1];
+      current = undefined;
+      continue;
     }
+    if (region === "files") {
+      // A file's lines are all indented, so an unindented empty line is the
+      // gap between this part and the next.
+      if (line === "") {
+        region = undefined;
+        current = undefined;
+        continue;
+      }
+      if (!line.startsWith("  ")) {
+        const named = /^(.*) · pinned by /.exec(line);
+        current = { key: named?.[1] ?? line, kind: "files", lines: [line] };
+        entries.push(current);
+        continue;
+      }
+    } else if (region !== undefined) {
+      const match = HEADER[region]?.exec(line);
+      if (match !== null && match !== undefined && match[1] !== undefined) {
+        current = { key: match[1], kind: region, lines: [line] };
+        entries.push(current);
+        continue;
+      }
+    }
+    current?.lines.push(line);
+  }
+  // The blank line that separates two parts belongs to neither.
+  for (const entry of entries) {
+    while (entry.lines.length > 1 && entry.lines[entry.lines.length - 1] === "") entry.lines.pop();
   }
   return entries;
+}
+
+/** A frozen entry as a person reads it: its header without the handle, its text without the indent. */
+function readable(entry: FrozenEntry): { summary: string; body: string } {
+  const [first = "", ...rest] = entry.lines;
+  const text = rest.map((line) => (line.startsWith("  ") ? line.slice(2) : line));
+  const header = entry.kind === "files" ? first : first.replace(/^\S+ /, "");
+  if (entry.kind === "files") return { summary: header, body: [header, ...text].join("\n") };
+  if (entry.kind === "chat") return { summary: oneLine(text.join(" ")) || header, body: [header, ...text].join("\n") };
+  return { summary: oneLine(header), body: [header, ...text].join("\n") };
 }
 
 export class ContextView implements Component, Focusable {
@@ -227,7 +292,7 @@ export class ContextView implements Component, Focusable {
   onCollapse?: () => void;
   /** Fired on `u` over an entry that names a Brain record: withdraw the mark on it (§4.1). */
   onWithdrawMark?: (partId: string, itemId: string | number) => void;
-  /** Fired on `p` over an entry that names a Brain chat record: toggle the pin marker. */
+  /** Fired on `p`: pins an ephemeral item or unpins a file. A Brain entry has no pin on this layer (§3.2). */
   onTogglePin?: (partId: string, itemId: string | number) => void;
   /**
    * Bring a rendered line range into view. The view lives in a scroll pane, so
@@ -242,11 +307,16 @@ export class ContextView implements Component, Focusable {
   private rows: Array<{ section: number } | { node: PromptNode; section: number }> = [];
   private cursor = 0;
   private nowArmed = false;
+  /** The first archive press is a confirmation, not a deferred archive mark. */
+  private archiveConfirmation: string | undefined;
   private showReal = false;
   private folded = new Map<string, boolean>();
   private hits: Array<{ start: number; end: number; index: number }> = [];
 
   setData(data: ContextViewData): void {
+    const oldRows = this.rows;
+    const oldCursor = this.cursor;
+    const previous = oldRows[oldCursor];
     this.data = data;
     this.sections = this.build(data);
     this.rows = [];
@@ -257,13 +327,17 @@ export class ContextView implements Component, Focusable {
     // The cursor stays on the entry it was on, by id, across a refresh. The app
     // refreshes this view on a timer while a run is going; resetting to the top
     // each time is what made the cursor look like it jumped while scrolling.
-    // Only when the entry it was on is gone does it fall back to the first one,
-    // and it never lands on a section heading, which carries no cursor.
-    const previous = this.rows[this.cursor];
-    const held =
-      previous !== undefined && "node" in previous
-        ? this.rows.findIndex((row) => "node" in row && row.node.id === previous.node.id)
+    // If it disappears, prefer the previous surviving entry, then the next
+    // one. Deleting the last entry therefore moves up instead of to the top.
+    const findOld = (row: (typeof oldRows)[number] | undefined): number =>
+      row !== undefined && "node" in row
+        ? this.rows.findIndex((candidate) => "node" in candidate && candidate.node.id === row.node.id)
         : -1;
+    let held = findOld(previous);
+    if (held < 0 && previous !== undefined && "node" in previous) {
+      for (let at = oldCursor - 1; at >= 0 && held < 0; at -= 1) held = findOld(oldRows[at]);
+      for (let at = oldCursor + 1; at < oldRows.length && held < 0; at += 1) held = findOld(oldRows[at]);
+    }
     this.cursor = held >= 0 ? held : this.firstEntry();
   }
 
@@ -273,30 +347,45 @@ export class ContextView implements Component, Focusable {
     return (
       estimateTokens(this.data.systemPrompt) +
       estimateSerialized(this.data.tools) +
-      estimateTokens(this.data.projectionText ?? "") +
+      estimateTokens(this.headText(this.data)) +
       estimateSerialized(this.data.transcriptMessages) +
       estimateSerialized(this.data.toolWorkItems) +
       estimateTokens(this.data.stateBlockText)
     );
   }
 
+  /**
+   * The bytes of the head's projection section: the frozen file when there is
+   * one. When the file is missing the section renders the Brain itself, the same
+   * way, so this does too.
+   */
+  private headText(data: ContextViewData): string {
+    return data.projectionText ?? projectContext(data.brain, new Map(), data.person).text;
+  }
+
   private build(data: ContextViewData): PromptSection[] {
     const handles = data.brain.handles;
-    const projection = projectionEntries(data.projectionText ?? projectContext(data.brain, new Map(), data.person).text);
+    const frozenText = this.headText(data);
+    const frozen = parseProjection(frozenText);
+    const frozenKeys = new Set(frozen.map((entry) => entry.key));
+    const person = data.person ?? "you";
 
     // ── head ────────────────────────────────────────────────────────────────
-    const head: PromptNode[] = [
-      {
-        id: "system",
-        handle: "H",
-        kind: "system",
-        label: "system prompt",
-        summary: oneLine(data.systemPrompt),
-        body: data.systemPrompt,
-        real: data.systemPrompt,
-      },
-    ];
+    // The head, in §5.1's order: the system prompt, the tool definitions, then
+    // the frozen projection. The tools are declared to the provider alongside
+    // the system message; the rest is the message itself.
+    const head: PromptNode[] = [];
 
+    // The system prompt, then the tool definitions (§5.1): the instructions are the first section of the system message.
+    head.push({
+      id: "system",
+      handle: "H",
+      kind: "system",
+      label: "system prompt",
+      summary: oneLine(data.systemPrompt),
+      body: data.systemPrompt,
+      real: data.systemPrompt,
+    });
     data.tools.forEach((tool, index) => {
       head.push({
         id: `tool-${tool.name}`,
@@ -310,81 +399,96 @@ export class ContextView implements Component, Focusable {
       });
     });
 
-    const record = (
-      kind: "atlas" | "ledger" | "chat" | "ephemera",
-      id: string,
-      handle: string | undefined,
-      body: string,
-      pinned?: "user" | "agent" | undefined,
-      mark?: Mark | undefined,
-    ): PromptNode => {
-      const bytes = handle === undefined ? undefined : projection.get(handle);
-      // The two views of one entry: what the person can read, and the bytes the
-      // model receives. A record written since the freeze is in the Brain but not
-      // yet in the projection; the real view says so rather than showing bytes
-      // that are not there.
-      const frozen = bytes === undefined || bytes.length === 0 ? undefined : bytes;
-      return {
-        id: `${kind}-${id}`,
-        handle: handle ?? "?",
-        kind,
-        // The handle's letter already says which book this is; the name column
-        // says it again in words so a row can be read without decoding letters.
-        label: kind,
-        summary: oneLine(body),
-        body,
-        real: frozen === undefined
-          ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
-          : frozen.join("\n"),
-        target: { part: kind, id },
-        ...(pinned === undefined ? {} : { pinned }),
-        // A mark is a decision waiting for a collapse, and the row says which
-        // one and who made it (§4.1): a mark nobody can see reads as nothing
-        // having happened.
-        ...(mark === undefined
-          ? {}
-          : { marked: `${mark.action} · ${mark.author === "user" ? (data.person ?? "you") : "agent"}` }),
-      };
+    // A row for what the head holds that the Brain no longer does, or holds
+    // differently: the head is frozen, so the model still reads it. Nothing here
+    // is listed for what the head does NOT hold: this view is the context as it
+    // is, so a record or a pin that is waiting for the next collapse has no row in
+    // the head. It shows where it really is (a pinned item's body row, the tail).
+    const GONE = "gone from the Brain since the freeze · the head holds it until the next collapse";
+
+    const mark = (m: Mark | undefined): { marked: string } | Record<string, never> =>
+      m === undefined ? {} : { marked: `${m.action} on collapse · ${m.author === "user" ? person : "agent"}` };
+
+    type Located = { id: string; mark?: Mark | undefined; label?: string; pinned?: "user" | "agent" | undefined } | undefined;
+    const locate = (kind: "atlas" | "ledger" | "chat" | "ephemera", handle: string): Located => {
+      const id = handles.entries.find((entry) => entry.kind === kind && entry.handle === handle)?.id;
+      if (id === undefined) return undefined;
+      if (kind === "atlas") return data.brain.atlas.find((node) => node.id === id) === undefined ? undefined : { id, mark: data.brain.atlas.find((node) => node.id === id)?.mark };
+      if (kind === "ledger") return data.brain.ledger.find((entry) => entry.id === id) === undefined ? undefined : { id, mark: data.brain.ledger.find((entry) => entry.id === id)?.mark };
+      if (kind === "chat") return data.brain.chat.find((record) => record.id === id) === undefined ? undefined : { id, mark: data.brain.chat.find((record) => record.id === id)?.mark };
+      const item = data.brain.ephemera.find((candidate) => candidate.id === id);
+      return item === undefined ? undefined : { id, label: item.kind, pinned: item.pinned };
     };
 
-    for (const node of data.brain.atlas) {
-      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.pinned, node.mark));
-    }
-    for (const entry of data.brain.ledger) {
-      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned, entry.mark));
-    }
+    const deletes = new Set(data.brain.ephemeralDeletes ?? []);
+    const frozenRecord = (entry: FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }): PromptNode => {
+      const at = locate(entry.kind, entry.key);
+      const { summary, body } = readable(entry);
+      const unpinned = entry.kind === "ephemera" && at !== undefined && at.pinned === undefined;
+      return {
+        id: `${entry.kind}-${at?.id ?? entry.key}`,
+        handle: entry.key,
+        kind: entry.kind,
+        label: entry.kind === "ephemera" ? at?.label ?? /^\S+ \[([^\]]*)\]/.exec(entry.lines[0] ?? "")?.[1] ?? "pinned" : entry.kind,
+        summary,
+        body,
+        real: entry.lines.join("\n"),
+        ...(at === undefined ? { marked: GONE } : { target: { part: entry.kind, id: at.id } }),
+        ...(at === undefined ? {} : mark(at.mark)),
+        ...(unpinned ? { marked: "unpinned since the freeze · leaves the head at the next collapse" } : {}),
+        ...(entry.kind === "ephemera" && at !== undefined && deletes.has(at.id) ? { marked: "delete on collapse · you" } : {}),
+        ...(entry.kind === "ephemera" && at?.pinned !== undefined ? { pinned: at.pinned } : {}),
+      };
+    };
+    const of = (kind: FrozenEntry["kind"]) => frozen.filter((entry) => entry.kind === kind) as Array<FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }>;
+    for (const entry of of("atlas")) head.push(frozenRecord(entry));
+    for (const entry of of("ledger")) head.push(frozenRecord(entry));
+    // A Chat record is in the context once (§2.3). One in the frozen head is
+    // listed here. The person's words said since the freeze are the live body
+    // rows below, which act on the record; the agent's own are in the body as
+    // their `chat` call. Neither is in the head until the next collapse, so
+    // neither is listed here.
+    const liveSaid = data.transcriptMessages.filter((message) => message.role === "user");
+    const recordOfLine = new Map<number, ChatRecord>();
+    for (const entry of of("chat")) head.push(frozenRecord(entry));
     for (const chat of data.brain.chat) {
-      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned, chat.mark));
+      const handle = handleOf(handles, "chat", chat.id);
+      if (chat.author !== "user" || (handle !== undefined && frozenKeys.has(handle))) continue;
+      // The live line it was recorded as, matched in the order said.
+      const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+      if (line !== -1) recordOfLine.set(line, chat);
     }
-    // Pinned files come before pinned ephemera in the head (§5.1), each under
-    // the handle the tree gave it (§5.4), so the person can see what is being
-    // carried and take the pin off.
-    for (const file of data.brain.files) {
-      const name = file.path === "" ? "." : file.path;
+    // Pinned files come before pinned ephemera in the head (§5.1). The head
+    // holds the file as the collapse read it: those lines are the row, in both
+    // views. A file pinned since then is not in the head and has no row here;
+    // the tail says a pin is waiting.
+    const pinnedFiles = new Map(data.brain.files.map((file) => [file.path === "" ? "." : file.path, file]));
+    const treeHandle = (path: string) => data.treeHandles?.[path === "." ? "" : path] ?? data.treeHandles?.[path] ?? "F?";
+    const shownFiles = new Set<string>();
+    for (const entry of frozen.filter((candidate) => candidate.kind === "files")) {
+      shownFiles.add(entry.key);
+      const file = pinnedFiles.get(entry.key);
+      const { summary, body } = readable(entry);
       head.push({
-        id: `file-${file.path}`,
-        handle: data.treeHandles?.[file.path] ?? "F?",
+        id: `file-${file?.path ?? entry.key}`,
+        handle: treeHandle(entry.key),
         kind: "files",
         label: "file",
-        summary: `${name} · pinned by ${file.pinned === "user" ? (data.person ?? "the person") : "the agent"}${file.stale === true ? " · stale" : ""}`,
-        body: `${name}\n\nread again at every collapse, so the head holds the file and not a quotation of a reading of it.`,
-        real: "(read at the next collapse: a pinned file is the file, not a copy frozen here)",
-        pinned: file.pinned,
-        target: { part: "files", id: file.path },
+        summary,
+        body,
+        real: entry.lines.join("\n"),
+        // A file the head holds is a row you can act on whether or not it is still
+        // pinned: `p` unpins it, and on the row that says it is leaving, `p` pins it
+        // again, so the head keeps it.
+        target: { part: "files" as const, id: file?.path ?? entry.key },
+        ...(file === undefined
+          ? { marked: "unpinned since the freeze · leaves the head at the next collapse" }
+          : { pinned: file.pinned }),
       } satisfies PromptNode);
     }
     // Pinned ephemera come after Chat in the head (§5.1), each under its own
     // handle, because they are what the person kept in front of the agent.
-    for (const item of data.brain.ephemera) {
-      head.push({
-        ...record("ephemera", item.id, handleOf(handles, "ephemera", item.id), item.text),
-        label: item.kind,
-        pinned: item.pinned,
-        // The head is where a carried item is, so the head is where its pin is
-        // taken off: the store it came from is gone, and nothing else holds it.
-        target: { part: "ephemera", id: item.id },
-      });
-    }
+    for (const entry of of("ephemera")) head.push(frozenRecord(entry));
 
     // ── body ────────────────────────────────────────────────────────────────
     // The body is never sorted by kind: the person's messages, the reasoning, the
@@ -411,6 +515,22 @@ export class ContextView implements Component, Focusable {
             handle: `X${workCount}`,
             kind: "reasoning",
             label: "thinking",
+            summary: oneLine(item.text ?? ""),
+            body: item.text ?? "",
+            target: { part: "tool-work", id: String(item.id) },
+            pinned: item.pinned,
+          },
+        });
+      } else if (item.kind === "output") {
+        // The model's own plain text: part of what it receives next round.
+        candidates.push({
+          key,
+          order: suffix,
+          node: {
+            id: String(item.id),
+            handle: `X${workCount}`,
+            kind: "output",
+            label: "text",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
             target: { part: "tool-work", id: String(item.id) },
@@ -456,6 +576,9 @@ export class ContextView implements Component, Focusable {
     for (const message of data.transcriptMessages) {
       if (message.role !== "user") continue;
       personCount += 1;
+      // A mark placed on the live line lands on the record it was.
+      const chatRecord = recordOfLine.get(personCount - 1);
+      const chatMark = chatRecord?.mark;
       candidates.push({
         key: message.entry ?? Number.MAX_SAFE_INTEGER,
         // A person's message precedes the work its entry produced.
@@ -467,11 +590,28 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
-          target: { part: "transcript", id: message.id },
+          target: chatRecord === undefined ? { part: "transcript", id: message.targetId ?? message.id } : { part: "chat", id: chatRecord.id },
+          ...(chatMark === undefined ? {} : { marked: `${chatMark.action} on collapse · ${chatMark.author === "user" ? (data.person ?? "you") : "agent"}` }),
         },
       });
     }
     const body = candidates.sort((left, right) => left.key - right.key || left.order - right.order).map((entry) => entry.node);
+    // A pin placed since the freeze is not in the head, so it has no row there.
+    // The item it pins is a body row right now, so that row carries the pin and
+    // says it waits for the collapse, the way a row marked for delete says so.
+    const pendingPins: PromptNode[] = [];
+    for (const node of body) {
+      if (node.pinned === undefined || node.target?.part !== "tool-work") continue;
+      const item = data.brain.ephemera.find((candidate) => candidate.id === String(node.target?.id));
+      const handle = item === undefined ? undefined : handleOf(handles, "ephemera", item.id);
+      if (handle !== undefined && frozenKeys.has(handle)) continue;
+      node.marked = `pin on collapse · ${node.pinned === "user" ? person : "agent"}`;
+      pendingPins.push(node);
+    }
+    const deletions = new Set(data.brain.ephemeralDeletes ?? []);
+    for (const node of body) {
+      if (node.target !== undefined && deletions.has(String(node.target.id))) node.marked = "delete on collapse · you";
+    }
     // The numbering is the transcript's, when the app supplied it: `X3` names
     // one item, and the two views are two renderings of one prompt (§5.4).
     if (data.handles !== undefined) {
@@ -483,15 +623,24 @@ export class ContextView implements Component, Focusable {
     }
 
     // ── tail ────────────────────────────────────────────────────────────────
+    // The state block lists every pin, so a pin placed since the freeze is in the
+    // context right now in exactly one place: its `pins:` line. A file pinned
+    // since the freeze has no other row, so the tail carries the highlight for it
+    // (and for the items above), and says whose pins are waiting.
+    const waiting = [
+      ...data.brain.files.filter((file) => !shownFiles.has(file.path === "" ? "." : file.path)).map((file) => treeHandle(file.path === "" ? "." : file.path)),
+      ...pendingPins.map((node) => node.handle),
+    ];
     const tail: PromptNode[] = [
       {
         id: "state-block",
         handle: "B",
         kind: "state",
         label: "state block",
-        summary: "what is true right now: mode, fullness, writes, staleness, tree, pins, marks",
+        summary: oneLine(data.stateBlockText),
         body: data.stateBlockText,
         real: data.stateBlockText,
+        ...(waiting.length === 0 ? {} : { marked: `pin on collapse · ${waiting.join(", ")}` }),
       },
     ];
 
@@ -533,14 +682,26 @@ export class ContextView implements Component, Focusable {
     if (target === undefined) return;
     const now = this.nowArmed;
     this.nowArmed = false;
-    if (action === "archive") this.onArchive?.(target.part, target.id, now);
+    const ephemeral = target.part === "transcript" || target.part === "tool-work" || target.part === "ephemera";
+    const key = `${target.part}:${String(target.id)}`;
+    if (ephemeral && action === "archive" && !now && this.archiveConfirmation !== key) {
+      this.archiveConfirmation = key;
+      return;
+    }
+    this.archiveConfirmation = undefined;
+    if (action === "archive") this.onArchive?.(target.part, target.id, ephemeral || now);
     else this.onDelete?.(target.part, target.id, now);
   }
 
   /** Withdraw the mark on the entry under the cursor (§4.1). The palette calls this. */
   withdrawSelected(): void {
     const target = this.selectedNode()?.target;
-    if (target !== undefined) this.onWithdrawMark?.(target.part, target.id);
+    if (target === undefined) return;
+    if (this.archiveConfirmation === `${target.part}:${String(target.id)}`) {
+      this.archiveConfirmation = undefined;
+      return;
+    }
+    this.onWithdrawMark?.(target.part, target.id);
   }
 
   /** Arm or disarm apply-now, and say which it is now: the next mark is spent either way. */
@@ -556,13 +717,13 @@ export class ContextView implements Component, Focusable {
       .find((node) => node.target?.part === part && String(node.target.id) === String(id));
   }
 
-  /** The next entry in a direction, skipping section headings; stays put at the edge. */
+  /** The next entry in a direction, skipping headings and wrapping at the edge. */
   private step(direction: 1 | -1): number {
     for (let at = this.cursor + direction; at >= 0 && at < this.rows.length; at += direction) {
       const row = this.rows[at];
       if (row !== undefined && "node" in row) return at;
     }
-    return this.cursor;
+    return direction === 1 ? this.firstEntry() : this.lastEntry();
   }
 
   /**
@@ -691,7 +852,7 @@ export class ContextView implements Component, Focusable {
     lines.push(canvasLine("", width));
 
     if (this.data === undefined) {
-      lines.push(ink(tokens.muted("Nothing in the context yet.")));
+      lines.push(ink(tokens.muted("The context has not been read yet.")));
       return lines;
     }
 
@@ -748,8 +909,9 @@ export class ContextView implements Component, Focusable {
     // "you", which is what a stand-alone frame means.
     const who = this.data?.person ?? "you";
     const open = this.isOpen(node);
-    const ink = KIND_INK[node.kind];
-    const cursor = selected ? tokens.accent("▌") : " ";
+    const confirmed = node.target !== undefined && this.archiveConfirmation === `${node.target.part}:${String(node.target.id)}`;
+    const ink = confirmed ? tokens.danger : KIND_INK[node.kind];
+    const cursor = selected ? (confirmed ? tokens.danger("▌") : tokens.accent("▌")) : " ";
     const glyph = open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));
     // One name column. The handle's prefix already says what kind of thing the
@@ -764,13 +926,14 @@ export class ContextView implements Component, Focusable {
         : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? who : "agent"}`)} `;
     const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
-    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${paddedName}${mark}${pinned}`;
+    // Put the pending action before the name and preview so it survives narrow panes.
+    const head = `${cursor} ${tokens.muted(glyph)} ${handle}${mark}${mark === "" ? "" : " "}${paddedName}${pinned}`;
     const lines: string[] = [];
 
     if (!open) {
       const room = Math.max(8, width - visibleWidth(head) - 2);
-      const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "…", room, "…");
-      lines.push(canvasLine(`${head}${tokens.faint(preview)}`, width));
+      const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
+      lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
       return lines;
     }
 

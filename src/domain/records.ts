@@ -33,8 +33,6 @@ export interface ChatRecord {
   id: RecordId;
   author: "user" | "agent";
   text: string;
-  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
-  pinned?: "user" | "agent";
   /** The pending mark the next collapse applies (§4.1); its author rides with it. */
   mark?: Mark;
   createdAt: number;
@@ -55,8 +53,6 @@ export interface LedgerEntry {
   status: LedgerStatus;
   /** Null while open; set when a question is answered or an entry is closed with its outcome. */
   answer: LedgerAnswer | null;
-  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
-  pinned?: "user" | "agent";
   /** The pending mark the next collapse applies (§4.1); its author rides with it. */
   mark?: Mark;
   createdAt: number;
@@ -86,8 +82,6 @@ export interface AtlasNode {
   attachments: Attachment[];
   /** The collapse-time marker: a file attachment has drifted. No reason, no bookkeeping. */
   stale?: boolean;
-  /** The pin marker: "user" | "agent" — who placed the pin. An item pinned stays put; no reason, no source, no other bookkeeping. */
-  pinned?: "user" | "agent";
   /** The pending mark the next collapse applies (§4.1); its author rides with it. */
   mark?: Mark;
   createdAt: number;
@@ -173,6 +167,8 @@ export interface CartoBrain {
   atlas: AtlasNode[];
   /** Pinned ephemera: what a collapse carries into the head instead of sweeping (§3.2, §5.1). */
   ephemera: PinnedEphemeral[];
+  /** Live generation item identities chosen for deletion at the next collapse. */
+  ephemeralDeletes?: string[];
   /** Pinned files, read again at every collapse so the head holds the file (§5.1). */
   files: PinnedFile[];
   handles: HandleTable;

@@ -11,7 +11,7 @@ import { existsSync, statSync } from "node:fs";
 
 import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
-import { defineTool } from "@earendil-works/pi-durable";
+import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
 // the env's cwd, and the two things Carto adds are the `.brain` wall and the
 // existence check on `create` that the package's `write` does not offer.
@@ -23,7 +23,7 @@ import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
-import { SleepTask } from "./sleep-task.js";
+import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -39,11 +39,6 @@ export interface ToolSession {
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
 
-  /**
-   * Set by `tree`: the turn has ended and the host starts the next one at once,
-   * so the agent reads the tree it just asked for (§6.3). Cleared when read.
-   */
-  treeReadNext?: boolean;
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
   /** The generation this context belongs to; recorded on context-sourced pins. */
@@ -96,7 +91,6 @@ function resolveRecord(
     kind,
     id: target.id,
     ...(record.mark === undefined ? {} : { mark: record.mark }),
-    ...(record.pinned === undefined ? {} : { pinned: record.pinned }),
   };
 }
 
@@ -346,7 +340,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a Brain record's, or a file's from the tree; a pinned record goes on into the rebuilt context, and a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
+        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -379,34 +373,9 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               : `${named} is unpinned: the head stops holding a copy of that file.`,
           );
         }
-        const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "Brain record");
-        const kind = target.kind as "ledger" | "chat" | "atlas";
-        const record =
-          kind === "ledger"
-            ? current.ledger.find((entry) => entry.id === target.id)
-            : kind === "atlas"
-              ? current.atlas.find((node) => node.id === target.id)
-              : current.chat.find((entry) => entry.id === target.id);
-        if (record?.pinned === "user") {
-          throw new Error(
-            `${normalizeHandle(args.handle)} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
-          );
-        }
-        await brain.apply(
-          { kind: "pin.set", target: kind, id: target.id, pinned: args.action === "pin" ? "agent" : null },
-          api.now(),
+        throw new Error(
+          `${named} is not a file in the tree. Only a file is pinned: a record of the Brain stays until it is deleted or marked for archive, so there is nothing for a pin to keep.`,
         );
-        pendingWrite(session, { kind, action: args.action, id: target.id });
-        const placed = args.action === "pin";
-        const was = record?.pinned === "agent";
-        const note = placed
-          ? was
-            ? `${normalizeHandle(args.handle)} was already pinned by you.`
-            : `${normalizeHandle(args.handle)} is pinned.`
-          : was
-            ? `${normalizeHandle(args.handle)} is unpinned.`
-            : `${normalizeHandle(args.handle)} carried no pin of yours, so nothing changed.`;
-        return textOutput(note);
       },
     }),
 
@@ -480,9 +449,8 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         // The tree itself is not the result (§6.3): it ends the turn, and the
         // state block — rendered at this anchor — is the next turn. So the agent
         // sees the tree it just asked for instead of acting on the last one.
-        // The host reads `treeReadNext` and starts that turn; the same shape as
-        // a rest, without the waiting.
-        session.treeReadNext = true;
+        // Pi's after-run task queues that next turn, including when this run
+        // was itself a continuation or came from a timed rest.
         return {
           output: [
             {
@@ -523,21 +491,26 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           // nothing is stored and nothing is pending (§10).
           return { output: [{ type: "text" as const, text: `Resting until ${them} messages you.` }], control: { terminate: true } };
         }
-        // A timed rest is durable (§10): the seconds are kept on the session for
-        // the run's end to turn into a sleep in the store, so a restart during a
-        // rest does not lose it. The turn ends here; the state block is what the
-        // agent reads when the rest is over.
-        // A timed rest is a task of the conversation (§10), so the wait is in
-        // the store and not in this process, and the conversation is free while
-        // it sleeps — a message from the person ends the rest and starts its own
-        // turn. The run ends here either way: the state block is what the agent
-        // reads when the rest is over.
-        await api.createTask(
-          SleepTask,
-          { seconds: args.seconds },
-          { ownership: { kind: "conversation" } },
-          context,
-        );
+        // The receipt and the conversation-owned task are committed together.
+        // A replay after a crash cannot create a second timed rest. If a person
+        // already queued a line for this boundary, it ends this rest instead.
+        const seconds = args.seconds;
+        await api.commit(async (tx) => {
+          const receipt = await tx.doc(RestCallDoc, api.taskId);
+          if (receipt.handled) return;
+          const rest = await tx.doc(RestDoc, api.conversationId);
+          const inbox = await tx.doc(InboxDoc, api.conversationId);
+          // Any queued input already starts or continues a turn. Do not
+          // distinguish by content: a person's text may equal the marker.
+          const hasInput = inbox.items.some((item) => item.mode !== "write");
+          rest.legacyAllowed = false;
+          if (!hasInput) {
+            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" } });
+          } else {
+            rest.active = null;
+          }
+          receipt.handled = true;
+        }, context);
         return {
           output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },

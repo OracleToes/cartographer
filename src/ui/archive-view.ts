@@ -233,7 +233,8 @@ export class ArchiveView implements Component, Focusable {
       // A result of a `read` is not just text: restoring it is a claim about a
       // file, so the row says so rather than looking like any other result.
       const from = item.ephemeral?.kind === "readResult" ? readPathOf(item) : undefined;
-      const head = `${marker} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}${mark}${armed}`;
+      // The pending action must remain visible even when the kind or pin is long.
+      const head = `${marker}${mark} ${selected ? tokens.bold(tokens.text(kind)) : tokens.muted(kind)}${pin}${armed}`;
       lines.push(canvasLine(`  ${head}`, width));
       const summary = from === undefined ? summaryOf(item) : `read of ${from} — ${summaryOf(item)}`;
       const body = wrapTextWithAnsi(summary, Math.max(16, inner - 6)).slice(0, 3);

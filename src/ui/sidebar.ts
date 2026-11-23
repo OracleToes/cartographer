@@ -29,8 +29,6 @@ export interface SidebarCounts {
   contextTokens: number;
   atlas: number;
   ledger: number;
-  /** Entries carrying a pin, by book. */
-  pinned: Partial<Record<BookKind, number>>;
   /** Entries carrying a mark, by book. */
   marked: Partial<Record<BookKind, number>>;
   /** Stale attachments, by book. */
@@ -49,7 +47,6 @@ const EMPTY: SidebarCounts = {
   contextTokens: 0,
   atlas: 0,
   ledger: 0,
-  pinned: {},
   marked: {},
   stale: {},
   staleTotal: 0,
@@ -85,7 +82,7 @@ export class Sidebar implements Component {
   onToggleLayer?: (layer: SidebarLayer) => void;
 
   setCounts(counts: SidebarCounts): void {
-    this.counts = { ...counts, pinned: { ...counts.pinned }, marked: { ...counts.marked }, stale: { ...counts.stale } };
+    this.counts = { ...counts, marked: { ...counts.marked }, stale: { ...counts.stale } };
   }
 
   setActiveBook(item: string): void {
@@ -132,12 +129,9 @@ export class Sidebar implements Component {
     return String(kind === "atlas" ? this.counts.atlas : this.counts.ledger);
   }
 
-  /** The quiet marks after a figure: pins, marks, stale. One glyph each, never a sentence. */
+  /** The quiet marks after a figure: marks, stale. One glyph each, never a sentence. */
   private marksOf(kind: BookKind): string {
     const parts: string[] = [];
-    // A count of pins, not one pin's name: the sidebar says how many there are,
-    // and the block and the views name each one `P <handle>` (§5.4).
-    if ((this.counts.pinned[kind] ?? 0) > 0) parts.push(tokens.pin("P"));
     if ((this.counts.marked[kind] ?? 0) > 0) parts.push(tokens.warn("◆"));
     if ((this.counts.stale[kind] ?? 0) > 0) parts.push(tokens.warn("!"));
     return parts.join(" ");

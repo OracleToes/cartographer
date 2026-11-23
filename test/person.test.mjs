@@ -10,11 +10,10 @@
  * string the model can reach.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { describe } from "node:test";
+import test from "node:test";
 
 import { personName, launchingUserName, UNNAMED_PERSON } from "../dist/domain/person.js";
 import { parseConfig, ConfigError } from "../dist/runtime/config.js";
@@ -144,40 +143,5 @@ test("every tool the agent sees is written in the person's name, not a role word
   }
 });
 
-describe("the --user flag", { concurrency: 4 }, () => {
-  const runCli = (args, home) =>
-    execFileSync(process.execPath, ["bin/carto.mjs", ...args], {
-      cwd: process.cwd(),
-      env: { ...process.env, CARTO_HOME: home },
-      input: "",
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-  test("help documents --user and the userName setting", () => {
-    const home = tempDir();
-    try {
-      const help = runCli(["--help"], home);
-      assert.match(help, /--user <name>/);
-      assert.match(help, /userName/);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("--user is written into a config the run creates, and wins over the login name", () => {
-    const home = tempDir();
-    const root = tempDir();
-    try {
-      runCli(
-        ["--model", "llama-swap/ByteShape", "--endpoint", "http://localhost:8888/v1", "--user", "OracleToes", "--root", root],
-        home,
-      );
-      const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-      assert.equal(config.userName, "OracleToes", "the flag is the value the file keeps");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
+// CLI help and --user persistence are covered in the end-to-end config suite,
+// alongside the other flags, without starting duplicate Carto processes.

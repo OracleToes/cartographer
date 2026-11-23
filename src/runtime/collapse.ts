@@ -16,11 +16,9 @@
  * The frozen projection snapshot for a generation is written once, at
  * creation, and is immutable until purge.
  *
- * Recovery at open is derived from those rules: a generation whose snapshot
- * is missing never existed as a frozen whole (crash mid-creation), so it is
- * deleted and the Brain — which is authoritative — builds the next one.
- * Anything beyond the newest live store and its archive is purged the same
- * way, crash remainders included.
+ * Recovery uses a journal committed with the Brain and archive. A transition
+ * that did not commit keeps its original store; one that committed keeps its
+ * destination. Unjournaled stores whose history is ambiguous are preserved.
  */
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
@@ -31,8 +29,8 @@ import { projectContext } from "../domain/projection.js";
 import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import type { BrainStore } from "./brain-store.js";
-import { withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
+import { writeBackOf, type BrainStore } from "./brain-store.js";
+import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { lexicalProjectPath } from "./workspace.js";
@@ -107,33 +105,77 @@ function unlinkIfExists(path: string): void {
   }
 }
 
+const activeCollapses = new Set<string>();
+
+/**
+ * Resolve an interrupted cross-database collapse before the ordinary generation
+ * cleanup runs. The Brain journal is written before any destination file and is
+ * committed atomically with the sweep. Never infer success from timestamps.
+ */
+export async function recoverCollapse(root: string, brain: BrainStore, finishing = false): Promise<void> {
+  if (activeCollapses.has(resolve(root)) && !finishing) throw new Error("A collapse is still running for this project.");
+  await brain.recoverCollapseJournal(async (journal) => {
+    if (!Number.isSafeInteger(journal.ownerPid) || journal.ownerPid <= 0) throw new Error("Invalid collapse owner; all generation files were preserved.");
+    if (journal.ownerPid !== process.pid) {
+      let alive = true;
+      try { process.kill(journal.ownerPid, 0); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+      }
+      if (alive) throw new Error("Another process may still be collapsing this project; all generation files were preserved.");
+    }
+    const valid = (id: string) => /^gen-[\w-]+$/.test(id);
+    if (!valid(journal.source) || !valid(journal.destination) || journal.source === journal.destination) {
+      throw new Error("Invalid collapse journal; refusing to remove generation files.");
+    }
+    const keep = generationPaths(root, journal.committed ? journal.destination : journal.source);
+    if (!existsSync(keep.store) || !existsSync(keep.markdown) || !existsSync(keep.sidecar)) {
+      throw new Error("Collapse recovery cannot find the complete generation to keep; all remaining files were preserved.");
+    }
+    const keepDatabase = await openNodeSqliteDatabase(keep.store, { mode: "read-only" });
+    try {
+      const integrity = await keepDatabase.get<{ quick_check: string }>("PRAGMA quick_check");
+      if (integrity?.quick_check !== "ok") throw new Error("The generation to keep failed its integrity check.");
+    } finally {
+      await keepDatabase.close();
+    }
+    const discardId = journal.committed ? journal.source : journal.destination;
+    const discard = generationPaths(root, discardId);
+    // A partially written destination is disposable only before the Brain commit;
+    // after commit, the old source is disposable only because the archive owns it.
+    unlinkIfExists(discard.store);
+    if (existsSync(discard.store)) throw new Error("Collapse recovery could not remove the superseded store; its journal remains for retry.");
+    unlinkIfExists(`${discard.store}-wal`);
+    unlinkIfExists(`${discard.store}-shm`);
+    removeSnapshot({ directory: contextDirectory(root), markdown: discard.markdown, sidecar: discard.sidecar });
+    if ([discard.store, `${discard.store}-wal`, `${discard.store}-shm`, discard.markdown, discard.sidecar].some(existsSync)) {
+      throw new Error("Collapse recovery could not remove the superseded generation; its journal remains for retry.");
+    }
+  });
+}
+
 /**
  * Bring the generations in line with the rules at open. Returns the live
  * generation, or null when none is valid and one must be created.
  */
-export function reconcileGenerations(root: string): { live: GenerationFiles | null; removed: string[] } {
-  const removed: string[] = [];
-  // A generation missing any piece of its snapshot never existed as a frozen
-  // whole: delete it and let the Brain build the next one.
-  for (;;) {
-    const generations = discoverGenerations(root);
-    const head = generations[0];
-    if (head === undefined) return { live: null, removed };
-    if (head.hasStore && head.hasMarkdown && head.hasSidecar) break;
-    removeGenerationFiles(root, head);
-    removed.push(head.generation);
-  }
+export async function reconcileGenerations(root: string, brain: BrainStore): Promise<{ live: GenerationFiles | null; removed: string[] }> {
+  await recoverCollapse(root, brain);
   const generations = discoverGenerations(root);
-  const live = generations[0] ?? null;
-  // Only the live generation's files have any use: the archive lives in the
-  // Brain's own database, and a store a collapse was interrupted before
-  // deleting is a crash remainder, swept into the archive where it can still
-  // be reached or simply gone (§3.3, §3.4). Nothing keeps a second store.
-  for (const extra of generations.slice(1)) {
-    removeGenerationFiles(root, extra);
-    removed.push(extra.generation);
+  const stores = generations.filter((generation) => generation.hasStore);
+  // Legacy unjournaled crash remainders are ambiguous: a newer store may have
+  // been created before the sweep committed. Also, a store whose snapshot has
+  // gone missing may still hold the only copy of live messages. Never guess.
+  if (stores.some((generation) => !generation.hasMarkdown || !generation.hasSidecar)) {
+    throw new Error("A generation store is missing its snapshot; all generation files were preserved for recovery.");
   }
-  return { live, removed };
+  if (stores.length > 1) {
+    throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
+  }
+  const removed: string[] = [];
+  for (const incomplete of generations.filter((generation) => !generation.hasStore)) {
+    removeGenerationFiles(root, incomplete);
+    removed.push(incomplete.generation);
+  }
+  return { live: stores[0] ?? null, removed };
 }
 
 /**
@@ -151,19 +193,23 @@ export function reconcileGenerations(root: string): { live: GenerationFiles | nu
  * its own mark (§4.1).
  */
 export async function readGenerationEphemera(storePath: string, generation: string): Promise<IncomingItem[]> {
-  if (!existsSync(storePath)) return [];
-  let database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
-  try {
-    database = await openNodeSqliteDatabase(storePath);
-  } catch {
-    // Not a store at all — an interrupted creation, say. Nothing to move out.
-    return [];
-  }
+  if (!existsSync(storePath)) throw new Error(`Live generation store is missing: ${storePath}`);
+  // Failure to read the old store must abort collapse before the store is
+  // removed. Treating a damaged database as an empty one destroys its only copy.
+  const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
   try {
     const table = await database.get<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_entries'",
     );
-    if (table === undefined) return [];
+    if (table === undefined) {
+      // A freshly created generation has an empty SQLite file before Pi opens
+      // it. A database with other tables but no entries is not that state.
+      const other = await database.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+      );
+      if (other !== undefined) throw new Error(`Live generation has an unrecognized store schema: ${storePath}`);
+      return [];
+    }
     const rows = await database.all<{ id: string; head: number | null; record: string }>(
       "SELECT id, head, record FROM live_entries ORDER BY id",
     );
@@ -175,26 +221,67 @@ export async function readGenerationEphemera(storePath: string, generation: stri
     // it; there is no second, later cut to walk.
     const newestHead = rows.reduce<number>((latest, row) => (row.head === null ? latest : Math.max(latest, Number(row.id))), 0);
     const tools = new Map<string, { name: string; path?: string }>();
+    const callMessages = new Map<string, unknown>();
     const parsed = rows
       .filter((row) => Number(row.id) >= newestHead)
-      .map((row) => ({ id: String(row.id), entry: JSON.parse(row.record) as StoredEntry }));
+      .map((row) => {
+        const entry = JSON.parse(row.record) as StoredEntry;
+        return { id: String(row.id), entry, original: entry };
+      });
+    const removed = removedPartKeys(parsed.map(({ entry }) => entry), generation);
+    // Pi's context edits supersede the raw model contribution. A delete applied
+    // now must not reappear in the archive when the old store is swept.
+    const edits = new Map<string, NonNullable<StoredEntry["edits"]>[number]>();
     for (const { entry } of parsed) {
-      for (const call of toolCallsOf(entry)) tools.set(call.id, call);
+      for (const edit of entry.edits ?? []) edits.set(String(edit.target), edit);
+    }
+    for (const item of parsed) {
+      const edit = edits.get(item.id);
+      if (edit !== undefined) item.entry = { ...item.entry, model: edit.action === "replace" ? (edit.messages ?? []) : [] };
+    }
+    for (const { original } of parsed) {
+      // Keep pairing metadata even when an edit removed the call. The result's
+      // original bytes must still be recoverable rather than silently discarded.
+      for (const call of toolCallsOf(original)) tools.set(call.id, call);
+      for (const message of original.model ?? []) {
+        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (part === null || typeof part !== "object") continue;
+          const call = part as { type?: unknown; id?: unknown };
+          if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
+        }
+      }
     }
     const incoming: IncomingItem[] = [];
-    for (const { id, entry } of parsed) {
+    for (const { id, entry, original } of parsed) {
+      const oldMessage = original.model?.[0];
+      const message = entry.model?.[0];
+      const keys = oldMessage?.role === "assistant" && message?.role === "assistant"
+        ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set())
+        : undefined;
       // The entity is what a restore needs to put the item back where it was:
       // the tool call's own id, and for a result the call it answers.
       const callId = callIdOf(entry);
       const call = callId === undefined ? undefined : tools.get(callId);
       const tool = call?.name;
       const path = call?.path;
-      for (const part of ephemeralPartsOf(entry, tool)) {
+      for (const part of ephemeralPartsOf(entry, tool, keys)) {
+        let model: unknown;
+        if (message?.role === "assistant" && Array.isArray(message.content)) {
+          const index = keys?.indexOf(part.key) ?? -1;
+          if (index >= 0) model = [{ ...message, content: [message.content[index]], stopReason: part.value.kind === "toolCall" ? "toolUse" : "stop" }];
+        } else if (message?.role === "toolResult" && callId !== undefined) {
+          const callMessage = callMessages.get(callId);
+          if (callMessage !== undefined) model = [callMessage, message];
+        } else if (message?.role === "user") {
+          model = [message];
+        }
         incoming.push({
           id: ephemeralItemId(generation, id, part.key),
           layer: "ephemeral",
           ephemeral: {
             ...part.value,
+            ...(model === undefined ? {} : { model }),
             ...(callId === undefined
               ? {}
               : { data: { callId, ...(tool === undefined ? {} : { tool }), ...(path === undefined ? {} : { path }) } }),
@@ -203,10 +290,6 @@ export async function readGenerationEphemera(storePath: string, generation: stri
       }
     }
     return incoming;
-  } catch {
-    // A store whose shape this build does not recognise is not one to guess at:
-    // the collapse still runs, and the store is still deleted whole (§3.4).
-    return [];
   } finally {
     await database.close().catch(() => undefined);
   }
@@ -215,7 +298,46 @@ export async function readGenerationEphemera(storePath: string, generation: stri
 /** One row of the store's entries table, as far as the sweep reads it. */
 interface StoredEntry {
   kind?: string;
+  data?: unknown;
   model?: Array<{ role?: string; content?: unknown }>;
+  edits?: Array<{ target: string | number; action: "omit" | "replace"; messages?: Array<{ role?: string; content?: unknown }> }>;
+}
+
+/**
+ * Keep a part's original key after Carto edits a sibling. The original entry
+ * remains in Pi's append-only log, and each edit records the exact removed key.
+ * Never guess if another writer changed the contribution or an old edit cannot
+ * be reconciled: guessing could delete or pin a different, identical sibling.
+ */
+export function stablePartKeys(original: unknown, current: unknown, removed: ReadonlySet<string>): string[] {
+  if (!Array.isArray(original) || !Array.isArray(current)) throw new Error("Cannot identify edited context parts safely");
+  let thinking = 0;
+  let text = 0;
+  const candidates = original.map((part: unknown, index: number) => {
+    const type = part !== null && typeof part === "object" ? (part as { type?: unknown }).type : undefined;
+    const key = type === "thinking" ? `t${thinking++}` : type === "text" ? `x${text++}` : type === "toolCall" ? `c${index}` : `other${index}`;
+    return { key, part };
+  }).filter(({ key }) => !removed.has(key));
+  if (candidates.length !== current.length || candidates.some(({ part }, index) => JSON.stringify(part) !== JSON.stringify(current[index]))) {
+    throw new Error("Context parts changed outside Carto; refusing to guess their identities");
+  }
+  return candidates.map(({ key }) => key);
+}
+
+/** Carto's persisted part removals, keyed by original entry id. */
+export function removedPartKeys(entries: readonly { kind?: string | undefined; data?: unknown }[], generation: string): Map<string, Set<string>> {
+  const removed = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    if (entry.kind !== "carto.apply-now" || entry.data === null || typeof entry.data !== "object") continue;
+    const data = entry.data as { entry?: unknown; item?: unknown };
+    if (typeof data.entry !== "string" || typeof data.item !== "string") continue;
+    const prefix = `${generation}:${data.entry}:`;
+    if (!data.item.startsWith(prefix)) continue;
+    const keys = removed.get(data.entry) ?? new Set<string>();
+    keys.add(data.item.slice(prefix.length));
+    removed.set(data.entry, keys);
+  }
+  return removed;
 }
 
 /** A tool call in one entry, by the id the model issued and the tool's name. */
@@ -289,10 +411,29 @@ export function ephemeralItemId(generation: string, entryId: string | number, ke
   return `${generation}:${entryId}:${key}`;
 }
 
-export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
+export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, keys?: readonly string[]): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
   const parts: Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> = [];
   const role = entry.model?.find((message) => typeof message.role === "string")?.role;
   const { thinking, text } = modelTexts(entry);
+  if (role === "assistant") {
+    const content = entry.model?.[0]?.content;
+    if (!Array.isArray(content)) return parts;
+    const stable = keys ?? stablePartKeys(content, content, new Set());
+    for (const [index, part] of content.entries()) {
+      if (part === null || typeof part !== "object") continue;
+      const value = part as { type?: unknown; thinking?: unknown; text?: unknown; name?: unknown; arguments?: unknown };
+      const key = stable[index];
+      if (key === undefined) throw new Error("Missing stable part key");
+      if (value.type === "thinking" && typeof value.thinking === "string" && value.thinking.trim()) {
+        parts.push({ key, value: { kind: "reasoning", text: value.thinking } });
+      } else if (value.type === "text" && typeof value.text === "string" && value.text.trim()) {
+        parts.push({ key, value: { kind: "plainText", text: value.text } });
+      } else if (value.type === "toolCall" && value.name !== "chat") {
+        parts.push({ key, value: { kind: "toolCall", text: `${String(value.name)} ${JSON.stringify(value.arguments ?? {})}` } });
+      }
+    }
+    return parts;
+  }
   for (const [index, value] of thinking.entries()) parts.push({ key: `t${index}`, value: { kind: "reasoning", text: value } });
 
   if (role === "toolResult") {
@@ -373,6 +514,12 @@ export interface CollapseOptions {
    * the agent reads after the collapse, so it must name somebody either way.
    */
   person?: string;
+  /**
+   * The text of the person's messages this collapse hands straight to the new
+   * generation as its first turn. Their Chat records stay in the Brain but are
+   * left out of the head, so each is read once: as that turn (§2.3).
+   */
+  carriedTexts?: readonly string[];
 }
 
 export interface CollapseReport {
@@ -401,12 +548,27 @@ export interface CollapseReport {
  * lifecycle around this call.
  */
 export async function collapse(root: string, brain: BrainStore, options: CollapseOptions = {}): Promise<CollapseReport> {
+  const key = resolve(root);
+  if (activeCollapses.has(key)) throw new Error("A collapse is already running for this project.");
+  activeCollapses.add(key);
+  try {
+    return await performCollapse(root, brain, options);
+  } finally {
+    activeCollapses.delete(key);
+  }
+}
+
+async function performCollapse(root: string, brain: BrainStore, options: CollapseOptions): Promise<CollapseReport> {
+  await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
+  const archive = await brain.readArchive();
 
-  const discovered = discoverGenerations(root);
+  const discovered = discoverGenerations(root).filter((candidate) => candidate.hasStore);
+  if (discovered.length > 1) throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
   const live = discovered[0];
   if (live === undefined) throw new Error("No live generation exists to collapse.");
+  if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
   const generation = newGenerationId(new Date(now));
 
   // What is leaving the Brain: every record carrying a mark, with its action.
@@ -425,13 +587,33 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   // head is rebuilt from the Brain, so it is in the next store's head without
   // being read out of this one.
   const pins = new Set(refreshed.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
-  const swept = (await readGenerationEphemera(live.store, live.generation)).filter((item) => !pins.has(item.id));
+  const deletions = new Set(refreshed.ephemeralDeletes ?? []);
+  // A person's message is Chat once it is sent (§2.3), and Chat is swept like
+  // any Brain record: only when it is marked for archive, and then as the
+  // record. Its copy in the old store is the same words, so it is not swept a
+  // second time as an ephemeral. A line with no record behind it still is.
+  const recorded = new Map<string, number>();
+  for (const record of refreshed.chat) if (record.author === "user") recorded.set(record.text, (recorded.get(record.text) ?? 0) + 1);
+  const isRecordedPerson = (item: IncomingItem): boolean => {
+    if (item.ephemeral?.kind !== "personMessage") return false;
+    const left = recorded.get(item.ephemeral.text) ?? 0;
+    if (left === 0) return false;
+    recorded.set(item.ephemeral.text, left - 1);
+    return true;
+  };
+  const swept = (await readGenerationEphemera(live.store, live.generation)).filter(
+    (item) => !pins.has(item.id) && !deletions.has(item.id) && !isRecordedPerson(item),
+  );
 
   // The Brain the new generation is built from: the marks applied, so a record
   // that is archived or deleted is not in the head it was swept out of (§2,
   // §4.1). The same writes go into the transaction below, so what is rendered
   // and what is committed are the same Brain.
   const writes: { write: BrainWrite; now: number }[] = [];
+  for (const id of deletions) {
+    writes.push({ write: { kind: "ephemeral.delete-mark", id, marked: false }, now });
+    if (pins.has(id)) writes.push({ write: { kind: "ephemeral.unpin", id }, now });
+  }
   for (const record of leaving) {
     writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
     writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });
@@ -451,7 +633,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
   }
   for (const item of refreshed.ephemera) {
-    if (item.pinned === undefined) continue;
+    if (item.pinned === undefined || deletions.has(item.id)) continue;
     const path = item.kind === "readResult" ? item.entity?.path : undefined;
     if (path === undefined) continue;
     const text = readPinnedFile(root, path);
@@ -462,8 +644,40 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
 
   let next = refreshed;
   for (const step of writes) next = applyWrite(next, step.write, step.now);
-  const projection = projectContext(next, fileTexts, options.person ?? personName());
+  // Restored Brain records are committed by the same sweep and must already
+  // be present in the frozen head. Ephemeral restores go to the live store.
+  for (const item of applyArchiveMarks(archive).restored) {
+    const write = writeBackOf(item);
+    if (write !== undefined) next = applyWrite(next, write, now);
+  }
+  // The messages handed on as the new generation's first turn are not in its
+  // head as well: the newest record with that text is the one sent, and it
+  // joins the head at the next collapse, from the body it will be in then.
+  const handedOn = new Set<string>();
+  for (const text of options.carriedTexts ?? []) {
+    const record = [...next.chat].reverse().find((candidate) => candidate.author === "user" && candidate.text === text && !handedOn.has(candidate.id));
+    if (record !== undefined) handedOn.add(record.id);
+  }
+  const projection = projectContext(next, fileTexts, options.person ?? personName(), {
+    chat: new Set(next.chat.filter((record) => !handedOn.has(record.id)).map((record) => record.id)),
+  });
 
+  // Reserve the handoff before creating any destination files. Recovery can
+  // distinguish a partial destination from a committed sweep even if the
+  // process stops at any point between those operations.
+  const destination = generationPaths(root, generation);
+  if (existsSync(destination.store) || existsSync(destination.markdown) || existsSync(destination.sidecar)) {
+    throw new Error("New collapse generation already exists; refusing to overwrite it.");
+  }
+  await brain.beginCollapse(live.generation, generation, () => {
+    const stores = discoverGenerations(root).filter((candidate) => candidate.hasStore);
+    if (stores.length !== 1 || stores[0]?.generation !== live.generation || !stores[0].hasMarkdown || !stores[0].hasSidecar) {
+      throw new Error("The live generation changed during collapse; all files were preserved.");
+    }
+    if (existsSync(destination.store) || existsSync(destination.markdown) || existsSync(destination.sidecar)) {
+      throw new Error("New collapse generation already exists; refusing to overwrite it.");
+    }
+  });
   // 1. Snapshot first: no store exists for the new generation until the bytes
   //    are frozen on disk.
   writeSnapshot(root, generation, projection, now);
@@ -479,15 +693,17 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   const applied = await brain.applyCollapse({
     writes,
     generation,
+    source: live.generation,
+    expected: { brain: refreshed, archive },
     incoming: [
       ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),
       ...swept,
     ],
     now,
   });
-  // 2. The old store is deleted whole. Everything it held is gone rather than
-  //    hidden, which is what makes the sweep a real deletion (§3.4).
-  removeGenerationFiles(root, live);
+  // 2. The journal is committed with the sweep, so the same recovery path
+  // safely deletes the old store whether we finish here or crash beforehand.
+  await recoverCollapse(root, brain, true);
   return {
     generation,
     swept: live.generation,
@@ -515,7 +731,18 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
 export function rewriteHeadSnapshot(root: string, generation: string, brain: CartoBrain, person: string, now: number): void {
   const fileTexts = new Map<string, string | undefined>();
   for (const file of brain.files) fileTexts.set(file.path, readPinnedFile(root, file.path));
-  writeSnapshot(root, generation, projectContext(brain, fileTexts, person), now);
+  // Chat said since the freeze is in the body, and a rebuilt head keeps to the
+  // records the frozen one held: the head gathers in new Chat at a collapse,
+  // not before, or the model would read the same words twice (§2.3). A
+  // snapshot from before Chat was in the head listed none, so it holds none.
+  let held: ReadonlySet<string> | undefined;
+  try {
+    const sidecar = JSON.parse(readFileSync(snapshotPaths(root, generation).sidecar, "utf8")) as { chat?: unknown };
+    held = new Set(Array.isArray(sidecar.chat) ? sidecar.chat.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    held = undefined;
+  }
+  writeSnapshot(root, generation, projectContext(brain, fileTexts, person, held === undefined ? {} : { chat: held }), now);
 }
 
 /** A Brain record a collapse is about to act on, and the archive row it becomes when it is archived. */

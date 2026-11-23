@@ -131,15 +131,26 @@ calls, other non-Chat model output, and the model transcript. None of it is
 kept.
 
 An ephemeral item survives only if it is pinned on the live context layer.
-Everything else is swept to the archive at collapse.
+Otherwise it is swept to the archive at collapse, unless the person has chosen
+to delete it at that collapse (§4.1).
 
 Brain records are not ephemeral. They stay in the Brain until they are deleted,
 or until they are marked for archive and a collapse moves them out (§4.1).
 
-**Only Chat is a conversation.** The person's message is already in the
-transcript, so the prefill does not repeat it. The agent's Chat reaches the model
-as the `chat` tool's result. The prefill carries structure, handles, and state,
-and the transcript is the dialogue.
+**Only Chat is a conversation.** Inside a generation the person's message is
+already in the body, where it was said, and the agent's Chat reaches the model as
+the `chat` tool's result; the head does not repeat either until a collapse ends
+that body. Both are Chat records in the Brain, so they stay until someone deletes
+them, and the collapse places them in the head (§3.2, §5.1): the conversation
+goes on across a collapse, and the transcript and the Context view are two views
+of the same records. Chat is swept like every Brain record: only a delete or an
+archive mark removes one, and an archived record moves out as the record, never
+also as a swept line. A rebuild in the middle of a generation (an apply-now)
+keeps to the Chat the head held at the freeze, and a message handed on as the new
+generation's first turn is left out of that head; either way each record is read
+once, and joins the head at the next collapse. The Context view lists a record
+once: in the head when it is frozen there, and for the person's words said since,
+as the live row, which marks the record.
 
 ### 3.2 Pins
 
@@ -151,8 +162,23 @@ or the agent.
 - An entry pinned on the archive layer is never deleted. It stays in the archive
   until it is unpinned or restored.
 
-The person may pin or unpin any entry. The agent may pin any entry and may unpin
-only its own pins; it may not remove a pin the person placed.
+A pin only stops a sweep. So it exists only where something is swept:
+
+- Ephemeral items and files, on the live context layer. An ephemeral item is
+  swept by default and a pin is how it stays; a file is pin-only.
+- Any item in the archive, a Brain record that was archived included, where the
+  pin stops its grace running out.
+
+**A Brain record (Atlas, Ledger, Chat) on the context layer has no pin.** The
+Brain is not swept: a record leaves it only by a mark (§4.1). A pin on one would
+hold nothing back, so there is no way to place one, for the person or the agent,
+in any view. A Brain entry can be pinned once it is in the archive, in the archive
+layer.
+
+The person may pin or unpin any entry that can carry a pin. The agent may pin a
+file or an ephemeral item and may unpin only its own pins; it may not remove a pin
+the person placed. The agent has no handle on the archive, so it never pins
+there.
 
 A pin renders inline on the entry it marks. It is not a record of its own and
 takes no place in the prefill's order.
@@ -162,7 +188,8 @@ The state block lists every pinned entry and its author.
 ### 3.3 The archive
 
 The archive is Carto's own database under `.brain/`. It is the destination for
-everything a collapse sweeps, and nothing else.
+everything a collapse sweeps and for ephemeral entries the person archives
+immediately (§4.1).
 
 - It holds swept ephemeral items and Brain records marked for archive.
 - It grants one collapse of grace. An unpinned item in the archive is deleted
@@ -224,10 +251,10 @@ context, and either party may trigger it. It needs no approval.
 A collapse:
 
 1. ends the live context;
-2. sweeps every unpinned ephemeral item and every Brain record marked for
-   archive into the archive;
-3. deletes every Brain record marked for delete, and every unpinned archive item
-   past its grace period;
+2. sweeps every unpinned ephemeral item not chosen for deletion, and every Brain
+   record marked for archive, into the archive;
+3. deletes ephemeral items chosen for deletion, every Brain record marked for
+   delete, and every unpinned archive item past its grace period;
 4. places every record the Brain holds into the new context's head (§5.1), in
    order, clustered by type, and returns every entry marked for restore to its
    place in the context;
@@ -241,6 +268,13 @@ and a collapse rebuilds the agent's context from the Brain.
 
 A collapse rebuilds the context, and everything unrecorded is gone.
 
+A collapse must not lose live content because it was interrupted. Before creating
+its new generation, it records the intended handoff; the handoff becomes committed
+in the same transaction as the Brain and archive changes. Recovery keeps the old
+store if that transaction did not commit, and keeps the new generation if it did.
+When missing or ambiguous files prevent a safe decision, recovery preserves the
+stores and reports the problem instead of guessing which one to delete.
+
 **The agent collapses when it is appropriate**, and what makes it appropriate is
 that it has finished a piece of work and put what it needs into its Brain. A
 short run ends that way: the work is done, the Brain is current, and a collapse
@@ -251,10 +285,38 @@ about the project, the agent pins what it needs to know, arranges its context so
 nothing in it is a distraction, collapses, and then begins — so it works inside a
 context built for the problem rather than one it accumulated on the way there.
 
-Nothing enforces this, and the spec has no trigger, threshold, or counter for it.
-It is a thing the prompt asks for and the person shares: either side may collapse
-at any moment, and knowing that is what keeps the agent's Brain worth rebuilding
-from.
+Either side may collapse at any moment. At an estimated 75% context fill, the
+state block warns the agent to prepare the Brain and collapse before it runs out
+of room. The percentage is an estimate, not a guarantee of available output.
+
+**The agent keeps itself small, and nobody un-sticks it.** The agent is long
+running, so a collapse it asks for, or one the model's limits force, is carried
+out and the agent goes on by itself: the context is rebuilt from the Brain and
+the new generation starts on a state block, with no message from the person.
+This holds for every host and for a run that nothing of the person's started,
+such as a timed rest waking.
+
+- **The warning.** At an estimated 75% of a known window the state block says
+  `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
+  you need to continue to the Brain, mark what is obsolete, then collapse. An
+  unknown window is reported as unknown; no percentage is invented.
+- **Limits are the other trigger.** Carto uses the signals pi already provides
+  and adds no threshold of its own. A recognised provider overflow error, and a
+  `length` stop that pi's own check calls recoverable — the response ended below
+  the output limit that was intended, so the cause may be the context — ask for
+  one collapse. A `length` stop is not proof the context is full; a response that
+  ended at the intended limit is an ordinary stop and continues as any answer.
+- **Bounded.** A generation that was itself rebuilt automatically and then asks
+  to collapse again having done no work, or having started already at the warning
+  fill, is not collapsed a third time. The host says plainly that the rebuild got
+  nowhere (the head may be too large for the window) and waits for the person.
+- **Nothing the person said is lost.** Messages queued when the collapse runs,
+  and a message whose run the model's limit killed before it was answered, are
+  carried into the new generation and are what it starts on. A message sent while
+  the rebuild is under way waits for the new session. A paused agent is not
+  restarted, but the person's own messages are still delivered.
+- **The cost is accepted.** A collapse forced by a limit loses whatever the agent
+  had not written to the Brain. Nothing removes unmarked Brain records.
 
 ### 4.1 Archive, restore, and delete are marks
 
@@ -268,6 +330,14 @@ changed or withdrawn until then.
   next collapse.
 - **Marked for restore**, for an entry in the archive, leaves it in the archive
   for now and returns it to the context at the next collapse.
+
+For ephemeral content in Context, sweeping to the archive is already the default.
+The person's `d` instead chooses deletion at the next collapse and shows that
+choice on the entry; it does not sweep the entry to the archive. `!d` removes it
+from the model's view immediately; its bytes remain in the append-only live store
+until that store is removed at collapse. The first `a` highlights the ephemeral
+entry in red to confirm the action; the second `a` archives it immediately.
+The highlight is a confirmation, not an archive mark waiting for collapse.
 
 The person and the agent can both create, edit, delete, reorder, and mark records
 of every type the Brain knows, from the workspace as much as from a tool. A record
@@ -347,8 +417,10 @@ listed by type. They appear where they actually are.
 The last thing in the prefill is the **state block**. It is the agent's
 dashboard about its Brain and the project, and it reports:
 
-- **Context fullness** — the server's own count for the last request, plus what
-  tool calls have added since.
+- **Context fullness** — the server's input and output count for the last
+  response, plus estimated tool work added since. When the window is known,
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
+  unknown, do not invent a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
 - **Pending changes** — one line per Brain write since the last collapse, named
@@ -606,7 +678,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `chat` | Writes one Agent Chat record: something declared person-facing. |
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
-| `pin` | Sets or clears the pin on one entry. |
+| `pin` | Sets or clears the pin on one file from the tree. |
 | `mark` | Marks one Brain record for archive or delete, or withdraws a mark the agent placed. Applies at the next collapse. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
@@ -661,12 +733,44 @@ Neither the spec nor the runtime supplies a size limit to enforce in its place.
 
 ## 8. Workspace
 
+**The screen is surfaces, darkest outermost.** The chrome (the margin round the
+frame, the header row, the key bar and the context bar) sits on the deepest tone;
+the sidebar and the working area are raised out of it, each on its own step;
+the prompt and a selected row are raised again. The frame has a margin of two
+cells and one row, one cell on a narrow terminal and none on a very small one,
+with a breathing row between the bands only when the terminal has rows to
+spare. Every cell of the frame is painted: a pane that is shorter than its room
+is filled to its foot, never left to show the terminal's own background. Text
+runs on a three-step ramp (body, dim, faint) and a saturated colour always means
+something. None of this changes what a view shows or what a key does.
+
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Every entry is collapsible, and every entry starts collapsed: a row
 is its handle, its name, and a one-line summary until it is opened. Each tool
 gets one collapsible entry in its own sub-tree. Schema-shaped content has a
 human-readable view and a real view. A row that trails off is readable in full
 somewhere.
+
+**The Context view shows what the model receives, as it is now, and nothing in
+its place.** There is no placeholder and no sentence describing a row instead of
+being it. A head row is the frozen head's own lines: a record, a pinned item, and
+a pinned file with the text the collapse read, each as written there, in both
+views. The head is listed from the frozen bytes, so a record or a pin that has
+left the Brain since the freeze is still shown, marked as leaving at the next
+collapse, because the model still reads it. **Nothing the head does not hold is
+listed in the head**, not with a note and not in a row of its own: a record
+written, or a file or an item pinned, since the freeze is not in the context
+yet, and a view of the context does not show it where it is not. A pending change
+is shown where it really is, on a row that exists: a pinned item's body row is
+highlighted as `pin on collapse`, the way a row marked for delete is highlighted,
+and the tail, which is where the state block lists the pins and the marks,
+carries the highlight for a pin that has no other row, such as a file. The Atlas,
+the Ledger, the transcript and the Tree are where a pending record or pin is
+read and changed. The body holds every message the model receives, the agent's `chat`
+calls and its plain text included; the tail is the state block as sent. The
+head is listed in §5.1's order, the system prompt first (it is the first
+section of the system message, ahead of the projection); the tools are shown as
+registered, `bash` with Carto's sentence. The token count covers what is shown.
 
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
@@ -675,14 +779,54 @@ private annotation layer over what the model sees. Anything not kept stays
 ephemeral, and a staged change takes effect at the next collapse unless the person
 applies it now (§4.1).
 
-**The transcript renders everything the model does.** The person's lines land
+**The person has the same controls in every view of the Brain** (§3.2, §4.1).
+`p` pins or unpins the entry under the cursor where something can carry a pin
+(§3.2): an ephemeral item in the Context view or a transcript card, an item in
+the archive, and a file in the Tree, where the head holds a
+pinned file as it stands, read again at every collapse. Atlas, Ledger and Chat
+records have no pin outside the archive, so `p` is not theirs. The person's press
+unpins a pin whoever placed it, and the file's pin is keyed by the same path the
+agent's `pin` writes, so one file is one pin. In the Context view, Atlas, and
+Ledger, `a` marks the record for archive, `d` marks it for delete, `u` withdraws
+the person's mark, and `!` arms the next mark to apply at once; the books route
+these into the same code as the Context view, and the header says when `!` is
+armed. In the books `d` and `u` mark and withdraw in the detail pane too, and
+the detail pages with `ctrl+d` and `ctrl+u`. `c` collapses from the Context view,
+Atlas, Ledger, and the Tree, where the marks are applied. While `/` takes a
+filter, every one of these keys is a letter of it. A file carries a pin and no
+mark: the `mark` tool is for Brain records. These keys are commands in the same
+list as everything else, so the footer, `f1`, and the palette show them.
+In Chat, `escape` leaves the prompt and selects a block (the last one); `j`/`k`
+(or the arrows) walk the Chat blocks, the person's and the agent's, and the cards;
+`g` and `G` go to the first and last; and `a`, `d`, `u` and `!` (and `p`, on a
+card) do what they do everywhere else, through the same handlers as the Context view's rows: a Chat block
+is its Brain record, a card is the ephemeral item it renders (a tool row is its
+result), and an ephemeral card asks before it archives. `escape` or `enter` returns
+to the prompt. A card still streaming is not an item anything holds and cannot be
+selected. A click folds a card; it never pins or marks.
+
+**The open book follows the Brain.** The drain that rebuilds the transcript, on
+every run boundary, on a throttled live-watch tick and on a slow timer, also
+redraws the open Atlas or Ledger when the Brain's records changed, and the
+sidebar's counts with it, judged by a digest of what the books show so a quiet
+Brain costs a read and a comparison, not a redraw. The Context view and the Tree
+follow on the same drain.
+
+**The transcript renders everything the model does.** The Chat the head holds is
+drawn first, in the head's order, before anything the generation did — after a
+reload as before it, and whatever the entries' timestamps say; Chat written since
+sits where it was written. The person's lines land
 where the context places them. The agent's Chat words render as Chat. Its
 reasoning, plain model text, and tool calls render as foldable cards: dimmer than
 Chat, in their own hues, never mistaken for Chat. A card streams while the run is
 in flight inside a limited-height window, and folds to a one-line header at the
-boundary. A click folds or unfolds a card, a toggle toggles every card in view,
-and the wheel over an open card scrolls its window. Chat remains the only channel
-that addresses the person.
+boundary. A header click folds or opens a card; a click on a long card's body or
+hidden-lines indicator toggles between the preview and full content. A toggle
+folds or opens every card in view, and the wheel scrolls the transcript. Chat remains the only channel
+that addresses the person. When a collapse sweeps work out of the context, that
+work disappears from the transcript as well; the person's messages and the
+agent's Chat remain. Pinned work that survives the collapse remains visible.
+Session notifications are transient UI notices, not transcript messages.
 
 **The context bar spans the whole bottom of the application and is always
 visible.** Its width is the server's own context capacity: the total the server
@@ -691,9 +835,16 @@ gauge with a budget mark.
 
 It shows three quantities, each in its own colour:
 
-- **Fill** — how much of the context is occupied, as a solid colour.
-- **Prefilled** — during a prompt read, how much has been read so far.
+- **Fill** — how much of the context is occupied, as a solid colour. The last
+  known fill remains visible while a new request is prefilling and is restored
+  from the session's last measured response after reopening.
+- **Prefilled** — during a prompt read, how much has been read so far, including
+  the reused prefix; newly read tokens are distinguished from the solid fill.
 - **To prefill** — during a prompt read, how much is still to read.
+
+The bar also shows prefill and decode speeds in tokens per second. When the
+server has not supplied a progress or speed figure, it is unknown, not zero or
+an invented live measurement. On narrow terminals the bar may shorten its labels.
 
 The two prefill quantities are the point of the bar. Prefill is the slow half of
 a long context, and a bar that shows how far along the read is tells the person

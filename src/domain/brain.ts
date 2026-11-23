@@ -31,7 +31,6 @@ export type BrainWrite =
   | { kind: "chat.update"; id: RecordId; text: string; updatedAt: number }
   | { kind: "ledger.upsert"; entry: LedgerEntry }
   | { kind: "atlas.upsert"; node: AtlasNode }
-  | { kind: "pin.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; pinned: "user" | "agent" | null }
   | { kind: "mark.set"; target: "chat" | "ledger" | "atlas"; id: RecordId; action: MarkAction; author: Author }
   | { kind: "mark.clear"; target: "chat" | "ledger" | "atlas"; id: RecordId; author?: Author }
   | { kind: "delete"; target: "chat" | "ledger" | "atlas"; id: RecordId }
@@ -41,7 +40,8 @@ export type BrainWrite =
   | { kind: "file.stale"; path: string; stale: boolean }
   /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
   | { kind: "ephemeral.pin"; item: PinnedEphemeral }
-  | { kind: "ephemeral.unpin"; id: RecordId };
+  | { kind: "ephemeral.unpin"; id: RecordId }
+  | { kind: "ephemeral.delete-mark"; id: RecordId; marked: boolean };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   const next = doApplyWrite(brain, write, now);
@@ -50,6 +50,12 @@ export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): C
 
 function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
   switch (write.kind) {
+    case "ephemeral.delete-mark": {
+      const ids = new Set(brain.ephemeralDeletes ?? []);
+      if (write.marked) ids.add(write.id);
+      else ids.delete(write.id);
+      return { ...brain, ephemeralDeletes: [...ids] };
+    }
     case "ephemeral.pin": {
       // One entry per item. Pinning again replaces the pin and its author,
       // which is what a pin being "a boolean on an entry" means (§3.2).
@@ -168,14 +174,6 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
       return clearMark(brain, write.target, write.id);
     }
 
-    case "pin.set": {
-      // A pin means "keep it here" (§3.2). A marker on the entry; no
-      // reason, no source, no bookkeeping. The marker records who placed it:
-      // "user" | "agent" — the person may remove either kind of pin, the agent
-      // may remove only its own.
-      return setPin(brain, write.target, write.id, write.pinned);
-    }
-
     case "delete": {
       switch (write.target) {
         case "chat": {
@@ -255,39 +253,10 @@ function clearMark(brain: CartoBrain, target: MarkTarget, id: RecordId): CartoBr
 
 type MarkTarget = "chat" | "ledger" | "atlas";
 
-/** Places or clears the pin marker on one record; a cleared pin removes the key, never leaves `pinned: undefined` lying around. */
 /** A re-written node re-asserts its text and attachments; the stale marker is collapse-time truth and is cleared. */
 function clearStale(node: AtlasNode): AtlasNode {
   if (node.stale === undefined) return node;
   const { stale: _stale, ...cleared } = node;
   void _stale;
   return cleared;
-}
-
-function setPinRecord<T extends { pinned?: "user" | "agent" }>(record: T, pinned: "user" | "agent" | null): T {
-  if (pinned === null) {
-    // Deleting the key is what "unpinned" means; a cleared pin must not
-    // leave `pinned: undefined` lying around in the persisted document.
-    const copy: Record<string, unknown> = { ...record };
-    delete copy.pinned;
-    return copy as T;
-  }
-  return { ...record, pinned };
-}
-
-function setPin(brain: CartoBrain, target: "chat" | "ledger" | "atlas", id: RecordId, pinned: "user" | "agent" | null): CartoBrain {
-  switch (target) {
-    case "chat": {
-      if (!brain.chat.some((record) => record.id === id)) throw new BrainError("No Chat record is named by that handle.");
-      return { ...brain, chat: brain.chat.map((record) => (record.id === id ? setPinRecord(record, pinned) : record)) };
-    }
-    case "ledger": {
-      if (!brain.ledger.some((entry) => entry.id === id)) throw new BrainError("No Ledger record is named by that handle.");
-      return { ...brain, ledger: brain.ledger.map((entry) => (entry.id === id ? setPinRecord(entry, pinned) : entry)) };
-    }
-    case "atlas": {
-      if (!brain.atlas.some((node) => node.id === id)) throw new BrainError("No Atlas node is named by that handle.");
-      return { ...brain, atlas: brain.atlas.map((node) => (node.id === id ? setPinRecord(node, pinned) : node)) };
-    }
-  }
 }

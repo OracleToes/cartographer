@@ -5,7 +5,7 @@
  * CLI against a fresh CARTO_HOME that never reaches the network.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +32,9 @@ const captureStream = () => {
   return { stream, text: () => text };
 };
 
+// Each test has its own temporary home, project, models, and HTTP server.
+// Running independent cases concurrently avoids a serial headless/CLI tail.
+describe("configuration and headless", { concurrency: 3 }, () => {
 // ---------- config ----------
 
 test("parseModelRef splits on the first slash; the model id keeps the rest", () => {
@@ -202,7 +205,9 @@ const headlessFixture = async () => {
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  // These headless cases do not reopen the Brain; persistence is covered by
+  // the Brain and recovery suites, while the live generation remains on disk.
+  const brain = await openBrain(":memory:");
   return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxFor = (contextWindow = 100_000) => {
@@ -228,19 +233,20 @@ test("stdin that is not a terminal and carries no lines announces itself instead
   }
 });
 
-test("a person line comes back only as chat words, prefixed", async () => {
+test("headless waits for consecutive tree continuations and prints their chat", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
-  const factory = (build) => (context) => build(context);
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
-    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep" })], { stopReason: "toolUse" })),
+    () => fauxAssistantMessage([fauxToolCall("tree", { depth: 1 }, { id: "tree-1" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("tree", { depth: 2 }, { id: "tree-2" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("chat", { text: "tree checked" }, { id: "tree-chat" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "tree-stop" })], { stopReason: "toolUse" }),
   ]);
   const out = captureStream();
   try {
-    const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["say hi", "/quit"]), output: out.stream, now: FIXED_NOW });
+    const code = await runHeadless({ root, brain, models, model: ref, input: inputFrom(["look", "/quit"]), output: out.stream, now: FIXED_NOW });
     assert.equal(code, 0);
-    assert.match(out.text(), /carto: hello person/);
+    assert.match(out.text(), /carto: tree checked/);
     assert.match(out.text(), /carto · faux-test\/faux-model/);
   } finally {
     await cleanup();
@@ -335,16 +341,20 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
 // ---------- the CLI, end to end without a server ----------
 
 const cliEnv = (home) => ({ ...process.env, CARTO_HOME: home });
-const runCli = (args, { home, input } = {}) => {
-  const child = execFileSync(process.execPath, ["bin/carto.mjs", ...args], {
+const runCli = (args, { home, input } = {}) => new Promise((resolve, reject) => {
+  const child = execFile(process.execPath, ["bin/carto.mjs", ...args], {
     cwd: join(process.cwd()),
     env: cliEnv(home ?? tempDir()),
-    input: input ?? "",
     encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
+  }, (error, stdout, stderr) => {
+    if (error) {
+      error.status = error.code;
+      error.stderr = stderr;
+      reject(error);
+    } else resolve(stdout);
   });
-  return child;
-};
+  child.stdin.end(input ?? "");
+});
 const projectRoot = () => {
   const root = tempDir();
   mkdirSync(join(root, "src"), { recursive: true });
@@ -355,22 +365,24 @@ const projectRoot = () => {
 // CARTO_HOME, so they share no state: run them at once rather than paying four
 // process spawns one after another, which the suite's budget cannot afford.
 describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
-  test("--help exits 0 and names the config file and the workspace TUI", () => {
+  test("--help exits 0 and names the config file and the workspace TUI", async () => {
     // The line driver is no longer "the interface"; help must say plainly what
     // boots by default and how to force the driver.
-    const help = runCli(["--help"]);
+    const help = await runCli(["--help"]);
     assert.match(help, /~\/\.carto\/config\.json/);
     assert.match(help, /workspace TUI/);
     assert.match(help, /--headless/);
     assert.match(help, /--model llama-swap\/ByteShape/);
+    assert.match(help, /--user <name>/);
+    assert.match(help, /userName/);
   });
 
-  test("no config and no --model: exit 1 and the one-liner that creates it", () => {
+  test("no config and no --model: exit 1 and the one-liner that creates it", async () => {
     const home = tempDir();
     try {
       let failed = null;
       try {
-        runCli([], { home });
+        await runCli([], { home });
       } catch (error) {
         failed = error;
       }
@@ -382,33 +394,32 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     }
   });
 
-  test("--model creates the config; a bare run then boots the headless driver and exits at stdin EOF", () => {
+  test("--model and --user create the config and boot the headless driver at stdin EOF", async () => {
     const home = tempDir();
     const root = projectRoot();
     try {
-      const first = runCli(
-        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--root", root],
+      const first = await runCli(
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--user", "OracleToes", "--root", root],
         { home, input: "" },
       );
-      void first;
+      assert.match(first, /carto · llama-swap\/ByteShape/);
       const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
-      const second = runCli(["--root", root], { home, input: "" });
-      assert.match(second, /carto · llama-swap\/ByteShape/);
+      assert.equal(raw.userName, "OracleToes", "--user is persisted instead of the login name");
     } finally {
       rmSync(home, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("an unsupported provider fails plainly, before any request is made", () => {
+  test("an unsupported provider fails plainly, before any request is made", async () => {
     const home = tempDir();
     const root = projectRoot();
     try {
       let failed = null;
       try {
-        runCli(["--model", "openrouter/some-model", "--root", root], { home });
+        await runCli(["--model", "openrouter/some-model", "--root", root], { home });
       } catch (error) {
         failed = error;
       }
@@ -420,4 +431,5 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
 });

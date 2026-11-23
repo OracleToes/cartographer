@@ -17,15 +17,14 @@
  *   streaming stays open on the last lines of what is arriving — a card you are
  *   watching is the end of it — and the moment the round lands it folds to its
  *   header.
- * - **Status lines** are a faint middot and a sentence: quiet facts about the
- *   session, never the agent's voice.
+ * - **Stop-reason lines** are a faint middot and a sentence attached to the
+ *   current model work. UI notifications use pi's transient flash instead.
  *
- * **A click on the header deepens a card**: folded to open, open to full. **A
- * click on the body closes it.** A click on the `⋯ n lines …` rule shows
- * everything the window was hiding, which is what that line is for. A click on
- * a Chat block toggles its pin, `ctrl+e` folds every card in view, and the wheel
- * belongs to the page — the one scrolling owner (§8) — so scrolling up simply
- * stops following the tail.
+ * **A click on the header folds or opens a card.** When its body is too long
+ * for the preview, a click on the body or `⋯ n lines …` rule shows it in full;
+ * another body click returns to the preview. A click on a Chat block toggles its
+ * pin, `ctrl+e` folds every card in view, and the wheel belongs to the page —
+ * the one scrolling owner (§8) — so scrolling up simply stops following the tail.
  *
  * The three states are not decoration: open is a window on a body, so a very
  * long result stays readable inline without pushing the transcript off the
@@ -46,12 +45,21 @@
  * Nothing here is data: the workspace rebuilds the landed list from the session
  * and the Brain at every drain and pushes the in-flight partial separately.
  */
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 
+import type { Mark, PinnedEphemeral } from "../domain/records.js";
 import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
-import { pinHandle } from "./prompt-handles.js";
+import { RecordControls, type RecordAction } from "./record-controls.js";
 
-type BlockRange = { id: string; start: number; end: number };
+/**
+ * What a selected block is, in the Context view's own terms (`part`, `id`), so
+ * a key pressed here is the same act as the key on that view's row: a Chat
+ * block is its Brain record, a card is the ephemeral item it renders.
+ */
+export type BlockTarget = { part: "chat" | "tool-work"; id: string };
+
+/** A block the keys can select: where it was drawn, and what it is. */
+type Selectable = { key: string; target: BlockTarget; start: number; end: number };
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
@@ -64,6 +72,9 @@ type CardBase = {
   status?: "pending" | "running" | "done";
   /** Landed tool calls whose result came back as an error. */
   failed?: boolean;
+  /** Stable Context identities for the call/part and its result, if any. */
+  sourceId?: string;
+  resultId?: string;
 };
 export type CardEntry =
   | (CardBase & { kind: "reasoning"; text: string })
@@ -71,13 +82,78 @@ export type CardEntry =
   | (CardBase & { kind: "tool"; name: string; args: string; /** Retained running output while the call executes; preferred as the card body when present. */ output?: string });
 
 export type TranscriptEntry =
-  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined }
+  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; mark?: Mark | undefined }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
+
+/** Below every context entry's key: where the Chat the head holds is drawn. */
+const HEAD_CHAT_KEY = -1_000_000;
+
+/**
+ * Where a Chat record is drawn among the generation's entries. A record the
+ * frozen head holds is in the head, which is before everything the generation
+ * did, so it is drawn first, in the head's order, whatever its timestamp says.
+ * Any other record sits after the last entry that was written at or before it;
+ * an entry with no message of its own has no time and anchors nothing.
+ */
+export function chatKeyOf(
+  record: { id: string; createdAt: number },
+  head: readonly string[],
+  frame: ReadonlyArray<{ id: number; t: number }>,
+): number {
+  const at = head.indexOf(record.id);
+  if (at >= 0) return HEAD_CHAT_KEY + at;
+  let anchor = 0;
+  for (const slot of frame) if (slot.t > 0 && slot.t <= record.createdAt) anchor = Math.max(anchor, slot.id);
+  return anchor + 0.5;
+}
+
+/** Retain dialogue and only the work that actually survived a collapse. */
+export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: readonly PinnedEphemeral[]): TranscriptEntry[] {
+  const held = new Map(pins.filter((item) => item.pinned !== undefined).map((item) => [item.id, item]));
+  const seenChat = new Set<string>();
+  const retained: TranscriptEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "person") {
+      // U handles belong to the old generation, not to historical dialogue.
+      retained.push({ kind: "person", text: entry.text });
+    } else if (entry.kind === "agent") {
+      if (entry.recordId !== undefined && seenChat.has(entry.recordId)) continue;
+      if (entry.recordId !== undefined) seenChat.add(entry.recordId);
+      retained.push(entry);
+    } else if (isCard(entry)) {
+      const part = entry.sourceId === undefined ? undefined : held.get(entry.sourceId);
+      const result = entry.resultId === undefined ? undefined : held.get(entry.resultId);
+      if (part === undefined && result === undefined) continue;
+      // A tool row combines a call and a result. If only one was pinned, do
+      // not leak the swept half back into the transcript or its copied text.
+      if (entry.kind === "tool") {
+        const { handle: _handle, output: _output, failed: _failed, ...card } = entry;
+        retained.push({ ...card, id: `retained-${entry.sourceId ?? entry.resultId}`, args: part === undefined ? "" : entry.args, ...(result === undefined ? {} : { output: result.text, ...(entry.failed === undefined ? {} : { failed: entry.failed }) }) });
+      } else if (part !== undefined) {
+        const { handle: _handle, ...card } = entry;
+        retained.push({ ...card, id: `retained-${entry.sourceId}`, text: part.text });
+      }
+    }
+  }
+  return retained;
+}
+
+/** Deliver UI status through pi's flash, suppressing rapid identical repeats. */
+export function createStatusNotifier(flash: (message: string, durationMs: number) => void, now: () => number = Date.now): (message: string) => void {
+  let last: { message: string; at: number } | undefined;
+  const duration = 3_000;
+  return (message) => {
+    const at = now();
+    if (last?.message === message && at - last.at >= 0 && at - last.at < duration) return;
+    last = { message, at };
+    flash(message, duration);
+  };
+}
 
 /** Spine, gap, then a six-cell label column; the body starts here and every continuation lines up under it. */
 const LABEL_WIDTH = 6;
@@ -100,7 +176,7 @@ interface CardRange {
   id: string;
   start: number;
   end: number;
-  /** The header row: a click here deepens the card. */
+  /** The header row: a click here folds or opens the card. */
   header: number;
   /** The `⋯ n earlier lines` row, when the window is hiding some: a click here shows them. */
   more?: number;
@@ -219,22 +295,159 @@ export function formatToolArgs(args: unknown, name?: string): string {
   return String(args);
 }
 
-export class TranscriptView implements Component {
+export class TranscriptView implements Component, Focusable {
+  /** Set by the TUI when focus moves here: the block cursor takes the keys while it does. */
+  focused = false;
   private items: TranscriptEntry[] = [];
   private queued: Array<{ text: string; mode: string }> = [];
   private liveCards: CardEntry[] = [];
   private views = new Map<string, CardView>();
-  /** Cards whose hidden head the person asked to see, by clicking the rule that counted it. */
-  private revealed = new Set<string>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
-  private blockRanges: BlockRange[] = [];
+  private selectables: Selectable[] = [];
   private cacheWidth = -1;
-  /** Fired on a click of an agent block that names a Brain record: toggle the pin marker. */
-  onTogglePin?: (recordId: string) => void;
   private cacheLines: string[] = [];
+  private lastWidth = 80;
+  private selecting = false;
+  private cursorKey: string | undefined;
+  private cursorIndex = 0;
+  /** The first archive press on an ephemeral card is a confirmation, as in the Context view. */
+  private archiveConfirmation: string | undefined;
+  /** The same four marks every other view has; one class holds `!`'s arming. */
+  readonly controls = new RecordControls();
 
-  constructor(private readonly options: { project?: string } = {}) {}
+  /** `p` on the selected card (same signature as the Context view's); a Chat block has no pin. */
+  onTogglePin?: (part: BlockTarget["part"], id: string) => void;
+  onArchive?: (part: BlockTarget["part"], id: string, now: boolean) => void;
+  onDelete?: (part: BlockTarget["part"], id: string, now: boolean) => void;
+  onWithdrawMark?: (part: BlockTarget["part"], id: string) => void;
+  /** Leave block selection (the host hands focus back to the prompt). */
+  onLeave?: () => void;
+  /** Keep the selected block on screen: the host scrolls its pane to these lines. */
+  onReveal?: (start: number, end: number) => void;
+
+  constructor(private readonly options: { project?: string } = {}) {
+    this.controls.onMark = (key, action, now) => this.markBlock(key, action, now);
+    this.controls.onWithdraw = (key) => {
+      const target = this.selectables.find((block) => block.key === key)?.target;
+      if (this.archiveConfirmation === key) this.archiveConfirmation = undefined;
+      else if (target !== undefined) this.onWithdrawMark?.(target.part, target.id);
+      this.cacheWidth = -1;
+    };
+  }
+
+  /** True while a block is selected and the keys are the block's. */
+  isSelecting(): boolean {
+    return this.selecting;
+  }
+
+  /** Select the last block, the one nearest the prompt. False when there is nothing to select. */
+  startSelecting(): boolean {
+    this.render(this.lastWidth);
+    const last = this.selectables.at(-1);
+    if (last === undefined) return false;
+    this.selecting = true;
+    this.cursorKey = last.key;
+    this.cursorIndex = this.selectables.length - 1;
+    this.cacheWidth = -1;
+    this.reveal();
+    return true;
+  }
+
+  stopSelecting(): void {
+    this.selecting = false;
+    this.cursorKey = undefined;
+    this.archiveConfirmation = undefined;
+    if (this.controls.nowArmed) this.controls.toggleApplyNow();
+    this.cacheWidth = -1;
+  }
+
+  /** The id the keys act on: the selected block's key. */
+  selectedKey(): string | undefined {
+    return this.selecting ? this.cursorKey : undefined;
+  }
+
+  private selectedBlock(): Selectable | undefined {
+    return this.selectables.find((block) => block.key === this.cursorKey);
+  }
+
+  private moveCursor(to: number): void {
+    if (this.selectables.length === 0) return;
+    const index = Math.max(0, Math.min(this.selectables.length - 1, to));
+    this.cursorIndex = index;
+    this.cursorKey = this.selectables[index]?.key;
+    this.archiveConfirmation = undefined;
+    this.cacheWidth = -1;
+    this.render(this.lastWidth);
+    this.reveal();
+  }
+
+  private reveal(): void {
+    const block = this.selectedBlock();
+    if (block !== undefined) this.onReveal?.(block.start, block.end);
+  }
+
+  /** Which kind of thing is selected: only a card (an ephemeral item) can be pinned. */
+  selectedPart(): BlockTarget["part"] | undefined {
+    return this.selecting ? this.selectedBlock()?.target.part : undefined;
+  }
+
+  /** Pin or unpin the selected card, the act `p` performs; the palette calls this. */
+  pinSelected(): void {
+    const target = this.selectedBlock()?.target;
+    if (target?.part === "tool-work") this.onTogglePin?.(target.part, target.id);
+  }
+
+  /** Mark the selected block, the act `a` and `d` perform; the palette calls this. */
+  markSelected(action: RecordAction): void {
+    this.controls.mark(this.cursorKey, action);
+  }
+
+  withdrawSelected(): void {
+    this.controls.withdraw(this.cursorKey);
+  }
+
+  toggleApplyNow(): boolean {
+    const armed = this.controls.toggleApplyNow();
+    this.cacheWidth = -1;
+    return armed;
+  }
+
+  /**
+   * A mark waits for the collapse unless `!` armed it. An ephemeral card
+   * archives at once but asks first, like the Context view's rows: the first
+   * `a` is a confirmation (the block turns red), the second archives.
+   */
+  private markBlock(key: string, action: RecordAction, now: boolean): void {
+    const target = this.selectables.find((block) => block.key === key)?.target;
+    if (target === undefined) return;
+    const ephemeral = target.part === "tool-work";
+    if (ephemeral && action === "archive" && !now && this.archiveConfirmation !== key) {
+      this.archiveConfirmation = key;
+      this.cacheWidth = -1;
+      return;
+    }
+    this.archiveConfirmation = undefined;
+    if (action === "archive") this.onArchive?.(target.part, target.id, ephemeral || now);
+    else this.onDelete?.(target.part, target.id, now);
+    this.cacheWidth = -1;
+  }
+
+  /**
+   * Block selection. The marks and `p` come through the command registry like
+   * every view's; what is left here is moving the cursor and leaving, on the
+   * same keys the Context view uses.
+   */
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, "enter")) {
+      this.onLeave?.();
+      return;
+    }
+    if (matchesKey(data, "k") || matchesKey(data, "up")) this.moveCursor(this.cursorIndex - 1);
+    else if (matchesKey(data, "j") || matchesKey(data, "down")) this.moveCursor(this.cursorIndex + 1);
+    else if (matchesKey(data, "g")) this.moveCursor(0);
+    else if (data === "G") this.moveCursor(this.selectables.length - 1);
+  }
 
   /** Replace the landed list (already in final order) and the queued list (rendered after it). */
   setEntries(entries: TranscriptEntry[], queued: Array<{ text: string; mode: string }> = []): void {
@@ -261,7 +474,6 @@ export class TranscriptView implements Component {
     this.queued = [];
     this.liveCards = [];
     this.views.clear();
-    this.revealed.clear();
     this.wrapMemo.clear();
     this.cacheWidth = -1;
   }
@@ -314,7 +526,6 @@ export class TranscriptView implements Component {
   private pruneState(): void {
     const present = new Set(this.cardIds());
     for (const id of [...this.views.keys()]) if (!present.has(id)) this.views.delete(id);
-    for (const id of [...this.revealed]) if (!present.has(id)) this.revealed.delete(id);
     for (const id of [...this.wrapMemo.keys()]) if (!present.has(id)) this.wrapMemo.delete(id);
   }
 
@@ -392,8 +603,7 @@ export class TranscriptView implements Component {
 
   private cardHeader(card: CardEntry, width: number, view: CardView): string {
     const tint = kindTint(card);
-    // Three states, three glyphs: a caret opens, and a card already open says
-    // how it deepens rather than pretending to be closed.
+    // A caret opens or folds the card; the full glyph marks its deeper body.
     const glyph = view === "folded" ? "▸" : view === "open" ? "▾" : "⇣";
     const labelText = kindLabel(card);
     const label = tint(tokens.bold(labelText));
@@ -447,7 +657,7 @@ export class TranscriptView implements Component {
     // way the rule that counts the hidden lines is the control that shows them,
     // and `full` is the page with no window on it at all.
     const shown = card.live === true ? LIVE_TAIL : OPEN_WINDOW;
-    const windowed = view !== "full" && !this.revealed.has(card.id) && total > shown;
+    const windowed = view !== "full" && total > shown;
     if (windowed) {
       const hidden = total - shown;
       range.more = lines.length + start;
@@ -468,34 +678,29 @@ export class TranscriptView implements Component {
   }
 
   /**
-   * The click map: the header deepens a card (folded → open → full), the body
-   * closes it, the `⋯ n earlier lines` rule shows what it was hiding, and a
-   * click on a Chat block toggles its pin. The wheel stays the page's.
+   * The header folds or opens a card. The body (including the hidden-lines
+   * rule) toggles a long card between preview and full. A click never pins or
+   * marks: those are keys, on a selected block. The wheel stays the page's.
    */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
     const cardRange = this.rangeAt(event.y);
-    const block = this.blockRanges.find((range) => event.y >= range.start && event.y < range.end);
-    if (cardRange === undefined && block === undefined) return undefined;
+    if (cardRange === undefined) return undefined;
 
     if (event.type === "press") return { handled: true };
     if (event.type === "click") {
-      // A Chat block over a card: Chat is what the person is reading, so it
-      // keeps the click.
-      if (block !== undefined) {
-        this.onTogglePin?.(block.id);
-        this.cacheWidth = -1;
-        return { handled: true, render: true };
-      }
-      if (cardRange === undefined) return undefined;
       const card = this.cardById(cardRange.id);
       if (card === undefined) return undefined;
-      if (cardRange.more !== undefined && event.y === cardRange.more) {
-        this.revealed.add(card.id);
-      } else if (event.y === cardRange.header) {
-        const view = this.viewOf(card);
-        this.views.set(card.id, view === "folded" ? "open" : view === "open" ? "full" : "open");
+      const view = this.viewOf(card);
+      if (event.y === cardRange.header) {
+        this.views.set(card.id, view === "folded" ? "open" : "folded");
+      } else if (view === "full") {
+        this.views.set(card.id, "open");
+      } else if (cardRange.more !== undefined) {
+        this.views.set(card.id, "full");
       } else {
-        this.views.set(card.id, "folded");
+        // A short preview already shows everything: there is no full view to
+        // expand to, and a body tap must not collapse it.
+        return { handled: true };
       }
       this.cacheWidth = -1;
       return { handled: true, render: true };
@@ -525,10 +730,11 @@ export class TranscriptView implements Component {
 
   render(width: number): string[] {
     if (this.cacheWidth === width) return this.cacheLines;
+    this.lastWidth = width;
     const lines: string[] = [];
     const total = this.items.length + this.liveCards.length + this.queued.length;
     this.ranges = [];
-    this.blockRanges = [];
+    this.selectables = [];
     if (total === 0) {
       this.cacheLines = this.inset(this.emptyState(width), width);
       this.cacheWidth = width;
@@ -545,6 +751,10 @@ export class TranscriptView implements Component {
       const drawn = this.renderCard(card, width, start);
       lines.push(...drawn.lines);
       this.ranges.push(drawn.range);
+      // A card in flight is not an item anything holds yet; a landed one is the
+      // ephemeral item its source id names (the result's, for a tool row).
+      const id = card.live === true ? undefined : (card.resultId ?? card.sourceId);
+      if (id !== undefined) this.selectables.push({ key: `card:${card.id}`, target: { part: "tool-work", id }, start, end: lines.length });
     };
     for (const entry of this.items) {
       if (isCard(entry)) {
@@ -552,19 +762,18 @@ export class TranscriptView implements Component {
         continue;
       }
       gap();
-      if (entry.kind === "person") {
-        lines.push(...this.block("you", entry.text, width, entry.handle));
-      } else if (entry.kind === "agent") {
+      if (entry.kind === "person" || entry.kind === "agent") {
         const start = lines.length;
-        // A pin is an entry in its own right (§5.4): it carries the `P` handle
-        // named by the handle of what it marks, and says who placed it, so the
-        // row reads as one entry pinned rather than one entry with a badge.
-        const pin =
-          entry.pinned === undefined
-            ? ""
-            : `${pinHandle(entry.handle ?? "?")} ${entry.pinned === "user" ? "you" : "agent"}`;
-        lines.push(...this.block("carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
-        if (entry.recordId !== undefined) this.blockRanges.push({ id: entry.recordId, start, end: lines.length });
+        lines.push(...this.block(entry.kind === "person" ? "you" : "carto", entry.text, width, entry.handle));
+        if (entry.mark !== undefined) {
+          const mark = `◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`;
+          for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - PREFIX_WIDTH))) {
+            lines.push(`${" ".repeat(PREFIX_WIDTH)}${tokens.warn(line)}`);
+          }
+        }
+        if (entry.recordId !== undefined) {
+          this.selectables.push({ key: `chat:${entry.recordId}`, target: { part: "chat", id: entry.recordId }, start, end: lines.length });
+        }
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);
         for (const line of wrapTextWithAnsi(`${text}`, width - 3)) lines.push(`  ${line}`);
@@ -580,8 +789,23 @@ export class TranscriptView implements Component {
       lines.push(`  ${" ".repeat(PREFIX_WIDTH)}${tokens.faint(`· ${label}`)}`);
     }
     this.cacheWidth = width;
-    this.cacheLines = this.inset(lines, width);
+    this.cacheLines = this.inset(lines, width, this.cursorLines());
     return this.cacheLines;
+  }
+
+  /**
+   * The lines of the selected block, so the page can mark them. A block that has
+   * gone from the list (deleted, archived) leaves the cursor on its neighbour.
+   */
+  private cursorLines(): { start: number; end: number } | undefined {
+    if (!this.selecting) return undefined;
+    let at = this.selectables.findIndex((block) => block.key === this.cursorKey);
+    if (at === -1) at = Math.min(this.cursorIndex, this.selectables.length - 1);
+    const block = this.selectables[at];
+    if (block === undefined) return undefined;
+    this.cursorKey = block.key;
+    this.cursorIndex = at;
+    return block;
   }
 
   /**
@@ -589,7 +813,14 @@ export class TranscriptView implements Component {
    * run to the pane's right edge, so the transcript reads as a surface rather
    * than as glyphs floating on whatever the terminal had.
    */
-  private inset(lines: string[], width: number): string[] {
-    return lines.map((line) => canvasLine(line.length === 0 ? "" : `  ${line}`, width));
+  private inset(lines: string[], width: number, selected?: { start: number; end: number }): string[] {
+    const armed = selected !== undefined && this.archiveConfirmation === this.cursorKey;
+    return lines.map((line, index) => {
+      if (line.length === 0) return canvasLine("", width);
+      // The cursor is a bar in the margin, red when the next key archives.
+      const inside = selected !== undefined && index >= selected.start && index < selected.end;
+      const margin = inside ? `${armed ? tokens.danger("▌") : tokens.accent("▌")} ` : "  ";
+      return canvasLine(`${margin}${line}`, width);
+    });
   }
 }

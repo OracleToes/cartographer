@@ -105,6 +105,8 @@ function gitStatuses(root: string, paths: readonly string[]): Map<string, string
 export class TreeView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /** Fired on `p` over a row: pin or unpin it. `directory` is true for a folder, which cannot be pinned. */
+  onTogglePin?: (path: string, directory: boolean) => void;
   /**
    * Called with the drawn line of the selected row after each render. The view
    * does not scroll itself, and a ScrollView does not follow a child's cursor:
@@ -281,6 +283,23 @@ export class TreeView implements Component, Focusable {
     this.detailNote = handle === undefined ? undefined : this.detailNote === handle ? undefined : handle;
   }
 
+  /** True while `/` is taking text: a command key is a letter of the filter then. */
+  isFiltering(): boolean {
+    return this.filtering;
+  }
+
+  /**
+   * Pin or unpin the file under the cursor, the act `p` performs (§3.2). The
+   * person may pin or unpin any file; the callback gets the entry's absolute
+   * path, the same key the agent's `pin` writes, so one file is one pin. A
+   * directory holds no bytes the head could carry, so it names nothing here.
+   */
+  pinSelected(): void {
+    const selected = this.selectedRow();
+    if (selected === undefined) return;
+    this.onTogglePin?.(selected.entry.path, selected.entry.directory);
+  }
+
   handleInput(data: string): void {
     if (this.filtering) {
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
@@ -341,6 +360,10 @@ export class TreeView implements Component, Focusable {
     }
     if (matchesKey(data, "l") || matchesKey(data, "right") || matchesKey(data, "enter") || matchesKey(data, "space")) {
       this.foldAt(false);
+      return;
+    }
+    if (matchesKey(data, "p")) {
+      this.pinSelected();
       return;
     }
     if (matchesKey(data, "t")) {
@@ -494,7 +517,7 @@ export class TreeView implements Component, Focusable {
       const parent = this.projection?.handles.get(resolve(entry.path, ".."));
       if (parent !== undefined) usable.push(`\`tree ${parent}${depth}\` anchors the block on its directory`);
     }
-    usable.push("`pin` keeps it", "`mark` retires it");
+    usable.push("`pin` keeps it", "`p` pins or unpins it as you");
     lines.push(padLine(` ${tokens.faint(usable.join(" · "))}`, width));
     return lines;
   }
@@ -503,7 +526,7 @@ export class TreeView implements Component, Focusable {
     const node = this.data?.brain.atlas.find((candidate) => this.handleOfNode(candidate.id) === handle);
     if (node === undefined) return [];
     const lines: string[] = [];
-    lines.push(padLine(` ${tokens.atlas(handle)} ${tokens.bold(node.title)}${node.pinned !== undefined ? ` ${tokens.pin("P")}` : ""}${this.staleNotes.has(handle) ? ` ${tokens.warn("· stale")}` : ""}`, width));
+    lines.push(padLine(` ${tokens.atlas(handle)} ${tokens.bold(node.title)}${this.staleNotes.has(handle) ? ` ${tokens.warn("· stale")}` : ""}`, width));
     for (const line of wrapTextWithAnsi(node.text, Math.max(8, width - 3))) lines.push(padLine(`  ${tokens.text(line)}`, width));
     for (const link of node.links) {
       const linked = link;
@@ -534,7 +557,7 @@ export class TreeView implements Component, Focusable {
         : "";
     const pinnedOnly = this.showPinnedOnly ? ` ${tokens.pin("· pinned only")}` : "";
     const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${filter}${pinnedOnly}`;
-    const right = `${tokens.faint("j/k move · h/l fold · t note · f pinned · / filter ")}`;
+    const right = `${tokens.faint("j/k move · h/l fold · p pin · t note · f pinned · / filter ")}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(`${left}${" ".repeat(gap)}${right}`, width)));
     lines.push(padLine("", width));
