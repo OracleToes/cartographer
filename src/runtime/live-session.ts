@@ -53,7 +53,7 @@ import { writeSnapshot } from "./projection-files.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
-import { STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
+import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 
 export interface LiveSessionOptions {
   /**
@@ -75,6 +75,11 @@ export interface LiveSessionOptions {
    * the same person and nothing guesses a second time.
    */
   person?: string;
+  /**
+   * Context fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the
+   * state block. Default: 75 (COLLAPSE_WARNING_PERCENT).
+   */
+  collapseWarningPercent?: number;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -150,6 +155,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const state: LiveSessionState = {
     person: options.person ?? personName(),
     contextWindow,
+    collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
     paused: false,
     pending: [],
     tree: { anchor: root, depth: 2 },
@@ -240,7 +246,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         if (reason === null) return { kind: "none" };
         // A generation that was itself rebuilt automatically and did nothing
         // before asking again is the loop this bound exists to break.
-        if (state.rebuiltAutomatically && !generationProgressed(state.work)) {
+        if (state.rebuiltAutomatically && !generationProgressed(state.work, state.collapseWarningPercent)) {
           return { kind: "stop", reason, explanation: stalledCollapseExplanation(reason) };
         }
         return { kind: "collapse", reason };

@@ -69,6 +69,8 @@ export interface StateBlockInput {
   person: string;
   /** The server's advertised window; 0 = unknown, never a made-up number. */
   contextWindow: number;
+  /** Fill percentage (1–100) that triggers `[COLLAPSE NEEDED]`; defaults to COLLAPSE_WARNING_PERCENT (75). */
+  collapseWarningPercent?: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
   /** Output of that response also occupies the context. */
@@ -156,7 +158,7 @@ export function contextFillPercent(input: StateBlockInput): number | undefined {
   return input.contextWindow > 0 ? estimatedContextTokens(input) / input.contextWindow * 100 : undefined;
 }
 
-/** The fill at which the block asks the agent to collapse. */
+/** The default fill at which the block asks the agent to collapse. */
 export const COLLAPSE_WARNING_PERCENT = 75;
 
 export function renderStateBlock(input: StateBlockInput): string {
@@ -164,6 +166,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const output = input.lastReportedOutput ?? 0;
   const estimated = estimatedContextTokens(input);
   const percentage = contextFillPercent(input);
+  const warningPercent = input.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT;
   // The provider's own count is the only number here that is not an estimate,
   // and a window nobody advertised is unknown rather than a made-up figure.
   const fullness =
@@ -174,7 +177,7 @@ export function renderStateBlock(input: StateBlockInput): string {
       : reported === undefined
         ? `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
         : `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)}`;
-  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= COLLAPSE_WARNING_PERCENT ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
+  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= warningPercent ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +

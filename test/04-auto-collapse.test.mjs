@@ -99,6 +99,33 @@ describe("automatic collapse", { concurrency: 4 }, () => {
     }
   });
 
+  test("a configured collapseWarningPercent drives both the state block warning and the stall bound", async () => {
+    const env = await fixture();
+    // With a 10,000-token window, the baseline system/tool prompt is well under 75% (around 15-30%).
+    const { faux, models, captured, factory, ref } = fauxFor({ contextWindow: 10_000 });
+    faux.setResponses([
+      collapseCall(factory),
+      factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "did a step" }, { id: "chat-step" })], { stopReason: "toolUse" })),
+      collapseCall(factory),
+    ]);
+    const opts = options({ ...env, models, ref }, { collapseWarningPercent: 10 });
+    const first = await openLiveSession(opts);
+    let second;
+    try {
+      assert.equal(first.state.collapseWarningPercent, 10);
+      await ask(first, "check the lower threshold");
+      assert.match(blockOf(captured[0]).content, /context fill: ~\d+% · \[COLLAPSE NEEDED\]/, "warns at the configured 10% threshold, well below 75%");
+      // After automatic collapse, the new generation starts above the configured 10% warning fill,
+      // so even after doing a step, asking to collapse again is caught by the stall bound.
+      second = (await carryOut(first, opts)).session;
+      assert.equal(second.state.collapseWarningPercent, 10, "the configured threshold survives collapse");
+      assert.equal(second.reviewCollapseRequest().kind, "stop");
+    } finally {
+      await closeLiveSession(second ?? first).catch(() => undefined);
+      await env.cleanup();
+    }
+  });
+
   test("an agent-requested collapse rebuilds from the Brain and resumes on a state block, no message needed", async () => {
     const env = await fixture();
     const { faux, models, captured, factory, ref } = fauxFor();

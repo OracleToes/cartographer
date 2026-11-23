@@ -90,7 +90,7 @@ test("an unknown window renders as unknown, never as a number; a pin or advertis
   assert.match(known, /context: ~12,410 \/ 131,072 tokens/);
 });
 
-test("fullness warns at 75 percent, including the last response's output", () => {
+test("fullness warns at the configured threshold (default 75 percent), including the last response's output", () => {
   const base = { contextWindow: 1000, lastReportedInput: 700, toolWorkSince: 25 };
   const below = renderStateBlock(input({ ...base, lastReportedOutput: 24 }));
   assert.match(below, /context fill: ~74%/);
@@ -101,6 +101,13 @@ test("fullness warns at 75 percent, including the last response's output", () =>
   assert.match(warning, /Write down what you need to continue/);
   const estimated = renderStateBlock(input({ contextWindow: 1000, lastReportedInput: undefined, systemTokens: 250, transcriptTokens: 250, toolWorkTokens: 250 }));
   assert.match(estimated, /context fill: ~75% · \[COLLAPSE NEEDED\]/);
+
+  // A custom threshold overrides the default in both directions.
+  const lowered = renderStateBlock(input({ ...base, lastReportedOutput: 0, collapseWarningPercent: 70 }));
+  assert.match(lowered, /context fill: ~72% · \[COLLAPSE NEEDED\]/);
+  const raised = renderStateBlock(input({ ...base, lastReportedOutput: 25, collapseWarningPercent: 80 }));
+  assert.match(raised, /context fill: ~75%/);
+  assert.doesNotMatch(raised, /\[COLLAPSE NEEDED\]/);
 });
 
 test("marker messages are dropped from payloads; everything else survives", () => {

@@ -45,7 +45,7 @@ test("parseModelRef splits on the first slash; the model id keeps the rest", () 
   assert.throws(() => parseModelRef("llama-swap/"), ConfigError);
 });
 
-test("parseConfig rejects a bad version, model, endpoint, and context window", () => {
+test("parseConfig rejects a bad version, model, endpoint, context window, and collapse warning", () => {
   assert.throws(() => parseConfig({ version: 2, model: "llama-swap/x" }), /version must be 1/);
   assert.throws(() => parseConfig({ version: 1, model: 42 }), /model must be a string/);
   assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "not-a-url" }), /not a valid URL/);
@@ -55,6 +55,14 @@ test("parseConfig rejects a bad version, model, endpoint, and context window", (
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 512 }).contextWindow, 512, "the pin is the person's number — any integer ≥ 0 wins");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 0 }).contextWindow, 0, "0 is the valid 'no pin' pin");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 75_000 }).contextWindow, 75_000);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 0 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 101 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 0.75 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: "75" }), /from 1 to 100/);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x" }).collapseWarningPercent, undefined);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 1 }).collapseWarningPercent, 1);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 60 }).collapseWarningPercent, 60);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 100 }).collapseWarningPercent, 100);
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {
@@ -73,11 +81,11 @@ test("a missing config without --model fails with the one-liner that creates it"
 test("a missing config with --model is created; a later load reads it back", async () => {
   const home = tempDir();
   try {
-    const first = await loadGlobalConfig({ home, modelOverride: "llama-swap/ByteShape", llamaSwapEndpointOverride: "http://localhost:8888/v1/", contextWindowOverride: 75_000 });
+    const first = await loadGlobalConfig({ home, modelOverride: "llama-swap/ByteShape", llamaSwapEndpointOverride: "http://localhost:8888/v1/", contextWindowOverride: 75_000, collapseWarningPercentOverride: 80 });
     assert.equal(first.created, true);
     assert.equal(first.config.llamaSwapEndpoint, "http://localhost:8888/v1");
     const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.deepEqual(raw, { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000 });
+    assert.deepEqual(raw, { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000, collapseWarningPercent: 80 });
 
     const second = await loadGlobalConfig({ home });
     assert.equal(second.created, false);
@@ -90,13 +98,15 @@ test("a missing config with --model is created; a later load reads it back", asy
 test("overrides against an existing config apply in memory; the file is untouched", async () => {
   const home = tempDir();
   try {
-    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000 }, home);
-    const overridden = await loadGlobalConfig({ home, contextWindowOverride: 40_960, llamaSwapEndpointOverride: "http://example:9/v1" });
+    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000, collapseWarningPercent: 80 }, home);
+    const overridden = await loadGlobalConfig({ home, contextWindowOverride: 40_960, llamaSwapEndpointOverride: "http://example:9/v1", collapseWarningPercentOverride: 60 });
     assert.equal(overridden.config.contextWindow, 40_960);
     assert.equal(overridden.config.llamaSwapEndpoint, "http://example:9/v1");
+    assert.equal(overridden.config.collapseWarningPercent, 60);
     const onDisk = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
     assert.equal(onDisk.contextWindow, 75_000);
     assert.equal(onDisk.llamaSwapEndpoint, "http://localhost:8888/v1");
+    assert.equal(onDisk.collapseWarningPercent, 80);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -373,6 +383,8 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     assert.match(help, /workspace TUI/);
     assert.match(help, /--headless/);
     assert.match(help, /--model llama-swap\/ByteShape/);
+    assert.match(help, /--collapse-warning <n>/);
+    assert.match(help, /collapseWarningPercent/);
     assert.match(help, /--user <name>/);
     assert.match(help, /userName/);
   });
@@ -399,13 +411,14 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     const root = projectRoot();
     try {
       const first = await runCli(
-        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--user", "OracleToes", "--root", root],
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--collapse-warning", "65", "--user", "OracleToes", "--root", root],
         { home, input: "" },
       );
       assert.match(first, /carto · llama-swap\/ByteShape/);
       const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
+      assert.equal(raw.collapseWarningPercent, 65);
       assert.equal(raw.userName, "OracleToes", "--user is persisted instead of the login name");
     } finally {
       rmSync(home, { recursive: true, force: true });

@@ -285,9 +285,10 @@ about the project, the agent pins what it needs to know, arranges its context so
 nothing in it is a distraction, collapses, and then begins — so it works inside a
 context built for the problem rather than one it accumulated on the way there.
 
-Either side may collapse at any moment. At an estimated 75% context fill, the
-state block warns the agent to prepare the Brain and collapse before it runs out
-of room. The percentage is an estimate, not a guarantee of available output.
+Either side may collapse at any moment. At an estimated 75% context fill by
+default (adjustable in config), the state block warns the agent to prepare the
+Brain and collapse before it runs out of room. The percentage is an estimate,
+not a guarantee of available output.
 
 **The agent keeps itself small, and nobody un-sticks it.** The agent is long
 running, so a collapse it asks for, or one the model's limits force, is carried
@@ -296,7 +297,8 @@ the new generation starts on a state block, with no message from the person.
 This holds for every host and for a run that nothing of the person's started,
 such as a timed rest waking.
 
-- **The warning.** At an estimated 75% of a known window the state block says
+- **The warning.** At an estimated fill reaching the configured collapse warning
+  percentage (default 75%) of a known window the state block says
   `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
   you need to continue to the Brain, mark what is obsolete, then collapse. An
   unknown window is reported as unknown; no percentage is invented.
@@ -419,8 +421,9 @@ dashboard about its Brain and the project, and it reports:
 
 - **Context fullness** — the server's input and output count for the last
   response, plus estimated tool work added since. When the window is known,
-  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
-  unknown, do not invent a percentage.
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at the configured
+  collapse warning percentage (default 75%); when it is unknown, do not invent
+  a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
 - **Pending changes** — one line per Brain write since the last collapse, named

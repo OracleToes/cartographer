@@ -68,6 +68,8 @@ export interface LiveSessionState extends ToolSession, ModelTelemetry {
   person: string;
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
   contextWindow: number;
+  /** Fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the state block. */
+  collapseWarningPercent: number;
   /**
    * The person has paused the agent (§9). Pausing is not an interrupt and is
    * never told to the agent, so nothing in the block mentions it; the flag is
@@ -110,9 +112,9 @@ export interface GenerationWork {
 export const newGenerationWork = (): GenerationWork => ({ requests: 0, startFill: undefined, steps: 0 });
 
 /** Whether a generation that asks to collapse again has done anything the last collapse made room for. */
-export function generationProgressed(work: GenerationWork): boolean {
+export function generationProgressed(work: GenerationWork, warningPercent: number = COLLAPSE_WARNING_PERCENT): boolean {
   if (work.steps === 0) return false;
-  return !(work.startFill !== undefined && work.startFill >= COLLAPSE_WARNING_PERCENT);
+  return !(work.startFill !== undefined && work.startFill >= warningPercent);
 }
 
 export interface CartoExtensionOptions {
@@ -291,6 +293,7 @@ export async function renderLiveStateBlock(
   const input: StateBlockInput = {
     person: options.session.person,
     contextWindow: options.session.contextWindow,
+    collapseWarningPercent: options.session.collapseWarningPercent,
     lastReportedInput: options.session.lastReportedInput,
     lastReportedOutput: options.session.lastReportedOutput,
     systemTokens,
