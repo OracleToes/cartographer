@@ -359,7 +359,18 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   view.setData({
     brain,
     systemPrompt: "You are Carto.",
-    projectionText: "Atlas — what you understand about the project\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z",
+    // The frozen head holds all three records, so all three are rows.
+    projectionText: [
+      "Atlas — what you understand about the project",
+      "A1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z",
+      "",
+      "Ledger — what you are working on",
+      "L1 [goal · open] Keep the prefill in one order — 1970-01-01T00:00:00.001Z",
+      "",
+      "Chat — what you and you have said to each other",
+      "C1 [you] — 1970-01-01T00:00:00.002Z",
+      "  The context view is the prefill now.",
+    ].join("\n"),
     tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
     transcriptMessages: [{ id: 2, role: "user", text: "show me the prompt" }],
     toolWorkItems: [
@@ -1334,7 +1345,7 @@ test("a person's line said since the freeze is one row, the body's, and it acts 
   const shown = view.render(100).map(plain).join("\n");
   assert.equal(shown.split("said just now").length - 1, 1, "the live line is shown once");
   assert.ok(shown.includes("said before the collapse"), "the frozen record is in the head");
-  assert.ok(shown.includes("the agent answered"), "the agent's own, with no body row, is still listed");
+  assert.ok(!shown.includes("the agent answered"), "the agent's own is not in the head yet, so it is not listed there");
   // The body row is the record: the cursor on it pins that record.
   for (let step = 0; step < 12; step += 1) {
     view.handleInput("j");
@@ -1410,14 +1421,14 @@ test("a pinned file's row is the file's lines as the head holds them, in both vi
   assert.ok(real.includes("  line one of the file"), "and the file's text as indented in the head");
 });
 
-test("a file pinned since the freeze says it is not in the head, and a file unpinned since is still shown", () => {
+test("a file pinned since the freeze is not in the head's rows; the tail carries the highlight, and a file unpinned since is still shown", () => {
   const brain = frozenBrain();
   brain.files = [{ path: "notes.md", pinned: "user", createdAt: 1 }, { path: "later.md", pinned: "user", createdAt: 2 }];
-  const view = contextOf({ brain });
+  const view = contextOf({ brain, treeHandles: { "notes.md": "F1", "later.md": "F7" } });
   const shown = plain(view.render(100).join("\n"));
-  assert.match(shown, /later\.md · pinned by OracleToes/, "the new pin is listed");
-  const flat = shown.replace(/\s*│\s*/g, " ").replace(/\s+/g, " ");
-  assert.match(flat, /pinned after the head was frozen, so the head does not hold it\. It joins the head at the next collapse/, "and says why the model does not have it");
+  assert.ok(!shown.includes("later.md"), "the head does not hold it, so the head does not list it");
+  assert.ok(!/Not in the model's context yet|does not hold it/.test(shown), "and no row stands in for it with a sentence");
+  assert.match(shown, /◆ pin on collapse · F7/, "the tail, where the state block lists the pins, is highlighted");
   assert.ok(shown.includes("src/gone.ts"), "a file the head still holds is shown although the pin is gone");
   assert.match(shown, /unpinned since the freeze/, "with the reason it is leaving");
 });
@@ -1442,16 +1453,25 @@ test("a record gone from the Brain since the freeze is still in the view, for th
   assert.match(shown, /gone from the Brain since the freeze/);
 });
 
-test("a record written since the freeze shows its text and says plainly it is not in the head", () => {
+test("a record written since the freeze is not in the head, so the head does not show it", () => {
   const brain = frozenBrain();
   brain.handles.entries.push({ kind: "ledger", id: "l9", handle: "L9", timestamp: 9 });
   brain.ledger.push({ id: "l9", kind: "goal", text: "a goal written later", status: "open", answer: null, createdAt: 9, updatedAt: 9 });
   const view = contextOf({ brain });
   const human = plain(view.render(100).join("\n"));
-  assert.ok(human.includes("a goal written later"), "the person reads it");
+  assert.ok(!human.includes("a goal written later"), "the context does not hold it yet");
   view.handleInput("\t");
-  const real = plain(view.render(100).join("\n"));
-  assert.match(real, /Not in the model's context yet: this was written after the head was frozen/, "the model's view says what is true");
+  assert.ok(!plain(view.render(100).join("\n")).includes("a goal written later"), "in neither view");
+});
+
+test("an item pinned since the freeze is highlighted where it is, in the body, and has no head row", () => {
+  const view = contextOf({
+    toolWorkItems: [{ id: "g:2:t0", entry: 2, order: 0, kind: "output", text: "keep this one", pinned: "user" }],
+  });
+  const shown = plain(view.render(100).join("\n"));
+  assert.equal(shown.split("keep this one").length - 1, 1, "listed once: in the body, where the model has it");
+  assert.match(shown, /◆ pin on collapse · OracleToes/, "highlighted the way a row marked for delete is");
+  assert.match(shown, /◆ pin on collapse · X1/, "and the tail names the pin that waits");
 });
 
 test("the model's own text is a body row with its words; the system prompt and tail are shown as sent", () => {

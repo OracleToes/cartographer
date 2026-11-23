@@ -757,9 +757,16 @@ being it. A head row is the frozen head's own lines: a record, a pinned item, an
 a pinned file with the text the collapse read, each as written there, in both
 views. The head is listed from the frozen bytes, so a record or a pin that has
 left the Brain since the freeze is still shown, marked as leaving at the next
-collapse, because the model still reads it. A Brain record the head does not hold
-yet shows its text and says, specifically, that the model does not have it and
-when it will. The body holds every message the model receives, the agent's `chat`
+collapse, because the model still reads it. **Nothing the head does not hold is
+listed in the head**, not with a note and not in a row of its own: a record
+written, or a file or an item pinned, since the freeze is not in the context
+yet, and a view of the context does not show it where it is not. A pending change
+is shown where it really is, on a row that exists: a pinned item's body row is
+highlighted as `pin on collapse`, the way a row marked for delete is highlighted,
+and the tail, which is where the state block lists the pins and the marks,
+carries the highlight for a pin that has no other row, such as a file. The Atlas,
+the Ledger, the transcript and the Tree are where a pending record or pin is
+read and changed. The body holds every message the model receives, the agent's `chat`
 calls and its plain text included; the tail is the state block as sent. The
 head is listed in §5.1's order, the system prompt first (it is the first
 section of the system message, ahead of the projection); the tools are shown as

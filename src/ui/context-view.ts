@@ -400,10 +400,10 @@ export class ContextView implements Component, Focusable {
     });
 
     // A row for what the head holds that the Brain no longer does, or holds
-    // differently: the head is frozen, so the model still reads it.
-    const notFrozen = (what: string) => `Not in the model's context yet: ${what}, so the head does not hold it. It joins the head at the next collapse.`;
-    const NOT_FROZEN = notFrozen("this was written after the head was frozen");
-    const FILE_NOT_FROZEN = notFrozen("this file was pinned after the head was frozen");
+    // differently: the head is frozen, so the model still reads it. Nothing here
+    // is listed for what the head does NOT hold: this view is the context as it
+    // is, so a record or a pin that is waiting for the next collapse has no row in
+    // the head. It shows where it really is (a pinned item's body row, the tail).
     const GONE = "gone from the Brain since the freeze · the head holds it until the next collapse";
 
     const mark = (m: Mark | undefined): { marked: string } | Record<string, never> =>
@@ -440,68 +440,28 @@ export class ContextView implements Component, Focusable {
         ...(entry.kind === "ephemera" && at?.pinned !== undefined ? { pinned: at.pinned } : {}),
       };
     };
-    // A Brain record the head does not hold: its text as a person reads it, and
-    // the plain statement that the model does not have it yet.
-    const unfrozenRecord = (
-      kind: "atlas" | "ledger" | "chat" | "ephemera",
-      id: string,
-      handle: string | undefined,
-      label: string,
-      summary: string,
-      body: string,
-      extra: Partial<PromptNode> = {},
-    ): PromptNode => ({
-      id: `${kind}-${id}`,
-      handle: handle ?? "?",
-      kind,
-      label,
-      summary: oneLine(summary),
-      body,
-      real: NOT_FROZEN,
-      target: { part: kind, id },
-      ...extra,
-    });
-
     const of = (kind: FrozenEntry["kind"]) => frozen.filter((entry) => entry.kind === kind) as Array<FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }>;
     for (const entry of of("atlas")) head.push(frozenRecord(entry));
-    for (const node of data.brain.atlas) {
-      const handle = handleOf(handles, "atlas", node.id);
-      if (handle !== undefined && frozenKeys.has(handle)) continue;
-      head.push(unfrozenRecord("atlas", node.id, handle, "atlas", node.title, `${node.title}\n${node.text}`, mark(node.mark)));
-    }
     for (const entry of of("ledger")) head.push(frozenRecord(entry));
-    for (const item of data.brain.ledger) {
-      const handle = handleOf(handles, "ledger", item.id);
-      if (handle !== undefined && frozenKeys.has(handle)) continue;
-      const answer = item.answer === null ? "" : `\n→ answered: ${item.answer.text}`;
-      head.push(unfrozenRecord("ledger", item.id, handle, "ledger", item.text, `[${item.kind} · ${item.status}] ${item.text}${answer}`, mark(item.mark)));
-    }
     // A Chat record is in the context once (§2.3). One in the frozen head is
-    // listed here; the person's words said since the freeze are the live body
-    // rows below, which act on the record. The agent's own are in the body as
-    // their `chat` call and reach the head at the next collapse, so they are
-    // listed here, saying so, until then.
+    // listed here. The person's words said since the freeze are the live body
+    // rows below, which act on the record; the agent's own are in the body as
+    // their `chat` call. Neither is in the head until the next collapse, so
+    // neither is listed here.
     const liveSaid = data.transcriptMessages.filter((message) => message.role === "user");
     const recordOfLine = new Map<number, ChatRecord>();
     for (const entry of of("chat")) head.push(frozenRecord(entry));
     for (const chat of data.brain.chat) {
       const handle = handleOf(handles, "chat", chat.id);
-      if (handle !== undefined && frozenKeys.has(handle)) continue;
-      if (chat.author === "user") {
-        // The live line it was recorded as, matched in the order said. A
-        // record with no line left in the body (the line was removed) is
-        // listed here, so no Chat is missing from the view.
-        const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
-        if (line !== -1) {
-          recordOfLine.set(line, chat);
-          continue;
-        }
-      }
-      head.push(unfrozenRecord("chat", chat.id, handle, "chat", chat.text, chat.text, mark(chat.mark)));
+      if (chat.author !== "user" || (handle !== undefined && frozenKeys.has(handle))) continue;
+      // The live line it was recorded as, matched in the order said.
+      const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+      if (line !== -1) recordOfLine.set(line, chat);
     }
     // Pinned files come before pinned ephemera in the head (§5.1). The head
     // holds the file as the collapse read it: those lines are the row, in both
-    // views. A pin placed since then is not in the head, and says so.
+    // views. A file pinned since then is not in the head and has no row here;
+    // the tail says a pin is waiting.
     const pinnedFiles = new Map(data.brain.files.map((file) => [file.path === "" ? "." : file.path, file]));
     const treeHandle = (path: string) => data.treeHandles?.[path === "." ? "" : path] ?? data.treeHandles?.[path] ?? "F?";
     const shownFiles = new Set<string>();
@@ -522,34 +482,9 @@ export class ContextView implements Component, Focusable {
           : { pinned: file.pinned, target: { part: "files" as const, id: file.path } }),
       } satisfies PromptNode);
     }
-    for (const file of data.brain.files) {
-      const name = file.path === "" ? "." : file.path;
-      if (shownFiles.has(name)) continue;
-      head.push({
-        id: `file-${file.path}`,
-        handle: treeHandle(name),
-        kind: "files",
-        label: "file",
-        summary: `${name} · pinned by ${file.pinned === "user" ? person : "you"}${file.stale === true ? " · [stale: the file is gone or has changed since this pin]" : ""}`,
-        body: `${name} · pinned by ${file.pinned === "user" ? person : "you"}\n${FILE_NOT_FROZEN}`,
-        real: FILE_NOT_FROZEN,
-        pinned: file.pinned,
-        target: { part: "files", id: file.path },
-      } satisfies PromptNode);
-    }
     // Pinned ephemera come after Chat in the head (§5.1), each under its own
     // handle, because they are what the person kept in front of the agent.
     for (const entry of of("ephemera")) head.push(frozenRecord(entry));
-    for (const item of data.brain.ephemera) {
-      const handle = handleOf(handles, "ephemera", item.id);
-      if (item.pinned === undefined || (handle !== undefined && frozenKeys.has(handle))) continue;
-      head.push(
-        unfrozenRecord("ephemera", item.id, handle, item.kind, item.text, `[${item.kind}] ${item.text}`, {
-          pinned: item.pinned,
-          ...(deletes.has(item.id) ? { marked: "delete on collapse · you" } : {}),
-        }),
-      );
-    }
 
     // ── body ────────────────────────────────────────────────────────────────
     // The body is never sorted by kind: the person's messages, the reasoning, the
@@ -657,6 +592,18 @@ export class ContextView implements Component, Focusable {
       });
     }
     const body = candidates.sort((left, right) => left.key - right.key || left.order - right.order).map((entry) => entry.node);
+    // A pin placed since the freeze is not in the head, so it has no row there.
+    // The item it pins is a body row right now, so that row carries the pin and
+    // says it waits for the collapse, the way a row marked for delete says so.
+    const pendingPins: PromptNode[] = [];
+    for (const node of body) {
+      if (node.pinned === undefined || node.target?.part !== "tool-work") continue;
+      const item = data.brain.ephemera.find((candidate) => candidate.id === String(node.target?.id));
+      const handle = item === undefined ? undefined : handleOf(handles, "ephemera", item.id);
+      if (handle !== undefined && frozenKeys.has(handle)) continue;
+      node.marked = `pin on collapse · ${node.pinned === "user" ? person : "agent"}`;
+      pendingPins.push(node);
+    }
     const deletions = new Set(data.brain.ephemeralDeletes ?? []);
     for (const node of body) {
       if (node.target !== undefined && deletions.has(String(node.target.id))) node.marked = "delete on collapse · you";
@@ -672,6 +619,14 @@ export class ContextView implements Component, Focusable {
     }
 
     // ── tail ────────────────────────────────────────────────────────────────
+    // The state block lists every pin, so a pin placed since the freeze is in the
+    // context right now in exactly one place: its `pins:` line. A file pinned
+    // since the freeze has no other row, so the tail carries the highlight for it
+    // (and for the items above), and says whose pins are waiting.
+    const waiting = [
+      ...data.brain.files.filter((file) => !shownFiles.has(file.path === "" ? "." : file.path)).map((file) => treeHandle(file.path === "" ? "." : file.path)),
+      ...pendingPins.map((node) => node.handle),
+    ];
     const tail: PromptNode[] = [
       {
         id: "state-block",
@@ -681,6 +636,7 @@ export class ContextView implements Component, Focusable {
         summary: oneLine(data.stateBlockText),
         body: data.stateBlockText,
         real: data.stateBlockText,
+        ...(waiting.length === 0 ? {} : { marked: `pin on collapse · ${waiting.join(", ")}` }),
       },
     ];
 
