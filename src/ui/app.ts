@@ -80,7 +80,7 @@ import { ContextView, type ContextDialogueMessage, type ContextToolItem, type Co
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
-import { Column, Fill, margin, Row, type Viewport } from "./frame.js";
+import { Column, Fill, Inset, margin, Row, type Viewport } from "./frame.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -1215,23 +1215,41 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { ...pane(0), grow: 1 },
   ]);
   const inChatLayer = () => state.view === "chat" && state.layer === "context";
-  // The working pane: a row of air above the content, a cell either side, the
-  // prompt (only where you type) across its foot, and a row below it where
-  // there is no prompt.
+  // The working pane: a row of air above the content, the prompt (only where
+  // you type) across its foot, and a row below it where there is no prompt. The
+  // views indent themselves, so there is no column of air either side: every
+  // extra column is another box composited onto every row of every frame.
   const workPane = new Column([
     pane(1),
-    { component: new Row([pane(1), { component: workArea, basis: 0, grow: 1 }, pane(1)]), basis: 0, grow: 1, minSize: 3 },
+    { component: workArea, basis: 0, grow: 1, minSize: 3 },
     { component: editor, basis: "auto", minSize: 3, visible: inChatLayer },
     { ...pane(1), visible: () => !inChatLayer() },
   ]);
-  // The sidebar's panel runs to the foot of the pane; the list is what it holds.
-  const sidebarPane = new Column([{ component: sidebar, basis: "auto" }, { ...pane(0, rawPalette.panel), grow: 1 }]);
+  // The panes' row, margins included: one cell of chrome either side on a
+  // narrow terminal, two on a wide one. The sidebar's margin, its panel below the
+  // list and the seam to the working pane are drawn by one `Inset`, because each
+  // separate box in this row is another composite of every one of its rows on
+  // every frame, and the working pane's lines are the costly ones to re-read.
+  const sidebarIn = (cells: number, visible: (viewport: Viewport) => boolean) => ({
+    component: new Inset(sidebar, cells, 1, rawPalette.panel, rawPalette.chrome, rows),
+    basis: cells + sidebarWidth + 1,
+    visible: (viewport: Viewport) => state.sidebarVisible && visible(viewport),
+  });
+  const bareIn = (cells: number, visible: (viewport: Viewport) => boolean) => ({
+    ...chrome(cells),
+    visible: (viewport: Viewport) => !state.sidebarVisible && visible(viewport),
+  });
   const panes = new Row([
-    { component: sidebarPane, basis: sidebarWidth, visible: () => state.sidebarVisible },
-    { ...chrome(1), visible: () => state.sidebarVisible },
+    sidebarIn(2, margin.wide),
+    sidebarIn(1, margin.narrow),
+    sidebarIn(0, margin.none),
+    bareIn(2, margin.wide),
+    bareIn(1, margin.narrow),
     { component: workPane, basis: 0, grow: 1, minSize: 20 },
+    { ...chrome(2), visible: margin.wide },
+    { ...chrome(1), visible: margin.narrow },
   ]);
-  // One cell of chrome either side of the panes on a narrow terminal, two on a wide one.
+  // The single-row bands take the same margin.
   const framed = (inner: Component) =>
     new Row([
       { ...chrome(2), visible: margin.wide },
@@ -1244,7 +1262,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     chrome(1, margin.edge),
     { component: framed(header), basis: 1 },
     chrome(1, margin.gap),
-    { component: framed(panes), basis: 0, grow: 1, minSize: 6 },
+    { component: panes, basis: 0, grow: 1, minSize: 6 },
     chrome(1, margin.gap),
     { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
     chrome(1, margin.edge),

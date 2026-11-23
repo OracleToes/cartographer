@@ -1603,3 +1603,25 @@ test("the frame's stacks are laid out once per frame: a long pane is not re-rend
   assert.equal(spy.calls, 1, "rendered once, by the layout pass");
   assert.equal(frame.lines.length, 24);
 });
+
+test("a pane's margin, floor and seam are one box, and a click lands on the row it meant", async () => {
+  const { Inset } = await import("../dist/ui/frame.js");
+  const clicks = [];
+  const child = {
+    invalidate() {},
+    render: (width) => ["row".padEnd(width, "."), "two".padEnd(width, ".")],
+    handleMouse(event) {
+      clicks.push([event.x, event.y, event.width]);
+      return { handled: true };
+    },
+  };
+  const inset = new Inset(child, 2, 1, "#171f2a", "#06080b", () => 5);
+  const lines = inset.render(20);
+  assert.equal(lines.length, 5, "the floor runs to the foot of the screen");
+  for (const line of lines) assert.equal(visibleWidth(line), 20, "every row is the box's width");
+  assert.ok(plain(lines[0]).startsWith("  row"), "the margin is before the pane");
+  assert.ok(!inset.handleMouse({ type: "click", button: "left", x: 1, y: 0, screenX: 1, screenY: 0, width: 20, height: 5, shift: false, alt: false, ctrl: false }), "a click in the margin is nobody's");
+  assert.ok(!inset.handleMouse({ type: "click", button: "left", x: 19, y: 0, screenX: 19, screenY: 0, width: 20, height: 5, shift: false, alt: false, ctrl: false }), "nor one on the seam");
+  inset.handleMouse({ type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 20, height: 5, shift: false, alt: false, ctrl: false });
+  assert.deepEqual(clicks, [[3, 1, 17]], "the pane sees the click as its own, shifted by the margin");
+});

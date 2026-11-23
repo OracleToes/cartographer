@@ -14,7 +14,7 @@
  * and clipped by the layout to the room it has. It is a margin when given a
  * fixed size, and a pane's floor when given `grow`.
  */
-import { HStack, VStack, type Component } from "@earendil-works/pi-tui";
+import { HStack, VStack, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 
 import { fillLine } from "./tokens.js";
 
@@ -57,6 +57,7 @@ export class Fill implements Component {
 export const margin = {
   wide: (viewport: Viewport): boolean => viewport.width >= 100,
   narrow: (viewport: Viewport): boolean => viewport.width >= 60 && viewport.width < 100,
+  none: (viewport: Viewport): boolean => viewport.width < 60,
   edge: (viewport: Viewport): boolean => viewport.height >= 20,
   gap: (viewport: Viewport): boolean => viewport.height >= 26,
 };
@@ -84,5 +85,50 @@ export class Row extends HStack {
 export class Column extends VStack {
   override render(): string[] {
     return [];
+  }
+}
+
+/**
+ * A pane with its margin and its floor in one box.
+ *
+ * Every box in a row is composited onto the row after the ones before it, and
+ * compositing re-reads the whole row each time; it was most of a frame. The
+ * sidebar's left margin, its panel below the list, and the seam to its right are
+ * all drawn by the one line this builds, so they cost nothing extra. It passes
+ * the mouse on, shifted by the margin, so a click lands on the row it meant.
+ */
+export class Inset implements Component {
+  private readonly leftCells: string;
+  private readonly rightCells: string;
+
+  constructor(
+    private readonly child: Component & { handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined },
+    private readonly left: number,
+    private readonly right: number,
+    private readonly floorHex: string,
+    edgeHex: string,
+    private readonly rows: () => number,
+  ) {
+    this.leftCells = left === 0 ? "" : fillLine("", left, edgeHex);
+    this.rightCells = right === 0 ? "" : fillLine("", right, edgeHex);
+  }
+
+  invalidate(): void {
+    this.child.invalidate?.();
+  }
+
+  render(width: number): string[] {
+    const inner = Math.max(1, width - this.left - this.right);
+    const lines = this.child.render(inner);
+    const floor = fillLine("", inner, this.floorHex);
+    const out: string[] = [];
+    for (let row = 0; row < Math.max(lines.length, this.rows()); row += 1) out.push(`${this.leftCells}${lines[row] ?? floor}${this.rightCells}`);
+    return out;
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const x = event.x - this.left;
+    if (x < 0 || x >= event.width - this.left - this.right) return undefined;
+    return this.child.handleMouse?.({ ...event, x, width: event.width - this.left - this.right });
   }
 }
