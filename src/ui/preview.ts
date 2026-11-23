@@ -20,7 +20,7 @@ import { ContextView, type ContextViewData } from "./context-view.js";
 import { TreeView } from "./tree-view.js";
 import { HelpPanel, type HelpExtra } from "./help-panel.js";
 import { Palette } from "./palette.js";
-import { bandLine, canvasLine, chromeLine, tokens, visibleWidth } from "./tokens.js";
+import { bandLine, canvasLine, chromeLine, padLine, tokens, visibleWidth } from "./tokens.js";
 import { sidebarWidth } from "./sidebar.js";
 import { emptyBrain } from "../domain/records.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -472,8 +472,9 @@ function workspace(header: HeaderView, sidebarLines: string[], main: (width: num
   const rows: string[] = [...header.render(width), chromeLine("", width)];
   for (let index = 0; index < count; index += 1) {
     const left = sidebarLines[index] ?? bandLine("", sidebarWidth);
-    const right = mainLines[index] ?? "";
-    rows.push(frame([left], sidebarWidth) + chromeLine("", 1) + canvasLine(right, mainWidth));
+    const right = mainLines[index];
+    const rightCell = right !== undefined && right.startsWith("\u001b[48") ? padLine(right, mainWidth) : canvasLine(right ?? "", mainWidth);
+    rows.push(frame([left], sidebarWidth) + chromeLine("", 1) + rightCell);
   }
   return rows;
 }

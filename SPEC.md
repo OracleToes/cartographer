@@ -739,7 +739,8 @@ Neither the spec nor the runtime supplies a size limit to enforce in its place.
 **The screen is surfaces, darkest outermost.** The chrome (the margin round the
 frame, the header row, the key bar and the context bar) sits on the deepest tone;
 the sidebar and the working area are raised out of it, each on its own step;
-the prompt and a selected row are raised again. The frame has a margin of two
+the prompt, entry headers in the transcript and context views, and a selected
+row are raised again. The frame has a margin of two
 cells and one row, one cell on a narrow terminal and none on a very small one,
 with a breathing row between the bands only when the terminal has rows to
 spare. Every cell of the frame is painted: a pane that is shorter than its room

@@ -25,11 +25,7 @@ import {
   type TextStyle,
 } from "@earendil-works/pi-tui";
 
-let cachedMode: TerminalColorMode | undefined;
-function mode(): TerminalColorMode {
-  if (cachedMode === undefined) cachedMode = getTerminalColorMode();
-  return cachedMode;
-}
+const mode = (): TerminalColorMode => getTerminalColorMode();
 
 const style = (hex: string, extra: Omit<TextStyle, "fg"> = {}) => {
   const color = parseColor(hex);
@@ -70,7 +66,7 @@ export const canvasLine = (line: string, width: number): string => fillLine(line
 /** A line of the chrome (header, key bar, context bar): the deepest tone, around the panes. */
 export const chromeLine = (line: string, width: number): string => fillLine(line, width, palette.chrome);
 
-/** A line of a raised input surface, the prompt's. */
+/** A line of a raised surface: the prompt, and entry headers above their bodies. */
 export const surfaceLine = (line: string, width: number): string => fillLine(line, width, palette.surface);
 
 /** Any band's line, filled to the width: the sidebar uses it for its own colour. */

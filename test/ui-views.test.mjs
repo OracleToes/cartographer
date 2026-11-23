@@ -1553,6 +1553,107 @@ test("every entry in the context view shows its estimated token cost, folded and
   checkEntries(view.render(100), "open");
 });
 
+test("every transcript and context entry header sits on a slightly different background colour from its body", async () => {
+  const { setCapabilityOverrides } = await import("@earendil-works/pi-tui");
+  const { canvasLine, surfaceLine } = await import("../dist/ui/tokens.js");
+  setCapabilityOverrides({ trueColor: true });
+  try {
+    const leadingBg = (line) => {
+      const match = line.match(/^\x1b\[48;[0-9;]+m/);
+      return match?.[0] ?? "";
+    };
+    const headerBg = leadingBg(surfaceLine("", 10));
+    const bodyBg = leadingBg(canvasLine("", 10));
+    assert.ok(headerBg.length > 0 && bodyBg.length > 0, "both surfaces emit a background ANSI escape");
+    assert.notEqual(headerBg, bodyBg, "header and body backgrounds are distinct colours");
+
+    // 1. TranscriptView: person, agent (with mark), reasoning, output, tool, live tool, queued.
+    const transcript = new TranscriptView();
+    transcript.setEntries(
+      [
+        { kind: "person", text: "person body line", handle: "U1", recordId: "c-u" },
+        { kind: "agent", text: "agent body line", handle: "C1", recordId: "c-a", mark: { action: "archive", author: "user" } },
+        { kind: "reasoning", id: "r1", handle: "X1", text: "reasoning body line" },
+        { kind: "output", id: "o1", handle: "X2", text: "output body line" },
+        { kind: "tool", id: "t1", handle: "X3", name: "read", args: "path: src/a.ts", output: "tool body line" },
+      ],
+      [{ text: "queued body line", mode: "steer" }],
+    );
+    transcript.setLive([
+      { kind: "tool", id: "live-1", handle: "X4", name: "bash", args: "command: ls", output: "live tool body line", live: true, status: "running" },
+    ]);
+    const findLine = (lines, needle) => {
+      const found = lines.find((line) => plain(line).includes(needle));
+      assert.ok(found !== undefined, `expected line containing "${needle}"`);
+      return found;
+    };
+
+    // Folded landed cards still paint their header row with the header background.
+    const foldedTranscript = transcript.render(90);
+    for (const headerNeedle of ["▌ you U1", "▌ carto C1", "X1", "X2", "X3", "X4", "⏸ you"]) {
+      assert.equal(leadingBg(findLine(foldedTranscript, headerNeedle)), headerBg, `folded transcript header "${headerNeedle}" uses surface background`);
+    }
+
+    // First toggle folds the open live card; second toggle opens every card so every entry has header + body.
+    transcript.toggleAllCards();
+    transcript.toggleAllCards();
+
+    const transcriptLines = transcript.render(90);
+    for (const line of transcriptLines) assert.equal(visibleWidth(line), 90, "transcript line exact width");
+    for (const headerNeedle of ["▌ you U1", "▌ carto C1", "X1", "X2", "X3", "X4", "⏸ you"]) {
+      assert.equal(leadingBg(findLine(transcriptLines, headerNeedle)), headerBg, `transcript header "${headerNeedle}" uses surface background`);
+    }
+    for (const bodyNeedle of [
+      "person body line",
+      "agent body line",
+      "archive on collapse · you",
+      "reasoning body line",
+      "output body line",
+      "tool body line",
+      "live tool body line",
+      "queued body line",
+    ]) {
+      assert.equal(leadingBg(findLine(transcriptLines, bodyNeedle)), bodyBg, `transcript body "${bodyNeedle}" uses canvas background`);
+    }
+
+    // 2. ContextView: every entry header (folded and open) vs its expanded body and section headings.
+    const context = new ContextView();
+    context.setData({
+      brain: frozenBrain(),
+      person: "OracleToes",
+      systemPrompt: "system prompt body text",
+      projectionText: FROZEN_HEAD,
+      tools: [{ name: "read", description: "read a file", parameters: { type: "object" } }],
+      transcriptMessages: [{ id: 1, entry: 1, order: -1, role: "user", text: "user prompt body text" }],
+      toolWorkItems: [{ id: "g:2:r", entry: 2, order: 1, kind: "reasoning", text: "context reasoning body" }],
+      stateBlockText: "<carto-state>\nstate block body text\n</carto-state>",
+      treeHandles: { "notes.md": "F1", "src/gone.ts": "F2" },
+    });
+
+    const checkContextHeaders = (lines, state) => {
+      for (const line of lines) assert.equal(visibleWidth(line), 100, `context (${state}): exact width`);
+      for (const heading of ["HEAD ·", "BODY ·", "TAIL ·"]) {
+        assert.equal(leadingBg(findLine(lines, heading)), bodyBg, `context (${state}): section heading "${heading}" stays on canvas`);
+      }
+      const headerRows = lines.filter((line) => /^\s*[▌ ] [▸▾] /.test(plain(line)));
+      assert.ok(headerRows.length >= 6, `context (${state}): every entry has a header row`);
+      for (const row of headerRows) {
+        assert.equal(leadingBg(row), headerBg, `context (${state}): entry header "${plain(row).trim()}" uses surface background`);
+      }
+    };
+
+    checkContextHeaders(context.render(100), "folded");
+    context.toggleAll();
+    const openContextLines = context.render(100);
+    checkContextHeaders(openContextLines, "open");
+    for (const bodyNeedle of ["system prompt body text", "user prompt body text", "context reasoning body", "state block body text"]) {
+      assert.equal(leadingBg(findLine(openContextLines, bodyNeedle)), bodyBg, `context (open): body "${bodyNeedle}" uses canvas background`);
+    }
+  } finally {
+    setCapabilityOverrides({ trueColor: undefined });
+  }
+});
+
 test("the system message is the instructions first and the frozen projection second (§5.1)", async () => {
   const { createCartoExtension, cartoInstructions } = await import("../dist/runtime/carto-extension.js");
   const extension = createCartoExtension({

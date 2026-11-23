@@ -45,7 +45,7 @@ import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
-import { canvasLine, padLine, tokens } from "./tokens.js";
+import { canvasLine, padLine, surfaceLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
 
 export interface ContextToolItem {
@@ -959,22 +959,22 @@ export class ContextView implements Component, Focusable {
         const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", roomWithCost, "…");
         const styledPreview = confirmed ? tokens.danger(preview) : tokens.faint(preview);
         const gap = Math.max(2, width - headWidth - visibleWidth(preview) - costWidth - 1);
-        lines.push(canvasLine(`${head}${styledPreview}${" ".repeat(gap)}${cost}`, width));
+        lines.push(surfaceLine(`${head}${styledPreview}${" ".repeat(gap)}${cost}`, width));
         return lines;
       }
       if (headWidth + costWidth + 2 <= width) {
         const gap = width - headWidth - costWidth - 1;
-        lines.push(canvasLine(`${head}${" ".repeat(gap)}${cost}`, width));
+        lines.push(surfaceLine(`${head}${" ".repeat(gap)}${cost}`, width));
         return lines;
       }
       const room = Math.max(8, width - headWidth - 2);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
-      lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
+      lines.push(surfaceLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
       return lines;
     }
 
     const openGap = width - headWidth - costWidth - 1;
-    lines.push(canvasLine(openGap >= 1 ? `${head}${" ".repeat(openGap)}${cost}` : head, width));
+    lines.push(surfaceLine(openGap >= 1 ? `${head}${" ".repeat(openGap)}${cost}` : head, width));
     lines.push(...this.renderBody(node, width, ink));
     return lines;
   }
