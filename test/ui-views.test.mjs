@@ -52,7 +52,6 @@ test("Sidebar renders the transcript, the context, the tree, and both books with
     treeFiles: 6,
     atlas: 5,
     ledger: 2,
-    pinned: { atlas: 1 },
     marked: {},
     stale: { atlas: 1 },
     staleTotal: 1,
@@ -527,7 +526,6 @@ test("the two books are two panes: the list names the entry, l focuses its detai
     text: "Refactor UI components with two-pane layout",
     status: "open",
     answer: null,
-    pinned: "agent",
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
@@ -607,44 +605,17 @@ test("TranscriptView displays tool name in card header when known", () => {
   assert.ok(headerLine.includes("running"));
 });
 
-test("the p key toggles the pin on the selected entry (ledger and atlas)", () => {
+test("Atlas and Ledger have no pin: p does nothing there, since only the archive pins a Brain entry", () => {
   const ledger = new LedgerView();
   const brain = emptyBrain();
-  brain.ledger.push({
-    id: "l-a",
-    kind: "note",
-    text: "pin me",
-    status: "open",
-    answer: null,
-    pinned: "agent",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  });
-  brain.handles.entries.push({ kind: "ledger", id: "l-a", handle: "L1", timestamp: Date.now() });
-  let toggled = null;
-  ledger.onTogglePin = (id) => { toggled = id; };
+  brain.ledger.push({ id: "l-a", kind: "note", text: "no pin here", status: "open", answer: null, createdAt: 1, updatedAt: 1 });
+  brain.handles.entries.push({ kind: "ledger", id: "l-a", handle: "L1", timestamp: 1 });
   ledger.setData(brain);
+  assert.equal(ledger.pinSelected, undefined, "no pin act on the ledger");
+  const before = plain(ledger.render(100).join("\n"));
   ledger.handleInput("p");
-  assert.equal(toggled, "l-a");
-
-  const atlas = new AtlasView();
-  const atlasBrain = emptyBrain();
-  atlasBrain.atlas.push({
-    id: "n-a",
-    title: "pin me",
-    text: "claim",
-    links: [],
-    attachments: [],
-    pinned: "user",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  });
-  atlasBrain.handles.entries.push({ kind: "atlas", id: "n-a", handle: "A1", timestamp: Date.now() });
-  let atlasToggled = null;
-  atlas.onTogglePin = (id) => { atlasToggled = id; };
-  atlas.setData(atlasBrain, []);
-  atlas.handleInput("p");
-  assert.equal(atlasToggled, "n-a");
+  assert.equal(plain(ledger.render(100).join("\n")), before, "and the key changes nothing");
+  assert.doesNotMatch(plain(ledger.render(100).join("\n")), /p pin/, "the header does not offer it");
 });
 
 test("a click never pins; block selection acts with the same keys on Chat blocks and cards", () => {
@@ -656,14 +627,12 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
   transcript.onWithdrawMark = (part, id) => acts.push(["withdraw", part, id]);
   transcript.setEntries([
     { kind: "person", text: "you said this", recordId: "c-p" },
-    { kind: "agent", text: "a durable agent statement", recordId: "c-a", pinned: "user", handle: "C3" },
+    { kind: "agent", text: "a durable agent statement", recordId: "c-a", handle: "C3" },
     { kind: "tool", id: "ctx-1-0", name: "read", args: "{}", sourceId: "gen:1:t0", resultId: "gen:1:r0" },
     { kind: "agent", text: "boot burst, no record" },
   ]);
   const lines = transcript.render(120);
-  // §5.4: a pin is named by the handle of the entry it marks, so the row reads
-  // `P C3 you` — the pin's handle, the entry's, and who placed it.
-  assert.match(plain(lines.join("\n")), /P C3 you/, "the pin renders with its own handle, and says who placed it");
+  assert.ok(plain(lines.join("\n")).includes("C3"), "a Chat block wears its handle");
 
   const click = transcript.handleMouse({ type: "click", x: 5, y: 2, screenX: 5, screenY: 2, width: 120, height: 20, shift: false, alt: false, ctrl: false });
   assert.equal(click, undefined, "a click on a Chat block is not handled: pinning is a key");
@@ -676,7 +645,9 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
   assert.deepEqual(acts.pop(), ["pin", "tool-work", "gen:1:r0"], "a card is its result, the item a pin keeps");
   transcript.handleInput("k");
   transcript.pinSelected();
-  assert.deepEqual(acts.pop(), ["pin", "chat", "c-a"]);
+  assert.equal(transcript.selectedPart(), "chat", "a Chat block has no pin to offer");
+  transcript.pinSelected();
+  assert.deepEqual(acts, [], "and p on it does nothing");
   transcript.markSelected("delete");
   assert.deepEqual(acts.pop(), ["delete", "chat", "c-a", false]);
   transcript.toggleApplyNow();
@@ -943,7 +914,7 @@ test("marked Chat entries in the transcript show their pending action", () => {
   const view = new TranscriptView();
   view.setEntries([
     { kind: "agent", recordId: "1", handle: "C1", text: "first", mark: { action: "delete", author: "user" } },
-    { kind: "agent", recordId: "2", handle: "C2", text: "second", pinned: "agent", mark: { action: "archive", author: "agent" } },
+    { kind: "agent", recordId: "2", handle: "C2", text: "second", mark: { action: "archive", author: "agent" } },
   ]);
   const frame = plain(view.render(80).join("\n"));
   assert.match(frame, /delete on collapse · you/);
@@ -1194,11 +1165,11 @@ test("a pinned file is in the head, under the tree's handle, with the person who
 });
 
 test("a pin reads the same in the block and in the view: P and the handle of what it marks", () => {
-  // One record, added the way the Brain adds one, so its handle comes from the
-  // handle table and both renderings have to agree on the name (§5.4).
+  // One pinned item, added the way the Brain adds one, so its handle comes from
+  // the handle table and both renderings have to agree on the name (§5.4).
   let brain = emptyBrain();
-  brain = applyWrite(brain, { kind: "atlas.upsert", node: { id: "a3", title: "cartography", text: "t", links: [], attachments: [], pinned: "user", createdAt: 1, updatedAt: 1 } }, 1);
-  const handle = brain.handles.entries.find((entry) => entry.id === "a3").handle;
+  brain = applyWrite(brain, { kind: "ephemeral.pin", item: { id: "gen:1:t0", text: "kept", kind: "reasoning", createdAt: 1, pinned: "user" } }, 1);
+  const handle = brain.handles.entries.find((entry) => entry.id === "gen:1:t0").handle;
 
   const block = renderStateBlock({
     person: "OracleToes",
@@ -1213,7 +1184,7 @@ test("a pin reads the same in the block and in the view: P and the handle of wha
     pinned: [{ handle, author: "user" }],
     marks: [],
     stale: [],
-    resolveHandle: (kind, id) => (kind === "atlas" && id === "a3" ? handle : undefined),
+    resolveHandle: (kind, id) => (kind === "ephemera" && id === "gen:1:t0" ? handle : undefined),
     mode: "edit",
     tree: { root: "/project", depth: 1, lines: [] },
   });
@@ -1346,10 +1317,10 @@ test("a person's line said since the freeze is one row, the body's, and it acts 
     ],
   };
   brain.chat.push({ id: "c1", author: "user", text: "said before the collapse", createdAt: 1, updatedAt: 1 });
-  brain.chat.push({ id: "c2", author: "user", text: "said just now", pinned: "user", createdAt: 2, updatedAt: 2 });
+  brain.chat.push({ id: "c2", author: "user", text: "said just now", createdAt: 2, updatedAt: 2 });
   brain.chat.push({ id: "c3", author: "agent", text: "the agent answered", createdAt: 3, updatedAt: 3 });
-  const pinned = [];
-  view.onTogglePin = (part, id) => pinned.push([part, id]);
+  const marked = [];
+  view.onDelete = (part, id) => marked.push([part, id]);
   view.setData({
     brain,
     systemPrompt: "system",
@@ -1367,8 +1338,8 @@ test("a person's line said since the freeze is one row, the body's, and it acts 
   // The body row is the record: the cursor on it pins that record.
   for (let step = 0; step < 12; step += 1) {
     view.handleInput("j");
-    view.handleInput("p");
+    view.handleInput("d");
   }
-  assert.ok(pinned.some(([part, id]) => part === "chat" && id === "c2"), "p on the live line reaches the Chat record");
-  assert.ok(!pinned.some(([part]) => part === "transcript"), "and not a swept copy");
+  assert.ok(marked.some(([part, id]) => part === "chat" && id === "c2"), "a mark on the live line reaches the Chat record");
+  assert.ok(!marked.some(([part]) => part === "transcript"), "and not a swept copy");
 });

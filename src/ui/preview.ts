@@ -91,7 +91,6 @@ export function previewTranscript(width = 110): string {
     contextTokens: 18_430,
     atlas: 6,
     ledger: 4,
-    pinned: { chat: 2, atlas: 1 },
     marked: {},
     stale: {},
     staleTotal: 0,
@@ -110,7 +109,6 @@ export function previewTranscript(width = 110): string {
       text: "Found it. The cards were keyed by the live attempt, so a rebuild replaced them instead of folding them. They are keyed by the context entry now.",
       recordId: "12",
       handle: "C1",
-      pinned: "user",
     },
     { kind: "reasoning", id: "r1", handle: "X1", text: "The live cards used the attempt number in their id. A rebuild after the round landed produced different ids, so the fold state was discarded and the card came back open. Keying by the entry and the part index makes the id stable across the boundary." },
     { kind: "tool", id: "t1", handle: "X2", name: "read", args: "path: src/ui/transcript.ts\noffset: 120\nlimit: 40" },
@@ -166,7 +164,6 @@ export function previewArchive(width = 110): string {
     contextTokens: 18_430,
     atlas: 6,
     ledger: 4,
-    pinned: { chat: 2 },
     marked: {},
     stale: {},
     staleTotal: 0,
@@ -317,7 +314,7 @@ export function previewContext(width = 110): string {
     windowUnknown: false,
   });
   const sidebar = new Sidebar();
-  sidebar.setCounts({ chat: 1, contextTokens: 14_220, atlas: 2, ledger: 1, pinned: {}, marked: {}, stale: {}, staleTotal: 0, treeDirs: 4, treeFiles: 22, archive: 0, archivePinned: 0 });
+  sidebar.setCounts({ chat: 1, contextTokens: 14_220, atlas: 2, ledger: 1, marked: {}, stale: {}, staleTotal: 0, treeDirs: 4, treeFiles: 22, archive: 0, archivePinned: 0 });
   sidebar.setActiveBook("context");
   const footer = new FooterView(() => [
     { key: "↑↓", label: "move" },
@@ -419,7 +416,6 @@ export function previewTree(width = 110): string {
     contextTokens: 14_220,
     atlas: 2,
     ledger: 0,
-    pinned: { atlas: 0 },
     marked: {},
     stale: {},
     staleTotal: 0,

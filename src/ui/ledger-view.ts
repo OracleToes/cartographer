@@ -17,14 +17,12 @@ import {
 
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, LedgerEntry } from "../domain/records.js";
-import { padLine, tokens, pinBadgeText } from "./tokens.js";
+import { padLine, tokens } from "./tokens.js";
 import { RecordControls } from "./record-controls.js";
 
 export class LedgerView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
-  /** Fired on `p`: toggle the pin marker on the selected entry. */
-  onTogglePin?: (id: string) => void;
   /** The person's marks on the selected record: `a` archive, `d` delete, `u` withdraw, `!` apply now (§4.1). */
   readonly controls = new RecordControls();
 
@@ -50,15 +48,9 @@ export class LedgerView implements Component, Focusable {
     return this.filtering;
   }
 
-  /** The id the cursor is on, which the marks and the pin act on. */
+  /** The id the cursor is on, which the marks act on. */
   selectedId(): string | undefined {
     return this.getFilteredEntries()[this.selectedIndex]?.id;
-  }
-
-  /** Pin or unpin the selected record, the act `p` performs. */
-  pinSelected(): void {
-    const id = this.selectedId();
-    if (id !== undefined) this.onTogglePin?.(id);
   }
 
   handleInput(data: string): void {
@@ -127,20 +119,10 @@ export class LedgerView implements Component, Focusable {
         this.detailExpanded = !this.detailExpanded;
         return;
       }
-      if (matchesKey(data, "p")) {
-        const entry = filtered[this.selectedIndex];
-        if (entry) this.onTogglePin?.(entry.id);
-        return;
-      }
     } else {
       // Detail pane focused
       if (matchesKey(data, "h") || matchesKey(data, "left") || matchesKey(data, "escape")) {
         this.focusedPane = "list";
-        return;
-      }
-      if (matchesKey(data, "p")) {
-        const entry = this.getFilteredEntries()[this.selectedIndex];
-        if (entry) this.onTogglePin?.(entry.id);
         return;
       }
       if (matchesKey(data, "j") || matchesKey(data, "down")) {
@@ -227,7 +209,6 @@ export class LedgerView implements Component, Focusable {
 
     const titlePrefix = `${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.kindBadge(entry.kind)} ${entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status)}`;
     const badges: string[] = [];
-    if (entry.pinned !== undefined) badges.push(pinBadgeText(entry.pinned, "pin"));
     badges.push(tokens.muted(isoDate));
     if (this.focusedPane === "detail") badges.push(tokens.bold(tokens.accent("[FOCUSED]")));
 
@@ -282,7 +263,7 @@ export class LedgerView implements Component, Focusable {
         : "";
     const stale = "";
     const left = ` ${name} ${tokens.faint("·")} ${figure}${filter}${stale}`;
-    const right = `${tokens.faint(this.controls.nowArmed ? "next mark applies NOW " : "p pin · a/d mark · u withdraw · ! now · / filter ")}`;
+    const right = `${tokens.faint(this.controls.nowArmed ? "next mark applies NOW " : "a/d mark · u withdraw · ! now · / filter ")}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(left + " ".repeat(gap) + right, width)));
     lines.push(padLine("", width));
@@ -307,11 +288,10 @@ export class LedgerView implements Component, Focusable {
         const isSelected = idx === this.selectedIndex;
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
         const handleStr = `[${handle}]`.padEnd(6);
-        const pinStr = pinBadgeText(entry.pinned, "P");
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
         const kindStr = tokens.muted(`[${entry.kind}]`);
 
-        const badgeStr = `${pinStr} ${statusStr}`;
+        const badgeStr = statusStr;
         const mark = entry.mark === undefined ? "" : `${tokens.warn(`◆ ${entry.mark.action}`)} `;
         const previewSpace = Math.max(1, listWidth - 14 - visibleWidth(badgeStr) - visibleWidth(mark));
         const preview = truncateToWidth(entry.text.replace(/\s+/g, " "), previewSpace, "…");
@@ -337,10 +317,9 @@ export class LedgerView implements Component, Focusable {
         const handle = (this.brain ? handleOf(this.brain.handles, "ledger", entry.id) : "") ?? `L${idx + 1}`;
         const isSelected = idx === this.selectedIndex;
         const prefix = isSelected ? tokens.accent("▸ ") : "  ";
-        const pinStr = pinBadgeText(entry.pinned, "pin");
         const statusStr = entry.status === "open" ? tokens.statusBadge("open") : tokens.closedBadge(entry.status);
         const mark = entry.mark === undefined ? "" : `${tokens.warn(`◆ ${entry.mark.action} on collapse`)} `;
-        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${mark}[${entry.kind}] ${entry.text} ${statusStr} ${pinStr}`;
+        const rowText = `${prefix}${tokens.bold(tokens.accent(`[${handle}]`))} ${mark}[${entry.kind}] ${entry.text} ${statusStr}`;
         lines.push(isSelected ? tokens.selectedBg(padLine(rowText, width)) : rowText);
 
         if (isSelected && this.detailExpanded) {

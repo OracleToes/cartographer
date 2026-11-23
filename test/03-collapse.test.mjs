@@ -164,28 +164,6 @@ test("a record marked for archive leaves the Brain and lands in the archive", as
   }
 });
 
-test("a pin holds an archive mark back: the record stays in the Brain and the head until the pin comes off", async () => {
-  const root = tempRoot();
-  try {
-    fakeGeneration(root, "gen-20261116T020000Z-live004", 1_700_000_100);
-    const store = await openBrain(":memory:");
-    await store.apply({ kind: "chat.record", record: { id: "c1", author: "user", text: "hold me", createdAt: at(1), updatedAt: at(1) } }, at(1));
-    await store.apply({ kind: "mark.set", target: "chat", id: "c1", action: "archive", author: "user" }, at(2));
-    await store.apply({ kind: "pin.set", target: "chat", id: "c1", pinned: "user" }, at(3));
-
-    const report = await collapse(root, store);
-
-    assert.deepEqual(report.archived, [], "the pin kept it out of the sweep");
-    const brain = await store.read();
-    assert.equal(brain.chat.length, 1);
-    assert.equal(brain.chat[0].mark?.action, "archive", "the mark waits, still placed");
-    assert.ok(readFileSync(generationPaths(root, report.generation).markdown, "utf8").includes("hold me"), "and the head still holds it");
-    await store.close();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("a record marked for delete is deleted for real at the collapse and leaves nothing behind", async () => {
   const root = tempRoot();
   try {

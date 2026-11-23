@@ -103,7 +103,7 @@ export function projectContext(
     atlas.push("Atlas — what you understand about the project");
     for (const node of brain.atlas) {
       atlas.push(
-        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.pinned ? ` · [pinned by ${node.pinned === "user" ? person : "you"}]` : ""}${node.stale ? " · [stale: the file changed after this note]" : ""}`,
+        `${partOf("atlas", node.id)} ${node.title} — ${iso(node.updatedAt)}${node.stale ? " · [stale: the file changed after this note]" : ""}`,
       );
       atlas.push(`  ${node.text}`);
       for (const link of node.links) atlas.push(`  link: ${resolveHandle(brain, link)}`);
@@ -122,7 +122,7 @@ export function projectContext(
     ledger.push("Ledger — what you are working on");
     for (const entry of brain.ledger) {
       ledger.push(
-        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}${entry.pinned ? ` · [pinned by ${entry.pinned === "user" ? person : "you"}]` : ""}`,
+        `${partOf("ledger", entry.id)} [${entry.kind} · ${entry.status}] ${entry.text} — ${iso(entry.updatedAt)}`,
       );
       if (entry.answer !== null) {
         ledger.push(`  → answered: ${entry.answer.text}`);
@@ -140,7 +140,7 @@ export function projectContext(
     chat.push(`Chat — what you and ${person} have said to each other`);
     for (const record of held) {
       chat.push(
-        `${partOf("chat", record.id)} [${record.author === "user" ? person : "you"}] — ${iso(record.createdAt)}${record.pinned ? ` · [pinned by ${record.pinned === "user" ? person : "you"}]` : ""}`,
+        `${partOf("chat", record.id)} [${record.author === "user" ? person : "you"}] — ${iso(record.createdAt)}`,
       );
       chat.push(indent(record.text));
     }

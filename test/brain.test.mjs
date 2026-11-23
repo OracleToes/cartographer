@@ -41,7 +41,7 @@ test("atlas.upsert stores links as written; unconnected nodes float freely", () 
   assert.equal(floating.atlas[1].links.length, 0);
 });
 
-test("links survive deletion as written (no cascade); a pin is a marker on the entry; stale is a marker on the entry", () => {
+test("links survive deletion as written (no cascade); stale is a marker on the entry", () => {
   let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "c", at(1)) }, at(1));
   brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), ["a1"]) }, at(2));
   brain = applyWrite(brain, { kind: "delete", target: "atlas", id: "a1" }, at(3));
@@ -49,23 +49,6 @@ test("links survive deletion as written (no cascade); a pin is a marker on the e
   assert.equal(brain.atlas.length, 1);
   assert.equal(brain.atlas[0].links.length, 1);
   assert.equal(brain.atlas[0].links[0], "a1");
-
-  // A pin only holds an archive mark back from a collapse, so a record that is
-  // not marked for archive has nothing for it to hold.
-  assert.throws(() => applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: "user" }, at(4)), BrainError);
-  brain = applyWrite(brain, { kind: "mark.set", target: "atlas", id: "a2", action: "delete", author: "user" }, at(4));
-  assert.throws(() => applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: "user" }, at(4)), BrainError, "a delete mark is not an archive mark");
-  brain = applyWrite(brain, { kind: "mark.set", target: "atlas", id: "a2", action: "archive", author: "user" }, at(4));
-  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: "user" }, at(4));
-  assert.equal(brain.atlas[0].pinned, "user");
-  // The pin goes with the archive mark: withdrawn, or turned into a delete.
-  const withdrawn = applyWrite(brain, { kind: "mark.clear", target: "atlas", id: "a2", author: "user" }, at(4));
-  assert.ok(!("pinned" in withdrawn.atlas[0]), "withdrawing the archive mark takes the pin with it");
-  const turned = applyWrite(brain, { kind: "mark.set", target: "atlas", id: "a2", action: "delete", author: "user" }, at(4));
-  assert.ok(!("pinned" in turned.atlas[0]), "a delete mark leaves nothing for a pin to hold");
-  brain = applyWrite(brain, { kind: "pin.set", target: "atlas", id: "a2", pinned: null }, at(5));
-  assert.equal(brain.atlas[0].pinned, undefined);
-  assert.ok(!("pinned" in brain.atlas[0]), "a cleared pin removes the key, not a phantom undefined");
 
   brain = applyWrite(brain, { kind: "atlas.stale", id: "a2", stale: true }, at(6));
   assert.equal(brain.atlas[0].stale, true);
@@ -77,11 +60,6 @@ test("links survive deletion as written (no cascade); a pin is a marker on the e
   brain = applyWrite(brain, { kind: "atlas.stale", id: "a2", stale: true }, at(8));
   brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(9), ["a1"], []) }, at(9));
   assert.equal(brain.atlas[0].stale, undefined);
-
-  const withChat = applyWrite(emptyBrain(), { kind: "chat.record", record: chat("c1", "user", "hi", at(1)) }, at(1));
-  const chatMarked = applyWrite(withChat, { kind: "mark.set", target: "chat", id: "c1", action: "archive", author: "agent" }, at(2));
-  const chatPinned = applyWrite(chatMarked, { kind: "pin.set", target: "chat", id: "c1", pinned: "agent" }, at(2));
-  assert.equal(chatPinned.chat[0].pinned, "agent");
 });
 
 test("deletion is single-step in every layer; unknown IDs throw", () => {

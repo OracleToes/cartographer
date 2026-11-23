@@ -91,7 +91,6 @@ function resolveRecord(
     kind,
     id: target.id,
     ...(record.mark === undefined ? {} : { mark: record.mark }),
-    ...(record.pinned === undefined ? {} : { pinned: record.pinned }),
   };
 }
 
@@ -341,7 +340,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree, or a Brain record's that you have already marked for archive; a pin on a record holds that archive mark back from the collapse, and one on a record with no archive mark is refused; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
+        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -374,34 +373,9 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               : `${named} is unpinned: the head stops holding a copy of that file.`,
           );
         }
-        const target = resolveKnown(current, args.handle, ["ledger", "chat", "atlas"], "Brain record");
-        const kind = target.kind as "ledger" | "chat" | "atlas";
-        const record =
-          kind === "ledger"
-            ? current.ledger.find((entry) => entry.id === target.id)
-            : kind === "atlas"
-              ? current.atlas.find((node) => node.id === target.id)
-              : current.chat.find((entry) => entry.id === target.id);
-        if (record?.pinned === "user") {
-          throw new Error(
-            `${normalizeHandle(args.handle)} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
-          );
-        }
-        await brain.apply(
-          { kind: "pin.set", target: kind, id: target.id, pinned: args.action === "pin" ? "agent" : null },
-          api.now(),
+        throw new Error(
+          `${named} is not a file in the tree. Only a file is pinned: a record of the Brain stays until it is deleted or marked for archive, so there is nothing for a pin to keep.`,
         );
-        pendingWrite(session, { kind, action: args.action, id: target.id });
-        const placed = args.action === "pin";
-        const was = record?.pinned === "agent";
-        const note = placed
-          ? was
-            ? `${normalizeHandle(args.handle)} was already pinned by you.`
-            : `${normalizeHandle(args.handle)} is pinned.`
-          : was
-            ? `${normalizeHandle(args.handle)} is unpinned.`
-            : `${normalizeHandle(args.handle)} carried no pin of yours, so nothing changed.`;
-        return textOutput(note);
       },
     }),
 

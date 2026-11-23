@@ -760,12 +760,9 @@ interface LeavingRecord {
  */
 function markedForCollapse(brain: CartoBrain): LeavingRecord[] {
   const out: LeavingRecord[] = [];
-  const take = (kind: "chat" | "ledger" | "atlas", record: { id: string; mark?: { action: string }; pinned?: unknown }): void => {
+  const take = (kind: "chat" | "ledger" | "atlas", record: { id: string; mark?: { action: string } }): void => {
     const action = record.mark?.action;
     if (action !== "archive" && action !== "delete") return;
-    // A pin is the hold on an archive mark (§3.2): the record stays in the
-    // Brain, mark and all, until the pin comes off.
-    if (record.pinned !== undefined) return;
     out.push({
       kind,
       id: record.id,

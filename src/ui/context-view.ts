@@ -229,7 +229,7 @@ export class ContextView implements Component, Focusable {
   onCollapse?: () => void;
   /** Fired on `u` over an entry that names a Brain record: withdraw the mark on it (§4.1). */
   onWithdrawMark?: (partId: string, itemId: string | number) => void;
-  /** Fired on `p` over an entry that names a Brain chat record: toggle the pin marker. */
+  /** Fired on `p`: pins an ephemeral item or unpins a file. A Brain entry has no pin on this layer (§3.2). */
   onTogglePin?: (partId: string, itemId: string | number) => void;
   /**
    * Bring a rendered line range into view. The view lives in a scroll pane, so
@@ -326,7 +326,6 @@ export class ContextView implements Component, Focusable {
       id: string,
       handle: string | undefined,
       body: string,
-      pinned?: "user" | "agent" | undefined,
       mark?: Mark | undefined,
     ): PromptNode => {
       const bytes = handle === undefined ? undefined : projection.get(handle);
@@ -348,7 +347,6 @@ export class ContextView implements Component, Focusable {
           ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
           : frozen.join("\n"),
         target: { part: kind, id },
-        ...(pinned === undefined ? {} : { pinned }),
         // A mark is a decision waiting for a collapse, and the row says which
         // one and who made it (§4.1): a mark nobody can see reads as nothing
         // having happened.
@@ -359,10 +357,10 @@ export class ContextView implements Component, Focusable {
     };
 
     for (const node of data.brain.atlas) {
-      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.pinned, node.mark));
+      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.mark));
     }
     for (const entry of data.brain.ledger) {
-      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.pinned, entry.mark));
+      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.mark));
     }
     // A Chat record is in the context once (§2.3). One in the frozen head is
     // listed here; the person's words said since the freeze are the live body
@@ -382,7 +380,7 @@ export class ContextView implements Component, Focusable {
           continue;
         }
       }
-      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.pinned, chat.mark));
+      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.mark));
     }
     // Pinned files come before pinned ephemera in the head (§5.1), each under
     // the handle the tree gave it (§5.4), so the person can see what is being
@@ -485,7 +483,7 @@ export class ContextView implements Component, Focusable {
     for (const message of data.transcriptMessages) {
       if (message.role !== "user") continue;
       personCount += 1;
-      // A pin or a mark placed on the live line lands on the record it was.
+      // A mark placed on the live line lands on the record it was.
       const chatRecord = recordOfLine.get(personCount - 1);
       const chatMark = chatRecord?.mark;
       candidates.push({
@@ -500,7 +498,6 @@ export class ContextView implements Component, Focusable {
           summary: oneLine(message.text),
           body: message.text,
           target: chatRecord === undefined ? { part: "transcript", id: message.targetId ?? message.id } : { part: "chat", id: chatRecord.id },
-          ...(chatRecord?.pinned === undefined ? {} : { pinned: chatRecord.pinned }),
           ...(chatMark === undefined ? {} : { marked: `${chatMark.action} on collapse · ${chatMark.author === "user" ? (data.person ?? "you") : "agent"}` }),
         },
       });

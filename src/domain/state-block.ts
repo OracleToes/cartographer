@@ -128,10 +128,6 @@ const pendingWord = (write: PendingWrite, person: string): string => {
       return "updated";
     case "chat record":
       return `said to ${person}`;
-    case "pin":
-      return "pinned";
-    case "unpin":
-      return "unpinned";
     case "unmark":
       return "mark withdrawn";
     default:

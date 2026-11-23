@@ -256,27 +256,12 @@ export async function renderLiveStateBlock(
     };
   }
   const pinned: Array<{ handle: string; author: "user" | "agent" }> = [];
-  for (const node of brain.atlas) {
-    if (node.pinned === undefined) continue;
-    const handle = handleOf(brain.handles, "atlas", node.id);
-    if (handle !== undefined) pinned.push({ handle, author: node.pinned });
-  }
   // Pinned ephemera are in the head like anything else that was pinned (§3.2,
   // §5.1), so the block lists them by handle with who kept them.
   for (const item of brain.ephemera) {
     if (item.pinned === undefined) continue;
     const handle = handleOf(brain.handles, "ephemera", item.id);
     if (handle !== undefined) pinned.push({ handle, author: item.pinned });
-  }
-  for (const entry of brain.ledger) {
-    if (entry.pinned === undefined) continue;
-    const handle = handleOf(brain.handles, "ledger", entry.id);
-    if (handle !== undefined) pinned.push({ handle, author: entry.pinned });
-  }
-  for (const record of brain.chat) {
-    if (record.pinned === undefined) continue;
-    const handle = handleOf(brain.handles, "chat", record.id);
-    if (handle !== undefined) pinned.push({ handle, author: record.pinned });
   }
   // A pinned file is a pin like any other and the block lists every pin with
   // its author (§3.2). It is named by the handle the tree gave it, because that
@@ -292,11 +277,9 @@ export async function renderLiveStateBlock(
     }
   }
   const marks: MarkLine[] = [];
-  const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; pinned?: "user" | "agent"; mark?: { action: string; author: "user" | "agent" } }>): void => {
+  const collectMarks = (kind: "atlas" | "ledger" | "chat", records: ReadonlyArray<{ id: string; mark?: { action: string; author: "user" | "agent" } }>): void => {
     for (const record of records) {
-      // A pin holds an archive mark back (§3.2): the collapse will not act on
-      // it, so "at the next collapse" would be untrue. The pin is listed above.
-      if (record.mark === undefined || record.pinned !== undefined) continue;
+      if (record.mark === undefined) continue;
       const handle = handleOf(brain.handles, kind, record.id);
       if (handle === undefined) continue;
       marks.push({ handle, action: record.mark.action as MarkLine["action"], author: record.mark.author });

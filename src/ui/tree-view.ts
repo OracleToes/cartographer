@@ -526,7 +526,7 @@ export class TreeView implements Component, Focusable {
     const node = this.data?.brain.atlas.find((candidate) => this.handleOfNode(candidate.id) === handle);
     if (node === undefined) return [];
     const lines: string[] = [];
-    lines.push(padLine(` ${tokens.atlas(handle)} ${tokens.bold(node.title)}${node.pinned !== undefined ? ` ${tokens.pin("P")}` : ""}${this.staleNotes.has(handle) ? ` ${tokens.warn("· stale")}` : ""}`, width));
+    lines.push(padLine(` ${tokens.atlas(handle)} ${tokens.bold(node.title)}${this.staleNotes.has(handle) ? ` ${tokens.warn("· stale")}` : ""}`, width));
     for (const line of wrapTextWithAnsi(node.text, Math.max(8, width - 3))) lines.push(padLine(`  ${tokens.text(line)}`, width));
     for (const link of node.links) {
       const linked = link;

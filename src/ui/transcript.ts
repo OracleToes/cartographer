@@ -49,7 +49,6 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Compo
 
 import type { Mark, PinnedEphemeral } from "../domain/records.js";
 import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
-import { pinHandle } from "./prompt-handles.js";
 import { RecordControls, type RecordAction } from "./record-controls.js";
 
 /**
@@ -83,8 +82,8 @@ export type CardEntry =
   | (CardBase & { kind: "tool"; name: string; args: string; /** Retained running output while the call executes; preferred as the card body when present. */ output?: string });
 
 export type TranscriptEntry =
-  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; pinned?: "user" | "agent" | undefined; mark?: Mark | undefined }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** The pin marker (who placed it), if any. */ pinned?: "user" | "agent" | undefined; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
+  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; mark?: Mark | undefined }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -295,7 +294,7 @@ export class TranscriptView implements Component, Focusable {
   /** The same four marks every other view has; one class holds `!`'s arming. */
   readonly controls = new RecordControls();
 
-  /** `p` on the selected block (same signature as the Context view's). */
+  /** `p` on the selected card (same signature as the Context view's); a Chat block has no pin. */
   onTogglePin?: (part: BlockTarget["part"], id: string) => void;
   onArchive?: (part: BlockTarget["part"], id: string, now: boolean) => void;
   onDelete?: (part: BlockTarget["part"], id: string, now: boolean) => void;
@@ -366,10 +365,15 @@ export class TranscriptView implements Component, Focusable {
     if (block !== undefined) this.onReveal?.(block.start, block.end);
   }
 
-  /** Pin or unpin the selected block, the act `p` performs; the palette calls this. */
+  /** Which kind of thing is selected: only a card (an ephemeral item) can be pinned. */
+  selectedPart(): BlockTarget["part"] | undefined {
+    return this.selecting ? this.selectedBlock()?.target.part : undefined;
+  }
+
+  /** Pin or unpin the selected card, the act `p` performs; the palette calls this. */
   pinSelected(): void {
     const target = this.selectedBlock()?.target;
-    if (target !== undefined) this.onTogglePin?.(target.part, target.id);
+    if (target?.part === "tool-work") this.onTogglePin?.(target.part, target.id);
   }
 
   /** Mark the selected block, the act `a` and `d` perform; the palette calls this. */
@@ -738,14 +742,7 @@ export class TranscriptView implements Component, Focusable {
       gap();
       if (entry.kind === "person" || entry.kind === "agent") {
         const start = lines.length;
-        // A pin is an entry in its own right (§5.4): it carries the `P` handle
-        // named by the handle of what it marks, and says who placed it, so the
-        // row reads as one entry pinned rather than one entry with a badge.
-        const pin =
-          entry.pinned === undefined
-            ? ""
-            : `${pinHandle(entry.handle ?? "?")} ${entry.pinned === "user" ? "you" : "agent"}`;
-        lines.push(...this.block(entry.kind === "person" ? "you" : "carto", entry.text, width, entry.handle, pin.length > 0 ? pin : undefined));
+        lines.push(...this.block(entry.kind === "person" ? "you" : "carto", entry.text, width, entry.handle));
         if (entry.mark !== undefined) {
           const mark = `◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`;
           for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - PREFIX_WIDTH))) {

@@ -234,7 +234,7 @@ test("unknown handles are explicit errors, never guesses", async () => {
   );
   await assert.rejects(
     byName.pin.execute({ action: "pin", handle: "Q4" }, api, {}),
-    /No Brain record here has the handle Q4/,
+    /Q4 is not a file in the tree/,
   );
   await cleanup();
 });

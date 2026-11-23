@@ -209,7 +209,6 @@ export const tokens = {
 
   /** Badges: a tinted chip, never a solid block of colour. */
   handleBadge: both(palette.text, palette.selection, { bold: true }),
-  pinBadge: badge("#1a1503", palette.gold),
   staleBadge: badge("#1a1303", palette.gold),
   kindBadge: both(palette.atlas, palette.panelRaised, { bold: true }),
   statusBadge: badge("#06210f", palette.agent),
@@ -238,10 +237,6 @@ export const kindTint = {
 
 /** A one-cell accent spine: the selected row's left edge, a card's kind, a quote. */
 export const spine = (tint: (text: string) => string): string => tint("▌");
-
-/** The pin badge, carrying the author: "u" for the person, "a" for the agent. No badge at all when unpinned. */
-export const pinBadgeText = (pinned: "user" | "agent" | undefined, label: string): string =>
-  pinned === undefined ? "" : tokens.pinBadge(`${label}·${pinned === "user" ? "u" : "a"}`);
 
 export const statusLine = (text: string): string => tokens.faint(tokens.italic(text));
 export const statusWarnLine = (text: string): string => tokens.warn(tokens.italic(text));

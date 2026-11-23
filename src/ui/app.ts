@@ -10,7 +10,7 @@
  * The books are layers of the same workspace, not separate screens:
  *
  * - the **transcript** is the boot view and the only place you type;
- * - the **atlas** and the **ledger** are the Brain, read and pinned;
+ * - the **atlas** and the **ledger** are the Brain, read, and marked from there;
  * - the **context** is the prompt the model reads, and the only place surgery happens;
  * - the **archive** is a layer over the working area, toggled by `ctrl+t`, the
  *   sidebar's layer row, or the palette (§3.3) — it is the person's, and no
@@ -144,10 +144,6 @@ function countSidebar(
       stale.atlas = (stale.atlas ?? 0) + 1;
     }
   }
-  const pinned: Partial<Record<BookKind, number>> = {};
-  for (const record of brainState.chat) if (record.pinned !== undefined) pinned.chat = (pinned.chat ?? 0) + 1;
-  for (const node of brainState.atlas) if (node.pinned !== undefined) pinned.atlas = (pinned.atlas ?? 0) + 1;
-  for (const entry of brainState.ledger) if (entry.pinned !== undefined) pinned.ledger = (pinned.ledger ?? 0) + 1;
   const marked: Partial<Record<BookKind, number>> = {};
   for (const record of brainState.chat) if (record.mark !== undefined) marked.chat = (marked.chat ?? 0) + 1;
   for (const node of brainState.atlas) if (node.mark !== undefined) marked.atlas = (marked.atlas ?? 0) + 1;
@@ -173,7 +169,6 @@ function countSidebar(
     contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
-    pinned,
     marked,
     stale,
     staleTotal: marks.length,
@@ -753,40 +748,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     else if (end > top + height) contextScroll.scrollTo(Math.max(0, end - height));
   };
 
-  /** Person-side pin toggles: place/remove a pin as "user". Shared by every view that can toggle a pin. */
-  const togglePin = async (target: "chat" | "ledger" | "atlas", id: string) => {
-    const brainState = await brain.read();
-    const record =
-      target === "chat"
-        ? brainState.chat.find((r) => r.id === id)
-        : target === "ledger"
-          ? brainState.ledger.find((e) => e.id === id)
-          : brainState.atlas.find((n) => n.id === id);
-    if (record === undefined) return;
-    // A pin only holds an archive mark back from a collapse (§3.2): a Brain
-    // record that is not marked for archive has nothing to hold back.
-    if (record.pinned === undefined && record.mark?.action !== "archive") {
-      pushStatus("pin holds an archive mark back: mark it for archive (a) first");
-      tui.requestRender();
-      return;
-    }
-    if (record.pinned === undefined) {
-      await brain.apply({ kind: "pin.set", target, id: record.id, pinned: "user" }, Date.now());
-      pushStatus(`pinned ${target} record #${record.id} (you)`);
-    } else {
-      await brain.apply({ kind: "pin.set", target, id: record.id, pinned: null }, Date.now());
-      pushStatus(`unpinned ${target} record #${record.id}`);
-    }
-    await rebuildTranscript();
-    const fresh = await brain.read();
-    if (state.view === "atlas") atlasView.setData(fresh, liveStaleMarks(fresh, options.root));
-    if (state.view === "ledger") ledgerView.setData(fresh);
-    if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
-    if (state.view === "context") await syncContextView(fresh);
-    await refreshSidebar();
-    tui.requestRender();
-  };
-
   /**
    * The person's archive operations (§3.3). There is no tool for any of these,
    * and no handle that names an archived item: the agent does not know the
@@ -927,8 +888,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
   transcript.onLeave = leaveBlockSelection;
-  ledgerView.onTogglePin = (id: string) => void togglePin("ledger", id);
-  atlasView.onTogglePin = (id: string) => void togglePin("atlas", id);
 
   /** Redraw whichever view shows Brain state from the Brain as it now stands. */
   const refreshBrainViews = async () => {
@@ -1021,14 +980,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   contextView.onTogglePin = (partId: string, itemId: string | number) => {
     void (async () => {
       const brainState = await brain.read();
-      if (partId === "atlas" || partId === "ledger" || partId === "chat") {
-        await togglePin(partId, String(itemId));
-        return;
-      }
-      if (partId === "transcript") {
-        const chatRecord = brainState.chat.find((r) => String(r.id) === String(itemId));
-        if (chatRecord === undefined) return;
-        await togglePin("chat", chatRecord.id);
+      // A Brain entry has no pin on the context layer: a pin only stops a
+      // sweep, and the Brain is not swept. Its pins live in the archive (§3.2).
+      if (partId === "atlas" || partId === "ledger" || partId === "chat" || partId === "transcript") {
+        pushStatus("a Brain entry is pinned only in the archive layer (ctrl+t)");
+        tui.requestRender();
         return;
       }
       if (partId === "files") {
@@ -1484,7 +1440,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       for (const record of chatRecords) {
         if (record.author === "user") unclaimed.set(record.text, [...(unclaimed.get(record.text) ?? []), record.id]);
       }
-      const recordFields = (id: string) => ({ recordId: id, pinned: liveChat.get(id)?.pinned, mark: liveChat.get(id)?.mark });
+      const recordFields = (id: string) => ({ recordId: id, mark: liveChat.get(id)?.mark });
       const sealedPerson = new Map<TranscriptEntry, string>();
       for (const entry of retained) {
         if (entry.kind !== "person") continue;
@@ -1515,7 +1471,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             text: record.text,
             recordId: record.id,
             ...(chatHandle === undefined ? {} : { handle: chatHandle }),
-            pinned: record.pinned,
             mark: brainState.chat.find((chat) => chat.id === record.id)?.mark,
           },
         });
@@ -1560,7 +1515,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const record = recordsById.get(entry.recordId);
         const handle = handleOf(brainState.handles, "chat", entry.recordId);
         const { handle: _oldHandle, ...old } = entry;
-        return { ...old, ...(record === undefined ? {} : { text: record.text, pinned: record.pinned }), ...(handle === undefined ? {} : { handle }), mark: brainState.chat.find((chat) => chat.id === entry.recordId)?.mark };
+        return { ...old, ...(record === undefined ? {} : { text: record.text }), ...(handle === undefined ? {} : { handle }), mark: brainState.chat.find((chat) => chat.id === entry.recordId)?.mark };
       });
       const sig = [
         state.session.generation,
@@ -2168,11 +2123,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     {
       id: "block-pin",
       group: "the transcript",
-      label: "pin or unpin the block",
-      hint: "a Chat record can be pinned once it is marked for archive: the pin holds that mark back",
+      label: "pin or unpin the card",
+      hint: "a pinned item in the live context goes on into the next collapse; Chat has no pin",
       key: "p",
       run: () => transcript.pinSelected(),
-      available: () => inChat() && transcript.isSelecting(),
+      available: () => inChat() && transcript.selectedPart() === "tool-work",
     },
     {
       id: "block-mark-archive",
@@ -2237,7 +2192,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       id: "pin-context-row",
       group: "the workspace",
       label: "pin or unpin the entry under the cursor",
-      hint: "a pinned item in the live context goes on into the next collapse; a Brain record is pinned only once marked for archive",
+      hint: "a pinned item in the live context goes on into the next collapse; a Brain entry is pinned only in the archive",
       key: "p",
       // The Context view matches the key itself, because it knows where the
       // cursor is; the palette comes here, so it does the same act.
@@ -2256,15 +2211,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       key: "p",
       run: () => treeView.pinSelected(),
       available: () => inView("tree") && !treeView.isFiltering(),
-    },
-    {
-      id: "pin-book-row",
-      group: "the workspace",
-      label: "pin or unpin the entry under the cursor",
-      hint: "a record can be pinned once it is marked for archive: the pin holds that mark back",
-      key: "p",
-      run: () => (state.view === "atlas" ? atlasView : ledgerView).pinSelected(),
-      available: () => bookIsOpen(),
     },
     {
       id: "book-mark-archive",
