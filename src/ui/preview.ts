@@ -292,12 +292,12 @@ export function previewContext(width = 110): string {
     ],
     transcriptMessages: [
       { id: 2, role: "user", text: "the context view is the prefill now, not a rail of six parts" },
-      { id: 6, role: "assistant [chat]", text: "Both regions read in the order the model reads them." },
     ],
     toolWorkItems: [
       { id: "3-0", kind: "reasoning", text: "The rail was a table of contents over a view that is already ordered; the order is the thing to show." },
       { id: "4-0", kind: "toolCall", name: "read", args: "path: src/ui/context-view.ts" },
       { id: "5-0", kind: "toolResult", callId: "4-0", output: "export class ContextView implements Component, Focusable {" },
+      { id: "6-0", kind: "toolCall", name: "chat", args: "text: Both regions read in the order the model reads them." },
     ],
     stateBlockText:
       "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by OracleToes\nmarks: none\n</carto-state>",

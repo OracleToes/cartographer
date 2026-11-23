@@ -323,7 +323,7 @@ export async function renderLiveStateBlock(
  * package keeps its own bounds and says them (§1); the shell is trusted in both
  * modes and is not a sandbox (§6.1).
  */
-function bashTool(): ToolRegistration {
+export function bashTool(): ToolRegistration {
   const base = createBashTool();
   return defineTool({
     ...base,
@@ -350,7 +350,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        */
       section(
         "carto-context",
-        async () => readFile(options.markdownPath, "utf8").catch(async () => projectContext(await options.brain.read()).text),
+        async () => readFile(options.markdownPath, "utf8").catch(async () => projectContext(await options.brain.read(), new Map(), options.session.person).text),
         { tag: false },
       ),
     ],

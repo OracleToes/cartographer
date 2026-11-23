@@ -359,7 +359,7 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   view.setData({
     brain,
     systemPrompt: "You are Carto.",
-    projectionText: "Atlas\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z",
+    projectionText: "Atlas — what you understand about the project\nA1 The Brain is the persistent record — 1970-01-01T00:00:00.000Z",
     tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
     transcriptMessages: [{ id: 2, role: "user", text: "show me the prompt" }],
     toolWorkItems: [
@@ -445,12 +445,13 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   assert.equal(gutter(), true, "and opens again");
 
   // Folding, and `tab` between the human and the real view of schema-shaped content.
-  view.handleInput("j"); // the system row (head's first entry)
+  view.handleInput("j"); // the second entry of the head
   lines = view.render(90);
   view.handleInput("\t");
   shown = plain(view.render(90).join("\n"));
   assert.ok(shown.includes("as the model receives it"), "tab swaps to the real view");
   view.handleInput("\t");
+  view.handleInput("k"); // back to the head's first entry
 
   // A mark is a mark, not a deletion (§4.1): `d` reports it and `!` arms it.
   const marks = [];
@@ -462,9 +463,9 @@ test("the context view is the prefill: head, body, tail, every entry folds and s
   // Walk down to the person's line: the head's Brain records and tools are
   // markable too, so the walk reaches them first and names each of them.
   for (let step = 0; step < 20; step += 1) {
-    view.handleInput("j");
     view.handleInput("d");
     if (marks.some((mark) => mark.part === "transcript")) break;
+    view.handleInput("j");
   }
   assert.ok(marks.some((mark) => mark.part === "atlas" && mark.id === "a1"), "an atlas record in the head can be marked");
   assert.ok(marks.some((mark) => mark.part === "ledger" && mark.id === "l1"), "a ledger record in the head can be marked");
@@ -929,7 +930,6 @@ test("a Brain delete mark appears on the Context row until withdrawn", () => {
   const view = new ContextView();
   const refresh = () => view.setData({ brain, systemPrompt: "system", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "state" });
   refresh();
-  view.handleInput("j");
   view.onDelete = (part, id, now) => {
     assert.deepEqual({ part, id, now }, { part: "chat", id: "c1", now: false });
     brain = applyWrite(brain, { kind: "mark.set", target: "chat", id, action: "delete", author: "user" }, 2);
@@ -1342,4 +1342,138 @@ test("a person's line said since the freeze is one row, the body's, and it acts 
   }
   assert.ok(marked.some(([part, id]) => part === "chat" && id === "c2"), "a mark on the live line reaches the Chat record");
   assert.ok(!marked.some(([part]) => part === "transcript"), "and not a swept copy");
+});
+
+// ── The context view shows what the model reads, and nothing standing in for it ──
+
+const FROZEN_HEAD = [
+  "Atlas — what you understand about the project",
+  "A1 Plan — 1970-01-01T00:00:00.000Z",
+  "  the frozen words",
+  "",
+  "Pinned files — read again at this collapse",
+  "notes.md · pinned by OracleToes",
+  "  line one of the file",
+  "  ",
+  "  line three of the file",
+  "src/gone.ts · pinned by you",
+  "  (this file could not be read at the collapse)",
+  "",
+  "Pinned — what OracleToes kept in front of you",
+  "X1 [reasoning] a thought kept",
+  "  across two lines",
+].join("\n");
+
+function frozenBrain() {
+  const brain = emptyBrain();
+  brain.handles = {
+    counters: { A: 1, X: 1 },
+    entries: [
+      { kind: "atlas", id: "a1", handle: "A1", timestamp: 0 },
+      { kind: "ephemera", id: "gen:1:t0", handle: "X1", timestamp: 1 },
+    ],
+  };
+  brain.atlas.push({ id: "a1", title: "Plan", text: "rewritten since the freeze", links: [], attachments: [], createdAt: 0, updatedAt: 5 });
+  brain.ephemera.push({ id: "gen:1:t0", text: "a thought kept\nacross two lines", kind: "reasoning", createdAt: 1, pinned: "user" });
+  brain.files = [{ path: "notes.md", pinned: "user", createdAt: 1 }, { path: "src/gone.ts", pinned: "agent", createdAt: 1 }];
+  return brain;
+}
+
+function contextOf(extra = {}) {
+  const view = new ContextView();
+  view.setData({
+    brain: frozenBrain(),
+    person: "OracleToes",
+    systemPrompt: "you are carto",
+    projectionText: FROZEN_HEAD,
+    tools: [],
+    transcriptMessages: [],
+    toolWorkItems: [],
+    stateBlockText: "<carto-state>\n[EDIT MODE]\n</carto-state>",
+    ...extra,
+  });
+  view.toggleAll();
+  return view;
+}
+
+test("a pinned file's row is the file's lines as the head holds them, in both views", () => {
+  const view = contextOf();
+  const human = plain(view.render(100).join("\n"));
+  assert.ok(human.includes("line one of the file") && human.includes("line three of the file"), "the person reads the file itself");
+  assert.ok(!human.includes("read again at every collapse"), "no sentence about the file stands in for it");
+  assert.ok(!human.includes("(read at the next collapse"), "and no promise of a reading");
+  // What the file's row does not say it was reading is not invented for the other.
+  assert.ok(human.includes("(this file could not be read at the collapse)"), "a file the collapse could not read says so, in the head's own words");
+  view.handleInput("\t");
+  const real = plain(view.render(100).join("\n"));
+  assert.ok(real.includes("notes.md · pinned by OracleToes"), "the model's view has the header line as written");
+  assert.ok(real.includes("  line one of the file"), "and the file's text as indented in the head");
+});
+
+test("a file pinned since the freeze says it is not in the head, and a file unpinned since is still shown", () => {
+  const brain = frozenBrain();
+  brain.files = [{ path: "notes.md", pinned: "user", createdAt: 1 }, { path: "later.md", pinned: "user", createdAt: 2 }];
+  const view = contextOf({ brain });
+  const shown = plain(view.render(100).join("\n"));
+  assert.match(shown, /later\.md · pinned by OracleToes/, "the new pin is listed");
+  const flat = shown.replace(/\s*│\s*/g, " ").replace(/\s+/g, " ");
+  assert.match(flat, /pinned after the head was frozen, so the head does not hold it\. It joins the head at the next collapse/, "and says why the model does not have it");
+  assert.ok(shown.includes("src/gone.ts"), "a file the head still holds is shown although the pin is gone");
+  assert.match(shown, /unpinned since the freeze/, "with the reason it is leaving");
+});
+
+test("a record is the head's bytes, even after the Brain's copy changed; a pinned item is too", () => {
+  const view = contextOf();
+  const human = plain(view.render(100).join("\n"));
+  assert.ok(human.includes("the frozen words"), "the atlas row shows what the model reads");
+  assert.ok(!human.includes("rewritten since the freeze"), "not the Brain's newer text");
+  assert.ok(human.includes("a thought kept") && human.includes("across two lines"), "a pinned item's frozen lines, all of them");
+  view.handleInput("\t");
+  const real = plain(view.render(100).join("\n"));
+  assert.ok(!real.includes("not in the frozen projection"), "a frozen pinned item is not called missing");
+  assert.ok(real.includes("X1 [reasoning] a thought kept"), "its row is the head's own line");
+});
+
+test("a record gone from the Brain since the freeze is still in the view, for the model still reads it", () => {
+  const brain = frozenBrain();
+  brain.atlas = [];
+  const shown = plain(contextOf({ brain }).render(100).join("\n"));
+  assert.ok(shown.includes("the frozen words"));
+  assert.match(shown, /gone from the Brain since the freeze/);
+});
+
+test("a record written since the freeze shows its text and says plainly it is not in the head", () => {
+  const brain = frozenBrain();
+  brain.handles.entries.push({ kind: "ledger", id: "l9", handle: "L9", timestamp: 9 });
+  brain.ledger.push({ id: "l9", kind: "goal", text: "a goal written later", status: "open", answer: null, createdAt: 9, updatedAt: 9 });
+  const view = contextOf({ brain });
+  const human = plain(view.render(100).join("\n"));
+  assert.ok(human.includes("a goal written later"), "the person reads it");
+  view.handleInput("\t");
+  const real = plain(view.render(100).join("\n"));
+  assert.match(real, /Not in the model's context yet: this was written after the head was frozen/, "the model's view says what is true");
+});
+
+test("the model's own text is a body row with its words; the system prompt and tail are shown as sent", () => {
+  const view = contextOf({
+    toolWorkItems: [{ id: "g:2:t0", entry: 2, order: 0, kind: "output", text: "plain words the model wrote" }],
+  });
+  const human = plain(view.render(100).join("\n"));
+  assert.ok(human.includes("plain words the model wrote"), "an assistant text row has its text");
+  assert.ok(!/result\s+\(empty\)/.test(human), "and is not an empty result");
+  view.handleInput("\t");
+  const real = plain(view.render(100).join("\n"));
+  assert.ok(real.includes("<instructions>") && real.includes("</instructions>"), "the system prompt is in the tag the harness wraps it in");
+  assert.ok(!human.includes("what is true right now: mode"), "the tail's row is the block, not a description of it");
+  // The head is the projection and then the instructions, as the system message is.
+  assert.ok(real.indexOf("A1") < real.indexOf("<instructions>"), "the projection comes before the instructions");
+});
+
+test("the token count includes a head that was rendered from the Brain when no frozen file exists", () => {
+  const count = (projectionText) => {
+    const view = new ContextView();
+    view.setData({ brain: frozenBrain(), person: "OracleToes", systemPrompt: "s", ...(projectionText === undefined ? {} : { projectionText }), tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "" });
+    return Number(/~([\d,]+) tokens/.exec(plain(view.render(100)[0]))[1].replace(/,/g, ""));
+  };
+  assert.ok(count(undefined) > count(""), "the fallback head is counted");
 });

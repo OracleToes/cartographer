@@ -740,6 +740,20 @@ gets one collapsible entry in its own sub-tree. Schema-shaped content has a
 human-readable view and a real view. A row that trails off is readable in full
 somewhere.
 
+**The Context view shows what the model receives, as it is now, and nothing in
+its place.** There is no placeholder and no sentence describing a row instead of
+being it. A head row is the frozen head's own lines: a record, a pinned item, and
+a pinned file with the text the collapse read, each as written there, in both
+views. The head is listed from the frozen bytes, so a record or a pin that has
+left the Brain since the freeze is still shown, marked as leaving at the next
+collapse, because the model still reads it. A Brain record the head does not hold
+yet shows its text and says, specifically, that the model does not have it and
+when it will. The body holds every message the model receives, the agent's `chat`
+calls and its plain text included; the tail is the state block as sent. The
+system prompt is shown in the tag the harness puts around it, after the
+projection it follows; the tools are shown as registered, `bash` with Carto's
+sentence. The token count covers what is shown.
+
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
 record, the pending line in the state block, and the next collapse. It is never a

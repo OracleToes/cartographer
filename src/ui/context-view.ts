@@ -140,6 +140,7 @@ type NodeKind =
   | "files"
   | "person"
   | "reasoning"
+  | "output"
   | "call"
   | "result"
   | "ephemera"
@@ -184,6 +185,7 @@ const KIND_INK: Record<NodeKind, (text: string) => string> = {
   files: tokens.pin,
   person: tokens.person,
   reasoning: tokens.reasoning,
+  output: tokens.output,
   call: tokens.tool,
   result: tokens.output,
   ephemera: tokens.pin,
@@ -199,24 +201,85 @@ const BODY_INSET = 7;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
+/** One entry of the frozen head, as the bytes the model reads. */
+interface FrozenEntry {
+  /** `A3`, `L1`, `C2`, `X1` for a record; the path for a pinned file. */
+  key: string;
+  kind: "atlas" | "ledger" | "chat" | "ephemera" | "files";
+  /** The entry's own lines, exactly as they sit in the head. */
+  lines: string[];
+}
+
 /**
  * The frozen projection, as entries. The projection is one section of the
  * system message, so the bytes are what the model reads; splitting it back into
- * its entries is a read of those bytes, never a re-render of the Brain.
+ * its entries is a read of those bytes, never a re-render of the Brain. Records
+ * are found by their handle; a pinned file by its header line, since every line
+ * of a file's text is indented and only its header is not.
  */
-function projectionEntries(text: string): Map<string, string[]> {
-  const entries = new Map<string, string[]>();
-  let current: string[] | undefined;
+function parseProjection(text: string): FrozenEntry[] {
+  const entries: FrozenEntry[] = [];
+  let region: FrozenEntry["kind"] | undefined;
+  let current: FrozenEntry | undefined;
+  const REGIONS: Array<[RegExp, FrozenEntry["kind"]]> = [
+    [/^Atlas — what you understand about the project$/, "atlas"],
+    [/^Ledger — what you are working on$/, "ledger"],
+    [/^Chat — what you and .* have said to each other$/, "chat"],
+    [/^Pinned files — read again at this collapse$/, "files"],
+    [/^Pinned — what .* kept in front of you$/, "ephemera"],
+  ];
+  const HEADER: Partial<Record<FrozenEntry["kind"], RegExp>> = {
+    atlas: /^(A\d+) /,
+    ledger: /^(L\d+) /,
+    chat: /^(C\d+) /,
+    ephemera: /^(X\d+) /,
+  };
   for (const line of text.split("\n")) {
-    const match = /^([ALC]\d+)\b/.exec(line);
-    if (match !== null && match[1] !== undefined) {
-      current = [line];
-      entries.set(match[1], current);
-    } else if (current !== undefined) {
-      current.push(line);
+    const heading = REGIONS.find(([pattern]) => pattern.test(line));
+    if (heading !== undefined) {
+      region = heading[1];
+      current = undefined;
+      continue;
     }
+    if (region === "files") {
+      // A file's lines are all indented, so an unindented empty line is the
+      // gap between this part and the next.
+      if (line === "") {
+        region = undefined;
+        current = undefined;
+        continue;
+      }
+      if (!line.startsWith("  ")) {
+        const named = /^(.*) · pinned by /.exec(line);
+        current = { key: named?.[1] ?? line, kind: "files", lines: [line] };
+        entries.push(current);
+        continue;
+      }
+    } else if (region !== undefined) {
+      const match = HEADER[region]?.exec(line);
+      if (match !== null && match !== undefined && match[1] !== undefined) {
+        current = { key: match[1], kind: region, lines: [line] };
+        entries.push(current);
+        continue;
+      }
+    }
+    current?.lines.push(line);
+  }
+  // The blank line that separates two parts belongs to neither.
+  for (const entry of entries) {
+    while (entry.lines.length > 1 && entry.lines[entry.lines.length - 1] === "") entry.lines.pop();
   }
   return entries;
+}
+
+/** A frozen entry as a person reads it: its header without the handle, its text without the indent. */
+function readable(entry: FrozenEntry): { summary: string; body: string } {
+  const [first = "", ...rest] = entry.lines;
+  const text = rest.map((line) => (line.startsWith("  ") ? line.slice(2) : line));
+  const header = entry.kind === "files" ? first : first.replace(/^\S+ /, "");
+  if (entry.kind === "files") return { summary: header, body: [header, ...text].join("\n") };
+  if (entry.kind === "chat") return { summary: oneLine(text.join(" ")) || header, body: [header, ...text].join("\n") };
+  return { summary: oneLine(header), body: [header, ...text].join("\n") };
 }
 
 export class ContextView implements Component, Focusable {
@@ -282,32 +345,199 @@ export class ContextView implements Component, Focusable {
   private totalTokens(): number {
     if (this.data === undefined) return 0;
     return (
-      estimateTokens(this.data.systemPrompt) +
+      estimateTokens(`<instructions>\n${this.data.systemPrompt}\n</instructions>`) +
       estimateSerialized(this.data.tools) +
-      estimateTokens(this.data.projectionText ?? "") +
+      estimateTokens(this.headText(this.data)) +
       estimateSerialized(this.data.transcriptMessages) +
       estimateSerialized(this.data.toolWorkItems) +
       estimateTokens(this.data.stateBlockText)
     );
   }
 
+  /**
+   * The bytes of the head's projection section: the frozen file when there is
+   * one. When the file is missing the section renders the Brain itself, the same
+   * way, so this does too.
+   */
+  private headText(data: ContextViewData): string {
+    return data.projectionText ?? projectContext(data.brain, new Map(), data.person).text;
+  }
+
   private build(data: ContextViewData): PromptSection[] {
     const handles = data.brain.handles;
-    const projection = projectionEntries(data.projectionText ?? projectContext(data.brain, new Map(), data.person).text);
+    const frozenText = this.headText(data);
+    const frozen = parseProjection(frozenText);
+    const frozenKeys = new Set(frozen.map((entry) => entry.key));
+    const person = data.person ?? "you";
 
     // ── head ────────────────────────────────────────────────────────────────
-    const head: PromptNode[] = [
-      {
-        id: "system",
-        handle: "H",
-        kind: "system",
-        label: "system prompt",
-        summary: oneLine(data.systemPrompt),
-        body: data.systemPrompt,
-        real: data.systemPrompt,
-      },
-    ];
+    // The head is the system message: the frozen projection first, then the
+    // instructions the harness wraps in their own tag. The tool definitions are
+    // declared to the provider alongside it, not written into it.
+    const head: PromptNode[] = [];
 
+    // A row for what the head holds that the Brain no longer does, or holds
+    // differently: the head is frozen, so the model still reads it.
+    const notFrozen = (what: string) => `Not in the model's context yet: ${what}, so the head does not hold it. It joins the head at the next collapse.`;
+    const NOT_FROZEN = notFrozen("this was written after the head was frozen");
+    const FILE_NOT_FROZEN = notFrozen("this file was pinned after the head was frozen");
+    const GONE = "gone from the Brain since the freeze · the head holds it until the next collapse";
+
+    const mark = (m: Mark | undefined): { marked: string } | Record<string, never> =>
+      m === undefined ? {} : { marked: `${m.action} on collapse · ${m.author === "user" ? person : "agent"}` };
+
+    type Located = { id: string; mark?: Mark | undefined; label?: string; pinned?: "user" | "agent" | undefined } | undefined;
+    const locate = (kind: "atlas" | "ledger" | "chat" | "ephemera", handle: string): Located => {
+      const id = handles.entries.find((entry) => entry.kind === kind && entry.handle === handle)?.id;
+      if (id === undefined) return undefined;
+      if (kind === "atlas") return data.brain.atlas.find((node) => node.id === id) === undefined ? undefined : { id, mark: data.brain.atlas.find((node) => node.id === id)?.mark };
+      if (kind === "ledger") return data.brain.ledger.find((entry) => entry.id === id) === undefined ? undefined : { id, mark: data.brain.ledger.find((entry) => entry.id === id)?.mark };
+      if (kind === "chat") return data.brain.chat.find((record) => record.id === id) === undefined ? undefined : { id, mark: data.brain.chat.find((record) => record.id === id)?.mark };
+      const item = data.brain.ephemera.find((candidate) => candidate.id === id);
+      return item === undefined ? undefined : { id, label: item.kind, pinned: item.pinned };
+    };
+
+    const deletes = new Set(data.brain.ephemeralDeletes ?? []);
+    const frozenRecord = (entry: FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }): PromptNode => {
+      const at = locate(entry.kind, entry.key);
+      const { summary, body } = readable(entry);
+      const unpinned = entry.kind === "ephemera" && at !== undefined && at.pinned === undefined;
+      return {
+        id: `${entry.kind}-${at?.id ?? entry.key}`,
+        handle: entry.key,
+        kind: entry.kind,
+        label: entry.kind === "ephemera" ? at?.label ?? /^\S+ \[([^\]]*)\]/.exec(entry.lines[0] ?? "")?.[1] ?? "pinned" : entry.kind,
+        summary,
+        body,
+        real: entry.lines.join("\n"),
+        ...(at === undefined ? { marked: GONE } : { target: { part: entry.kind, id: at.id } }),
+        ...(at === undefined ? {} : mark(at.mark)),
+        ...(unpinned ? { marked: "unpinned since the freeze · leaves the head at the next collapse" } : {}),
+        ...(entry.kind === "ephemera" && at !== undefined && deletes.has(at.id) ? { marked: "delete on collapse · you" } : {}),
+        ...(entry.kind === "ephemera" && at?.pinned !== undefined ? { pinned: at.pinned } : {}),
+      };
+    };
+    // A Brain record the head does not hold: its text as a person reads it, and
+    // the plain statement that the model does not have it yet.
+    const unfrozenRecord = (
+      kind: "atlas" | "ledger" | "chat" | "ephemera",
+      id: string,
+      handle: string | undefined,
+      label: string,
+      summary: string,
+      body: string,
+      extra: Partial<PromptNode> = {},
+    ): PromptNode => ({
+      id: `${kind}-${id}`,
+      handle: handle ?? "?",
+      kind,
+      label,
+      summary: oneLine(summary),
+      body,
+      real: NOT_FROZEN,
+      target: { part: kind, id },
+      ...extra,
+    });
+
+    const of = (kind: FrozenEntry["kind"]) => frozen.filter((entry) => entry.kind === kind) as Array<FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }>;
+    for (const entry of of("atlas")) head.push(frozenRecord(entry));
+    for (const node of data.brain.atlas) {
+      const handle = handleOf(handles, "atlas", node.id);
+      if (handle !== undefined && frozenKeys.has(handle)) continue;
+      head.push(unfrozenRecord("atlas", node.id, handle, "atlas", node.title, `${node.title}\n${node.text}`, mark(node.mark)));
+    }
+    for (const entry of of("ledger")) head.push(frozenRecord(entry));
+    for (const item of data.brain.ledger) {
+      const handle = handleOf(handles, "ledger", item.id);
+      if (handle !== undefined && frozenKeys.has(handle)) continue;
+      const answer = item.answer === null ? "" : `\n→ answered: ${item.answer.text}`;
+      head.push(unfrozenRecord("ledger", item.id, handle, "ledger", item.text, `[${item.kind} · ${item.status}] ${item.text}${answer}`, mark(item.mark)));
+    }
+    // A Chat record is in the context once (§2.3). One in the frozen head is
+    // listed here; the person's words said since the freeze are the live body
+    // rows below, which act on the record. The agent's own are in the body as
+    // their `chat` call and reach the head at the next collapse, so they are
+    // listed here, saying so, until then.
+    const liveSaid = data.transcriptMessages.filter((message) => message.role === "user");
+    const recordOfLine = new Map<number, ChatRecord>();
+    for (const entry of of("chat")) head.push(frozenRecord(entry));
+    for (const chat of data.brain.chat) {
+      const handle = handleOf(handles, "chat", chat.id);
+      if (handle !== undefined && frozenKeys.has(handle)) continue;
+      if (chat.author === "user") {
+        // The live line it was recorded as, matched in the order said. A
+        // record with no line left in the body (the line was removed) is
+        // listed here, so no Chat is missing from the view.
+        const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+        if (line !== -1) {
+          recordOfLine.set(line, chat);
+          continue;
+        }
+      }
+      head.push(unfrozenRecord("chat", chat.id, handle, "chat", chat.text, chat.text, mark(chat.mark)));
+    }
+    // Pinned files come before pinned ephemera in the head (§5.1). The head
+    // holds the file as the collapse read it: those lines are the row, in both
+    // views. A pin placed since then is not in the head, and says so.
+    const pinnedFiles = new Map(data.brain.files.map((file) => [file.path === "" ? "." : file.path, file]));
+    const treeHandle = (path: string) => data.treeHandles?.[path === "." ? "" : path] ?? data.treeHandles?.[path] ?? "F?";
+    const shownFiles = new Set<string>();
+    for (const entry of frozen.filter((candidate) => candidate.kind === "files")) {
+      shownFiles.add(entry.key);
+      const file = pinnedFiles.get(entry.key);
+      const { summary, body } = readable(entry);
+      head.push({
+        id: `file-${file?.path ?? entry.key}`,
+        handle: treeHandle(entry.key),
+        kind: "files",
+        label: "file",
+        summary,
+        body,
+        real: entry.lines.join("\n"),
+        ...(file === undefined
+          ? { marked: "unpinned since the freeze · leaves the head at the next collapse" }
+          : { pinned: file.pinned, target: { part: "files" as const, id: file.path } }),
+      } satisfies PromptNode);
+    }
+    for (const file of data.brain.files) {
+      const name = file.path === "" ? "." : file.path;
+      if (shownFiles.has(name)) continue;
+      head.push({
+        id: `file-${file.path}`,
+        handle: treeHandle(name),
+        kind: "files",
+        label: "file",
+        summary: `${name} · pinned by ${file.pinned === "user" ? person : "you"}${file.stale === true ? " · [stale: the file is gone or has changed since this pin]" : ""}`,
+        body: `${name} · pinned by ${file.pinned === "user" ? person : "you"}\n${FILE_NOT_FROZEN}`,
+        real: FILE_NOT_FROZEN,
+        pinned: file.pinned,
+        target: { part: "files", id: file.path },
+      } satisfies PromptNode);
+    }
+    // Pinned ephemera come after Chat in the head (§5.1), each under its own
+    // handle, because they are what the person kept in front of the agent.
+    for (const entry of of("ephemera")) head.push(frozenRecord(entry));
+    for (const item of data.brain.ephemera) {
+      const handle = handleOf(handles, "ephemera", item.id);
+      if (item.pinned === undefined || (handle !== undefined && frozenKeys.has(handle))) continue;
+      head.push(
+        unfrozenRecord("ephemera", item.id, handle, item.kind, item.text, `[${item.kind}] ${item.text}`, {
+          pinned: item.pinned,
+          ...(deletes.has(item.id) ? { marked: "delete on collapse · you" } : {}),
+        }),
+      );
+    }
+
+    // The instructions, in the tag the harness puts around them.
+    head.push({
+      id: "system",
+      handle: "H",
+      kind: "system",
+      label: "system prompt",
+      summary: oneLine(data.systemPrompt),
+      body: data.systemPrompt,
+      real: `<instructions>\n${data.systemPrompt}\n</instructions>`,
+    });
     data.tools.forEach((tool, index) => {
       head.push({
         id: `tool-${tool.name}`,
@@ -320,98 +550,6 @@ export class ContextView implements Component, Focusable {
         target: { part: "tools", id: tool.name },
       });
     });
-
-    const record = (
-      kind: "atlas" | "ledger" | "chat" | "ephemera",
-      id: string,
-      handle: string | undefined,
-      body: string,
-      mark?: Mark | undefined,
-    ): PromptNode => {
-      const bytes = handle === undefined ? undefined : projection.get(handle);
-      // The two views of one entry: what the person can read, and the bytes the
-      // model receives. A record written since the freeze is in the Brain but not
-      // yet in the projection; the real view says so rather than showing bytes
-      // that are not there.
-      const frozen = bytes === undefined || bytes.length === 0 ? undefined : bytes;
-      return {
-        id: `${kind}-${id}`,
-        handle: handle ?? "?",
-        kind,
-        // The handle's letter already says which book this is; the name column
-        // says it again in words so a row can be read without decoding letters.
-        label: kind,
-        summary: oneLine(body),
-        body,
-        real: frozen === undefined
-          ? "(not in the frozen projection yet — this entry reaches the head at the next collapse)"
-          : frozen.join("\n"),
-        target: { part: kind, id },
-        // A mark is a decision waiting for a collapse, and the row says which
-        // one and who made it (§4.1): a mark nobody can see reads as nothing
-        // having happened.
-        ...(mark === undefined
-          ? {}
-          : { marked: `${mark.action} on collapse · ${mark.author === "user" ? (data.person ?? "you") : "agent"}` }),
-      };
-    };
-
-    for (const node of data.brain.atlas) {
-      head.push(record("atlas", node.id, handleOf(handles, "atlas", node.id), node.title, node.mark));
-    }
-    for (const entry of data.brain.ledger) {
-      head.push(record("ledger", entry.id, handleOf(handles, "ledger", entry.id), entry.text, entry.mark));
-    }
-    // A Chat record is in the context once (§2.3). One in the frozen head is
-    // listed here; the person's words said since the freeze are the live body
-    // rows below, which act on the record. The agent's own have no body row,
-    // so they are listed here, marked as not yet frozen, until a collapse.
-    const liveSaid = data.transcriptMessages.filter((message) => message.role === "user");
-    const recordOfLine = new Map<number, ChatRecord>();
-    for (const chat of data.brain.chat) {
-      const frozen = projection.has(handleOf(handles, "chat", chat.id) ?? "");
-      if (!frozen && chat.author === "user") {
-        // The live line it was recorded as, matched in the order said. A
-        // record with no line left in the body (the line was removed) is
-        // listed here, so no Chat is missing from the view.
-        const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
-        if (line !== -1) {
-          recordOfLine.set(line, chat);
-          continue;
-        }
-      }
-      head.push(record("chat", chat.id, handleOf(handles, "chat", chat.id), oneLine(chat.text), chat.mark));
-    }
-    // Pinned files come before pinned ephemera in the head (§5.1), each under
-    // the handle the tree gave it (§5.4), so the person can see what is being
-    // carried and take the pin off.
-    for (const file of data.brain.files) {
-      const name = file.path === "" ? "." : file.path;
-      head.push({
-        id: `file-${file.path}`,
-        handle: data.treeHandles?.[file.path] ?? "F?",
-        kind: "files",
-        label: "file",
-        summary: `${name} · pinned by ${file.pinned === "user" ? (data.person ?? "the person") : "the agent"}${file.stale === true ? " · stale" : ""}`,
-        body: `${name}\n\nread again at every collapse, so the head holds the file and not a quotation of a reading of it.`,
-        real: "(read at the next collapse: a pinned file is the file, not a copy frozen here)",
-        pinned: file.pinned,
-        target: { part: "files", id: file.path },
-      } satisfies PromptNode);
-    }
-    // Pinned ephemera come after Chat in the head (§5.1), each under its own
-    // handle, because they are what the person kept in front of the agent.
-    for (const item of data.brain.ephemera) {
-      head.push({
-        ...record("ephemera", item.id, handleOf(handles, "ephemera", item.id), item.text),
-        ...((data.brain.ephemeralDeletes ?? []).includes(item.id) ? { marked: "delete on collapse · you" } : {}),
-        label: item.kind,
-        pinned: item.pinned,
-        // The head is where a carried item is, so the head is where its pin is
-        // taken off: the store it came from is gone, and nothing else holds it.
-        target: { part: "ephemera", id: item.id },
-      });
-    }
 
     // ── body ────────────────────────────────────────────────────────────────
     // The body is never sorted by kind: the person's messages, the reasoning, the
@@ -438,6 +576,22 @@ export class ContextView implements Component, Focusable {
             handle: `X${workCount}`,
             kind: "reasoning",
             label: "thinking",
+            summary: oneLine(item.text ?? ""),
+            body: item.text ?? "",
+            target: { part: "tool-work", id: String(item.id) },
+            pinned: item.pinned,
+          },
+        });
+      } else if (item.kind === "output") {
+        // The model's own plain text: part of what it receives next round.
+        candidates.push({
+          key,
+          order: suffix,
+          node: {
+            id: String(item.id),
+            handle: `X${workCount}`,
+            kind: "output",
+            label: "text",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
             target: { part: "tool-work", id: String(item.id) },
@@ -524,7 +678,7 @@ export class ContextView implements Component, Focusable {
         handle: "B",
         kind: "state",
         label: "state block",
-        summary: "what is true right now: mode, fullness, writes, staleness, tree, pins, marks",
+        summary: oneLine(data.stateBlockText),
         body: data.stateBlockText,
         real: data.stateBlockText,
       },
@@ -738,7 +892,7 @@ export class ContextView implements Component, Focusable {
     lines.push(canvasLine("", width));
 
     if (this.data === undefined) {
-      lines.push(ink(tokens.muted("Nothing in the context yet.")));
+      lines.push(ink(tokens.muted("The context has not been read yet.")));
       return lines;
     }
 
@@ -818,7 +972,7 @@ export class ContextView implements Component, Focusable {
 
     if (!open) {
       const room = Math.max(8, width - visibleWidth(head) - 2);
-      const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "…", room, "…");
+      const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
       lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
       return lines;
     }

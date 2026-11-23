@@ -39,7 +39,6 @@ import {
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
-import { createBashTool } from "@earendil-works/pi-durable/tools";
 
 import {
   applyOmitNow,
@@ -59,7 +58,7 @@ import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
-import { cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
+import { bashTool as cartoBashTool, cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
 import { isMarkerMessage, splitContextMessages, stripStateBlocks, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
@@ -509,8 +508,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       brain,
       session: state.session.state,
     });
-    const bashTool = createBashTool();
-    const allTools: ContextToolItem[] = [...productTools, bashTool].map((t) => ({
+    // The tools the model is offered, as the extension registers them: `bash`
+    // is the one with Carto's sentence in its description, not the package's.
+    const allTools: ContextToolItem[] = [...productTools, cartoBashTool()].map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.parameters,
@@ -579,47 +579,42 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           } else if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
             toolWorkItems.push({ id: ephemeralItemId(generation, id, partKey), entry: i, order: j, kind: "output", text: part.text });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
-            if (part.name === "chat") {
-              const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
-              transcriptMessages.push({ id: `${id}-${j}`, entry: i, order: j, role: "assistant [chat]", text: textArg, timestamp: ts });
-            } else {
-              toolWorkItems.push({
-                id: ephemeralItemId(generation, id, partKey),
-                entry: i,
-                order: j,
-                kind: "toolCall",
-                name: part.name,
-                args: prettyArgs(part.arguments),
-              });
-            }
+            // Every call is a call the model receives, `chat` included: the
+            // person's view of it is Chat, the model's is a call with arguments.
+            toolWorkItems.push({
+              id: ephemeralItemId(generation, id, partKey),
+              entry: i,
+              order: j,
+              kind: "toolCall",
+              name: part.name,
+              args: prettyArgs(part.arguments),
+            });
           }
         }
       } else if (role === "toolResult") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
-        for (let j = 0; j < content.length; j++) {
-          const part = content[j];
-          if (!isRecord(part)) continue;
-          const toolText = typeof part.text === "string" ? part.text : "";
-          if (!toolText.startsWith("carto: ")) {
-            // A result names the call it answers, and the call names the tool
-            // and what it was pointed at: that is how the sweep, and a pin, know
-            // a result is a `read`'s and of what file (§5.5).
-            const callId = toolCallIdOf(message);
-            const call = callId === undefined ? undefined : callNames.get(callId);
-            toolWorkItems.push({
-              id: ephemeralItemId(generation, id, "r"),
-              entry: i,
-              // A result answers the call that precedes it, so it sits after
-              // every part of the entry it answers.
-              order: Number.MAX_SAFE_INTEGER,
-              kind: "toolResult",
-              output: toolText,
-              tool: call?.name,
-              ...(callId === undefined || call === undefined
-                ? {}
-                : { payload: { callId, ...(call.name === undefined ? {} : { tool: call.name }), ...(call.path === undefined ? {} : { path: call.path }) } }),
-            });
-          }
+        // One result is one item: its text parts are one message to the model.
+        const texts = content.flatMap((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []));
+        {
+          const toolText = texts.join("\n");
+          // A result names the call it answers, and the call names the tool
+          // and what it was pointed at: that is how the sweep, and a pin, know
+          // a result is a `read`'s and of what file (§5.5).
+          const callId = toolCallIdOf(message);
+          const call = callId === undefined ? undefined : callNames.get(callId);
+          toolWorkItems.push({
+            id: ephemeralItemId(generation, id, "r"),
+            entry: i,
+            // A result answers the call that precedes it, so it sits after
+            // every part of the entry it answers.
+            order: Number.MAX_SAFE_INTEGER,
+            kind: "toolResult",
+            output: toolText,
+            tool: call?.name,
+            ...(callId === undefined || call === undefined
+              ? {}
+              : { payload: { callId, ...(call.name === undefined ? {} : { tool: call.name }), ...(call.path === undefined ? {} : { path: call.path }) } }),
+          });
         }
       }
     }
