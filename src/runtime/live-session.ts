@@ -54,6 +54,7 @@ import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
+import { estimateContextTokens } from "../domain/estimate.js";
 
 export interface LiveSessionOptions {
   /**
@@ -211,16 +212,18 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     // The latest response is durable in Pi's context. Rehydrate its reported
     // usage on reopen instead of resetting the bar to an unrelated estimate.
     const prior = (await conversation.context(BACKGROUND_CONTEXT)).messages;
-    for (let index = prior.length - 1; index >= 0; index -= 1) {
-      const message = prior[index];
-      if (message?.role !== "assistant") continue;
-      const usage = message.usage;
-      const input = usage.input + usage.cacheRead + usage.cacheWrite;
-      if (input <= 0) continue;
-      state.lastReportedInput = input;
-      state.lastReportedOutput = usage.output;
-      state.toolWorkAtLastReport = splitContextMessages(prior.slice(0, index + 1)).toolWorkTokens;
-      break;
+    const usageEstimate = estimateContextTokens(prior);
+    if (usageEstimate.lastUsageIndex !== null) {
+      const message = prior[usageEstimate.lastUsageIndex];
+      if (message?.role === "assistant") {
+        const usage = message.usage;
+        const input = usage.input + usage.cacheRead + usage.cacheWrite;
+        if (input > 0) {
+          state.lastReportedInput = input;
+          state.lastReportedOutput = usage.output;
+          state.toolWorkAtLastReport = splitContextMessages(prior.slice(0, usageEstimate.lastUsageIndex + 1)).toolWorkTokens;
+        }
+      }
     }
     harness.resume();
     const session: LiveSession = {

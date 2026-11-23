@@ -17,10 +17,12 @@
 import {
   backgroundAnsi,
   getTerminalColorMode,
+  Markdown,
   parseColor,
   styleText,
   truncateToWidth,
   visibleWidth,
+  type MarkdownTheme,
   type TerminalColorMode,
   type TextStyle,
 } from "@earendil-works/pi-tui";
@@ -220,11 +222,45 @@ export const tokens = {
   closedBadge: both(palette.textDim, palette.panelRaised),
   chip: (label: string, fgHex: string, bgHex: string) => badge(fgHex, bgHex)(label),
 
+  /** Search highlights for TuiAltScreen's built-in viewport search. */
+  searchMatch: both(palette.text, "#3d3217"),
+  searchCurrentMatch: both("#12151a", palette.gold, { bold: true }),
+
   bold: (text: string) => styleText(text, { bold: true }, mode()),
   italic: (text: string) => styleText(text, { italic: true }, mode()),
   dim: (text: string) => styleText(text, { dim: true }, mode()),
   underline: (text: string) => styleText(text, { underline: true }, mode()),
+  strikethrough: (text: string) => styleText(text, { strikethrough: true }, mode()),
 } as const;
+
+/** Shared Markdown theme using Carto's semantic palette. */
+export const markdownTheme: MarkdownTheme = {
+  heading: (text) => tokens.bold(tokens.accent(text)),
+  link: (text) => tokens.underline(tokens.accent(text)),
+  linkUrl: (text) => tokens.faint(text),
+  code: (text) => tokens.tool(text),
+  codeBlock: (text) => tokens.text(text),
+  codeBlockBorder: (text) => tokens.rule(text),
+  quote: (text) => tokens.muted(tokens.italic(text)),
+  quoteBorder: (text) => tokens.rule(text),
+  hr: (text) => tokens.rule(text),
+  listBullet: (text) => tokens.accent(text),
+  bold: (text) => tokens.bold(text),
+  italic: (text) => tokens.italic(text),
+  strikethrough: (text) => tokens.strikethrough(text),
+  underline: (text) => tokens.underline(text),
+};
+
+/**
+ * Render Markdown prose via pi-tui's `Markdown` component for a given content
+ * width, trimming trailing padding spaces so callers can indent and paint the
+ * enclosing surface edge to edge.
+ */
+export function renderMarkdown(text: string, width: number, color: (text: string) => string = tokens.text): string[] {
+  if (text.trim().length === 0) return [];
+  const md = new Markdown(text, 0, 0, markdownTheme, { color });
+  return md.render(Math.max(1, width)).map((line) => line.replace(/[ ]+$/, ""));
+}
 
 /** A book's hue by name, so a view can colour a handle without a branch at every call site. */
 export const kindTint = {

@@ -158,65 +158,34 @@ Do not start any item below without confirming the preference first.
 
 ### Decision 1 — Split-pane `ScrollView` for Atlas and Ledger detail panes
 
-- **Where:** `src/ui/atlas-view.ts`, `src/ui/ledger-view.ts`, `src/ui/app.ts`.
-- **What pi-tui offers:** `HStack` + a dedicated `ScrollView` for the right-hand
-  detail pane, replacing manual `scrollOffset`, hardcoded `maxLines = 22`,
-  manual wheel `±3`, and the `⋯ ▲/▼` footer.
-- **Why it needs taste:** Changing from one composite component inside one
-  `ScrollView` to two real panes changes narrow-terminal fallback (`width < 72`),
-  how list vs. detail focus is shown, where mouse-wheel events scroll, and
-  whether the `⋯ ▲ N above ▼ M more lines` indicator is replaced by a scrollbar.
-- **Question to ask:** Do you want Atlas and Ledger refactored into real split
-  `HStack` + per-pane `ScrollView`s (dropping manual `scrollOffset` and the
-  22-line cap), or kept as single-component views?
+**Status: done (adopted split `ScrollView`s).** `AtlasView` and `LedgerView`
+expose `headerPane`, `listPane`, and `detailPane` with `attachScrolls(...)`;
+`src/ui/app.ts` mounts them in independent `ScrollView`s inside a `Row`
+(`HStack`) on wide viewports (`width >= 72`) with stacked fallback on narrow
+viewports, removing manual `scrollOffset`, fixed line caps, and the `⋯ ▲/▼`
+footer.
 
 ### Decision 2 — Command palette (`src/ui/palette.ts`) vs. `pi-tui`'s `SelectList`
 
-- **Where:** `src/ui/palette.ts`.
-- **What pi-tui offers:** `SelectList` (built-in cursor, paging, and mouse
-  clicks; `palette.ts` already exports `selectTheme: SelectListTheme`).
-- **Why it needs taste:** `Palette` currently draws non-selectable uppercase
-  group headings (`THE TRANSCRIPT`, `ANYWHERE`, …) with right-aligned keycaps,
-  which `SelectList` does not natively support. Using `SelectList` means either
-  flattening headings into row descriptions (e.g. `group · key`) or keeping
-  `Palette`'s custom renderer.
-- **Question to ask:** Keep `Palette`'s grouped-heading layout as-is, or switch
-  to `SelectList` (gaining mouse clicks/paging at the cost of inline group
-  headings)?
+**Status: done (switched to `SelectList`).** `Palette` now delegates selection,
+paging, scroll info, and mouse click/wheel handling to `pi-tui`'s `SelectList`
+with `fuzzyFilter` over commands and inline `group · key` descriptions.
 
 ### Decision 3 — Token estimation (`src/domain/estimate.ts`) vs. `@earendil-works/pi-ai/utils/estimate`
 
-- **Where:** `src/domain/estimate.ts`, `src/domain/state-block.ts`,
-  `src/runtime/live-session.ts`, `src/ui/context-bar.ts`.
-- **What pi-ai offers:** `estimateTextTokens`, `estimateMessageTokens`,
-  `estimateContextTokens`, and `calculateContextTokens` (3.5 chars/token, image
-  estimates, structured assistant/tool-call handling, and last-assistant-usage +
-  trailing-message math).
-- **Why it needs taste:** Switching from Carto's 4 bytes/token JSON estimate to
-  `pi-ai`'s 3.5 chars/token message estimator shifts all displayed `~N tok`
-  numbers (~14% higher) and slightly changes when estimated-only fill crosses
-  `collapseWarningPercent`. Carto's 3-way `system / transcript / toolWork` split
-  still stays in Carto either way.
-- **Question to ask:** Switch `estimate.ts` (and last-usage + trailing math) to
-  `@earendil-works/pi-ai/utils/estimate`, or keep Carto's 4-bytes/token
-  estimator?
+**Status: done (switched to `@earendil-works/pi-ai/utils/estimate`).**
+`src/domain/estimate.ts` delegates to `estimateTextTokens` /
+`estimateMessageTokens`, `splitContextMessages` uses message-aware estimation,
+and `src/runtime/live-session.ts` rehydrates last assistant usage via
+`estimateContextTokens`.
 
 ### Decision 4 — Unused `TuiAltScreen` viewport features & `Markdown`
 
-- **Where:** `src/ui/app.ts`, `src/ui/transcript.ts`, `src/ui/atlas-view.ts`,
-  `src/ui/ledger-view.ts`.
-- **What pi-tui offers:**
-  1. Built-in alternate-screen search (`searchMatchStyle`,
-     `searchCurrentMatchStyle`, `tui.altScreen.search`).
-  2. Clickable `scrollToEndIndicator` on the primary follow-end `ScrollView`
-     when scrolled away from the bottom.
-  3. `Markdown` component for rendered headings, lists, bold/italic, code
-     blocks, and tables.
-- **Why it needs taste:** Each changes visible chrome, keybindings, or text
-  styling (e.g. search keybinding vs. `/` filter in books, a floating jump-to-end
-  pill in the transcript, rendered Markdown vs. plain wrapped text).
-- **Question to ask:** Which (if any) of built-in alt-screen search, the
-  scroll-to-end indicator, and `Markdown` rendering do you want wired in?
+**Status: done (wired all three).** `src/ui/app.ts` configures
+`TuiAltScreen`'s built-in search styling (`ctrl+shift+f`, also documented in
+`/help`) and clickable `scrollToEndIndicator`; `src/ui/tokens.ts` exports a
+shared `markdownTheme` / `renderMarkdown` helper used for agent Chat blocks in
+`TranscriptView` and prose in `AtlasView` and `LedgerView`.
 
 ---
 

@@ -37,7 +37,7 @@
  * Empty sections say `none` rather than lying by omission, and nothing is
  * omitted. No section asks for anything; the block reports.
  */
-import { estimateSerialized, estimateTokens } from "./estimate.js";
+import { estimateSerialized } from "./estimate.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
 export const STATE_BLOCK_CLOSE = "</carto-state>";
@@ -239,16 +239,7 @@ export function splitContextMessages(messages: readonly MessageLike[]): {
   let toolWorkTokens = 0;
   for (const message of messages) {
     if (message.role === "system") {
-      const parts: string[] = [];
-      const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "");
-      if (content.length > 0) parts.push(content);
-      for (const value of Object.values(message.sections ?? {})) {
-        if (typeof value === "string" && value.length > 0) parts.push(value);
-      }
-      if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) {
-        parts.push(JSON.stringify(message.toolsAdded));
-      }
-      systemTokens += estimateTokens(parts.join("\n\n"));
+      systemTokens += estimateSerialized(message);
       continue;
     }
     const toolWork =

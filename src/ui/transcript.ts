@@ -48,7 +48,7 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 
 import type { Mark, PinnedEphemeral } from "../domain/records.js";
-import { canvasLine, statusLine, statusWarnLine, surfaceLine, tokens } from "./tokens.js";
+import { canvasLine, renderMarkdown, statusLine, statusWarnLine, surfaceLine, tokens } from "./tokens.js";
 import { RecordControls, type RecordAction } from "./record-controls.js";
 
 /**
@@ -566,6 +566,12 @@ export class TranscriptView implements Component, Focusable {
     const header = `${tint(SPINE)} ${tint(tokens.bold(label))}${marker}`;
     const body = Math.max(1, width - INSET - 2);
     const lines: string[] = [header];
+    if (who === "carto") {
+      const rendered = renderMarkdown(text, body, tokens.text);
+      if (rendered.length === 0) lines.push("  ");
+      else for (const line of rendered) lines.push(`  ${line}`);
+      return lines;
+    }
     for (const logical of text.split("\n")) {
       if (logical.length === 0) {
         lines.push("  ");

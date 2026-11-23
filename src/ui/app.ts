@@ -386,7 +386,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const terminal = new ProcessTerminal();
-  const tui = new TuiAltScreen(terminal, undefined, undefined, { copySelection: createSelectionCopier() });
+  const tui = new TuiAltScreen(terminal, undefined, undefined, {
+    copySelection: createSelectionCopier(),
+    searchMatchStyle: tokens.searchMatch,
+    searchCurrentMatchStyle: tokens.searchCurrentMatch,
+    searchNavigationButtonStyle: (text, hovered) =>
+      hovered ? tokens.selectedBg(tokens.accent(text)) : tokens.muted(text),
+    scrollToEndIndicator: () => tokens.selectedBg(` ${tokens.accent("↓")} ${tokens.text("jump to latest")} `),
+  });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
@@ -450,10 +457,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const treeView = new TreeView();
   const archiveView = new ArchiveView();
 
-  // Each pannable view gets its own scroll view: Posting's "one scrolling pane in
-  // front" — the wheel and the arrow keys move whatever is focused.
-  const atlasScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
-  const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  // Each pannable view gets its own scroll view; Atlas and Ledger mount their
+  // list and detail panes in independent ScrollViews on wide viewports.
+  const atlasListScroll = new ScrollView(atlasView.listPane, { primary: false, overscroll: "contain" });
+  const atlasDetailScroll = new ScrollView(atlasView.detailPane, { primary: false, overscroll: "contain", scrollbar: "auto" });
+  const atlasNarrowScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
+  atlasView.attachScrolls(atlasListScroll, atlasDetailScroll);
+  atlasView.onFocus = () => tui.setFocus(atlasView);
+
+  const ledgerListScroll = new ScrollView(ledgerView.listPane, { primary: false, overscroll: "contain" });
+  const ledgerDetailScroll = new ScrollView(ledgerView.detailPane, { primary: false, overscroll: "contain", scrollbar: "auto" });
+  const ledgerNarrowScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  ledgerView.attachScrolls(ledgerListScroll, ledgerDetailScroll);
+  ledgerView.onFocus = () => tui.setFocus(ledgerView);
+
   const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
   const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
   // A ScrollView does not follow a child's cursor, and the tree is taller than
@@ -1212,14 +1229,71 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // A scrolling view takes the height of its content, up to the room there is,
   // and the pane's own colour fills the rest.
   const scrolled = (component: Component, visible: () => boolean) => ({ component, basis: "auto" as const, shrink: 1, minSize: 3, visible });
+  const bookSplit = (
+    headerPane: Component,
+    listScroll: ScrollView,
+    detailScroll: ScrollView,
+    narrowScroll: ScrollView,
+    listBasis: number,
+  ) =>
+    new Column([
+      {
+        component: new Column([
+          { component: headerPane, basis: 2 },
+          {
+            component: new Row([
+              {
+                component: new Column([
+                  { component: listScroll, basis: "auto", shrink: 1, minSize: 1 },
+                  { ...pane(0, rawPalette.panel), grow: 1 },
+                ]),
+                basis: listBasis,
+                minSize: 24,
+                shrink: 1,
+              },
+              pane(2),
+              {
+                component: new Column([
+                  { component: detailScroll, basis: "auto", shrink: 1, minSize: 1 },
+                  { ...pane(0, rawPalette.surface), grow: 1 },
+                ]),
+                basis: 0,
+                grow: 1,
+                minSize: 30,
+              },
+            ]),
+            basis: 0,
+            grow: 1,
+            minSize: 3,
+          },
+        ]),
+        basis: 0,
+        grow: 1,
+        minSize: 3,
+        visible: (viewport: Viewport) => viewport.width >= 72,
+      },
+      {
+        component: new Column([
+          { component: narrowScroll, basis: "auto", shrink: 1, minSize: 3 },
+          { ...pane(0), grow: 1 },
+        ]),
+        basis: 0,
+        grow: 1,
+        minSize: 3,
+        visible: (viewport: Viewport) => viewport.width < 72,
+      },
+    ]);
+  const atlasSplit = bookSplit(atlasView.headerPane, atlasListScroll, atlasDetailScroll, atlasNarrowScroll, 36);
+  const ledgerSplit = bookSplit(ledgerView.headerPane, ledgerListScroll, ledgerDetailScroll, ledgerNarrowScroll, 38);
+  const inSplitBook = () => state.layer === "context" && (state.view === "atlas" || state.view === "ledger");
   const workArea = new Column([
     scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
-    scrolled(atlasScroll, () => state.view === "atlas" && state.layer === "context"),
-    scrolled(ledgerScroll, () => state.view === "ledger" && state.layer === "context"),
+    { component: atlasSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
+    { component: ledgerSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
     scrolled(treeScroll, () => state.view === "tree" && state.layer === "context"),
     scrolled(contextScroll, () => state.view === "context" && state.layer === "context"),
     scrolled(archiveScroll, () => state.layer === "archive"),
-    { ...pane(0), grow: 1 },
+    { ...pane(0), grow: 1, visible: () => !inSplitBook() },
   ]);
   const inChatLayer = () => state.view === "chat" && state.layer === "context";
   // The working pane: a row of air above the content, the prompt (only where
@@ -2512,6 +2586,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   }
 
   const helpExtras = (): HelpExtra[] => [
+    { group: "type it", key: "ctrl+shift+f", label: "search the viewport" },
     { group: "type it", key: "/copy", label: "copy the transcript" },
     { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
     { group: "type it", key: "/help", label: "the command list in the transcript" },

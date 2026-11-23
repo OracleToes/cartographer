@@ -1604,9 +1604,9 @@ test("every entry in the context view shows its estimated token cost, folded and
       assert.ok(row !== undefined, `${label}: ${handle} row rendered`);
       assert.match(row, /~[\d,]+ tok\s*$/, `${label}: ${handle} shows its token cost on the right`);
     }
-    assert.match(rowFor("H"), /~100 tok\s*$/, `${label}: 400-byte system prompt estimates to ~100 tok`);
-    assert.match(rowFor("U1"), /~3 tok\s*$/, `${label}: 12-byte message estimates to ~3 tok`);
-    assert.match(rowFor("R1"), /~20 tok\s*$/, `${label}: 80-byte tool result estimates to ~20 tok`);
+    assert.match(rowFor("H"), /~115 tok\s*$/, `${label}: 400-byte system prompt estimates via pi-ai (3.5 chars/tok) to ~115 tok`);
+    assert.match(rowFor("U1"), /~4 tok\s*$/, `${label}: 12-byte message estimates via pi-ai (3.5 chars/tok) to ~4 tok`);
+    assert.match(rowFor("R1"), /~23 tok\s*$/, `${label}: 80-byte tool result estimates via pi-ai (3.5 chars/tok) to ~23 tok`);
   };
 
   checkEntries(view.render(100), "folded");
@@ -1904,4 +1904,88 @@ test("Atlas, Ledger, and Tree filter bars use pi-tui Input and fuzzyFilter", asy
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Atlas and Ledger expose split-pane ScrollViews with no fixed line cap", async () => {
+  const { ScrollView } = await import("@earendil-works/pi-tui");
+  const brain = emptyBrain();
+  const longText = Array.from({ length: 40 }, (_, i) => `- item ${i + 1}: detail line`).join("\n");
+  brain.atlas.push({ id: "a1", title: "LongNode", text: longText, links: [], attachments: [], createdAt: 1, updatedAt: 1 });
+  brain.ledger.push({ id: "l1", kind: "goal", text: longText, status: "open", answer: null, createdAt: 1, updatedAt: 1 });
+  brain.handles.entries.push(
+    { kind: "atlas", id: "a1", handle: "A1", timestamp: 1 },
+    { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 },
+  );
+
+  for (const [name, view] of [["atlas", new AtlasView()], ["ledger", new LedgerView()]]) {
+    if (name === "atlas") view.setData(brain, []);
+    else view.setData(brain);
+    const listScroll = new ScrollView(view.listPane, { primary: false, overscroll: "contain" });
+    const detailScroll = new ScrollView(view.detailPane, { primary: false, overscroll: "contain" });
+    view.attachScrolls(listScroll, detailScroll);
+
+    const detailLines = view.detailPane.render(60);
+    assert.ok(detailLines.length > 40, `${name}: detail pane renders all lines without a 28-line cap`);
+    assert.ok(!plain(detailLines.join("\n")).includes("more lines"), `${name}: no manual ⋯ scroll footer`);
+    detailScroll.updateLayout(detailLines.length, 10, () => {});
+    view.handleInput("l");
+    view.handleInput("j");
+    assert.equal(detailScroll.scrollTop, 1, `${name}: j scrolls the detail ScrollView`);
+    view.handleInput("G");
+    assert.equal(detailScroll.scrollTop, detailLines.length - 10, `${name}: G jumps to the end of detailScroll`);
+    view.handleInput("g");
+    assert.equal(detailScroll.scrollTop, 0, `${name}: g returns to the start of detailScroll`);
+  }
+});
+
+test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList", async () => {
+  const { Palette } = await import("../dist/ui/palette.js");
+  const ran = [];
+  let closed = 0;
+  const palette = new Palette([
+    { id: "a", group: "views", label: "open Atlas", key: "ctrl+o", run: () => ran.push("a") },
+    { id: "b", group: "session", label: "collapse now", key: "ctrl+k", run: () => ran.push("b") },
+  ]);
+  palette.onClose = () => {
+    closed += 1;
+  };
+  const lines = palette.render(64);
+  for (const line of lines) assert.equal(visibleWidth(line), 64, "exact width");
+  assert.match(plain(lines.join("\n")), /open Atlas/);
+  assert.match(plain(lines.join("\n")), /collapse now/);
+
+  // Mouse click on the second item (4 header rows + index 1 = y 5) runs it.
+  palette.handleMouse({ type: "press", button: "left", x: 6, y: 5, screenX: 6, screenY: 5, width: 64, height: 10, shift: false, alt: false, ctrl: false });
+  palette.handleMouse({ type: "click", button: "left", x: 6, y: 5, screenX: 6, screenY: 5, width: 64, height: 10, shift: false, alt: false, ctrl: false });
+  assert.deepEqual(ran, ["b"]);
+  assert.equal(closed, 1);
+
+  // Fuzzy filter + Enter runs the matching command.
+  for (const ch of "atl") palette.handleInput(ch);
+  palette.handleInput("\r");
+  assert.deepEqual(ran, ["b", "a"]);
+});
+
+test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", () => {
+  const transcript = new TranscriptView();
+  transcript.setEntries([
+    { kind: "agent", handle: "C1", recordId: "c1", text: "## Summary\n\n- **Bold** item with `code`" },
+  ]);
+  const lines = transcript.render(80);
+  for (const line of lines) assert.equal(visibleWidth(line), 80, "every markdown line fits the pane width");
+  const text = plain(lines.join("\n"));
+  assert.match(text, /Summary/);
+  assert.match(text, /Bold/);
+  assert.match(text, /code/);
+  assert.doesNotMatch(text, /\*\*Bold\*\*/, "markdown emphasis delimiters are rendered, not left raw");
+});
+
+test("estimate.ts delegates to pi-ai/utils/estimate", async () => {
+  const { estimateTokens, estimateSerialized } = await import("../dist/domain/estimate.js");
+  assert.equal(estimateTokens("a".repeat(35)), 10);
+  assert.equal(
+    estimateSerialized({ role: "user", content: "a".repeat(35), timestamp: 1 }),
+    10,
+    "Pi messages use estimateMessageTokens rather than JSON stringification",
+  );
 });
