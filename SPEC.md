@@ -446,6 +446,12 @@ dashboard about its Brain and the project, and it reports:
 - **Pinned entries** — every pinned entry, with its author.
 - **Marks** — every entry carrying a mark, with its action and its author (§4.1).
 - **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
+- **Decision flow & state-reactive attention cues** — a compact mode-aware
+  `flow:` checklist at the tail, plus conditional `attention:` cues derived
+  strictly from live facts (such as `bash` used for file edits, pinned files
+  drifting on disk since collapse, an untouched/flat Brain after several tool
+  calls, bloated Chat history, or persistent jobs with unread output). Omitted
+  when clean.
 
 A long pending list is the signal to collapse.
 
@@ -579,9 +585,11 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 - The block arrives as a user-role message. A system message cannot start a turn.
 - The block is rendered fresh at the tail of every request and is removed after
-  use. It never accumulates, so its cost is one block and nothing more.
-- It is purely informative and never instructive. It does not ask the agent to
-  do anything.
+  use. Because the model never sees prior blocks, it never accumulates and
+  every request sees the tail fresh at its attention peak.
+- It guides rather than coerces: its compact `flow:` decision tree and
+  condition-triggered `attention:` cues reflect observed live state so the agent
+  steers itself cleanly without blocking tool calls or imposing rigid phases (§1).
 
 ## 6. Project files
 

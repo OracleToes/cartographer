@@ -116,9 +116,29 @@ export interface StateBlockInput {
   marks: MarkLine[];
   /** Persistent piped jobs currently held in host RAM; omitted from the block when empty. */
   jobs?: readonly JobSummaryLine[];
+  /** State-reactive cues triggered by live observations right now; omitted when empty. */
+  attention?: readonly string[];
   /** The project root, so the tree's anchor reads `.` where the agent stands rather than an absolute path. */
   projectRoot?: string;
   tree: { root: string; depth: number; lines: string[] };
+}
+
+function decisionFlowLines(mode: "edit" | "read only", person: string): string[] {
+  if (mode === "read only") {
+    return [
+      "flow:",
+      `  - Exploring in read only mode? -> use \`read\` and \`tree\` without modifying files; map findings in \`atlas\`/\`ledger\` and answer ${person} via \`chat\`.`,
+      "  - Head bloated or finished exploring? -> `mark` resolved items, `collapse`, or `sleep` when nothing is left to check.",
+    ];
+  }
+  return [
+    "flow:",
+    "  - Task unmapped or plan stale? -> map goals, steps, and atomic leaves in `atlas`; track your active leaf in `ledger`.",
+    "  - Reading, editing, or creating files? -> use `read`, `edit`, `create` (not `bash` sed/cat/python file edits) and `pin` active files.",
+    "  - Testing or running long-lived processes? -> extend one reusable interactive harness in place (no piling up test scripts); use `proc` for persistent processes.",
+    "  - Changed code or learned something? -> update your `atlas`/`ledger` handle in place now, then verify edge cases through the harness.",
+    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved \`chat\`/leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
+  ];
 }
 
 function formatJobSummary(job: JobSummaryLine): string {
@@ -239,11 +259,31 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.jobs !== undefined && input.jobs.length > 0
       ? ["jobs:", ...input.jobs.map(formatJobSummary)]
       : [];
+  const flowLines = decisionFlowLines(input.mode, input.person);
+  const attentionLines: string[] =
+    input.attention !== undefined && input.attention.length > 0
+      ? ["attention:", ...input.attention.map((line) => `  - ${line}`)]
+      : [];
   // `T1` names the tree itself (§5.4): the block carries a handle for the
   // thing the block renders, so the agent can point at what it is looking at.
   const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
-  return [STATE_BLOCK_OPEN, mode, fullness, ...percentageLine, space, pending, stale, ...jobsLines, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
+  return [
+    STATE_BLOCK_OPEN,
+    mode,
+    fullness,
+    ...percentageLine,
+    space,
+    pending,
+    stale,
+    ...jobsLines,
+    ...treeLines,
+    pinned,
+    marks,
+    ...flowLines,
+    ...attentionLines,
+    STATE_BLOCK_CLOSE,
+  ].join("\n");
 }
 
 export { estimateSerialized };

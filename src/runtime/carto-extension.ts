@@ -176,36 +176,134 @@ function staleMarksFor(
   brain: CartoBrain,
   root: string,
   session: CartoExtensionOptions["session"],
-): Array<{ handle: string; why: string }> {
-  const marks: Array<{ handle: string; why: string }> = [];
+  markdownPath: string,
+): { items: Array<{ handle: string; why: string }>; modifiedPins: string[] } {
+  const items: Array<{ handle: string; why: string }> = [];
   for (const mark of liveStaleMarks(brain, root)) {
-    marks.push({ handle: mark.label, why: "the file changed after this note" });
+    items.push({ handle: mark.label, why: "the file changed after this note" });
   }
-  for (const handle of staleFileHandles(brain, root, session)) {
-    marks.push({ handle, why: "pinned, and the file is gone" });
+  const pinDrift = staleFileHandles(brain, root, session, markdownPath);
+  const modifiedPins: string[] = [];
+  for (const drift of pinDrift) {
+    items.push({ handle: drift.handle, why: drift.why });
+    if (drift.modified) modifiedPins.push(drift.handle);
   }
   for (const handle of staleReadResultHandles(brain, root)) {
-    marks.push({ handle, why: "a pinned reading, and the file has changed since" });
+    items.push({ handle, why: "a pinned reading, and the file has changed since" });
   }
-  return marks;
+  return { items, modifiedPins };
 }
 
 /**
- * Handles of pinned files that cannot be read as they were pinned: gone, or not
- * a text file. A pin is a promise the head holds the file, so a pin that cannot
- * be kept says so (§5.1, §5.5).
+ * Handles of pinned files that are gone or changed on disk since the head was
+ * frozen. A pin is a promise the head holds the current file, so drift says so
+ * (§5.1, §5.5).
  */
-function staleFileHandles(brain: CartoBrain, root: string, session: CartoExtensionOptions["session"]): string[] {
+function staleFileHandles(
+  brain: CartoBrain,
+  root: string,
+  session: CartoExtensionOptions["session"],
+  markdownPath: string,
+): Array<{ handle: string; why: string; modified: boolean }> {
   if (brain.files.length === 0) return [];
   const tree = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
-  const names: string[] = [];
+  const snapshotMtime = statMtimeSafe(markdownPath);
+  const drifted: Array<{ handle: string; why: string; modified: boolean }> = [];
   for (const file of brain.files) {
     const real = lexicalProjectPathSafe(root, file.path);
-    const readable = real !== null && statMtimeSafe(real) !== null;
-    if (readable) continue;
-    for (const [path, handle] of tree.handles) if (path === file.path) names.push(handle);
+    const mtime = real === null ? null : statMtimeSafe(real);
+    let handle: string | undefined;
+    for (const [path, named] of tree.handles) if (path === file.path) handle = named;
+    const label = handle ?? file.path;
+    if (mtime === null) {
+      drifted.push({ handle: label, why: "pinned, and the file is gone", modified: false });
+    } else if (snapshotMtime !== null && mtime > snapshotMtime + 50) {
+      drifted.push({ handle: label, why: "pinned copy in head is older than disk; collapse to refresh", modified: true });
+    }
   }
-  return names.sort((left, right) => left.localeCompare(right));
+  return drifted.sort((left, right) => left.handle.localeCompare(right.handle));
+}
+
+const BASH_FILE_OP_PATTERN =
+  /(?:^|[;&|]\s*)(?:sed\s+-(?:n|i)|head\s|tail\s|cat\s+[^<>|&;\n]+)|cat\s*>>?\s*\S|tee\s+\S|perl\s+-i|python3?\b[\s\S]*?\bopen\s*\(/;
+
+interface GenerationToolActivity {
+  totalCalls: number;
+  lastTurnUsedBashForFiles: boolean;
+}
+
+function inspectToolActivity(visibleMessages: readonly import("../domain/state-block.js").MessageLike[]): GenerationToolActivity {
+  let totalCalls = 0;
+  let lastAssistantCalls: Array<{ name: string; command?: string }> = [];
+  for (const message of visibleMessages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const calls: Array<{ name: string; command?: string }> = [];
+    for (const part of message.content as Array<Record<string, unknown>>) {
+      if (part === null || typeof part !== "object" || part.type !== "toolCall") continue;
+      totalCalls += 1;
+      const name = typeof part.name === "string" ? part.name : "";
+      const args = part.arguments as Record<string, unknown> | undefined;
+      const command = typeof args?.command === "string" ? args.command : undefined;
+      calls.push(command === undefined ? { name } : { name, command });
+    }
+    if (calls.length > 0) lastAssistantCalls = calls;
+  }
+  const lastTurnUsedBashForFiles = lastAssistantCalls.some(
+    (call) => call.name === "bash" && call.command !== undefined && BASH_FILE_OP_PATTERN.test(call.command),
+  );
+  return { totalCalls, lastTurnUsedBashForFiles };
+}
+
+/**
+ * State-reactive attention cues rendered at the tail of `<carto-state>` (§5.3, §5.7).
+ * Every cue is grounded in live facts from the Brain, generation, or jobs table;
+ * nothing is emitted when the condition is not present.
+ */
+export function deriveStateAttention(params: {
+  brain: CartoBrain;
+  mode: "edit" | "read only";
+  pendingCount: number;
+  modifiedPins: readonly string[];
+  jobs: readonly import("../domain/state-block.js").JobSummaryLine[];
+  activity: GenerationToolActivity;
+}): string[] {
+  const cues: string[] = [];
+  if (params.activity.lastTurnUsedBashForFiles) {
+    cues.push(
+      "Last `bash` call touched files directly -> use `read`/`edit`/`create` instead of `bash` sed/cat/python, and extend one reusable harness rather than creating extra test scripts.",
+    );
+  }
+  if (params.modifiedPins.length > 0) {
+    cues.push(
+      `Pinned file(s) changed on disk since collapse (${params.modifiedPins.join(", ")}) -> \`read\` current disk content or \`collapse\` at the next boundary to refresh the head.`,
+    );
+  }
+  if (params.activity.totalCalls >= 3 && params.pendingCount === 0) {
+    cues.push(
+      `Brain has 0 writes after ${params.activity.totalCalls} tool calls this generation -> update your active \`ledger\`/\`atlas\` handle in place now so progress survives collapse.`,
+    );
+  }
+  const activeWork = params.brain.chat.length >= 2 || params.activity.totalCalls >= 2;
+  if (params.mode === "edit" && activeWork && params.brain.atlas.length <= 1) {
+    const count = params.brain.atlas.length === 0 ? "no nodes" : "only 1 node";
+    cues.push(`Atlas has ${count} -> map goals, steps, and atomic leaves in \`atlas\`.`);
+  }
+  if (activeWork && params.brain.ledger.length === 0) {
+    cues.push("Ledger is empty -> track your active leaf, open questions, and current progress in `ledger`.");
+  }
+  const markedChatCount = params.brain.chat.filter((record) => record.mark !== undefined).length;
+  if (params.brain.chat.length >= 8 && markedChatCount < 2) {
+    cues.push(
+      `Head carries ${params.brain.chat.length} Chat records -> \`mark\` resolved older Chat handles for archive before your next \`collapse\`.`,
+    );
+  }
+  const needyJobs = params.jobs.filter((job) => job.unreadLines > 0 || job.status === "exited");
+  if (needyJobs.length > 0) {
+    cues.push(
+      `Persistent job(s) have unread output or exited (${needyJobs.map((job) => job.handle).join(", ")}) -> call \`proc\` \`read\` or \`stop\`.`,
+    );
+  }
+  return cues;
 }
 
 /**
@@ -289,6 +387,18 @@ export async function renderLiveStateBlock(
   collectMarks("atlas", brain.atlas);
   collectMarks("ledger", brain.ledger);
   collectMarks("chat", brain.chat);
+  const mode: "edit" | "read only" = options.session.readOnly ? "read only" : "edit";
+  const jobs = options.jobs === undefined ? [] : summarizeJobs(options.jobs);
+  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath);
+  const activity = inspectToolActivity(visibleMessages);
+  const attention = deriveStateAttention({
+    brain,
+    mode,
+    pendingCount: options.session.pending.length,
+    modifiedPins: stale.modifiedPins,
+    jobs,
+    activity,
+  });
   const input: StateBlockInput = {
     person: options.session.person,
     contextWindow: options.session.contextWindow,
@@ -308,12 +418,13 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
-    ...(options.jobs === undefined ? {} : { jobs: summarizeJobs(options.jobs) }),
-    // Atlas notes drift, a pinned file that is gone drifts, and a pinned `read`
-    // result whose file changed is the same fact about a quotation (§5.5).
-    stale: staleMarksFor(brain, options.root, options.session),
+    ...(jobs.length === 0 ? {} : { jobs }),
+    ...(attention.length === 0 ? {} : { attention }),
+    // Atlas notes drift, pinned files gone or modified since freeze drift, and
+    // pinned `read` results whose file changed are the same fact about drift (§5.5).
+    stale: stale.items,
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
-    mode: options.session.readOnly ? "read only" : "edit",
+    mode,
     projectRoot: options.root,
     tree,
   };
@@ -330,7 +441,7 @@ export function bashTool(): ToolRegistration {
   const base = createBashTool();
   return defineTool({
     ...base,
-    description: `${base.description ?? "Run a command."} The command runs in the project root. The shell is not sandboxed in read only mode, where what stops a command that writes is you.`,
+    description: `${base.description ?? "Run a command."} Runs in the project root for shell commands (builds, tests, linters, git). Do not use bash to read, create, or edit project files (use read, edit, or create) or for long-lived interactive processes (use proc). Not sandboxed in read only mode, where what stops a command that writes is you.`,
   });
 }
 
