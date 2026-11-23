@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test, { describe } from "node:test";
 
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
@@ -19,7 +20,7 @@ import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
-import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
+import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "carto-r4-"));
@@ -345,6 +346,132 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
     assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "after load: advertised");
   } finally {
     await new Promise((resolveClose) => server.close(resolveClose));
+  }
+});
+
+test("bare llama-server (GGUF filename id) and /props fallback populate the configured model's context window", async () => {
+  // 1) Bare llama-server returning a single owned_by: "llamacpp" entry with its GGUF filename.
+  const bareServer = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "Qwen3-32B-Q4_K_M.gguf", owned_by: "llamacpp", meta: { n_ctx: 65_536 } }] }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => bareServer.listen(0, "127.0.0.1", resolveListen));
+  try {
+    const { port } = bareServer.address();
+    const models = configuredModels(
+      { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+      { provider: "llama-swap", modelId: "ByteShape" },
+    );
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "lone llamacpp entry mirrors capacity onto route name");
+  } finally {
+    await new Promise((resolveClose) => bareServer.close(resolveClose));
+  }
+
+  // 2) Server whose /v1/models omits capacity but whose passive /props exposes default_generation_settings.n_ctx.
+  const propsServer = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "ByteShape" }] }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/props") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ default_generation_settings: { n_ctx: 49_152 } }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => propsServer.listen(0, "127.0.0.1", resolveListen));
+  try {
+    const { port } = propsServer.address();
+    const models = configuredModels(
+      { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+      { provider: "llama-swap", modelId: "ByteShape" },
+    );
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 49_152, "/props n_ctx fills in when /v1/models omits capacity");
+  } finally {
+    await new Promise((resolveClose) => propsServer.close(resolveClose));
+  }
+});
+
+test("cold llama-swap discovers the context window mid-first-run as soon as the model responds", async () => {
+  const { root, brain, cleanup } = await headlessFixture();
+  let loaded = false;
+  let releaseStream;
+  const held = new Promise((resolve) => { releaseStream = resolve; });
+  const server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      const listing = loaded ? { data: [{ id: "ByteShape", context_length: 65_536 }] } : { data: [{ id: "ByteShape" }] };
+      response.end(JSON.stringify(listing));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/chat/completions") {
+      request.resume();
+      request.on("end", () => {
+        loaded = true;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        // Send a prefill progress frame and hold the stream open so we can verify
+        // that capacity discovery completes WHILE the first turn is still prefilling.
+        response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: null }, finish_reason: null }], prompt_progress: { total: 1000, cache: 200, processed: 600, time_ms: 500 } })}\n\n`);
+        void held.then(() => {
+          const call = { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "sleep", arguments: "{}" } }] };
+          response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: call, finish_reason: null }] })}\n\n`);
+          response.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`);
+        });
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const { port } = server.address();
+  const models = configuredModels(
+    { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+    { provider: "llama-swap", modelId: "ByteShape" },
+  );
+  await models.refresh({ providers: ["llama-swap"] });
+  const session = await openLiveSession({ root, brain, models, model: { provider: "llama-swap", modelId: "ByteShape" }, now: FIXED_NOW });
+  const out = captureStream();
+  try {
+    assert.equal(session.state.contextWindow, 0, "cold startup begins with window unknown");
+    let refreshed;
+    const discovered = new Promise((resolve) => { refreshed = resolve; });
+    session.state.onResponse = () => {
+      if (session.state.contextWindow <= 0) {
+        void applyCapacityRefresh(
+          session,
+          () => models.refresh({ providers: ["llama-swap"] }).then(() => undefined),
+          models,
+          "llama-swap",
+          "ByteShape",
+          out.stream,
+        ).then(refreshed);
+      }
+    };
+    const submission = await submitInput(session, "hello");
+    await discovered;
+    assert.equal(session.state.contextWindow, 65_536, "window is discovered while the first response is still streaming");
+    assert.equal(session.state.prefillActive, true, "discovered before generation even starts");
+    releaseStream();
+    await submission.wait(BACKGROUND_CONTEXT);
+  } finally {
+    releaseStream();
+    await closeLiveSession(session);
+    await new Promise((resolveClose) => {
+      server.closeAllConnections();
+      server.close(resolveClose);
+    });
+    await cleanup();
   }
 });
 

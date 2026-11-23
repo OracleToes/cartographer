@@ -79,7 +79,7 @@ export interface LlamaSwapDeps {
 }
 
 /** Capacity advertised by one listing entry; field order per llama-swap and legacy llama.cpp. */
-export function advertisedCapacityOf(entry: unknown): { capacity: number; source: "context_length" | "context_window" | "meta.n_ctx" } | undefined {
+export function advertisedCapacityOf(entry: unknown): { capacity: number; source: "context_length" | "context_window" | "meta.n_ctx" | "n_ctx" } | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const record = entry as Record<string, unknown>;
   const pick = (value: unknown): number | undefined =>
@@ -93,7 +93,31 @@ export function advertisedCapacityOf(entry: unknown): { capacity: number; source
     const legacy = pick((meta as Record<string, unknown>).n_ctx);
     if (legacy !== undefined) return { capacity: legacy, source: "meta.n_ctx" };
   }
+  const topCtx = pick(record.n_ctx);
+  if (topCtx !== undefined) return { capacity: topCtx, source: "n_ctx" };
   return undefined;
+}
+
+/** Best-effort read of llama.cpp's `/props` (`default_generation_settings.n_ctx`) when `/models` omits capacity. */
+async function fetchPropsCapacity(fetchImpl: FetchLike, base: string, signal?: AbortSignal): Promise<number | undefined> {
+  try {
+    const root = base.replace(/\/v1$/, "");
+    const response = await fetchImpl(`${root}/props`, signal === undefined ? undefined : { signal });
+    if (!response.ok) return undefined;
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null) return undefined;
+    const record = body as Record<string, unknown>;
+    const pick = (value: unknown): number | undefined =>
+      typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+    const dgs = record.default_generation_settings;
+    if (typeof dgs === "object" && dgs !== null) {
+      const nCtx = pick((dgs as Record<string, unknown>).n_ctx);
+      if (nCtx !== undefined) return nCtx;
+    }
+    return pick(record.n_ctx);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -187,9 +211,39 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
       if (!Array.isArray(data)) {
         throw new Error("llama-swap /models did not return a data array");
       }
-      return data
+      const models = data
         .map((entry) => catalogModel(entry, configured, endpoint))
         .filter((candidate): candidate is Model<"openai-completions"> => candidate !== undefined);
+      // A bare llama-server reports its GGUF filename in /v1/models while
+      // answering requests for the configured route name; mirror its advertised
+      // capacity onto the configured model id when no exact id match exists.
+      let target = models.find((candidate) => candidate.id === model.modelId);
+      if (target === undefined && data.length === 1) {
+        const lone = data[0];
+        if (typeof lone === "object" && lone !== null && (lone as Record<string, unknown>).owned_by === "llamacpp") {
+          const mirrored = catalogModel({ ...(lone as Record<string, unknown>), id: model.modelId }, configured, endpoint);
+          if (mirrored !== undefined) {
+            models.push(mirrored);
+            target = mirrored;
+          }
+        }
+      }
+      // When no pin is set and /v1/models omits capacity for the active model,
+      // check llama.cpp's passive /props endpoint as a best-effort fallback.
+      if (baselineWindow === 0 && (target === undefined || target.contextWindow === 0)) {
+        const propsCapacity = await fetchPropsCapacity(fetchImpl, base, context.signal);
+        if (propsCapacity !== undefined) {
+          const entry = catalogModel({ id: model.modelId, context_length: propsCapacity }, configured, endpoint);
+          if (entry !== undefined) {
+            if (target !== undefined) {
+              models[models.indexOf(target)] = entry;
+            } else {
+              models.push(entry);
+            }
+          }
+        }
+      }
+      return models;
     },
     api: openAICompletionsApi(),
   });

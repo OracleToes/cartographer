@@ -403,9 +403,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const barState: ContextBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
   // Pi reports raw llama.cpp progress between durable transcript updates.
-  // Repaint the bar on those events, without rebuilding the whole transcript.
+  // Repaint the bar on those events, without rebuilding the whole transcript;
+  // when a cold server first answers and the window is still unknown, re-query
+  // the catalog immediately so the bar populates during the first run.
   const bindTelemetry = (session: LiveSession) => {
     session.state.onTelemetry = () => tui.requestRender();
+    session.state.onResponse = () => {
+      if (options.refreshCapacity === true && !shutdownRequested && session === state.session && session.state.contextWindow <= 0) {
+        void refreshAdvertisedWindow().catch(() => undefined);
+      }
+    };
   };
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
@@ -1782,16 +1789,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
   };
 
+  let capacityRefreshFlight: Promise<void> | undefined;
   const refreshAdvertisedWindow = async () => {
-    const sink = new Writable({
-      write(chunk, _encoding, callback) {
-        const line = String(chunk).trim();
-        if (line.length > 0) pushStatus(line);
-        callback();
-      },
-    });
-    await applyCapacityRefresh(state.session, refresh, options.models, options.model.provider, options.model.modelId, sink);
-    await rebuildTranscript();
+    if (capacityRefreshFlight !== undefined) return capacityRefreshFlight;
+    const work = (async () => {
+      const sink = new Writable({
+        write(chunk, _encoding, callback) {
+          const line = String(chunk).trim();
+          if (line.length > 0) pushStatus(line);
+          callback();
+        },
+      });
+      await applyCapacityRefresh(state.session, refresh, options.models, options.model.provider, options.model.modelId, sink);
+      if (shutdownRequested) return;
+      headerState.windowUnknown = state.session.state.contextWindow <= 0;
+      tui.requestRender();
+      await rebuildTranscript();
+    })();
+    capacityRefreshFlight = work;
+    try {
+      await work;
+    } finally {
+      if (capacityRefreshFlight === work) capacityRefreshFlight = undefined;
+    }
   };
 
   const runSubmission = async (message: string) => {

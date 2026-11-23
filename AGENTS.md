@@ -43,6 +43,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [pi — `packages/schema`](https://github.com/earendil-works/pi/tree/main/packages/schema) | agent | Tool parameter validation for the product tools (`defineTool` arguments) | `@earendil-works/pi-schema` 1.5.2 |
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
 | [canop/broot](https://github.com/canop/broot) | person | Inspiration for the tree view only: how a whole hierarchy is made readable in one pane. Not a dependency and not a port target | reference only |
+| [eliaskg/pi-prefill](https://github.com/eliaskg/pi-prefill) | person | Reference for live prefill progress (`return_progress`, `prompt_progress`, delta-based rate and ETA). Not a dependency and not a port target | reference only |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at

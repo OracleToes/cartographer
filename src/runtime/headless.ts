@@ -131,6 +131,26 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   };
   if (options.refreshCapacity === true) await refresh();
   let session = await openLiveSession(options);
+  let capacityRefreshFlight: Promise<void> | undefined;
+  const refreshWindow = async () => {
+    if (options.refreshCapacity !== true) return;
+    if (capacityRefreshFlight !== undefined) return capacityRefreshFlight;
+    const work = applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
+    capacityRefreshFlight = work;
+    try {
+      await work;
+    } finally {
+      if (capacityRefreshFlight === work) capacityRefreshFlight = undefined;
+    }
+  };
+  const bindResponseRefresh = (target: LiveSession) => {
+    target.state.onResponse = () => {
+      if (options.refreshCapacity === true && target === session && target.state.contextWindow <= 0) {
+        void refreshWindow().catch(() => undefined);
+      }
+    };
+  };
+  bindResponseRefresh(session);
   const seenChat = new Set<string>((await options.brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id));
 
   writeLine(output, `carto · ${options.model.provider}/${options.model.modelId} · ${options.root}`);
@@ -180,7 +200,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       await watchSession();
     }
     if (options.refreshCapacity === true) {
-      await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
+      await refreshWindow();
     }
   };
 
@@ -192,6 +212,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     watch = undefined;
     await previous?.stop().catch(() => undefined);
     const mine = session;
+    bindResponseRefresh(mine);
     const next = await mine.harness.watchDoc(LiveDoc, mine.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
     if (next === undefined) return;
     watch = next;

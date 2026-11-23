@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
+import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
 import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
 import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
@@ -722,6 +723,66 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   state.session.state.serverLost = true;
   bar.invalidate();
   assert.match(plain(bar.render(60)[0]), /8,000 \/ 32,768/);
+});
+
+test("the context bar draws live prefill progress even when the window is unknown, with uncached % and ETA", () => {
+  const state = {
+    session: {
+      state: {
+        contextWindow: 0,
+        prefillActive: true,
+        prefillTotal: 10_000,
+        prefilledTokens: 6_000,
+        prefillCached: 2_000,
+        prefillRate: 200,
+      },
+    },
+    parts: { system: 1_000, transcript: 500, toolWork: 500 },
+  };
+  const bar = new TokenBarView(state);
+  const line = plain(bar.render(120)[0]);
+  assert.match(line, /window unknown/);
+  assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
+  assert.match(line, /█/, "cached prefix is visible even before the window is known");
+  assert.match(line, /▓/, "active prefill bar renders even when contextWindow is 0");
+});
+
+test("model telemetry tracks delta-based prefill rate across heartbeats, handles missing cache, and detects generation start", () => {
+  let responses = 0;
+  const state = { onResponse: () => { responses += 1; } };
+  const telemetry = createModelTelemetry(state);
+  const id = telemetry.start();
+
+  // Server headers arrive: onResponse fires once per request.
+  telemetry.response(id);
+  telemetry.response(id);
+  assert.equal(responses, 1);
+
+  // Chunk 1 omits cache: defaults to 0 instead of dropping the chunk.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 500, time_ms: 1000 } });
+  assert.equal(state.prefillTotal, 2000);
+  assert.equal(state.prefilledTokens, 500);
+  assert.equal(state.prefillCached, 0);
+  assert.equal(state.prefillRate, 500);
+
+  // Heartbeat chunk with unchanged processed keeps the previous valid rate.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 500, time_ms: 1500 } });
+  assert.equal(state.prefillRate, 500);
+
+  // Delta rate: +500 tokens over +2500ms (from baseline 500@1000ms to 1000@3500ms) -> 200 tok/s.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 1000, time_ms: 3500 } });
+  assert.equal(state.prefillRate, 200);
+  assert.equal(state.prefillActive, true);
+
+  // delta.reasoning clears prefillActive (matching pi-prefill).
+  telemetry.event(id, { choices: [{ index: 0, delta: { reasoning: "thinking..." }, finish_reason: null }] });
+  assert.equal(state.prefillActive, false);
+
+  // Next request: finish_reason != null also clears prefillActive.
+  const id2 = telemetry.start();
+  telemetry.event(id2, { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+  assert.equal(state.prefillActive, false);
+  assert.equal(responses, 2, "first stream event also marks the request as responded");
 });
 
 test("the command registry drives the footer, and a key only fires where it is available", () => {
