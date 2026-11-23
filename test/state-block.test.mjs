@@ -103,6 +103,14 @@ test("fullness warns at 75 percent, including the last response's output", () =>
   assert.match(estimated, /context fill: ~75% · \[COLLAPSE NEEDED\]/);
 });
 
+test("the warning's threshold is the configured one, 75 when none is given", () => {
+  const base = { contextWindow: 1000, lastReportedInput: 600, toolWorkSince: 0, lastReportedOutput: 0 };
+  assert.doesNotMatch(renderStateBlock(input(base)), /\[COLLAPSE NEEDED\]/, "60% is below the default");
+  assert.match(renderStateBlock(input({ ...base, collapseWarningPercent: 60 })), /context fill: ~60% · \[COLLAPSE NEEDED\]/, "a lower line warns sooner");
+  assert.doesNotMatch(renderStateBlock(input({ ...base, lastReportedInput: 800, collapseWarningPercent: 90 })), /\[COLLAPSE NEEDED\]/, "a higher line warns later");
+  assert.match(renderStateBlock(input({ ...base, lastReportedInput: 900, collapseWarningPercent: 90 })), /\[COLLAPSE NEEDED\]/);
+});
+
 test("marker messages are dropped from payloads; everything else survives", () => {
   const messages = [
     { role: "user", content: "a real person message" },

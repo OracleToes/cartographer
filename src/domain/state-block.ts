@@ -102,6 +102,8 @@ export interface StateBlockInput {
   marks: MarkLine[];
   /** The project root, so the tree's anchor reads `.` where the agent stands rather than an absolute path. */
   projectRoot?: string;
+  /** The fill, in percent of a known window, at which the block says `[COLLAPSE NEEDED]`. Unset: the default. */
+  collapseWarningPercent?: number;
   tree: { root: string; depth: number; lines: string[] };
 }
 
@@ -156,7 +158,7 @@ export function contextFillPercent(input: StateBlockInput): number | undefined {
   return input.contextWindow > 0 ? estimatedContextTokens(input) / input.contextWindow * 100 : undefined;
 }
 
-/** The fill at which the block asks the agent to collapse. */
+/** The fill at which the block asks the agent to collapse, unless the configuration says otherwise (`collapseWarningPercent`). */
 export const COLLAPSE_WARNING_PERCENT = 75;
 
 export function renderStateBlock(input: StateBlockInput): string {
@@ -174,7 +176,7 @@ export function renderStateBlock(input: StateBlockInput): string {
       : reported === undefined
         ? `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
         : `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)}`;
-  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= COLLAPSE_WARNING_PERCENT ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
+  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= (input.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT) ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +

@@ -297,7 +297,9 @@ This holds for every host and for a run that nothing of the person's started,
 such as a timed rest waking.
 
 - **The warning.** At an estimated 75% of a known window the state block says
-  `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
+  `[COLLAPSE NEEDED]` on every request until the context is rebuilt (75% is the
+  default; `collapseWarningPercent` in the configuration sets it, above 0 and at
+  most 100, and the same value is the line the automatic-collapse bound reads): write what
   you need to continue to the Brain, mark what is obsolete, then collapse. An
   unknown window is reported as unknown; no percentage is invented.
 - **Limits are the other trigger.** Carto uses the signals pi already provides
@@ -419,7 +421,8 @@ dashboard about its Brain and the project, and it reports:
 
 - **Context fullness** — the server's input and output count for the last
   response, plus estimated tool work added since. When the window is known,
-  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75% (or the configured
+  `collapseWarningPercent`); when it is
   unknown, do not invent a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
