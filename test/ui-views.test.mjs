@@ -1625,3 +1625,37 @@ test("a pane's margin, floor and seam are one box, and a click lands on the row 
   inset.handleMouse({ type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 20, height: 5, shift: false, alt: false, ctrl: false });
   assert.deepEqual(clicks, [[3, 1, 17]], "the pane sees the click as its own, shifted by the margin");
 });
+
+test("every entry in the Context view carries what it costs the model, and the rows add up to the header", () => {
+  const view = contextOf({
+    systemPrompt: "s".repeat(400),
+    toolWorkItems: [
+      { id: "g:2:r0", entry: 2, order: 0, kind: "toolResult", output: "r".repeat(8000) },
+      { id: "g:3:c0", entry: 3, order: 0, kind: "toolCall", name: "bash", args: "x".repeat(36) },
+    ],
+    transcriptMessages: [{ id: "m1", entry: 1, order: 0, role: "user", text: "u".repeat(40) }],
+    stateBlockText: "b".repeat(80),
+  });
+  view.toggleAll(); // closed: one row per entry
+  for (const size of [100, 60]) {
+    const lines = view.render(size);
+    for (const line of lines) assert.equal(visibleWidth(line), size, "cost column keeps the row exact to its width");
+  }
+  const rows = view.render(100).map(plain);
+  const costOf = (needle) => {
+    const row = rows.find((line) => line.includes(needle));
+    assert.ok(row, `a row for ${needle}`);
+    return /(\d+(?:\.\d)?k?) tok\s*$/.exec(row)?.[1];
+  };
+  assert.equal(costOf("system prompt"), "100", "400 bytes at 4 per token");
+  assert.equal(costOf("rrrr"), "2.0k", "a result costs its output");
+  assert.equal(costOf("bbbb"), "20");
+  assert.equal(costOf("uuuu"), "10");
+  const sum = rows.flatMap((line) => { const m = /(\d+(?:\.\d)?k?) tok\s*$/.exec(line); return m ? [m[1]] : []; })
+    .reduce((total, text) => total + (text.endsWith("k") ? Number.parseFloat(text) * 1000 : Number(text)), 0);
+  const header = Number(/~([\d,]+) tokens/.exec(rows[0])[1].replace(/,/g, ""));
+  assert.ok(Math.abs(sum - header) <= header * 0.05, `rows (${sum}) add up to the header (${header}) within rounding`);
+  // Open, the entry's head line still carries it.
+  view.toggleAll();
+  assert.ok(plain(view.render(100).join("\n")).includes("100 tok"), "an open entry shows its cost on its first line");
+});

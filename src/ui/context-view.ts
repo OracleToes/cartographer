@@ -158,6 +158,8 @@ export interface PromptNode {
   summary: string;
   /** The body in the human view. */
   body: string;
+  /** What this entry costs the model: estimated tokens of the bytes it reads. */
+  cost: number;
   /** Schema-shaped content: the same entry as the model receives it. */
   real?: string;
   /** Where a mark on this node lands. Absent for the parts of the prompt the person cannot remove. */
@@ -198,6 +200,18 @@ const NAME_COLUMN = 14;
 const BODY_GUTTER = `     ${tokens.rule("│")} `;
 /** Its visible width — what the wrap must leave room for. */
 const BODY_INSET = 7;
+
+/** Cells the cost column takes at the right edge of an entry: `  1.2k tok`, right-aligned, and a space of margin. */
+const COST_COLUMN = 10;
+/** An entry this share of the whole context or more is drawn in the warning colour. */
+const HEAVY_SHARE = 0.1;
+
+/** A token count in a few cells: exact below a thousand, then `1.2k`, then `12k`. */
+export function formatCost(tokenCount: number): string {
+  if (tokenCount < 1000) return String(tokenCount);
+  if (tokenCount < 10_000) return `${(Math.round(tokenCount / 100) / 10).toFixed(1)}k`;
+  return `${Math.round(tokenCount / 1000)}k`;
+}
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
@@ -310,6 +324,8 @@ export class ContextView implements Component, Focusable {
   /** The first archive press is a confirmation, not a deferred archive mark. */
   private archiveConfirmation: string | undefined;
   private showReal = false;
+  /** The whole context's cost, taken once per render: a row's share of it picks its colour. */
+  private renderedTotal = 0;
   private folded = new Map<string, boolean>();
   private hits: Array<{ start: number; end: number; index: number }> = [];
 
@@ -341,17 +357,10 @@ export class ContextView implements Component, Focusable {
     this.cursor = held >= 0 ? held : this.firstEntry();
   }
 
-  /** Estimated size of everything the model reads, for the header. */
+  /** Estimated size of everything the model reads, for the header: the rows' costs added up. */
   private totalTokens(): number {
-    if (this.data === undefined) return 0;
-    return (
-      estimateTokens(this.data.systemPrompt) +
-      estimateSerialized(this.data.tools) +
-      estimateTokens(this.headText(this.data)) +
-      estimateSerialized(this.data.transcriptMessages) +
-      estimateSerialized(this.data.toolWorkItems) +
-      estimateTokens(this.data.stateBlockText)
-    );
+    // The sum of the rows, so what is on screen adds up to the figure at the top.
+    return this.sections.reduce((sum, section) => sum + section.nodes.reduce((inner, node) => inner + node.cost, 0), 0);
   }
 
   /**
@@ -384,6 +393,7 @@ export class ContextView implements Component, Focusable {
       label: "system prompt",
       summary: oneLine(data.systemPrompt),
       body: data.systemPrompt,
+      cost: estimateTokens(data.systemPrompt),
       real: data.systemPrompt,
     });
     data.tools.forEach((tool, index) => {
@@ -394,6 +404,8 @@ export class ContextView implements Component, Focusable {
         label: tool.name,
         summary: tool.description,
         body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
+        // The provider is sent the definition compact, not as the person reads it.
+        cost: estimateSerialized({ name: tool.name, description: tool.description, parameters: tool.parameters }),
         real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
         target: { part: "tools", id: tool.name },
       });
@@ -432,6 +444,7 @@ export class ContextView implements Component, Focusable {
         label: entry.kind === "ephemera" ? at?.label ?? /^\S+ \[([^\]]*)\]/.exec(entry.lines[0] ?? "")?.[1] ?? "pinned" : entry.kind,
         summary,
         body,
+        cost: estimateTokens(entry.lines.join("\n")),
         real: entry.lines.join("\n"),
         ...(at === undefined ? { marked: GONE } : { target: { part: entry.kind, id: at.id } }),
         ...(at === undefined ? {} : mark(at.mark)),
@@ -476,6 +489,7 @@ export class ContextView implements Component, Focusable {
         label: "file",
         summary,
         body,
+        cost: estimateTokens(entry.lines.join("\n")),
         real: entry.lines.join("\n"),
         // A file the head holds is a row you can act on whether or not it is still
         // pinned: `p` unpins it, and on the row that says it is leaving, `p` pins it
@@ -517,6 +531,7 @@ export class ContextView implements Component, Focusable {
             label: "thinking",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
+            cost: estimateTokens(item.text ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -533,6 +548,7 @@ export class ContextView implements Component, Focusable {
             label: "text",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
+            cost: estimateTokens(item.text ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -548,6 +564,7 @@ export class ContextView implements Component, Focusable {
             label: item.name ?? "call",
             summary: oneLine(item.args ?? ""),
             body: item.args ?? "",
+            cost: estimateTokens(`${item.name ?? "call"}${item.args ?? ""}`),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -565,6 +582,7 @@ export class ContextView implements Component, Focusable {
             label: "result",
             summary: oneLine(item.output ?? ""),
             body: item.output ?? "",
+            cost: estimateTokens(item.output ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
             payload: item.payload,
@@ -590,6 +608,7 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
+          cost: estimateTokens(message.text),
           target: chatRecord === undefined ? { part: "transcript", id: message.targetId ?? message.id } : { part: "chat", id: chatRecord.id },
           ...(chatMark === undefined ? {} : { marked: `${chatMark.action} on collapse · ${chatMark.author === "user" ? (data.person ?? "you") : "agent"}` }),
         },
@@ -639,6 +658,7 @@ export class ContextView implements Component, Focusable {
         label: "state block",
         summary: oneLine(data.stateBlockText),
         body: data.stateBlockText,
+        cost: estimateTokens(data.stateBlockText),
         real: data.stateBlockText,
         ...(waiting.length === 0 ? {} : { marked: `pin on collapse · ${waiting.join(", ")}` }),
       },
@@ -840,7 +860,8 @@ export class ContextView implements Component, Focusable {
     const inner = Math.max(16, width - 2);
     const ink = (text: string): string => ` ${text}`;
 
-    const left = `${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.totalTokens().toLocaleString("en-US")} tokens`)}`;
+    this.renderedTotal = this.totalTokens();
+    const left = `${tokens.bold(tokens.accent("CONTEXT"))} ${tokens.faint("· what the model reads")} ${tokens.faint(`· ~${this.renderedTotal.toLocaleString("en-US")} tokens`)}`;
     const mode = this.showReal ? tokens.warn("as the model receives it") : tokens.muted("as a person reads it");
     // "Now" is a rebuild in place, not a collapse (§4.1), and the line says so:
     // a key that turns out to be the most expensive operation there is would be
@@ -924,6 +945,18 @@ export class ContextView implements Component, Focusable {
       node.pinned === undefined
         ? ""
         : ` ${tokens.pin(`P ${node.handle.trim()} ${node.pinned === "user" ? who : "agent"}`)} `;
+    const total = this.renderedTotal;
+    const heavy = total > 0 && node.cost / total >= HEAVY_SHARE;
+    const costText = `${formatCost(node.cost).padStart(5)} ${"tok"}`;
+    const cost = heavy ? tokens.warn(costText) : tokens.faint(costText);
+    // The entry's line: what it says on the left, what it costs on the right.
+    // A pending action outranks the figure: where the row's own head would be clipped, the figure goes.
+    const withCost = (left: string): string => {
+      if (visibleWidth(head) + COST_COLUMN > width) return left;
+      const room = Math.max(1, width - COST_COLUMN);
+      const clipped = truncateToWidth(left, room, "");
+      return `${clipped}${" ".repeat(Math.max(0, room - visibleWidth(clipped)))}${cost} `;
+    };
     const clippedName = truncateToWidth(name, NAME_COLUMN, "…");
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
     // Put the pending action before the name and preview so it survives narrow panes.
@@ -931,13 +964,13 @@ export class ContextView implements Component, Focusable {
     const lines: string[] = [];
 
     if (!open) {
-      const room = Math.max(8, width - visibleWidth(head) - 2);
+      const room = Math.max(8, width - COST_COLUMN - visibleWidth(head) - 1);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
-      lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
+      lines.push(canvasLine(withCost(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`), width));
       return lines;
     }
 
-    lines.push(canvasLine(head, width));
+    lines.push(canvasLine(withCost(head), width));
     lines.push(...this.renderBody(node, width, ink));
     return lines;
   }

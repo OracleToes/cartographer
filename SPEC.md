@@ -773,7 +773,13 @@ read and changed. The body holds every message the model receives, the agent's `
 calls and its plain text included; the tail is the state block as sent. The
 head is listed in §5.1's order, the system prompt first (it is the first
 section of the system message, ahead of the projection); the tools are shown as
-registered, `bash` with Carto's sentence. The token count covers what is shown.
+registered, `bash` with Carto's sentence. **Every entry carries what it costs the
+model**, in estimated tokens at the right edge of its row (`2.0k tok`, one figure
+whether the entry is open or closed, and whichever view is shown): the bytes of
+that entry as sent, at the estimator's four bytes to the token. An entry that is a
+tenth or more of the whole is drawn in the warning colour, so the expensive ones
+stand out. The count in the header is the sum of the rows. A row too narrow to
+hold its pending mark and the figure keeps the mark.
 
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
