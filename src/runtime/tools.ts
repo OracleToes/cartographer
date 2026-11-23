@@ -481,7 +481,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "sleep",
       description:
-        `Last resort: end the turn and rest only after you have thoroughly tested your work and can find nothing else to fix, verify, or improve. Omit \`seconds\` to rest until ${them} messages you, or pass whole seconds (at least 1) to wake on your own from \`<carto-state>\`. A message from ${them} wakes you early.`,
+        `Last resort: end the turn and rest only after you have thoroughly exercised and verified your work and can find nothing else to fix, probe, or improve. Omit \`seconds\` to rest until ${them} messages you, or pass whole seconds (at least 1) to wake on your own from \`<carto-state>\`. A message from ${them} wakes you early.`,
       parameters: obj({ seconds: opt(int({ minimum: 1, description: `Whole seconds to rest before starting again. Omit to rest until ${them} messages you.` })) }),
       replay: "safe",
       execute: async (args, api, context) => {
