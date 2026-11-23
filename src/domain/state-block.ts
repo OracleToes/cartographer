@@ -60,6 +60,18 @@ export interface MarkLine {
   author: "user" | "agent";
 }
 
+/** One persistent job's compact status line in `<carto-state>` (§5.3); never holds scrollback. */
+export interface JobSummaryLine {
+  readonly handle: string;
+  readonly label: string;
+  readonly status: "running" | "exited";
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+  readonly unreadLines: number;
+  readonly quietMs: number;
+  readonly active: boolean;
+}
+
 export interface StateBlockInput {
   /**
    * The name the agent calls the person by: the configured name, or the
@@ -102,9 +114,27 @@ export interface StateBlockInput {
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
   /** Every entry carrying a mark, with its action and its author (§4.1). */
   marks: MarkLine[];
+  /** Persistent piped jobs currently held in host RAM; omitted from the block when empty. */
+  jobs?: readonly JobSummaryLine[];
   /** The project root, so the tree's anchor reads `.` where the agent stands rather than an absolute path. */
   projectRoot?: string;
   tree: { root: string; depth: number; lines: string[] };
+}
+
+function formatJobSummary(job: JobSummaryLine): string {
+  const unread =
+    job.unreadLines > 0
+      ? `${job.unreadLines} unread line${job.unreadLines === 1 ? "" : "s"}`
+      : null;
+  if (job.status === "exited") {
+    const code = job.exitSignal !== null ? job.exitSignal : job.exitCode === null ? "?" : String(job.exitCode);
+    return `  ${job.handle} "${job.label}" · exited(${code})${unread === null ? "" : ` · ${unread}`}`;
+  }
+  if (unread !== null) {
+    const activity = job.active ? "active" : `quiet ${Math.max(1, Math.round(job.quietMs / 1000))}s`;
+    return `  ${job.handle} "${job.label}" · running · ${unread} (${activity})`;
+  }
+  return `  ${job.handle} "${job.label}" · running · idle`;
 }
 
 const thousands = (value: number): string => Math.round(value).toLocaleString("en-US");
@@ -205,11 +235,15 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.marks.length === 0
       ? "marks: none"
       : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author, input.person)}`)].join("\n");
+  const jobsLines: string[] =
+    input.jobs !== undefined && input.jobs.length > 0
+      ? ["jobs:", ...input.jobs.map(formatJobSummary)]
+      : [];
   // `T1` names the tree itself (§5.4): the block carries a handle for the
   // thing the block renders, so the agent can point at what it is looking at.
   const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
-  return [STATE_BLOCK_OPEN, mode, fullness, ...percentageLine, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
+  return [STATE_BLOCK_OPEN, mode, fullness, ...percentageLine, space, pending, stale, ...jobsLines, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
 }
 
 export { estimateSerialized };

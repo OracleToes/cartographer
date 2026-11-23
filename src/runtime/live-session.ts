@@ -55,6 +55,7 @@ import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
+import { createJobTable, type JobTable } from "./jobs.js";
 
 export interface LiveSessionOptions {
   /**
@@ -81,6 +82,8 @@ export interface LiveSessionOptions {
    * state block. Default: 75 (COLLAPSE_WARNING_PERCENT).
    */
   collapseWarningPercent?: number;
+  /** Persistent piped jobs owned by the host; preserved across context collapses. */
+  jobs?: JobTable;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -96,6 +99,8 @@ export interface LiveSession {
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
   /** The Brain this session reads and writes: where the person's words are recorded as they are sent (§2.3). */
   readonly brain: BrainStore;
+  /** Persistent piped processes owned by the host; survives collapse. */
+  readonly jobs: JobTable;
   /** The session's clock, so a record the host writes is stamped the way the tools stamp theirs. */
   readonly now: () => number;
   /** The mutable present; named fields, no hidden state (§5.3). */
@@ -175,6 +180,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
   const gatedModels = freeze.gate(options.models, createModelTelemetry(state));
+  const jobs = options.jobs ?? createJobTable({ root, now });
 
   let harness: Harness | undefined;
   try {
@@ -184,6 +190,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         root,
         brain: options.brain,
         session: state,
+        jobs,
         markdownPath: paths.markdown,
         now,
       }),
@@ -244,6 +251,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       conversation,
       database,
       brain: options.brain,
+      jobs,
       now: options.now ?? Date.now,
       state,
       freeze,
@@ -742,7 +750,7 @@ export async function collapseLiveSession(
     carriedTexts: carry.map((input) => inputText(input.content)),
     ...ceremony,
   });
-  const next = await openLiveSession(options);
+  const next = await openLiveSession({ ...options, jobs: options.jobs ?? session.jobs });
   // Opening retries committed ephemeral restores and acknowledges each one
   // only after placement. Do not submit the report's items a second time.
   if (!automatic) return { session: next, report, reason, carried: 0, resumed: false };

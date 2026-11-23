@@ -9,7 +9,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 
-import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
+import { arr, bool, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
@@ -25,6 +25,16 @@ import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
+import {
+  createJobTable,
+  formatExit,
+  readJob,
+  sendJob,
+  startJob,
+  stopJob,
+  type JobActionResult,
+  type JobTable,
+} from "./jobs.js";
 
 export interface ToolSession {
   /**
@@ -49,6 +59,23 @@ export interface ToolDeps {
   root: string;
   brain: BrainStore;
   session: ToolSession;
+  jobs?: JobTable;
+}
+
+function formatJobResult(verb: string, result: JobActionResult): string {
+  const state =
+    result.status === "running"
+      ? result.settled
+        ? "running"
+        : "running (still active)"
+      : `exited(${formatExit(result.exitCode, result.exitSignal)})`;
+  const header = `${verb} ${result.handle} "${result.label}" [${state}]`;
+  const note =
+    result.omittedLines > 0
+      ? `\n(${result.omittedLines} older buffered line${result.omittedLines === 1 ? "" : "s"} dropped)`
+      : "";
+  if (result.output.length === 0) return `${header}${note}`;
+  return `${header}${note}\n${result.output}`;
 }
 
 // §1 and §2.5: no length limit the person did not set. An empty entry is the
@@ -233,6 +260,7 @@ function refuseWhenReadOnly(readOnly: boolean): void {
 
 export function createTools(deps: ToolDeps): ToolRegistration[] {
   const { root, brain, session } = deps;
+  const jobs = deps.jobs ?? createJobTable({ root });
   // Said once, then read from here: a tool description is something the agent
   // reads, so it names the person it works for rather than a role.
   const them = session.person;
@@ -515,6 +543,77 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },
         };
+      },
+    }),
+
+    defineTool({
+      name: "proc",
+      description:
+        `Run and drive persistent piped processes (REPLs, dev servers, interactive testing harnesses) in the project root that stay alive across turns and context collapse until stopped or Carto exits. Actions: "start" spawns \`command\` (optional \`label\`, \`waitMs\` default 1000, max 30000, pass 0 to return immediately) and returns a J handle; "send" writes \`input\` to stdin (newline appended unless \`raw\` is true) or sends \`signal\` ("SIGINT" or "SIGTERM") to \`handle\`; "read" returns unread output since the last read (or the last \`tailLines\` lines, from 1 up to 2000, optional \`waitMs\` default 0, max 30000); "stop" terminates \`handle\` and removes it. \`start\` and \`send\` settle after 150ms of quiet output (capped at \`waitMs\`) and return without killing the process if it stays active. Output is buffered up to 2000 lines per job and shared live with ${them} in the jobs view. Not sandboxed in read only mode, where what stops a command that writes is you.`,
+      parameters: obj({
+        action: oneOf(["start", "send", "read", "stop"], {
+          description: 'Operation to perform: "start", "send", "read", or "stop".',
+        }),
+        handle: opt(str({ description: 'Job handle such as "J1". Required for "send", "read", and "stop".' })),
+        command: opt(str({ description: 'Shell command to start in the project root. Required for "start".' })),
+        label: opt(str({ description: 'Short display label for the job shown in the state block and jobs view. Optional for "start".' })),
+        input: opt(str({ description: 'Text to write to stdin for "send". A trailing newline is added unless `raw` is true.' })),
+        raw: opt(bool({ description: 'When true, send `input` verbatim without adding a trailing newline.' })),
+        signal: opt(oneOf(["SIGINT", "SIGTERM"], { description: 'Signal to send to the job process group during "send".' })),
+        waitMs: opt(int({
+          maximum: 30000,
+          description: 'Max milliseconds to wait for quiet output (150ms idle settle, max 30000). Defaults to 1000 for "start"/"send" and 0 for "read". Pass 0 or less to return immediately.',
+        })),
+        tailLines: opt(int({
+          minimum: 1,
+          maximum: 2000,
+          description: 'For "read", return the last N buffered lines (1 to 2000) instead of only unread output.',
+        })),
+      }),
+      replay: "unsafe",
+      execute: async (args, _api, context) => {
+        const waitMs = args.waitMs === undefined ? undefined : Math.max(0, args.waitMs);
+        if (args.action === "start") {
+          if (args.command === undefined || args.command.trim().length === 0) {
+            throw new Error('`proc` with action "start" requires a non-empty `command`.');
+          }
+          const result = await startJob(jobs, {
+            command: args.command,
+            ...(args.label === undefined ? {} : { label: args.label }),
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(context.abortSignal === undefined ? {} : { signal: context.abortSignal }),
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Started", result) }] };
+        }
+        if (args.handle === undefined || args.handle.trim().length === 0) {
+          throw new Error(`\`proc\` with action "${args.action}" requires \`handle\`.`);
+        }
+        if (args.action === "send") {
+          if (args.input === undefined && args.signal === undefined) {
+            throw new Error('`proc` with action "send" requires `input` or `signal`.');
+          }
+          const result = await sendJob(jobs, {
+            handle: args.handle,
+            ...(args.input === undefined ? {} : { input: args.input }),
+            ...(args.raw === undefined ? {} : { raw: args.raw }),
+            ...(args.signal === undefined ? {} : { signal: args.signal }),
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(context.abortSignal === undefined ? {} : { abortSignal: context.abortSignal }),
+            source: "agent",
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Sent to", result) }] };
+        }
+        if (args.action === "read") {
+          const result = await readJob(jobs, {
+            handle: args.handle,
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(args.tailLines === undefined ? {} : { tailLines: args.tailLines }),
+            ...(context.abortSignal === undefined ? {} : { abortSignal: context.abortSignal }),
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Read", result) }] };
+        }
+        const result = await stopJob(jobs, args.handle);
+        return { output: [{ type: "text" as const, text: formatJobResult("Stopped", result) }] };
       },
     }),
   ];

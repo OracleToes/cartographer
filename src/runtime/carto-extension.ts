@@ -40,6 +40,7 @@ import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 import type { ModelTelemetry } from "./model-telemetry.js";
+import { summarizeJobs, type JobTable } from "./jobs.js";
 
 /**
  * The system prompt (§7): the tools describe themselves, so this carries only
@@ -50,7 +51,7 @@ import type { ModelTelemetry } from "./model-telemetry.js";
 export function cartoInstructions(person: string): string {
   return [
     `You are Carto: the working attention on one project, kept for ${person}. Your plain text is your own thinking; ${person} hears you through \`chat\`, so say what matters there plainly, once.`,
-    `Every visible item carries a handle: H is this prompt, Y tools, A/L/C Brain records, U is ${person}'s messages, X your working, B the \`<carto-state>\` block, T1 the tree (F files, D directories), R/S tool and shell results, and P pins. Each request ends with \`<carto-state>\` showing mode, fullness, recent writes, staleness, tree, pins, and marks.`,
+    `Every visible item carries a handle: H is this prompt, Y tools, A/L/C Brain records, U is ${person}'s messages, X your working, B the \`<carto-state>\` block, T1 the tree (F files, D directories), J persistent jobs, R/S tool and shell results, and P pins. Each request ends with \`<carto-state>\` showing mode, fullness, recent writes, staleness, jobs, tree, pins, and marks.`,
     `Think before you move. When given a task, map the problem and its steps into a loose graph in Atlas: goals linked to steps down to atomic leaves attached to the files they touch, working leaves before stems with no rigid order beyond that. Keep Ledger light and live: your active leaf, open questions, what is solved, and current progress.`,
     `Build in small, atomic steps: one function, one line, one value change, or one focused chunk at a time. When adding a file, \`create\` minimal boilerplate or a skeleton first, then grow it incrementally with \`edit\` so each step is easy to read, run, and judge. Update your existing Atlas or Ledger handle in place as you go, for nearly every change, so a collapse at any moment (even mid-step) leaves your progress, solved pieces, and next move intact.`,
     `Experience and verify what you build before handing it over. Build and maintain one reusable, non-accumulative, low-token interactive testing harness shaped for the project, like your own dev dashboard: extend it in place as the project grows rather than piling up one-off test files or growing scripted sequences. Use it to drive the real product as someone using it and as a developer, manipulate live state directly, jump into tricky states and edge cases, and inspect compact state output after each action so bugs surface to you instead of ${person}. Treat \`sleep\` as a last resort: keep exercising the product, probing edge cases, and fixing what breaks until you can genuinely find nothing else left to verify or improve, and \`sleep\` only when work is exhausted.`,
@@ -117,6 +118,8 @@ export interface CartoExtensionOptions {
   root: string;
   brain: BrainStore;
   session: LiveSessionState;
+  /** Persistent piped jobs owned by the host (survives collapse). */
+  jobs?: JobTable;
   /** Absolute path of the frozen projection for this generation. */
   markdownPath: string;
   now?: () => number;
@@ -305,6 +308,7 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
+    ...(options.jobs === undefined ? {} : { jobs: summarizeJobs(options.jobs) }),
     // Atlas notes drift, a pinned file that is gone drifts, and a pinned `read`
     // result whose file changed is the same fact about a quotation (§5.5).
     stale: staleMarksFor(brain, options.root, options.session),
@@ -429,7 +433,12 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       }),
     ],
     tools: [
-      ...createTools({ root: options.root, brain: options.brain, session: options.session }),
+      ...createTools({
+        root: options.root,
+        brain: options.brain,
+        session: options.session,
+        ...(options.jobs === undefined ? {} : { jobs: options.jobs }),
+      }),
       // `bash` is pi-durable's own (§7, §12): it runs through the env wired in
       // live-session, an abort kills the command, and its retained tail and
       // spill file are the package's bounds, stated in its description (§1).

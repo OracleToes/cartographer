@@ -45,6 +45,7 @@ import {
 } from "./live-session.js";
 import type { ModelRef } from "./config.js";
 import { formatModelRef, indexModels, resolveIndexedModel } from "./model-catalog.js";
+import { createJobTable, formatExit, stopAllJobs, summarizeJobs } from "./jobs.js";
 
 export interface HeadlessOptions extends LiveSessionOptions {
   input: Readable;
@@ -66,6 +67,7 @@ export interface HeadlessOptions extends LiveSessionOptions {
 const HELP = [
   "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
   "  /model     list provider models (/model <name> switches at the next step)",
+  "  /jobs      list persistent piped jobs",
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /help      see this",
@@ -132,7 +134,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
   let activeModel: ModelRef = { ...options.model };
-  const sessionOptions = (): HeadlessOptions => ({ ...options, model: activeModel });
+  const jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+  const sessionOptions = (): HeadlessOptions => ({ ...options, model: activeModel, jobs });
   const refresh = async () => {
     // Silent on failure: an unreachable server leaves the last known window standing.
     await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
@@ -244,6 +247,23 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         writeLine(output, HELP);
         continue;
       }
+      if (line === "/jobs") {
+        const list = summarizeJobs(jobs);
+        if (list.length === 0) {
+          writeLine(output, "(no persistent jobs)");
+        } else {
+          for (const job of list) {
+            const state =
+              job.status === "exited"
+                ? `exited(${formatExit(job.exitCode, job.exitSignal)})`
+                : job.unreadLines > 0
+                  ? `running · ${job.unreadLines} unread`
+                  : "running · idle";
+            writeLine(output, `${job.handle} "${job.label}" · ${state}`);
+          }
+        }
+        continue;
+      }
       if (line === "/pause" || line.startsWith("/pause ")) {
         const argument = line.slice("/pause".length).trim();
         const to = argument === "on" ? true : argument === "off" ? false : argument === "" ? undefined : null;
@@ -327,6 +347,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   } finally {
     await queue;
     await watch?.stop().catch(() => undefined);
+    await stopAllJobs(jobs).catch(() => undefined);
     await closeLiveSession(session);
   }
   if (linesSeen === 0 && !inputIsTTY) {

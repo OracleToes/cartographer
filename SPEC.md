@@ -439,6 +439,9 @@ dashboard about its Brain and the project, and it reports:
   by handle.
 - **New and stale entries** — Brain records written since the last collapse, and
   read results whose file changed since the read, named by handle (§5.5).
+- **Persistent jobs** — when persistent piped processes exist, one compact
+  status line per `J` handle (label, running/exited status, unread line count,
+  quiet/active indicator); never scrollback buffers, and omitted when none exist.
 - **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
 - **Marks** — every entry carrying a mark, with its action and its author (§4.1).
@@ -499,6 +502,7 @@ when something changed.
 | `X` | an ephemeral item, pinned or not |
 | `R` | the result of a tool call |
 | `S` | the result of `bash` |
+| `J` | a persistent piped process (`proc`) |
 | `E` | a Brain entry written since the last collapse, seen in the body |
 | `U` | the person's message |
 
@@ -696,6 +700,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
+| `proc` | Starts, drives, reads, and stops persistent piped processes (`J` handles) that live in host memory, survive collapse, and are shared live in the `jobs` view. |
 | `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain. |
 | `sleep` | Waits: forever, or for a number of seconds. |

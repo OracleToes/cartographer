@@ -58,6 +58,16 @@ import type { ModelRef } from "../runtime/config.js";
 import { formatModelRef, indexModels, listIndexedModels, resolveIndexedModel } from "../runtime/model-catalog.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
+import {
+  createJobTable,
+  onJobsChange,
+  sendJob,
+  snapshotJobs,
+  startJob,
+  stopAllJobs,
+  stopJob,
+  summarizeJobs,
+} from "../runtime/jobs.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { bashTool as cartoBashTool, cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
@@ -80,6 +90,7 @@ import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./side
 import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
+import { JobsView } from "./jobs-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
@@ -142,6 +153,7 @@ function countSidebar(
   contextTokens: number = 0,
   archive?: { total: number; pinned: number },
   tree?: { anchor: string; depth: number },
+  jobs?: { total: number; unread: number },
 ): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
   const stale: Partial<Record<"atlas" | "ledger" | "chat" | "context", number>> = {};
@@ -172,6 +184,8 @@ function countSidebar(
   }
   return {
     chat: brainState.chat.length,
+    jobs: jobs?.total ?? 0,
+    jobsUnread: jobs?.unread ?? 0,
     contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
@@ -372,7 +386,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   if (options.refreshCapacity === true) await refresh();
 
-  const session = await openLiveSession(options);
+  const jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+  const session = await openLiveSession({ ...options, jobs });
   const state: TuiState = {
     session,
     model: activeModel,
@@ -406,7 +421,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = () => formatModelRef(state.model);
-  const sessionOptions = (): LiveSessionOptions => ({ ...options, model: state.model });
+  const sessionOptions = (): LiveSessionOptions => ({ ...options, model: state.model, jobs });
   const headerState = {
     project,
     modelLabel: modelLabel(),
@@ -463,12 +478,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
+  const jobsView = new JobsView();
   const contextView = new ContextView();
   const treeView = new TreeView();
   const archiveView = new ArchiveView();
 
-  // Each pannable view gets its own scroll view; Atlas and Ledger mount their
-  // list and detail panes in independent ScrollViews on wide viewports.
+  // Each pannable view gets its own scroll view; Atlas, Ledger, and Jobs mount
+  // their list and detail panes in independent ScrollViews on wide viewports.
   const atlasListScroll = new ScrollView(atlasView.listPane, { primary: false, overscroll: "contain" });
   const atlasDetailScroll = new ScrollView(atlasView.detailPane, { primary: false, overscroll: "contain", scrollbar: "auto" });
   const atlasNarrowScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
@@ -480,6 +496,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const ledgerNarrowScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
   ledgerView.attachScrolls(ledgerListScroll, ledgerDetailScroll);
   ledgerView.onFocus = () => tui.setFocus(ledgerView);
+
+  const jobsListScroll = new ScrollView(jobsView.listPane, { primary: false, overscroll: "contain" });
+  const jobsDetailScroll = new ScrollView(jobsView.detailPane, { primary: false, follow: "end", overscroll: "contain", scrollbar: "auto" });
+  const jobsNarrowScroll = new ScrollView(jobsView, { primary: false, overscroll: "contain" });
+  jobsView.attachScrolls(jobsListScroll, jobsDetailScroll);
+  jobsView.onFocus = () => tui.setFocus(jobsView);
+  jobsView.onChange = () => tui.requestRender();
 
   const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
   const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
@@ -502,6 +525,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const brainState = await brain.read();
     const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
+    const jobSummaries = summarizeJobs(jobs);
     sidebar.setCounts(
       countSidebar(
         brainState,
@@ -514,6 +538,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         // The same anchor and depth the `tree` tool last set: the sidebar counts
         // what the view shows, not a second tree of its own.
         state.session.state.tree,
+        {
+          total: jobSummaries.length,
+          unread: jobSummaries.filter((job) => job.unreadLines > 0).length,
+        },
       ),
     );
     sidebar.setActiveBook(state.view);
@@ -535,6 +563,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       root: options.root,
       brain,
       session: state.session.state,
+      jobs,
     });
     // The tools the model is offered, as the extension registers them: `bash`
     // is the one with Carto's sentence in its description, not the package's.
@@ -648,7 +677,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
 
     const stateBlock = await renderLiveStateBlock(
-      { root: options.root, brain, session: state.session.state, markdownPath: state.session.markdownPath },
+      { root: options.root, brain, session: state.session.state, jobs, markdownPath: state.session.markdownPath },
       messages,
     );
 
@@ -698,6 +727,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       return;
     }
     if (state.view === "chat") tui.setFocus(transcript.isSelecting() ? transcript : editor);
+    else if (state.view === "jobs") tui.setFocus(jobsView);
     else if (state.view === "atlas") tui.setFocus(atlasView);
     else if (state.view === "ledger") tui.setFocus(ledgerView);
     else if (state.view === "tree") tui.setFocus(treeView);
@@ -706,13 +736,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const switchToView = async (view: ViewMode) => {
     if (view !== "chat") transcript.stopSelecting();
+    if (view !== "jobs") jobsView.exitTyping();
     state.view = view;
     headerState.view = view;
     sidebar.setActiveBook(view);
     focusCurrent();
     const brainState = await brain.read();
 
-    if (view === "atlas") {
+    if (view === "jobs") {
+      jobsView.setData(snapshotJobs(jobs));
+    } else if (view === "atlas") {
       atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
     } else if (view === "ledger") {
       ledgerView.setData(brainState);
@@ -741,6 +774,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sidebar.setLayer(layer);
     if (layer === "archive") {
       await refreshArchive();
+    } else if (state.view === "jobs") {
+      jobsView.setData(snapshotJobs(jobs));
     } else if (state.view === "context") {
       await syncContextView(await brain.read());
     } else if (state.view === "atlas") {
@@ -759,6 +794,32 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   atlasView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
+  jobsView.onBack = () => void switchToView("chat");
+  jobsView.onStart = (command) => {
+    void startJob(jobs, { command, waitMs: 0 })
+      .then((res) => pushStatus(`started ${res.handle} "${res.label}"`))
+      .catch((error) => pushStatus(`start failed: ${errorText(error)}`));
+  };
+  jobsView.onSend = (handle, input) => {
+    void sendJob(jobs, { handle, input, source: "user", waitMs: 0 })
+      .catch((error) => pushStatus(`send failed: ${errorText(error)}`));
+  };
+  jobsView.onSignal = (handle, signal) => {
+    void sendJob(jobs, { handle, signal, source: "user", waitMs: 0 })
+      .then(() => pushStatus(`sent ${signal} to ${handle}`))
+      .catch((error) => pushStatus(`signal failed: ${errorText(error)}`));
+  };
+  jobsView.onStop = (handle) => {
+    void stopJob(jobs, handle)
+      .then(() => pushStatus(`stopped ${handle}`))
+      .catch((error) => pushStatus(`stop failed: ${errorText(error)}`));
+  };
+  const unsubJobs = onJobsChange(jobs, () => {
+    if (shutdownRequested) return;
+    jobsView.setData(snapshotJobs(jobs));
+    void refreshSidebar().catch(() => undefined);
+    tui.requestRender();
+  });
   contextView.onBack = () => void switchToView("chat");
   treeView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
@@ -1295,9 +1356,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     ]);
   const atlasSplit = bookSplit(atlasView.headerPane, atlasListScroll, atlasDetailScroll, atlasNarrowScroll, 36);
   const ledgerSplit = bookSplit(ledgerView.headerPane, ledgerListScroll, ledgerDetailScroll, ledgerNarrowScroll, 38);
-  const inSplitBook = () => state.layer === "context" && (state.view === "atlas" || state.view === "ledger");
+  const jobsSplit = bookSplit(jobsView.headerPane, jobsListScroll, jobsDetailScroll, jobsNarrowScroll, 32);
+  const inSplitBook = () => state.layer === "context" && (state.view === "atlas" || state.view === "ledger" || state.view === "jobs");
   const workArea = new Column([
     scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
+    { component: jobsSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "jobs" && state.layer === "context" },
     { component: atlasSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
     { component: ledgerSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
     scrolled(treeScroll, () => state.view === "tree" && state.layer === "context"),
@@ -1306,6 +1369,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { ...pane(0), grow: 1, visible: () => !inSplitBook() },
   ]);
   const inChatLayer = () => state.view === "chat" && state.layer === "context";
+  const inJobsLayer = () => state.view === "jobs" && state.layer === "context";
   // The working pane: a row of air above the content, the prompt (only where
   // you type) across its foot, and a row below it where there is no prompt. The
   // views indent themselves, so there is no column of air either side: every
@@ -1314,7 +1378,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     pane(1),
     { component: workArea, basis: 0, grow: 1, minSize: 3 },
     { component: editor, basis: "auto", minSize: 3, visible: inChatLayer },
-    { ...pane(1), visible: () => !inChatLayer() },
+    { component: jobsView.inputPane, basis: "auto", minSize: 1, visible: inJobsLayer },
+    { ...pane(1), visible: () => !inChatLayer() && !inJobsLayer() },
   ]);
   // The panes' row, margins included: one cell of chrome either side on a
   // narrow terminal, two on a wide one. The sidebar's margin, its panel below the
@@ -1383,10 +1448,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const shutdown = async (code: number): Promise<void> => {
     if (shutdownRequested) return;
     shutdownRequested = true;
+    unsubJobs();
     if (liveTimer !== undefined) clearInterval(liveTimer);
     tui.stop();
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
+    await stopAllJobs(jobs).catch(() => undefined);
     await closeLiveSession(state.session);
     resolveRun?.(code);
   };
@@ -2601,6 +2668,58 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => !inChat(),
     },
     {
+      id: "view-jobs",
+      group: "go to",
+      label: "jobs",
+      hint: "persistent piped processes and live console",
+      run: () => void switchToView("jobs"),
+      available: () => !inView("jobs"),
+    },
+    {
+      id: "jobs-send",
+      group: "jobs",
+      label: "send stdin",
+      key: "i",
+      run: () => {
+        jobsView.enterSend();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob()?.status === "running",
+    },
+    {
+      id: "jobs-start",
+      group: "jobs",
+      label: "start job",
+      key: "n",
+      run: () => {
+        jobsView.enterStart();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping(),
+    },
+    {
+      id: "jobs-signal",
+      group: "jobs",
+      label: "SIGINT",
+      key: "s",
+      run: () => {
+        jobsView.signalSelected("SIGINT");
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob()?.status === "running",
+    },
+    {
+      id: "jobs-stop",
+      group: "jobs",
+      label: "stop job",
+      key: "d",
+      run: () => {
+        jobsView.stopSelected();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob() !== undefined,
+    },
+    {
       id: "view-atlas",
       group: "go to",
       label: "the atlas",
@@ -2651,7 +2770,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       label: "back to the transcript",
       key: "escape",
       run: () => void switchToView("chat"),
-      available: () => state.layer === "context" && state.view !== "chat",
+      available: () => state.layer === "context" && state.view !== "chat" && !(state.view === "jobs" && jobsView.isTyping()),
     },
   ] satisfies Command[]);
 
