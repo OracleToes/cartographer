@@ -25,11 +25,6 @@ export interface GlobalConfig {
   /** The pinned context window: it always wins (it can raise the server's advertised capacity). Unset: the server's advertised capacity is used. */
   contextWindow?: number;
   /**
-   * The context fill, in percent of a known window (greater than 0, at most 100),
-   * at which the state block says `[COLLAPSE NEEDED]`. Unset: 75.
-   */
-  collapseWarningPercent?: number;
-  /**
    * What the agent calls the person at the keyboard. Unset: the account that
    * launched Carto, resolved at run time — a name, never a role word.
    */
@@ -62,14 +57,6 @@ function parseContextWindow(value: unknown, where: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
     throw new ConfigError(`${where}: contextWindow must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got ${JSON.stringify(value)}.`);
-  }
-  return value;
-}
-
-function parseCollapseWarningPercent(value: unknown, where: string): number | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 100) {
-    throw new ConfigError(`${where}: collapseWarningPercent must be a number above 0 and at most 100 — the context fill, in percent, at which the state block says COLLAPSE NEEDED (default 75); got ${JSON.stringify(value)}.`);
   }
   return value;
 }
@@ -117,13 +104,11 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
   const llamaSwapEndpoint = parseEndpoint(record.llamaSwapEndpoint, where);
   const contextWindow = parseContextWindow(record.contextWindow, where);
   const userName = parseUserName(record.userName, where);
-  const collapseWarningPercent = parseCollapseWarningPercent(record.collapseWarningPercent, where);
   return {
     version: 1,
     model: record.model,
     ...(llamaSwapEndpoint === undefined ? {} : { llamaSwapEndpoint }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
-    ...(collapseWarningPercent === undefined ? {} : { collapseWarningPercent }),
     ...(userName === undefined ? {} : { userName }),
   };
 }
@@ -205,7 +190,6 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
   if (effectiveWindow !== undefined) merged.contextWindow = effectiveWindow;
   const effectiveName = userName ?? config.userName;
   if (effectiveName !== undefined) merged.userName = effectiveName;
-  if (config.collapseWarningPercent !== undefined) merged.collapseWarningPercent = config.collapseWarningPercent;
   return { config: merged, path, created: false };
 }
 

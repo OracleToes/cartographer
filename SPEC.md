@@ -297,9 +297,7 @@ This holds for every host and for a run that nothing of the person's started,
 such as a timed rest waking.
 
 - **The warning.** At an estimated 75% of a known window the state block says
-  `[COLLAPSE NEEDED]` on every request until the context is rebuilt (75% is the
-  default; `collapseWarningPercent` in the configuration sets it, above 0 and at
-  most 100, and the same value is the line the automatic-collapse bound reads): write what
+  `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
   you need to continue to the Brain, mark what is obsolete, then collapse. An
   unknown window is reported as unknown; no percentage is invented.
 - **Limits are the other trigger.** Carto uses the signals pi already provides
@@ -421,8 +419,7 @@ dashboard about its Brain and the project, and it reports:
 
 - **Context fullness** — the server's input and output count for the last
   response, plus estimated tool work added since. When the window is known,
-  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75% (or the configured
-  `collapseWarningPercent`); when it is
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
   unknown, do not invent a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
@@ -773,18 +770,7 @@ read and changed. The body holds every message the model receives, the agent's `
 calls and its plain text included; the tail is the state block as sent. The
 head is listed in §5.1's order, the system prompt first (it is the first
 section of the system message, ahead of the projection); the tools are shown as
-registered, `bash` with Carto's sentence. **Every entry carries what it costs the
-model**, in estimated tokens at the right edge of its row (`2.0k tok`, one figure
-whether the entry is open or closed, and whichever view is shown): the bytes of
-that entry as sent, at the estimator's four bytes to the token. An entry that is a
-tenth or more of the whole is drawn in the warning colour, so the expensive ones
-stand out. The count in the header is the sum of the rows. A row too narrow to
-hold its pending mark and the figure keeps the mark.
-
-**An entry's header is its own band.** A transcript card and a Context entry each
-have a header (handle, name, summary or marks) and a body; the header row is
-drawn a step lighter than the page, and the body stays on the page, so a column
-of entries is scanned by its headers and the two are never confused.
+registered, `bash` with Carto's sentence. The token count covers what is shown.
 
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the

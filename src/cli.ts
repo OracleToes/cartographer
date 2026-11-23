@@ -123,7 +123,6 @@ try {
         output: process.stdout,
         error: process.stderr,
         person,
-        ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
     : await (await import("./ui/app.js")).runTui({
@@ -132,7 +131,6 @@ try {
         models,
         model,
         person,
-        ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });
   await brain.close();

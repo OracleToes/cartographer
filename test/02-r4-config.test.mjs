@@ -55,13 +55,6 @@ test("parseConfig rejects a bad version, model, endpoint, and context window", (
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 512 }).contextWindow, 512, "the pin is the person's number — any integer ≥ 0 wins");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 0 }).contextWindow, 0, "0 is the valid 'no pin' pin");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 75_000 }).contextWindow, 75_000);
-  // The fill at which the state block says COLLAPSE NEEDED.
-  assert.equal(parseConfig({ version: 1, model: "llama-swap/x" }).collapseWarningPercent, undefined, "unset means the default");
-  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 60 }).collapseWarningPercent, 60);
-  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 100 }).collapseWarningPercent, 100);
-  for (const bad of [0, -5, 101, "75", null, Number.NaN]) {
-    assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: bad }), /collapseWarningPercent/, `rejects ${String(bad)}`);
-  }
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {
@@ -97,10 +90,9 @@ test("a missing config with --model is created; a later load reads it back", asy
 test("overrides against an existing config apply in memory; the file is untouched", async () => {
   const home = tempDir();
   try {
-    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000, collapseWarningPercent: 60 }, home);
+    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000 }, home);
     const overridden = await loadGlobalConfig({ home, contextWindowOverride: 40_960, llamaSwapEndpointOverride: "http://example:9/v1" });
     assert.equal(overridden.config.contextWindow, 40_960);
-    assert.equal(overridden.config.collapseWarningPercent, 60, "the warning's line survives the merge with overrides");
     assert.equal(overridden.config.llamaSwapEndpoint, "http://example:9/v1");
     const onDisk = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
     assert.equal(onDisk.contextWindow, 75_000);

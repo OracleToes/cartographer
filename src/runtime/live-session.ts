@@ -35,7 +35,6 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
 import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
-import { COLLAPSE_WARNING_PERCENT } from "../domain/state-block.js";
 import { createCartoExtension, generationProgressed, newGenerationWork, type LiveSessionState } from "./carto-extension.js";
 import { personName } from "../domain/person.js";
 import type { BrainStore } from "./brain-store.js";
@@ -76,8 +75,6 @@ export interface LiveSessionOptions {
    * the same person and nothing guesses a second time.
    */
   person?: string;
-  /** The fill, in percent of a known window, at which the state block says `[COLLAPSE NEEDED]` (config: `collapseWarningPercent`). Default 75. */
-  collapseWarningPercent?: number;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -153,7 +150,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const state: LiveSessionState = {
     person: options.person ?? personName(),
     contextWindow,
-    collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
     paused: false,
     pending: [],
     tree: { anchor: root, depth: 2 },
@@ -244,7 +240,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         if (reason === null) return { kind: "none" };
         // A generation that was itself rebuilt automatically and did nothing
         // before asking again is the loop this bound exists to break.
-        if (state.rebuiltAutomatically && !generationProgressed(state.work, state.collapseWarningPercent)) {
+        if (state.rebuiltAutomatically && !generationProgressed(state.work)) {
           return { kind: "stop", reason, explanation: stalledCollapseExplanation(reason) };
         }
         return { kind: "collapse", reason };

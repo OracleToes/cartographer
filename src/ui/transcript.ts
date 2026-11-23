@@ -48,7 +48,7 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 
 import type { Mark, PinnedEphemeral } from "../domain/records.js";
-import { canvasLine, headerLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
 import { RecordControls, type RecordAction } from "./record-controls.js";
 
 /**
@@ -815,14 +815,12 @@ export class TranscriptView implements Component, Focusable {
    */
   private inset(lines: string[], width: number, selected?: { start: number; end: number }): string[] {
     const armed = selected !== undefined && this.archiveConfirmation === this.cursorKey;
-    // A card's header row is a band of its own colour; its body stays on the page.
-    const headers = new Set(this.ranges.map((range) => range.header));
     return lines.map((line, index) => {
       if (line.length === 0) return canvasLine("", width);
       // The cursor is a bar in the margin, red when the next key archives.
       const inside = selected !== undefined && index >= selected.start && index < selected.end;
       const margin = inside ? `${armed ? tokens.danger("▌") : tokens.accent("▌")} ` : "  ";
-      return (headers.has(index) ? headerLine : canvasLine)(`${margin}${line}`, width);
+      return canvasLine(`${margin}${line}`, width);
     });
   }
 }
