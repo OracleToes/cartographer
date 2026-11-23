@@ -1583,3 +1583,23 @@ test("the frame paints every cell: fills are solid, resets re-arm the surface, a
   assert.equal(visibleWidth(keys), 60);
   assert.ok(plain(keys).startsWith(" ^x"), "the key bar is inset one cell");
 });
+
+test("the frame's stacks are laid out once per frame: a long pane is not re-rendered at every level of nesting", async () => {
+  const { Row, Column } = await import("../dist/ui/frame.js");
+  const { renderLayoutFrame } = await import("../node_modules/@earendil-works/pi-tui/dist/layout.js");
+  // Frames are requested for every chunk the model streams, and the context bar
+  // is repainted by them; a layout that composites the whole transcript again at
+  // every nesting level made each frame ~50x slower and the bar lag the stream.
+  const spy = {
+    calls: 0,
+    invalidate() {},
+    render(width) {
+      this.calls += 1;
+      return Array.from({ length: 400 }, () => "x".repeat(width));
+    },
+  };
+  const inner = new Row([{ component: new Row([{ component: new Column([{ component: spy, basis: 0, grow: 1 }]), basis: 0, grow: 1 }]), basis: 0, grow: 1 }]);
+  const frame = renderLayoutFrame(new Column([{ component: inner, basis: 0, grow: 1 }]), 80, 24, () => {});
+  assert.equal(spy.calls, 1, "rendered once, by the layout pass");
+  assert.equal(frame.lines.length, 24);
+});

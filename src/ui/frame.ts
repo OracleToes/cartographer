@@ -14,7 +14,7 @@
  * and clipped by the layout to the room it has. It is a margin when given a
  * fixed size, and a pane's floor when given `grow`.
  */
-import type { Component } from "@earendil-works/pi-tui";
+import { HStack, VStack, type Component } from "@earendil-works/pi-tui";
 
 import { fillLine } from "./tokens.js";
 
@@ -60,3 +60,29 @@ export const margin = {
   edge: (viewport: Viewport): boolean => viewport.height >= 20,
   gap: (viewport: Viewport): boolean => viewport.height >= 26,
 };
+
+/**
+ * Stacks that cost nothing to measure.
+ *
+ * pi-tui's layout measures every entry of an `HStack` by calling its `render`,
+ * and a stack's own `render` is the flattened, un-laid-out path: it renders and
+ * composites every child row by row. Nested around a long transcript that is
+ * the whole transcript composited again at every level, on every frame, and a
+ * frame is requested for every chunk the model streams — about fifty times
+ * slower than the layout itself, so the context bar lagged behind the stream.
+ *
+ * A layout that gives its stacks a definite height (every stack here sits in a
+ * parent that does) never reads that measurement: children are stretched. So
+ * these measure as nothing, and the layout pass is the only render.
+ */
+export class Row extends HStack {
+  override render(): string[] {
+    return [];
+  }
+}
+
+export class Column extends VStack {
+  override render(): string[] {
+    return [];
+  }
+}

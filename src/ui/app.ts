@@ -30,11 +30,9 @@ import { basename, relative, resolve } from "node:path";
 
 import {
   Editor,
-  HStack,
   ProcessTerminal,
   ScrollView,
   TuiAltScreen,
-  VStack,
   type Component,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
@@ -82,7 +80,7 @@ import { ContextView, type ContextDialogueMessage, type ContextToolItem, type Co
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
-import { Fill, margin, type Viewport } from "./frame.js";
+import { Column, Fill, margin, Row, type Viewport } from "./frame.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -1207,7 +1205,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // A scrolling view takes the height of its content, up to the room there is,
   // and the pane's own colour fills the rest.
   const scrolled = (component: Component, visible: () => boolean) => ({ component, basis: "auto" as const, shrink: 1, minSize: 3, visible });
-  const workArea = new VStack([
+  const workArea = new Column([
     scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
     scrolled(atlasScroll, () => state.view === "atlas" && state.layer === "context"),
     scrolled(ledgerScroll, () => state.view === "ledger" && state.layer === "context"),
@@ -1220,35 +1218,35 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // The working pane: a row of air above the content, a cell either side, the
   // prompt (only where you type) across its foot, and a row below it where
   // there is no prompt.
-  const workPane = new VStack([
+  const workPane = new Column([
     pane(1),
-    { component: new HStack([pane(1), { component: workArea, basis: 0, grow: 1 }, pane(1)]), basis: 0, grow: 1, minSize: 3 },
+    { component: new Row([pane(1), { component: workArea, basis: 0, grow: 1 }, pane(1)]), basis: 0, grow: 1, minSize: 3 },
     { component: editor, basis: "auto", minSize: 3, visible: inChatLayer },
     { ...pane(1), visible: () => !inChatLayer() },
   ]);
   // The sidebar's panel runs to the foot of the pane; the list is what it holds.
-  const sidebarPane = new VStack([{ component: sidebar, basis: "auto" }, { ...pane(0, rawPalette.panel), grow: 1 }]);
-  const panes = new HStack([
+  const sidebarPane = new Column([{ component: sidebar, basis: "auto" }, { ...pane(0, rawPalette.panel), grow: 1 }]);
+  const panes = new Row([
     { component: sidebarPane, basis: sidebarWidth, visible: () => state.sidebarVisible },
     { ...chrome(1), visible: () => state.sidebarVisible },
     { component: workPane, basis: 0, grow: 1, minSize: 20 },
   ]);
   // One cell of chrome either side of the panes on a narrow terminal, two on a wide one.
   const framed = (inner: Component) =>
-    new HStack([
+    new Row([
       { ...chrome(2), visible: margin.wide },
       { ...chrome(1), visible: margin.narrow },
       { component: inner, basis: 0, grow: 1, minSize: 20 },
       { ...chrome(2), visible: margin.wide },
       { ...chrome(1), visible: margin.narrow },
     ]);
-  const screen = new VStack([
+  const screen = new Column([
     chrome(1, margin.edge),
     { component: framed(header), basis: 1 },
     chrome(1, margin.gap),
     { component: framed(panes), basis: 0, grow: 1, minSize: 6 },
     chrome(1, margin.gap),
-    { component: framed(new VStack([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
+    { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
     chrome(1, margin.edge),
   ]);
 
