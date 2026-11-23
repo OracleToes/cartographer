@@ -80,13 +80,16 @@ function writeLine(stream: Writable, line: string): void {
   stream.write(`${line}\n`);
 }
 
-/** New agent-authored chat records since `seen`; adds them to `seen`. */
-async function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<string>): Promise<string[]> {
-  const lines: string[] = [];
+/** New agent- or system-authored chat records since `seen`; adds them to `seen`. */
+async function drainVisibleChat(
+  brain: LiveSessionOptions["brain"],
+  seen: Set<string>,
+): Promise<Array<{ author: "agent" | "system"; text: string }>> {
+  const lines: Array<{ author: "agent" | "system"; text: string }> = [];
   for (const record of (await brain.read()).chat) {
-    if (record.author !== "agent" || seen.has(record.id)) continue;
+    if ((record.author !== "agent" && record.author !== "system") || seen.has(record.id)) continue;
     seen.add(record.id);
-    lines.push(record.text);
+    lines.push({ author: record.author, text: record.text });
   }
   return lines;
 }
@@ -118,9 +121,16 @@ async function runCollapse(
   output: Writable,
   reason: string,
   automatic = false,
+  trigger?: "agent" | "automatic",
 ): Promise<LiveSession> {
   const previousGeneration = session.generation;
-  const outcome = await collapseLiveSession(session, options, reason, {}, { automatic });
+  const outcome = await collapseLiveSession(
+    session,
+    options,
+    reason,
+    {},
+    { automatic, ...(trigger === undefined ? {} : { trigger }) },
+  );
   const swept = outcome.report.swept === undefined ? "" : `; swept ${outcome.report.swept}`;
   const archived = outcome.report.archived.length === 0 ? "" : `; archived ${outcome.report.archived.length}`;
   const dropped = outcome.report.dropped.length === 0 ? "" : `; dropped ${outcome.report.dropped.length} past grace`;
@@ -164,7 +174,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     };
   };
   bindResponseRefresh(session);
-  const seenChat = new Set<string>((await options.brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id));
+  const seenChat = new Set<string>(
+    (await options.brain.read()).chat
+      .filter((record) => record.author === "agent" || record.author === "system")
+      .map((record) => record.id),
+  );
+  const printVisibleChat = async (): Promise<void> => {
+    for (const item of await drainVisibleChat(options.brain, seenChat)) {
+      writeLine(output, `${item.author === "system" ? "system" : "carto"}: ${item.text}`);
+    }
+  };
 
   writeLine(output, `carto · ${options.model.provider}/${options.model.modelId} · ${options.root}`);
   writeLine(output, HELP);
@@ -197,7 +216,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       await waitForRunEnd(session);
       // Silence is a real answer: an agent with nothing to say ends its turn
       // without a chat call, and that needs no remark from the driver.
-      for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+      await printVisibleChat();
       const verdict = session.reviewCollapseRequest();
       if (verdict.kind === "none") break;
       if (verdict.kind === "stop") {
@@ -205,7 +224,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         break;
       }
       try {
-        session = await runCollapse(session, sessionOptions(), output, verdict.reason, true);
+        session = await runCollapse(session, sessionOptions(), output, verdict.reason, true, verdict.trigger);
+        await printVisibleChat();
       } catch (err) {
         writeLine(error, `(the collapse failed: ${err instanceof Error ? err.message : String(err)})`);
         break;
@@ -348,7 +368,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         await exclusive(async () => {
           session = await runCollapse(session, sessionOptions(), output, "person requested (/collapse)");
           await watchSession();
-          for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+          await printVisibleChat();
         });
         continue;
       }

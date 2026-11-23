@@ -1967,18 +1967,26 @@ test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList
   assert.deepEqual(ran, ["b", "a"]);
 });
 
-test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", () => {
+test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", async () => {
+  const { retainAfterCollapse } = await import("../dist/ui/transcript.js");
   const transcript = new TranscriptView();
-  transcript.setEntries([
+  const entries = [
     { kind: "agent", handle: "C1", recordId: "c1", text: "## Summary\n\n- **Bold** item with `code`" },
-  ]);
+    { kind: "system", handle: "C2", recordId: "c2", text: "Automatic context collapse (context overflow). Rebuilt from the Brain." },
+  ];
+  transcript.setEntries(entries);
   const lines = transcript.render(80);
   for (const line of lines) assert.equal(visibleWidth(line), 80, "every markdown line fits the pane width");
   const text = plain(lines.join("\n"));
   assert.match(text, /Summary/);
   assert.match(text, /Bold/);
   assert.match(text, /code/);
+  assert.match(text, /system C2/);
+  assert.match(text, /Automatic context collapse/);
   assert.doesNotMatch(text, /\*\*Bold\*\*/, "markdown emphasis delimiters are rendered, not left raw");
+  assert.match(transcript.toPlainText(), /^system: Automatic context collapse/m);
+  const retained = retainAfterCollapse(entries, []);
+  assert.equal(retained.filter((entry) => entry.kind === "system").length, 1, "system Chat survives retainAfterCollapse");
 });
 
 test("estimate.ts delegates to pi-ai/utils/estimate", async () => {

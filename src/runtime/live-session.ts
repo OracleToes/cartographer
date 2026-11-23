@@ -50,6 +50,12 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
+import {
+  appendCollapseLog,
+  brainCountsOf,
+  collectCollapseBodyEntries,
+  type CollapseTrigger,
+} from "./collapse-log.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
@@ -120,7 +126,7 @@ export interface LiveSession {
 /** What a requested collapse comes to once the bound on automatic collapse has judged it. */
 export type CollapseVerdict =
   | { readonly kind: "none" }
-  | { readonly kind: "collapse"; readonly reason: string }
+  | { readonly kind: "collapse"; readonly reason: string; readonly trigger: "agent" | "automatic" }
   | { readonly kind: "stop"; readonly reason: string; readonly explanation: string };
 
 /** The words a host shows when it declines to collapse a second time in a row. */
@@ -166,6 +172,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
+    collapseTrigger: null,
     readOnly: false,
     generation,
     lastReportedInput: undefined,
@@ -174,6 +181,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     rebuiltAutomatically: false,
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
+    lastStateBlock: undefined,
   };
 
   // One gate per session, around every model call the session makes (§9).
@@ -258,18 +266,22 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       takeCollapseRequest() {
         const reason = state.collapseRequested;
         state.collapseRequested = null;
+        state.collapseTrigger = null;
         return reason;
       },
       reviewCollapseRequest() {
         const reason = state.collapseRequested;
+        const trigger = state.collapseTrigger;
         state.collapseRequested = null;
+        state.collapseTrigger = null;
         if (reason === null) return { kind: "none" };
         // A generation that was itself rebuilt automatically and did nothing
         // before asking again is the loop this bound exists to break.
         if (state.rebuiltAutomatically && !generationProgressed(state.work, state.collapseWarningPercent)) {
           return { kind: "stop", reason, explanation: stalledCollapseExplanation(reason) };
         }
-        return { kind: "collapse", reason };
+        const resolvedTrigger: "agent" | "automatic" = trigger ?? (reason === "the agent collapsed" ? "agent" : "automatic");
+        return { kind: "collapse", reason, trigger: resolvedTrigger };
       },
     };
     // Only restores already committed by a collapse are retried here. Ordinary
@@ -720,6 +732,8 @@ export interface CollapseFollow {
    * starts on its own, so nobody has to un-stick the agent.
    */
   readonly automatic?: boolean;
+  /** Distinguish an agent `collapse` tool call from a forced automatic limit collapse. */
+  readonly trigger?: "agent" | "automatic";
 }
 
 /** The text of a user input, for the places that need to show or compare it. */
@@ -777,13 +791,54 @@ export async function collapseLiveSession(
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
   const automatic = follow.automatic === true;
+  const trigger: CollapseTrigger = !automatic
+    ? "person"
+    : (follow.trigger ?? (reason === "the agent collapsed" ? "agent" : "automatic"));
   // Read before anything is withdrawn: aborting settles queued inputs, and the
   // sweep removes the store that holds the rest.
   const carry = automatic ? await unansweredInputs(session) : [];
   const paused = session.state.paused;
+  const preCollapseEntries = await sessionTranscript(session).catch(() => []);
+  const brainBefore = brainCountsOf(await options.brain.read());
+  const snapshotMeta = {
+    fromGeneration: session.generation,
+    model: `${options.model.provider}/${options.model.modelId}`,
+    contextWindow: session.state.contextWindow,
+    lastReportedInput: session.state.lastReportedInput ?? null,
+    toolWorkAtLastReport: session.state.toolWorkAtLastReport,
+    work: {
+      requests: session.state.work.requests,
+      steps: session.state.work.steps,
+      startFill: session.state.work.startFill ?? null,
+    },
+    pendingWrites: session.state.pending.length,
+    lastStateBlock: session.state.lastStateBlock ?? null,
+    bodyEntries: collectCollapseBodyEntries(preCollapseEntries),
+  };
   if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT, { background: true });
   else await interruptRun(session);
   await closeLiveSession(session);
+  // A forced automatic collapse (context overflow, declined compaction, or
+  // recoverable length limit) happened without the agent calling `collapse`, so
+  // record a System Chat message before freezing the new head: both the person
+  // and the rebuilt agent see why the context reset.
+  if (trigger === "automatic") {
+    const at = options.now?.() ?? Date.now();
+    const id = `chat:system-collapse:${snapshotMeta.fromGeneration}:${at}`;
+    await options.brain.apply(
+      {
+        kind: "chat.record",
+        record: {
+          id,
+          author: "system",
+          text: `Automatic context collapse (${reason}). Rebuilt from the Brain.`,
+          createdAt: at,
+          updatedAt: at,
+        },
+      },
+      at,
+    );
+  }
   // The Brain moves the marked records itself; what the new generation's frozen
   // prefill is built from is the Brain as it stands after that move (§3.3).
   // The head the next generation freezes names the same person every other
@@ -793,18 +848,51 @@ export async function collapseLiveSession(
     carriedTexts: carry.map((input) => inputText(input.content)),
     ...ceremony,
   });
+  const brainAfter = brainCountsOf(await options.brain.read());
   const next = await openLiveSession({ ...options, jobs: options.jobs ?? session.jobs });
+  let resumed = false;
+  if (automatic) {
+    next.state.rebuiltAutomatically = true;
+    // A pause is the person's, and it outlives a collapse: nothing starts of its own.
+    next.state.paused = paused;
+    // The person's own words are never held back by a pause, which only stops
+    // the agent starting on its own; a state block is that, so it waits.
+    if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
+    for (const input of carry) await admitInput(next, input.content, input.whenBusy);
+    resumed = carry.length > 0 || !paused;
+  }
+  const reportedTotal =
+    snapshotMeta.lastReportedInput === null ? null : snapshotMeta.lastReportedInput + snapshotMeta.toolWorkAtLastReport;
+  const fillPercent =
+    reportedTotal !== null && snapshotMeta.contextWindow > 0
+      ? Math.round((reportedTotal / snapshotMeta.contextWindow) * 100)
+      : null;
+  appendCollapseLog(session.root, {
+    at: new Date(options.now?.() ?? Date.now()).toISOString(),
+    fromGeneration: snapshotMeta.fromGeneration,
+    toGeneration: report.generation,
+    trigger,
+    reason,
+    model: snapshotMeta.model,
+    contextWindow: snapshotMeta.contextWindow,
+    lastReportedInput: snapshotMeta.lastReportedInput,
+    toolWorkAtLastReport: snapshotMeta.toolWorkAtLastReport,
+    fillPercent,
+    work: snapshotMeta.work,
+    pendingWrites: snapshotMeta.pendingWrites,
+    brainBefore,
+    brainAfter,
+    swept: report.swept ?? null,
+    archivedCount: report.archived.length,
+    droppedCount: report.dropped.length,
+    carried: automatic ? carry.length : 0,
+    resumed,
+    lastStateBlock: snapshotMeta.lastStateBlock,
+    bodyEntries: snapshotMeta.bodyEntries,
+  });
   // Opening retries committed ephemeral restores and acknowledges each one
   // only after placement. Do not submit the report's items a second time.
-  if (!automatic) return { session: next, report, reason, carried: 0, resumed: false };
-  next.state.rebuiltAutomatically = true;
-  // A pause is the person's, and it outlives a collapse: nothing starts of its own.
-  next.state.paused = paused;
-  // The person's own words are never held back by a pause, which only stops
-  // the agent starting on its own; a state block is that, so it waits.
-  if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
-  for (const input of carry) await admitInput(next, input.content, input.whenBusy);
-  return { session: next, report, reason, carried: carry.length, resumed: carry.length > 0 || !paused };
+  return { session: next, report, reason, carried: automatic ? carry.length : 0, resumed };
 }
 
 export interface SwitchModelResult {

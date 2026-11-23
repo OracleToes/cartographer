@@ -84,6 +84,7 @@ export type CardEntry =
 export type TranscriptEntry =
   | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; mark?: Mark | undefined }
   | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
+  | { kind: "system"; text: string; /** The Brain chat record this system notice is (e.g. automatic collapse). */ recordId?: string; handle?: string; mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -121,7 +122,7 @@ export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: r
     if (entry.kind === "person") {
       // U handles belong to the old generation, not to historical dialogue.
       retained.push({ kind: "person", text: entry.text });
-    } else if (entry.kind === "agent") {
+    } else if (entry.kind === "agent" || entry.kind === "system") {
       if (entry.recordId !== undefined && seenChat.has(entry.recordId)) continue;
       if (entry.recordId !== undefined) seenChat.add(entry.recordId);
       retained.push(entry);
@@ -535,6 +536,7 @@ export class TranscriptView implements Component, Focusable {
     for (const entry of this.items) {
       if (entry.kind === "person") lines.push(`you: ${entry.text}`);
       else if (entry.kind === "agent") lines.push(`carto: ${entry.text}`);
+      else if (entry.kind === "system") lines.push(`system: ${entry.text}`);
       else if (entry.kind === "status") lines.push(`· ${entry.text}`);
       else if (entry.kind === "reasoning") lines.push(`thinking: ${entry.text}`);
       else if (entry.kind === "output") lines.push(`text: ${entry.text}`);
@@ -553,9 +555,9 @@ export class TranscriptView implements Component, Focusable {
    * A voice block: a header row carrying the coloured spine, label and handle,
    * followed by body lines in body ink so the header sits on its own surface.
    */
-  private block(who: "you" | "carto", text: string, width: number, handle?: string, extra?: string): string[] {
-    const tint = who === "you" ? tokens.person : tokens.agent;
-    const label = who === "you" ? "you" : "carto";
+  private block(who: "you" | "carto" | "system", text: string, width: number, handle?: string, extra?: string): string[] {
+    const tint = who === "you" ? tokens.person : who === "system" ? tokens.warn : tokens.agent;
+    const label = who;
     const marker = [
       handle === undefined || handle.length === 0 ? "" : tokens.faint(handle),
       extra === undefined || extra.length === 0 ? "" : tokens.pin(extra),
@@ -572,13 +574,14 @@ export class TranscriptView implements Component, Focusable {
       else for (const line of rendered) lines.push(`  ${line}`);
       return lines;
     }
+    const bodyInk = who === "system" ? tokens.muted : tokens.text;
     for (const logical of text.split("\n")) {
       if (logical.length === 0) {
         lines.push("  ");
         continue;
       }
       for (const line of wrapTextWithAnsi(logical, body)) {
-        lines.push(`  ${tokens.text(line)}`);
+        lines.push(`  ${bodyInk(line)}`);
       }
     }
     return lines;
@@ -765,10 +768,11 @@ export class TranscriptView implements Component, Focusable {
         continue;
       }
       gap();
-      if (entry.kind === "person" || entry.kind === "agent") {
+      if (entry.kind === "person" || entry.kind === "agent" || entry.kind === "system") {
         const start = lines.length;
         headers.add(start);
-        lines.push(...this.block(entry.kind === "person" ? "you" : "carto", entry.text, width, entry.handle));
+        const speaker = entry.kind === "person" ? "you" : entry.kind === "system" ? "system" : "carto";
+        lines.push(...this.block(speaker, entry.text, width, entry.handle));
         if (entry.mark !== undefined) {
           const mark = `◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`;
           for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - 2))) {

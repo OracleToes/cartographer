@@ -48,6 +48,8 @@ export interface ToolSession {
   tree: { anchor: string; depth: number };
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
+  /** Who triggered the pending collapse request (`agent` tool call vs forced `automatic` limit). */
+  collapseTrigger?: "agent" | "automatic" | null;
 
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
@@ -494,13 +496,32 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries (after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work) as well as when context fills. Update Atlas/Ledger and send any \`chat\` ${them} needs first; everything unpinned outside the Brain is swept.`,
-      parameters: obj({}),
+        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries (after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work) as well as when context fills. Always include \`message\` (at least 1 character): a brief Chat update to ${them} explaining why you are collapsing and what comes next. Update Atlas/Ledger before calling; everything unpinned outside the Brain is swept.`,
+      parameters: obj({
+        message: str({
+          minLength: 1,
+          description: `Brief Chat message to ${them} explaining why you are collapsing and what comes next (at least 1 character).`,
+        }),
+      }),
       replay: "safe",
-      execute: async () => {
+      execute: async (args, api) => {
+        const message = args.message.trim();
+        if (message.length === 0) {
+          throw new Error(`\`collapse\` requires a non-empty \`message\` for ${them} explaining why you are collapsing and what comes next.`);
+        }
+        const id = `chat:${api.callId}`;
+        const existing = await brain.read();
+        if (!existing.chat.some((record) => record.id === id)) {
+          await brain.apply(
+            { kind: "chat.record", record: { id, author: "agent", text: message, createdAt: api.now(), updatedAt: api.now() } },
+            api.now(),
+          );
+          pendingWrite(session, { kind: "chat", action: "record", id });
+        }
         session.collapseRequested = "the agent collapsed";
+        session.collapseTrigger = "agent";
         return {
-          output: [{ type: "text" as const, text: "This run ends here. The context rebuilds from the Brain, and the state block is your next turn." }],
+          output: [{ type: "text" as const, text: `Said to ${them}. This run ends here. The context rebuilds from the Brain, and the state block is your next turn.` }],
           control: { terminate: true },
         };
       },

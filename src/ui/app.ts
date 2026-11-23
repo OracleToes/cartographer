@@ -70,6 +70,7 @@ import {
   summarizeJobs,
 } from "../runtime/jobs.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
+import { formatArchiveSummary, formatCollapseHistory, readCollapseLog } from "../runtime/collapse-log.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { bashTool as cartoBashTool, cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
@@ -1621,7 +1622,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // Once a carried item is unpinned or deleted it is no longer history:
       // remove its content from the retained prefix, not just from the render.
       state.sealed = retained;
-      const retainedChat = new Set(retained.flatMap((entry) => entry.kind === "agent" && entry.recordId !== undefined ? [entry.recordId] : []));
+      const retainedChat = new Set(
+        retained.flatMap((entry) => (entry.kind === "agent" || entry.kind === "system") && entry.recordId !== undefined ? [entry.recordId] : []),
+      );
       const chatRecords = await brain.readChat();
       // The Chat the frozen head holds, in the head's order: it is drawn where
       // the head is, before the generation's work, as the Context view lists it.
@@ -1678,7 +1681,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         agent.push({
           key: chatKeyOf(record, headChat, frame),
           entry: {
-            kind: "agent",
+            kind: record.author === "system" ? "system" : "agent",
             text: record.text,
             recordId: record.id,
             ...(chatHandle === undefined ? {} : { handle: chatHandle }),
@@ -1862,10 +1865,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return run;
   };
 
-  const runCollapse = (reason: string, automatic = false): Promise<void> => {
+  const runCollapse = (reason: string, automatic = false, trigger?: "agent" | "automatic"): Promise<void> => {
     if (state.collapsing) return Promise.resolve();
     state.collapsing = true;
-    return admitting(() => collapseNow(reason, automatic));
+    return admitting(() => collapseNow(reason, automatic, trigger));
   };
 
   /**
@@ -1885,10 +1888,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.requestRender();
       return;
     }
-    await runCollapse(verdict.reason, true);
+    await runCollapse(verdict.reason, true, verdict.trigger);
   };
 
-  const collapseNow = async (reason: string, automatic: boolean) => {
+  const collapseNow = async (reason: string, automatic: boolean, trigger?: "agent" | "automatic") => {
     const previous = state.session.generation;
     pushStatus(`collapsing context at ${suffix(previous)}: ${reason}…`);
     // The person's collapse drops what is queued. An automatic one carries it:
@@ -1914,7 +1917,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await rebuildTranscript(true);
       transcript.setLive([]);
       oldTranscript = transcript.snapshot();
-      const outcome = await collapseLiveSession(state.session, sessionOptions(), reason, {}, { automatic });
+      const outcome = await collapseLiveSession(
+        state.session,
+        sessionOptions(),
+        reason,
+        {},
+        { automatic, ...(trigger === undefined ? {} : { trigger }) },
+      );
       state.collapseEpoch += 1;
       state.session = outcome.session;
       state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
@@ -2060,26 +2069,37 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const copySession = async () => {
     const brainState = await brain.read();
+    const archiveState = await brain.readArchive().catch(() => ({ version: 1 as const, items: [] }));
+    const collapses = readCollapseLog(options.root);
     const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
     const lines: string[] = [
       `# carto session dump — ${new Date().toISOString()}`,
       `project: ${options.root}`,
-      `generation: ${state.session.generation}`,
+      `generation: ${state.session.generation} · collapses recorded: ${collapses.length}`,
       `model: ${modelLabel()} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
       `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
-      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
+      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length} · pinned files ${brainState.files.length} · archive ${archiveState.items.length}`,
+    ];
+    if (collapses.length > 0) {
+      lines.push("", `## collapse history (${collapses.length} recorded; oldest first)`, formatCollapseHistory(collapses));
+    }
+    if (state.session.state.lastStateBlock !== undefined && state.session.state.lastStateBlock.trim().length > 0) {
+      lines.push("", "## live <carto-state> (last sent to model)", state.session.state.lastStateBlock);
+    }
+    lines.push(
       "",
       "## transcript (what the person saw)",
       transcript.toPlainText(),
       "",
       "## context (what the model sees; oldest first; state-block markers stripped)",
-    ];
+    );
     for (const entry of entries) {
       const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
       if (flat === undefined) continue;
       if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
       lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
     }
+    lines.push("", "## archive (waiting out grace)", formatArchiveSummary(archiveState));
     const text = lines.join("\n");
     const result = await copyWithFallback(text, "session");
     pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);

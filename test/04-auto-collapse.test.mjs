@@ -47,7 +47,8 @@ const fauxFor = ({ contextWindow = 100_000, maxTokens } = {}) => {
   return { faux, models, captured, factory, ref: { provider: "faux-test", modelId: "faux-model" } };
 };
 const sleepCall = (factory) => factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: `sleep-${Math.random()}` })], { stopReason: "toolUse" }));
-const collapseCall = (factory) => factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: `collapse-${Math.random()}` })], { stopReason: "toolUse" }));
+const collapseCall = (factory, message = "Collapsing context and continuing from the Brain.") =>
+  factory(() => fauxAssistantMessage([fauxToolCall("collapse", { message }, { id: `collapse-${Math.random()}` })], { stopReason: "toolUse" }));
 // A provider that refuses the request: the scripted factory throws, and faux turns that into the error message pi sees.
 const overflow = (factory) => factory(() => { throw new Error(OVERFLOW); });
 const flat = (messages) => JSON.stringify(messages);
@@ -66,7 +67,7 @@ const options = ({ root, brain, models, ref }, extra = {}) => ({ root, brain, mo
 const carryOut = async (session, opts) => {
   const verdict = session.reviewCollapseRequest();
   assert.equal(verdict.kind, "collapse", `expected a collapse, got ${JSON.stringify(verdict)}`);
-  const outcome = await collapseLiveSession(session, opts, verdict.reason, {}, { automatic: true });
+  const outcome = await collapseLiveSession(session, opts, verdict.reason, {}, { automatic: true, trigger: verdict.trigger });
   await waitForRunEnd(outcome.session);
   return outcome;
 };
@@ -153,9 +154,24 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       assert.equal(flat(captured[1]).split("zebra").length - 1, 1, "the person's words come back once, from the Brain");
       assert.deepEqual((await env.brain.read()).chat.map((record) => [record.author, record.text]), [
         ["user", "please reset the context, zebra"],
+        ["agent", "Collapsing context and continuing from the Brain."],
         ["agent", "back, from the Brain alone"],
       ]);
       assert.equal(next.state.rebuiltAutomatically, true);
+      // Agent collapse writes its required agent Chat message, not a duplicate System notice,
+      // and appends a diagnostic collapse-log entry with last <carto-state> and body trace.
+      const { readCollapseLog, formatCollapseHistory } = await import("../dist/runtime/collapse-log.js");
+      const history = readCollapseLog(env.root);
+      assert.equal(history.length, 1);
+      assert.equal(history[0].trigger, "agent");
+      assert.equal(history[0].fromGeneration, session.generation);
+      assert.equal(history[0].toGeneration, next.generation);
+      assert.match(history[0].lastStateBlock ?? "", /<carto-state>/);
+      assert.ok(history[0].bodyEntries.some((entry) => entry.body.includes("please reset the context, zebra")));
+      const formatted = formatCollapseHistory(history);
+      assert.match(formatted, /collapse #1/);
+      assert.match(formatted, /trigger: agent/);
+      assert.match(formatted, /last <carto-state> before collapse/);
     } finally {
       await closeLiveSession(next ?? session).catch(() => undefined);
       await env.cleanup();
@@ -174,6 +190,7 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       assert.equal(outcome.carried, 0);
       assert.equal(outcome.session.state.rebuiltAutomatically, false);
       assert.equal(captured.length, 0);
+      assert.equal((await env.brain.read()).chat.filter((record) => record.author === "system").length, 0, "manual collapse writes no system Chat notice");
     } finally {
       await closeLiveSession(outcome.session);
       await env.cleanup();
@@ -242,6 +259,11 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       assert.equal(captured.length, 2);
       assert.match(flat(captured[1]), /ask about the quokka/);
       assert.deepEqual((await userTexts(next)).filter((text) => text.includes("quokka")), ["ask about the quokka"]);
+      // Forced automatic collapse records a System Chat notice before freezing the new head.
+      const systemChats = (await env.brain.read()).chat.filter((record) => record.author === "system");
+      assert.equal(systemChats.length, 1, "automatic overflow collapse records one system Chat message");
+      assert.match(systemChats[0].text, /Automatic context collapse \(the context overflowed:/);
+      assert.match(flat(captured[1]), /\[system\]/, "the rebuilt frozen head carries the [system] Chat notice");
     } finally {
       await closeLiveSession(next ?? session).catch(() => undefined);
       await env.cleanup();
@@ -416,6 +438,7 @@ describe("automatic collapse in the headless driver", { concurrency: 4 }, () => 
     try {
       await runHeadless({ ...options({ ...env, models, ref }), input: lines(["a heavy question", "/quit"]), output: out.stream, error: err.stream });
       assert.match(out.text(), /the context overflowed: .*exceeds the available context size.*1 unanswered message\(s\) carried over — the agent goes on/);
+      assert.match(out.text(), /system: Automatic context collapse \(the context overflowed:/);
       assert.match(out.text(), /carto: recovered/);
       assert.doesNotMatch(err.text(), /nothing was left to do/);
       assert.match(flat(captured[1]), /a heavy question/);

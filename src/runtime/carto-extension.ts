@@ -94,6 +94,8 @@ export interface LiveSessionState extends ToolSession, ModelTelemetry {
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
   toolWorkAtLastRequest: number;
+  /** The most recent `<carto-state>` block appended on the wire (RAM-only, for diagnostic dumps). */
+  lastStateBlock?: string | undefined;
 }
 
 /** What one generation has done, counted from the hooks, for the bound on automatic collapse. */
@@ -481,7 +483,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // Compaction is declined: the context is gardened by collapse, not
           // by Pi rewriting the transcript. The collapse rebuilds from the
           // Brain — the same rebuild the agent's collapse tool asks for.
-          options.session.collapseRequested ??= "context overflow; compaction declined";
+          if (options.session.collapseRequested === null) {
+            options.session.collapseRequested = "context overflow; compaction declined";
+            options.session.collapseTrigger = "automatic";
+          }
           return { decline: true };
         },
       }),
@@ -493,6 +498,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             if (work.requests === 0) work.startFill = contextFillPercent(input);
             work.requests += 1;
           });
+          options.session.lastStateBlock = block;
           return { messages: asPiMessages(appendStateBlock(visible, block, now())) };
         },
         afterResponse: (message) => {
@@ -513,7 +519,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // run before `onYield`. The provider's own error is the signal, so the
           // collapse is asked for here, where the failure is still seen.
           if (isContextOverflow(message, session.contextWindow > 0 ? session.contextWindow : undefined)) {
-            session.collapseRequested ??= `the context overflowed${message.errorMessage === undefined ? "" : `: ${message.errorMessage}`}`;
+            if (session.collapseRequested === null) {
+              session.collapseRequested = `the context overflowed${message.errorMessage === undefined ? "" : `: ${message.errorMessage}`}`;
+              session.collapseTrigger = "automatic";
+            }
           }
         },
         onYield: (message) => {
@@ -527,6 +536,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // on as any answer does.
           if (message.stopReason === "length" && isRecoverableLength(message, session.desiredMaxOutput)) {
             session.collapseRequested = `a response stopped at its length limit with room left in its output (${message.usage.output} of ${session.desiredMaxOutput} tokens)`;
+            session.collapseTrigger = "automatic";
             return undefined;
           }
           return { continue: STATE_BLOCK_MARKER };

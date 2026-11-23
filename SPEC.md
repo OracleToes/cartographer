@@ -101,8 +101,9 @@ losing the agent's way or piling up bookkeeping records.
 
 Chat is deliberate dialogue, recorded.
 
-- **Agent Chat** is written through the `chat` tool.
+- **Agent Chat** is written through the `chat` tool, or via the required `message` field of `collapse`.
 - **Person Chat** is the person's own message, recorded as it is sent.
+- **System Chat** is written when a forced automatic collapse happens (context overflow, declined compaction, or recoverable length stop), so both the person and the rebuilt agent see why the context reset.
 
 Chat is not plain model output. Reasoning, plain model text, and tool calls are
 never Chat, and are never recorded as Chat.
@@ -326,6 +327,7 @@ such as a timed rest waking.
   carried into the new generation and are what it starts on. A message sent while
   the rebuild is under way waits for the new session. A paused agent is not
   restarted, but the person's own messages are still delivered.
+- **Collapse communication.** When the agent calls `collapse`, it passes a required `message` recorded into Chat so the person and the rebuilt agent know why it collapsed and what comes next. When a forced automatic collapse happens (overflow, declined compaction, or recoverable length limit), Carto records a System Chat notice before freezing the new head so both sides see that an automatic collapse occurred.
 - **The cost is accepted.** A collapse forced by a limit loses whatever the agent
   had not written to the Brain. Nothing removes unmarked Brain records.
 
@@ -710,7 +712,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `bash` | Runs a command inside the project. |
 | `proc` | Starts, drives, reads, and stops persistent piped processes (`J` handles) that live in host memory, survive collapse, and are shared live in the `jobs` view. |
 | `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
-| `collapse` | Ends the context here and rebuilds it from the Brain. |
+| `collapse` | Ends the context here and rebuilds it from the Brain, recording a required Chat `message` to the person. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 
 `read`, `edit`, and `bash` are taken from the durable package. Carto supplies

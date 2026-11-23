@@ -139,9 +139,8 @@ export function projectContext(
   if (held.length > 0) {
     chat.push(`Chat — what you and ${person} have said to each other`);
     for (const record of held) {
-      chat.push(
-        `${partOf("chat", record.id)} [${record.author === "user" ? person : "you"}] — ${iso(record.createdAt)}`,
-      );
+      const speaker = record.author === "user" ? person : record.author === "system" ? "system" : "you";
+      chat.push(`${partOf("chat", record.id)} [${speaker}] — ${iso(record.createdAt)}`);
       chat.push(indent(record.text));
     }
   }
