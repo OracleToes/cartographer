@@ -160,8 +160,8 @@ function scopedRead(root: string): ToolRegistration {
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
-    // Carto adds is how the file is named and what the result becomes.
-    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project. The result is an item in the context with a handle of its own, and pinning it keeps that reading rather than the file. Read before you write about a file.`,
+    // Carto adds is how the file is named and how to keep reads slim.
+    description: `${base.description ?? ""} Name the file by its tree handle or a project path, using \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
       guardedPath(root, pathOf(args));
       return base.execute(args, api, context);
@@ -179,8 +179,8 @@ function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
-    // Carto adds is how the file is named and what the mode means here.
-    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project, and it must already exist: making one is \`create\`'s job. Every replacement is matched against the file as it is now, and the call lands all of them or none. Read the part you are changing first. Read only mode refuses this call.`,
+    // Carto adds is how the file is named, atomic pacing, and read-only mode.
+    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step — a function, a value, a small block — after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       guardedPath(root, pathOf(args));
@@ -199,7 +199,7 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
     ...write,
     name: "create",
     description:
-      "Create a file at a path that is free. It never overwrites: a path that already exists is an error, because changing a file is `edit`'s job and an overwrite would discard text you may never have read. Parent directories are made as needed. Read only mode refuses this call.",
+      "Create a new file at a path that is free, starting with minimal boilerplate or a clean skeleton (types, signatures, stubs) so you can grow it incrementally with `edit`. Never overwrites an existing path; parent directories are made as needed. Refused in read only mode.",
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = pathOf(args);
@@ -241,7 +241,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "chat",
       description:
-        `Say something to ${them}. This is the only channel that reaches them: your plain text is your own reasoning and they never see it. One thought per call, in your own words, without reporting the call. An empty turn needs no call at all.`,
+        `Say something to ${them}. This is the only channel ${them} sees; your plain text is private reasoning. Speak plainly when you have a result, question, or decision — no call needed on quiet working turns.`,
       parameters: obj({ text: Text }),
       replay: "safe",
       execute: async (args, api) => {
@@ -255,10 +255,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Write what you understand about the project: one node, a name and the understanding itself. A node may link to other nodes and may attach to what it is about — a file by path, or a record by handle. Pass a handle to rewrite that node; links and attachments are replaced wholesale, so send the whole set you want. Without a handle it is a new node. Nothing requires a node to connect to anything.",
+        "Create or update an Atlas node — either lasting project understanding or a node in your task/plan graph (goals linked to steps down to atomic leaves, worked leaves-before-stems, attached to the files they touch). Pass `handle` to update an existing node in place as work progresses; omit `handle` for a new node. Links and attachments replace the existing set on update, and nodes need not connect to anything.",
       parameters: obj({
         handle: opt(HandleRef),
-        title: str({ description: "The node's name: what this understanding is about." }),
+        title: str({ description: "The node's name: what this understanding or task node is about." }),
         text: Text,
         links: opt(arr(HandleRef)),
         attachments: opt(
@@ -302,7 +302,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "ledger",
       description:
-        `Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one ${them} asked is the same call as writing it. A plan is made of these records: the goal, then one record per step in the order you will take them, with progress naming the step it moved. A plan written here reaches ${them} in their Ledger, and is in your head at the next collapse without your reading it again.`,
+        `Create or update a lightweight Ledger record (goal, note, question, instruction, or progress) holding your active working state: current leaf, what is solved, open questions, and live progress. Pass \`handle\` to update an existing record in place as you go so a collapse at any moment preserves where you are; omit \`handle\` for a new record. A question takes \`answer\` and \`status\` so answering one ${them} asked uses the same call.`,
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),
@@ -340,7 +340,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
+        `Pin or unpin a file from the tree by its handle (at least 1 character). Pinned files are re-read fresh into the head at every collapse, so pin the files you are actively building in before collapsing. Only ${them} can remove a pin ${them} placed.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -382,7 +382,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        `Decide what one record is for, or withdraw the decision. The record is named by a handle of at least 1 character: an empty handle names nothing, and there is nothing else to act on. \`archive\` retires it from the Brain, \`delete\` removes it for good and leaves nothing behind, \`none\` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. \`delete\` is the heavier of the two, so when you mark for delete, tell ${them} what you are letting go of first. A mark ${them} placed is theirs to withdraw, so leave it.`,
+        `Mark a Brain record by handle (at least 1 character) for \`archive\` or \`delete\` at the next collapse, or \`none\` to withdraw your own mark. Use this to retire finished task-leaves and obsolete notes so the Brain stays sharp; when marking for \`delete\`, tell ${them} in \`chat\` first. Only ${them} can withdraw a mark ${them} placed.`,
       parameters: obj({
         handle: ExistingHandle,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -423,7 +423,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Move the project tree in your state block to where your attention is, and end the turn so you can read it: the block arrives as your next turn with the tree rendered at the anchor you just set. The arguments are optional and stick — an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is `T1` there. Nothing is returned here beyond the fact of the move.",
+        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str()),
@@ -466,7 +466,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        `End this context and rebuild it from the Brain. Collapse at a task boundary: the work is finished and the Brain holds it, or a long piece of work is about to start and you have pinned what you will need to begin inside a context built for it. Nothing needs approval from either side. Say anything ${them} must see first, because this context is about to be gone and whatever you did not write down goes with it.`,
+        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries — after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work — as well as when context fills. Update Atlas/Ledger and send any \`chat\` ${them} needs first; everything unpinned outside the Brain is swept.`,
       parameters: obj({}),
       replay: "safe",
       execute: async () => {
@@ -481,7 +481,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "sleep",
       description:
-        `End the turn and rest — the honest way to stop. With no argument you stay stopped until ${them} messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from ${them} brings you back sooner. Nothing is said to ${them} by this call.`,
+        `End the turn and rest when there is nothing left to do. Omit \`seconds\` to rest until ${them} messages you, or pass whole seconds (at least 1) to wake on your own from \`<carto-state>\`. A message from ${them} wakes you early.`,
       parameters: obj({ seconds: opt(int({ minimum: 1, description: `Whole seconds to rest before starting again. Omit to rest until ${them} messages you.` })) }),
       replay: "safe",
       execute: async (args, api, context) => {

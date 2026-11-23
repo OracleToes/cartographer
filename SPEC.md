@@ -83,10 +83,19 @@ What is in the Brain is what is in focus. The agent decides when a record has
 stopped earning its place and deletes it, or moves it to a more permanent Atlas
 entry. Nothing removes a record on the agent's behalf, and nothing scores it.
 
+Atlas also holds the agent's loose task/plan graph: larger goals linked to
+smaller steps down to atomic leaves, attached to the files they touch, with
+leaves worked before stems and no forced order beyond that. As leaves finish,
+the agent updates them in place, retires completed task nodes via `mark`, or
+folds lasting understanding into permanent Atlas notes.
+
 ### 2.2 Ledger
 
-The Ledger is the agent's working book: goals, notes, questions, instructions,
-and progress through a problem.
+The Ledger is the agent's lightweight active working state: current focus and
+active leaf, open questions, what has been solved, and live progress through a
+problem. Updating existing Atlas and Ledger handles in place as changes happen
+keeps the Brain ready for a collapse at any moment — even mid-step — without
+losing the agent's way or piling up bookkeeping records.
 
 ### 2.3 Chat
 

@@ -44,6 +44,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
 | [canop/broot](https://github.com/canop/broot) | person | Inspiration for the tree view only: how a whole hierarchy is made readable in one pane. Not a dependency and not a port target | reference only |
 | [eliaskg/pi-prefill](https://github.com/eliaskg/pi-prefill) | person | Reference for live prefill progress (`return_progress`, `prompt_progress`, delta-based rate and ETA). Not a dependency and not a port target | reference only |
+| [tomooshi/condensed-milk-pi](https://github.com/tomooshi/condensed-milk-pi) | person | Evaluated for context compression and bash output filtering; not adopted (retroactive masking conflicts with Carto's short-generation collapse model) | reference only (not adopted) |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at
