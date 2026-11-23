@@ -192,6 +192,11 @@ substitute for reading the code.
   See `docs/tests.md` for the full policy.
 - Do not chase a number. Do not add tests to keep a count up. Do not delete the
   only guard for a real break to make a failure disappear.
+- **Every test run must echo the `AGENTS.md` and compaction-disclosure reminder.**
+  `test/guard.mjs` and every `test/*.test.mjs` suite (via `test/agent-reminder.mjs`)
+  print instructions to read `AGENTS.md` immediately and inform `OracleToes` if
+  the session was compacted on that turn. An agent must **never** remove, shorten,
+  or silence this reminder from the test harness or any test suite.
 - **A probe is allowed** when you genuinely need to check something before
   you rely on it. Run probes only at the end of the stage, after the push, and
   never keep them. A probe is not a test and cannot be used to dodge the budget.
@@ -205,6 +210,7 @@ substitute for reading the code.
 - Do not use a probe to replace a test, or a test to replace reading the code.
 - Do not build what `@earendil-works/pi-tui`, `pi-durable`, or `pi-ai` already
   provide.
+- Do not remove, shorten, or silence the `AGENTS.md` and compaction-disclosure reminder from `test/guard.mjs`, `test/agent-reminder.mjs`, or any test suite.
 - Do not end a turn with work that is not pushed.
   tested without having seen the test pass.
 - Do not be sycophantic. No performed agreement, no unearned praise, no

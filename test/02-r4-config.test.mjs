@@ -4,6 +4,7 @@
  * runs against injected fakes, the driver against the faux provider, and the
  * CLI against a fresh CARTO_HOME that never reaches the network.
  */
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";

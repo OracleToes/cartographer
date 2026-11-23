@@ -9,6 +9,7 @@
  * the resolution order, and the fact that the old words are gone from every
  * string the model can reach.
  */
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

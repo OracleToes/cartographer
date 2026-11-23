@@ -4,6 +4,7 @@
  * the bound on repeating it, and the person's messages surviving it. Offline:
  * the faux provider scripts every response, and each case owns its project.
  */
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

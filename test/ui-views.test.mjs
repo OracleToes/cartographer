@@ -1,3 +1,4 @@
+import "./agent-reminder.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
