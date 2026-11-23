@@ -749,8 +749,9 @@ something. None of this changes what a view shows or what a key does.
 
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Every entry is collapsible, and every entry starts collapsed: a row
-is its handle, its name, and a one-line summary until it is opened. Each tool
-gets one collapsible entry in its own sub-tree. Schema-shaped content has a
+is its handle, its name, a one-line summary, and its estimated token cost until
+it is opened (when the token cost stays on its header). Each tool gets one
+collapsible entry in its own sub-tree. Schema-shaped content has a
 human-readable view and a real view. A row that trails off is readable in full
 somewhere.
 

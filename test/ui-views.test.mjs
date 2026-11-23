@@ -1514,6 +1514,45 @@ test("the token count includes a head that was rendered from the Brain when no f
   assert.ok(count(undefined) > count(""), "the fallback head is counted");
 });
 
+test("every entry in the context view shows its estimated token cost, folded and open", () => {
+  const view = new ContextView();
+  const longText = "x".repeat(400);
+  view.setData({
+    brain: frozenBrain(),
+    person: "OracleToes",
+    systemPrompt: longText,
+    projectionText: FROZEN_HEAD,
+    tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
+    transcriptMessages: [{ id: 1, entry: 1, order: -1, role: "user", text: "hello world!" }],
+    toolWorkItems: [
+      { id: "g:2:t0", entry: 2, order: 0, kind: "reasoning", text: "abcd".repeat(10) },
+      { id: "g:2:c1", entry: 2, order: 1, kind: "toolCall", name: "read", args: '{"path":"a.ts"}' },
+      { id: "g:3:r", entry: 3, order: 99, kind: "toolResult", output: "y".repeat(80) },
+    ],
+    stateBlockText: "<carto-state>\n[EDIT MODE]\n</carto-state>",
+    treeHandles: { "notes.md": "F1", "src/gone.ts": "F2" },
+  });
+
+  const checkEntries = (lines, label) => {
+    for (const line of lines) assert.equal(visibleWidth(line), 100, `${label}: exact pane width`);
+    const rows = lines.map(plain);
+    const rowFor = (handle) => rows.find((line) => new RegExp(`^\\s*[▌ ]\\s*[▸▾]\\s+${handle}\\b`).test(line));
+    // Every entry across head, body, and tail carries a `~N tok` indicator.
+    for (const handle of ["H", "Y1", "A1", "F1", "X1", "U1", "X2", "R1", "B"]) {
+      const row = rowFor(handle);
+      assert.ok(row !== undefined, `${label}: ${handle} row rendered`);
+      assert.match(row, /~[\d,]+ tok\s*$/, `${label}: ${handle} shows its token cost on the right`);
+    }
+    assert.match(rowFor("H"), /~100 tok\s*$/, `${label}: 400-byte system prompt estimates to ~100 tok`);
+    assert.match(rowFor("U1"), /~3 tok\s*$/, `${label}: 12-byte message estimates to ~3 tok`);
+    assert.match(rowFor("R1"), /~20 tok\s*$/, `${label}: 80-byte tool result estimates to ~20 tok`);
+  };
+
+  checkEntries(view.render(100), "folded");
+  view.toggleAll();
+  checkEntries(view.render(100), "open");
+});
+
 test("the system message is the instructions first and the frozen projection second (§5.1)", async () => {
   const { createCartoExtension, cartoInstructions } = await import("../dist/runtime/carto-extension.js");
   const extension = createCartoExtension({
