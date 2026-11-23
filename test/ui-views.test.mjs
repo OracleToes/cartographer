@@ -1659,3 +1659,35 @@ test("every entry in the Context view carries what it costs the model, and the r
   view.toggleAll();
   assert.ok(plain(view.render(100).join("\n")).includes("100 tok"), "an open entry shows its cost on its first line");
 });
+
+test("an entry's header is a different colour from its body, in the transcript and in the Context view", async () => {
+  // Colours are chosen from the terminal's depth at first use, so this runs in a
+  // process that says it is truecolor: in 256 colours the two shades are one.
+  const { execFileSync } = await import("node:child_process");
+  const script = `
+    import { TranscriptView } from "./dist/ui/transcript.js";
+    import { ContextView } from "./dist/ui/context-view.js";
+    import { emptyBrain } from "./dist/domain/records.js";
+    const bgOf = (line) => /^\\x1b\\[48;2;[0-9;]+m/.exec(line)?.[0];
+    const t = new TranscriptView();
+    t.setEntries([{ kind: "tool", id: "t", handle: "S1", name: "bash", args: "npm test", output: "all passed" }]);
+    t.toggleAllCards();
+    const tl = t.render(60);
+    const c = new ContextView();
+    c.setData({ brain: emptyBrain(), systemPrompt: "you are carto", projectionText: "", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "block" });
+    c.toggleAll();
+    const cl = c.render(60);
+    const strip = (s) => s.replace(/\\x1b\\[[0-9;]*m/g, "");
+    const find = (lines, text) => lines.find((l) => strip(l).includes(text));
+    console.log(JSON.stringify({
+      tHeader: bgOf(find(tl, "bash")), tBody: bgOf(find(tl, "all passed")),
+      cHeader: bgOf(find(cl, "system prompt")),
+      cBodyOnly: bgOf(cl.find((l) => strip(l).includes("│ you are carto"))),
+    }));
+  `;
+  const got = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, COLORTERM: "truecolor" }, encoding: "utf8" }));
+  assert.ok(got.tHeader && got.tBody, "both rows are painted");
+  assert.notEqual(got.tHeader, got.tBody, "a card's header is not the colour of its body");
+  assert.ok(got.cHeader && got.cBodyOnly);
+  assert.notEqual(got.cHeader, got.cBodyOnly, "a Context entry's header is not the colour of its body");
+});

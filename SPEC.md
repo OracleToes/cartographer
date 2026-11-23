@@ -781,6 +781,11 @@ tenth or more of the whole is drawn in the warning colour, so the expensive ones
 stand out. The count in the header is the sum of the rows. A row too narrow to
 hold its pending mark and the figure keeps the mark.
 
+**An entry's header is its own band.** A transcript card and a Context entry each
+have a header (handle, name, summary or marks) and a body; the header row is
+drawn a step lighter than the page, and the body stays on the page, so a column
+of entries is scanned by its headers and the two are never confused.
+
 **An edit made there is an edit to the source of truth.** A Brain-backed entry is
 edited in the Brain, and the change is everywhere that record appears: the
 record, the pending line in the state block, and the next collapse. It is never a

@@ -45,7 +45,7 @@ import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
-import { canvasLine, padLine, tokens } from "./tokens.js";
+import { canvasLine, headerLine, padLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
 
 export interface ContextToolItem {
@@ -966,11 +966,11 @@ export class ContextView implements Component, Focusable {
     if (!open) {
       const room = Math.max(8, width - COST_COLUMN - visibleWidth(head) - 1);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
-      lines.push(canvasLine(withCost(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`), width));
+      lines.push(headerLine(withCost(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`), width));
       return lines;
     }
 
-    lines.push(canvasLine(withCost(head), width));
+    lines.push(headerLine(withCost(head), width));
     lines.push(...this.renderBody(node, width, ink));
     return lines;
   }

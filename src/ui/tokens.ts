@@ -73,6 +73,13 @@ export const chromeLine = (line: string, width: number): string => fillLine(line
 /** A line of a raised input surface, the prompt's. */
 export const surfaceLine = (line: string, width: number): string => fillLine(line, width, palette.surface);
 
+/**
+ * The header of an entry (a transcript card, a Context row): a step lighter than
+ * the page its body sits on, so the two read as two things — a title and what it
+ * titles — and a column of entries can be scanned by its headers.
+ */
+export const headerLine = (line: string, width: number): string => fillLine(line, width, palette.entryHeader);
+
 /** Any band's line, filled to the width: the sidebar uses it for its own colour. */
 export const fillLine = (line: string, width: number, hex: string): string => {
   const bg = backgroundAnsi(parseColor(hex), mode());
@@ -122,6 +129,8 @@ const palette = {
   chrome: "#06080b",
   /** The working pane: raised out of the chrome. */
   background: "#0d1219",
+  /** The header of an entry, over the page its body is drawn on: a step lighter than it, a step short of a card. */
+  entryHeader: "#17202c",
   /** Inputs and cards: a step above the working pane. */
   surface: "#131a23",
   /** Raised regions: the sidebar, panels, overlays. */
