@@ -18,7 +18,7 @@
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { canvasLine, padLine, tokens } from "./tokens.js";
+import { chromeLine, tokens } from "./tokens.js";
 
 /** The archive is a layer (§3.3), not a screen: the same UI over a different layer. */
 export type Layer = "context" | "archive";
@@ -52,7 +52,9 @@ export class HeaderView implements Component {
     // Stateless; reads the live session reference.
   }
 
-  render(width: number): string[] {
+  render(outer: number): string[] {
+    // One cell of inset either side: the header is chrome, and chrome is not flush to the pane edge.
+    const width = Math.max(1, outer - 2);
     // Three zones, so a long project name can never push the figures around:
     // the mark and where you are on the left, the mode in the middle, the model
     // and its capacity on the right. Each zone is cut to fit; nothing overlaps.
@@ -86,7 +88,7 @@ export class HeaderView implements Component {
     const beforeMiddle = middle.length === 0 ? "" : middle;
     const leftPart = clippedLeft + " ".repeat(gapLeft) + beforeMiddle;
     const pad = Math.max(1, width - visibleWidth(leftPart) - rightWidth);
-    return [canvasLine(leftPart + " ".repeat(pad) + right, width)];
+    return [chromeLine(` ${leftPart}${" ".repeat(pad)}${right}`, outer)];
   }
 }
 
@@ -115,8 +117,9 @@ export class FooterView implements Component {
 
   render(width: number): string[] {
     const hints = this.hints();
+    const inner = Math.max(1, width - 2);
     // Posting's footer: the key in the accent, the verb in dim grey, two spaces between pairs.
     const rendered = hints.map((hint) => `${tokens.accent(hint.key)} ${tokens.faint(hint.label)}`);
-    return [canvasLine(truncateToWidth(rendered.join(tokens.faint("  ")), width, tokens.faint(" …")), width)];
+    return [chromeLine(` ${truncateToWidth(rendered.join(tokens.faint("  ")), inner, tokens.faint(" …"))}`, width)];
   }
 }

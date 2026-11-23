@@ -20,7 +20,7 @@ import { ContextView, type ContextViewData } from "./context-view.js";
 import { TreeView } from "./tree-view.js";
 import { HelpPanel, type HelpExtra } from "./help-panel.js";
 import { Palette } from "./palette.js";
-import { tokens, visibleWidth } from "./tokens.js";
+import { bandLine, canvasLine, chromeLine, tokens, visibleWidth } from "./tokens.js";
 import { sidebarWidth } from "./sidebar.js";
 import { emptyBrain } from "../domain/records.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -133,14 +133,9 @@ export function previewTranscript(width = 110): string {
     parts: { system: 6_400, transcript: 4_200, toolWork: 1_900 },
   };
 
-  const mainWidth = width - sidebarWidth;
-  const headerLines = header.render(mainWidth);
-  const sidebarLines = sidebar.render(sidebarWidth);
-  const transcriptLines = transcript.render(mainWidth);
-  // The bands, in the order the app stacks them: header, seam, working area,
-  // prompt, key bar, context bar. The sidebar runs beside all of them.
-  const column = [...headerLines, tokens.rule("─".repeat(mainWidth)), ...transcriptLines];
-  const rows = beside(sidebarLines, sidebarWidth, column, mainWidth);
+  // The bands, in the order the app stacks them: header, the panes (sidebar
+  // beside the working area, prompt in it), key bar, context bar.
+  const rows = workspace(header, sidebar.render(sidebarWidth), (mainWidth) => transcript.render(mainWidth), width);
   return [
     ...rows,
     frame(footer.render(width), width),
@@ -238,9 +233,7 @@ export function previewArchive(width = 110): string {
   };
 
   const sidebarLines = sidebar.render(sidebarWidth);
-  const mainWidth = width - sidebarWidth;
-  const archiveLines = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...archive.render(mainWidth)];
-  const rows = beside(sidebarLines, sidebarWidth, archiveLines, mainWidth);
+  const rows = workspace(header, sidebarLines, (mainWidth) => archive.render(mainWidth), width);
   const footer = new FooterView(() => [
     { key: "↑↓", label: "move" },
     { key: "p", label: "pin" },
@@ -330,9 +323,7 @@ export function previewContext(width = 110): string {
     session: { state: { contextWindow: 32_768, lastReportedInput: 13_100, toolWorkAtLastReport: 0 } },
     parts: { system: 7_200, transcript: 3_400, toolWork: 2_600 },
   };
-  const mainWidth = width - sidebarWidth;
-  const column = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...view.render(mainWidth)];
-  const rows = beside(sidebar.render(sidebarWidth), sidebarWidth, column, mainWidth);
+  const rows = workspace(header, sidebar.render(sidebarWidth), (mainWidth) => view.render(mainWidth), width);
   return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
 }
 
@@ -432,9 +423,7 @@ export function previewTree(width = 110): string {
     { key: "f", label: "pinned" },
     { key: "/", label: "filter" },
   ]);
-  const mainWidth = width - sidebarWidth;
-  const column = [...header.render(mainWidth), tokens.rule("─".repeat(mainWidth)), ...view.render(mainWidth)];
-  const rows = beside(sidebar.render(sidebarWidth), sidebarWidth, column, mainWidth);
+  const rows = workspace(header, sidebar.render(sidebarWidth), (mainWidth) => view.render(mainWidth), width);
   rmSync(root, { recursive: true, force: true });
   return [...rows, frame(footer.render(width), width)].join("\n");
 }
@@ -470,11 +459,21 @@ export function previewPalette(width = 64): string {
  * The sidebar and the working column, stacked the way the app's HStack lays them
  * out: each line is the pane's line, and the panes are padded to their widths.
  */
-function beside(left: string[], leftWidth: number, right: string[], rightWidth: number): string[] {
-  const rows: string[] = [];
-  const count = Math.max(left.length, right.length);
+/**
+ * The app's frame as text: the header across the top on the chrome, a seam of
+ * chrome, then the sidebar's panel and the working pane side by side with a
+ * column of chrome between them. Both panes are painted to the foot of the
+ * tallest, as the app's `Fill` does.
+ */
+function workspace(header: HeaderView, sidebarLines: string[], main: (width: number) => string[], width: number): string[] {
+  const mainWidth = width - sidebarWidth - 1;
+  const mainLines = main(mainWidth);
+  const count = Math.max(sidebarLines.length, mainLines.length);
+  const rows: string[] = [...header.render(width), chromeLine("", width)];
   for (let index = 0; index < count; index += 1) {
-    rows.push(frame([left[index] ?? ""], leftWidth) + frame([right[index] ?? ""], rightWidth));
+    const left = sidebarLines[index] ?? bandLine("", sidebarWidth);
+    const right = mainLines[index] ?? "";
+    rows.push(frame([left], sidebarWidth) + chromeLine("", 1) + canvasLine(right, mainWidth));
   }
   return rows;
 }

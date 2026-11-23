@@ -67,10 +67,21 @@ export const page = (text: string): string => tokens.canvas(text);
  */
 export const canvasLine = (line: string, width: number): string => fillLine(line, width, palette.background);
 
+/** A line of the chrome (header, key bar, context bar): the deepest tone, around the panes. */
+export const chromeLine = (line: string, width: number): string => fillLine(line, width, palette.chrome);
+
+/** A line of a raised input surface, the prompt's. */
+export const surfaceLine = (line: string, width: number): string => fillLine(line, width, palette.surface);
+
 /** Any band's line, filled to the width: the sidebar uses it for its own colour. */
 export const fillLine = (line: string, width: number, hex: string): string => {
   const bg = backgroundAnsi(parseColor(hex), mode());
-  const padded = padLine(line, width).replaceAll("\u001b[49m", `\u001b[49m${bg}`);
+  // `ESC[0m` clears the background as well: the editor's cursor ends with one,
+  // and without re-arming the rest of its row would fall back to the terminal's colour.
+  const padded = padLine(line, width)
+    .replaceAll("\u001b[49m", `\u001b[49m${bg}`)
+    .replaceAll("\u001b[0m", `\u001b[0m${bg}`)
+    .replaceAll("\u001b[m", `\u001b[m${bg}`);
   return `${bg}${padded}\u001b[49m`;
 };
 
@@ -107,22 +118,24 @@ export function padLine(str: string, width: number): string {
  * this file names a role.
  */
 const palette = {
-  /** The page. */
-  background: "#0a0d12",
-  /** Inputs and the transcript's own surface: a step above the page. */
-  surface: "#0f141b",
+  /** The chrome: the margin, the header row, the key bar and the context bar. The deepest tone. */
+  chrome: "#06080b",
+  /** The working pane: raised out of the chrome. */
+  background: "#0d1219",
+  /** Inputs and cards: a step above the working pane. */
+  surface: "#131a23",
   /** Raised regions: the sidebar, panels, overlays. */
-  panel: "#131a23",
+  panel: "#171f2a",
   /** A header inside a raised region. */
-  panelRaised: "#19222d",
+  panelRaised: "#1d2733",
   /** The selected row's tint. */
-  selection: "#1f2b3a",
+  selection: "#26344a",
   /** A row under the cursor in an unfocused pane. */
-  selectionQuiet: "#182231",
+  selectionQuiet: "#1c2738",
   /** Seams, borders, the editor's frame. */
-  rule: "#26323f",
+  rule: "#2a3646",
   /** A band's far edge: one column lighter than the surface it separates from. */
-  seam: "#2c3948",
+  seam: "#344254",
 
   /** Body text. */
   text: "#d7dee8",

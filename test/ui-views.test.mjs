@@ -1505,3 +1505,45 @@ test("Chat the head holds is drawn before the generation's work, whatever the en
   assert.equal(chatKeyOf({ id: "later", createdAt: 5_500 }, head, frame), 2.5);
   assert.equal(chatKeyOf({ id: "older", createdAt: 100 }, [], frame), 0.5, "older than every entry: before them all, not after a timeless one");
 });
+
+test("the frame paints every cell: fills are solid, resets re-arm the surface, and the chrome is exact to its width", async () => {
+  const { Fill, margin } = await import("../dist/ui/frame.js");
+  const { fillLine } = await import("../dist/ui/tokens.js");
+  const { HeaderView, FooterView } = await import("../dist/ui/chrome.js");
+
+  const fill = new Fill("#06080b", () => 7);
+  const lines = fill.render(12);
+  assert.equal(lines.length, 7, "as tall as the screen; the layout clips it to its room");
+  for (const line of lines) assert.equal(visibleWidth(line), 12);
+  assert.equal(fill.render(12), lines, "cached while the size is unchanged");
+
+  // The editor's cursor ends in a full reset; without re-arming, the rest of the row would be the terminal's.
+  const withCursor = fillLine("ab\x1b[7mc\x1b[0mdef", 10, "#131a23");
+  const bg = withCursor.slice(0, withCursor.indexOf("a"));
+  assert.ok(bg.startsWith("\x1b[48"), "the row begins on the surface");
+  assert.ok(withCursor.includes(`\x1b[0m${bg}`), "a full reset is followed by the surface again");
+
+  assert.ok(margin.wide({ width: 120, height: 40 }) && !margin.narrow({ width: 120, height: 40 }));
+  assert.ok(margin.narrow({ width: 80, height: 40 }) && !margin.wide({ width: 80, height: 40 }));
+  assert.ok(!margin.wide({ width: 50, height: 40 }) && !margin.narrow({ width: 50, height: 40 }), "no margin on a very small terminal");
+  assert.ok(margin.edge({ width: 80, height: 24 }) && !margin.gap({ width: 80, height: 24 }), "the breathing rows wait for rows to spare");
+
+  const header = new HeaderView({
+    project: "a-very-long-project-name-that-must-be-cut-to-fit-the-zone-it-has",
+    modelLabel: "llama-swap/model",
+    session: { generation: "gen-7b21ee", state: { contextWindow: 32_768, readOnly: true, paused: false } },
+    view: "chat",
+    layer: "context",
+    running: true,
+    windowUnknown: false,
+  });
+  for (const width of [40, 70, 120]) {
+    const [line] = header.render(width);
+    assert.equal(visibleWidth(line), width, `header at ${width}`);
+    assert.ok(line.startsWith("\x1b[48"), "the header is painted from its first cell");
+  }
+  const footer = new FooterView(() => [{ key: "^x", label: "stop" }, { key: "^p", label: "palette" }]);
+  const [keys] = footer.render(60);
+  assert.equal(visibleWidth(keys), 60);
+  assert.ok(plain(keys).startsWith(" ^x"), "the key bar is inset one cell");
+});

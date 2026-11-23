@@ -81,7 +81,8 @@ import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
-import { ruleLine, tokens } from "./tokens.js";
+import { rawPalette, surfaceLine, tokens } from "./tokens.js";
+import { Fill, margin, type Viewport } from "./frame.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -358,17 +359,6 @@ function generationHandles(live: LiveState | undefined, landed: readonly PromptI
   return promptHandles([...landed, ...partial]);
 }
 
-/** One hairline, exactly the width it is given: the seam under the header. */
-class Rule implements Component {
-  invalidate(): void {
-    // Stateless.
-  }
-
-  render(width: number): string[] {
-    return [ruleLine(width)];
-  }
-}
-
 export async function runTui(options: CartoTuiOptions): Promise<number> {
   const brain = options.brain;
   const refresh = async () => {
@@ -428,6 +418,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * the box says what it is for. One rule above, `message` in it, one rule below.
    */
   class PromptEditor extends Editor {
+    /** The prompt is a raised surface: its own step, so the cells the text does not cover are not the terminal's. */
+    override render(width: number): string[] {
+      return super.render(width).map((line) => surfaceLine(line, width));
+    }
+
     protected override renderTopBorder(width: number, hiddenLineCount: number): string {
       const label = " message ";
       const filler = Math.max(0, width - label.length - 1);
@@ -442,7 +437,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   }
 
   const editorTheme = { borderColor: (line: string) => tokens.rule(line), selectList: selectTheme };
-  const editor = new PromptEditor(tui, editorTheme);
+  const editor = new PromptEditor(tui, editorTheme, { paddingX: 2 });
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
@@ -1186,46 +1181,73 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     });
   };
   // ── The screen ────────────────────────────────────────────────────────────
-  // Posting's map of a screen, in bands: one header row, the working area, the
-  // prompt (only where you type), the key bar, and the context bar along the
-  // very bottom of everything. The sidebar is the full height of the working
-  // bands beside them; its seam is drawn by the pane itself.
+  // Surfaces, darkest outermost (frame.ts): the chrome — margin, header row,
+  // key bar, context bar — then the two panes raised out of it, the sidebar and
+  // the working area, then the prompt. Posting's map of a screen: a header row
+  // across the top, the panes under it, the keys that work here, and a bar
+  // along the very bottom.
   //
-  // Every band paints its own background, edge to edge. `VStack` sizes them by
-  // their contents and `Spacer` does not grow, so a layout that leaves a band
-  // to "fill" would show the terminal's own background through the gaps; each
-  // band here is given the height it renders at instead.
+  // pi-tui paints only what a component renders, so every gap is a `Fill`: the
+  // margin, the seam between the panes, each pane's floor below a short list.
+  // A pane that is shorter than its room would otherwise show the terminal's
+  // own background through it.
+  const rows = () => terminal.rows;
+  const chrome = (size: number, visible?: (viewport: Viewport) => boolean) => ({
+    component: new Fill(rawPalette.chrome, rows),
+    basis: size,
+    ...(visible === undefined ? {} : { visible }),
+  });
+  const pane = (size: number, hex: string = rawPalette.background) => ({ component: new Fill(hex, rows), basis: size });
   const footer = new FooterView(() => footerHints());
+  // A scrolling view takes the height of its content, up to the room there is,
+  // and the pane's own colour fills the rest.
+  const scrolled = (component: Component, visible: () => boolean) => ({ component, basis: "auto" as const, shrink: 1, minSize: 3, visible });
   const workArea = new VStack([
-    { component: transcriptScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
-    { component: atlasScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
-    { component: ledgerScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
-    { component: treeScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "tree" && state.layer === "context" },
-    { component: contextScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" && state.layer === "context" },
-    { component: archiveScroll, basis: 0, grow: 1, minSize: 3, visible: () => state.layer === "archive" },
+    scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
+    scrolled(atlasScroll, () => state.view === "atlas" && state.layer === "context"),
+    scrolled(ledgerScroll, () => state.view === "ledger" && state.layer === "context"),
+    scrolled(treeScroll, () => state.view === "tree" && state.layer === "context"),
+    scrolled(contextScroll, () => state.view === "context" && state.layer === "context"),
+    scrolled(archiveScroll, () => state.layer === "archive"),
+    { ...pane(0), grow: 1 },
   ]);
-  const headerBand = new VStack([{ component: header, basis: "auto" }, { component: new Rule(), basis: 1 }]);
-  const body = new HStack([
-    { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-    {
-      component: new VStack([
-        { component: headerBand, basis: 2 },
-        { component: workArea, basis: 0, grow: 1, minSize: 3 },
-        { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" && state.layer === "context" },
-      ]),
-      basis: 0,
-      grow: 1,
-      minSize: 20,
-    },
+  const inChatLayer = () => state.view === "chat" && state.layer === "context";
+  // The working pane: a row of air above the content, a cell either side, the
+  // prompt (only where you type) across its foot, and a row below it where
+  // there is no prompt.
+  const workPane = new VStack([
+    pane(1),
+    { component: new HStack([pane(1), { component: workArea, basis: 0, grow: 1 }, pane(1)]), basis: 0, grow: 1, minSize: 3 },
+    { component: editor, basis: "auto", minSize: 3, visible: inChatLayer },
+    { ...pane(1), visible: () => !inChatLayer() },
+  ]);
+  // The sidebar's panel runs to the foot of the pane; the list is what it holds.
+  const sidebarPane = new VStack([{ component: sidebar, basis: "auto" }, { ...pane(0, rawPalette.panel), grow: 1 }]);
+  const panes = new HStack([
+    { component: sidebarPane, basis: sidebarWidth, visible: () => state.sidebarVisible },
+    { ...chrome(1), visible: () => state.sidebarVisible },
+    { component: workPane, basis: 0, grow: 1, minSize: 20 },
+  ]);
+  // One cell of chrome either side of the panes on a narrow terminal, two on a wide one.
+  const framed = (inner: Component) =>
+    new HStack([
+      { ...chrome(2), visible: margin.wide },
+      { ...chrome(1), visible: margin.narrow },
+      { component: inner, basis: 0, grow: 1, minSize: 20 },
+      { ...chrome(2), visible: margin.wide },
+      { ...chrome(1), visible: margin.narrow },
+    ]);
+  const screen = new VStack([
+    chrome(1, margin.edge),
+    { component: framed(header), basis: 1 },
+    chrome(1, margin.gap),
+    { component: framed(panes), basis: 0, grow: 1, minSize: 6 },
+    chrome(1, margin.gap),
+    { component: framed(new VStack([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
+    chrome(1, margin.edge),
   ]);
 
-  tui.setLayoutRoot(
-    new VStack([
-      { component: body, basis: 0, grow: 1, minSize: 6 },
-      { component: footer, basis: 2 },
-      { component: tokenBar, basis: 1 },
-    ]),
-  );
+  tui.setLayoutRoot(screen);
   tui.start();
   tui.setFocus(editor);
 
