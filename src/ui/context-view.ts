@@ -58,6 +58,8 @@ export interface ContextDialogueMessage {
   id: string | number;
   /** Generation-scoped sweep identity for a live person message. */
   targetId?: string | undefined;
+  /** Exact Chat identity, or null when the live entry cannot be safely matched. */
+  recordId?: string | null | undefined;
   /**
    * The context entry this message is, and where it sits in the body. A message
    * id can be a composite (`"7-0"` for a chat call's part), so the order comes
@@ -477,7 +479,8 @@ export class ContextView implements Component, Focusable {
       const handle = handleOf(handles, "chat", chat.id);
       if (chat.author !== "user" || (handle !== undefined && frozenKeys.has(handle))) continue;
       // The live line it was recorded as, matched in the order said.
-      const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+      const line = liveSaid.findIndex((message, at) => !recordOfLine.has(at) &&
+        (message.recordId === chat.id || (message.recordId === undefined && message.text === chat.text)));
       if (line !== -1) recordOfLine.set(line, chat);
     }
     // Pinned files come before pinned ephemera in the head (§5.1). The head

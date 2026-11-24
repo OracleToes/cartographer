@@ -448,7 +448,10 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
   // A person's message is the one kind that is somebody's words rather than the
   // model's own: restoring it puts a message back, so it is not `plainText`.
   const kind: EphemeralKind = role === "user" ? "personMessage" : "plainText";
-  for (const [index, value] of text.entries()) parts.push({ key: `x${index}`, value: { kind, text: value } });
+  // A user message can contain multiple text blocks, but is one Chat line and
+  // one selectable contribution. Its recorded text concatenates those blocks.
+  const values = role === "user" ? [text.join("")] : text;
+  for (const [index, value] of values.entries()) if (value.trim()) parts.push({ key: `x${index}`, value: { kind, text: value } });
   return parts;
 }
 
@@ -520,6 +523,8 @@ export interface CollapseOptions {
    * left out of the head, so each is read once: as that turn (§2.3).
    */
   carriedTexts?: readonly string[];
+  /** Exact Chat identities of handed-on inputs, when known. */
+  carriedChatIds?: readonly string[];
 }
 
 export interface CollapseReport {
@@ -650,10 +655,9 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     const write = writeBackOf(item);
     if (write !== undefined) next = applyWrite(next, write, now);
   }
-  // The messages handed on as the new generation's first turn are not in its
-  // head as well: the newest record with that text is the one sent, and it
-  // joins the head at the next collapse, from the body it will be in then.
-  const handedOn = new Set<string>();
+  // A handed-on record stays in the body, not also the head. Prefer its exact
+  // identity; carriedTexts is retained for older callers without identities.
+  const handedOn = new Set<string>(options.carriedChatIds ?? []);
   for (const text of options.carriedTexts ?? []) {
     const record = [...next.chat].reverse().find((candidate) => candidate.author === "user" && candidate.text === text && !handedOn.has(candidate.id));
     if (record !== undefined) handedOn.add(record.id);

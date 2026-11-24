@@ -775,6 +775,26 @@ test("Chat is swept like any Brain record: a recorded message is not archived as
   }
 });
 
+test("a carried Chat identity excludes only that record from the frozen head", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live0c2", 1_700_000_100, []);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      for (const [id, n] of [["first", 1], ["second", 2]]) {
+        await store.apply({ kind: "chat.record", record: { id, author: "user", text: "same", createdAt: at(n), updatedAt: at(n) } }, at(n));
+      }
+      const report = await collapse(root, store, { person: "OracleToes", carriedChatIds: ["first"] });
+      const sidecar = JSON.parse(readFileSync(generationPaths(root, report.generation).sidecar, "utf8"));
+      assert.deepEqual(sidecar.chat, ["second"]);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restoring an ephemeral returns it to the archive's absence and the live context's keeping, without pinning it", async () => {
   const root = tempRoot();
   try {

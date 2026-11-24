@@ -86,7 +86,7 @@ export type CardEntry =
 
 export type TranscriptEntry =
   | { kind: "person"; text: string; /** The prompt's `U` or frozen `C` handle. */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; /** Restored person messages without a Chat record are ephemeral. */ sourceId?: string; mark?: Mark | undefined }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The live call when no record can be found. */ sourceId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
   | { kind: "system"; text: string; /** The Brain chat record this system notice is (e.g. automatic collapse). */ recordId?: string; handle?: string; mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
@@ -779,8 +779,8 @@ export class TranscriptView implements Component, Focusable {
         }
         if (entry.recordId !== undefined) {
           this.selectables.push({ key: `chat:${entry.recordId}`, target: { part: "chat", id: entry.recordId }, start, end: lines.length });
-        } else if (entry.kind === "person" && entry.sourceId !== undefined) {
-          this.selectables.push({ key: `person:${entry.sourceId}`, target: { part: "tool-work", id: entry.sourceId }, start, end: lines.length });
+        } else if ((entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined) {
+          this.selectables.push({ key: `${entry.kind}:${entry.sourceId}`, target: { part: "tool-work", id: entry.sourceId }, start, end: lines.length });
         }
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);

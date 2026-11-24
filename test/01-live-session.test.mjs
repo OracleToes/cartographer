@@ -14,6 +14,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@ear
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf } from "../dist/domain/handles.js";
+import { personChatBindings } from "../dist/domain/chat-identity.js";
 import {
   applyOmitNow,
   applyRecordActionNow,
@@ -521,6 +522,59 @@ test("sibling work identities survive repeated removals, including identical par
     assert.ok(!swept.some((item) => item.id === id("x2")));
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("applying Chat actions removes only the selected live person or agent contribution", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([
+      fauxText("keep this sibling"),
+      fauxToolCall("chat", { text: "same agent answer" }, { id: "chat-first" }),
+      fauxToolCall("chat", { text: "same agent answer" }, { id: "chat-second" }),
+    ], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "stop-first" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "stop-second" })], { stopReason: "toolUse" })),
+  ]);
+  let session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  try {
+    await (await submitInput(session, [{ type: "text", text: "same " }, { type: "text", text: "question" }])).wait(BACKGROUND_CONTEXT);
+    await (await submitInput(session, "same question")).wait(BACKGROUND_CONTEXT);
+    const people = (await brain.read()).chat.filter((record) => record.author === "user");
+    assert.equal(people.length, 2);
+    let entries = await sessionTranscript(session);
+    let bindings = personChatBindings(entries, (await brain.read()).chat, new Set());
+    const first = entries.find((entry) => bindings.get(entry.id) === people[0].id);
+    const second = entries.find((entry) => bindings.get(entry.id) === people[1].id);
+    assert.ok(first && second && first.id !== second.id, "equal text has separate durable identities");
+
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", people[1].id, "delete"), true);
+    entries = await sessionTranscript(session);
+    assert.equal(entries.find((entry) => entry.id === second.id).model.length, 0);
+    assert.equal(entries.find((entry) => entry.id === first.id).model[0].role, "user");
+    assert.ok((await brain.read()).chat.some((record) => record.id === people[0].id));
+    assert.ok(!(await brain.read()).chat.some((record) => record.id === people[1].id));
+
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", "chat:chat-first", "delete"), true);
+    entries = await sessionTranscript(session);
+    const model = JSON.stringify(entries.map((entry) => entry.model));
+    assert.ok(!model.includes('"id":"chat-first"'));
+    assert.ok(model.includes('"id":"chat-second"'));
+    assert.ok(model.includes("keep this sibling"));
+    assert.ok((await brain.read()).chat.some((record) => record.id === "chat:chat-second"));
+
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    entries = await sessionTranscript(session);
+    bindings = personChatBindings(entries, (await brain.read()).chat, new Set());
+    assert.equal(bindings.get(first.id), people[0].id, "identity survives reopening");
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", people[0].id, "archive"), true);
+    assert.equal((await sessionTranscript(session)).find((entry) => entry.id === first.id).model.length, 0);
+    assert.ok((await brain.readArchive()).items.some((item) => item.record?.value?.id === people[0].id));
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });

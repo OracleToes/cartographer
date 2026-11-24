@@ -6,7 +6,7 @@
  */
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -22,6 +22,7 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  sessionTranscript,
   submitInput,
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
@@ -296,6 +297,11 @@ describe("automatic collapse", { concurrency: 4 }, () => {
         (await userTexts(next)).filter((text) => /first|second/.test(text)),
         ["first, the one that failed", "second, queued while it failed"],
       );
+      const records = (await env.brain.read()).chat.filter((record) => record.author === "user");
+      const identities = (await sessionTranscript(next)).filter((entry) => entry.kind === "carto.user").map((entry) => entry.data.chatRecordId);
+      assert.deepEqual(identities, records.map((record) => record.id), "failed and queued inputs retain their original identities");
+      const sidecar = JSON.parse(readFileSync(next.markdownPath.replace(/\.md$/, ".json"), "utf8"));
+      assert.ok(records.every((record) => !sidecar.chat.includes(record.id)), "carried records are in the body, not duplicated in the head");
     } finally {
       await closeLiveSession(next ?? session).catch(() => undefined);
       await env.cleanup();

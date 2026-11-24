@@ -15,7 +15,8 @@ import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { applyWrite } from "../dist/domain/brain.js";
-import { promptHandles, toolRowHandle } from "../dist/ui/prompt-handles.js";
+import { promptHandles, promptItemsOf, toolRowHandle } from "../dist/ui/prompt-handles.js";
+import { personChatBindings } from "../dist/domain/chat-identity.js";
 import { renderStateBlock } from "../dist/domain/state-block.js";
 import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
@@ -238,6 +239,38 @@ test("a live person entry without a Chat record targets its prompt identity", ()
   transcript.pinSelected();
   transcript.markSelected("delete");
   assert.deepEqual(actions, [["pin", "tool-work", "generation:1:x0"], ["tool-work", "generation:1:x0", false]]);
+});
+
+test("person identity binds both views without reassigning ambiguous legacy lines", () => {
+  const records = [
+    { id: "one", author: "user", text: "repeated", createdAt: 1, updatedAt: 1 },
+    { id: "two", author: "user", text: "repeated", createdAt: 2, updatedAt: 2 },
+  ];
+  const entry = (id, recordId) => ({ id, ...(recordId === undefined ? {} : { data: { chatRecordId: recordId } }), model: [{ role: "user", content: [{ type: "text", text: "repeated" }] }] });
+  const entries = [entry(1, "one"), entry(2, "two")];
+  assert.deepEqual([...personChatBindings(entries, records, new Set())], [[1, "one"], [2, "two"]]);
+  assert.deepEqual([...personChatBindings(entries, [records[1]], new Set())], [[2, "two"]], "a missing record does not claim its sibling");
+  assert.deepEqual([...personChatBindings([entry(1), entry(2)], [records[1]], new Set())], [], "ambiguous legacy lines are not reassigned");
+  assert.deepEqual([...personChatBindings([entry(1), entry(2)], records, new Set())], [], "equal counts cannot prove which duplicate is which");
+  assert.deepEqual([...personChatBindings([entry(1)], [records[0]], new Set())], [[1, "one"]]);
+  assert.equal(promptItemsOf(entries, "g")[0].item.text, "repeated", "text parts remain visible and get a person handle");
+
+  const brain = { ...emptyBrain(), chat: records };
+  const context = new ContextView();
+  context.setData({ brain, projectionText: "", systemPrompt: "", tools: [], toolWorkItems: [], stateBlockText: "", transcriptMessages: [
+    { id: 1, role: "user", text: "repeated", targetId: "g:1:x0", recordId: null },
+    { id: 2, role: "user", text: "repeated", targetId: "g:2:x0", recordId: "two" },
+  ] });
+  const people = context.promptSections().find((section) => section.title === "body").nodes.filter((node) => node.kind === "person");
+  assert.deepEqual(people.map((node) => node.target), [{ part: "transcript", id: "g:1:x0" }, { part: "chat", id: "two" }]);
+
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id) => actions.push([part, id]);
+  transcript.setEntries([{ kind: "agent", text: "orphaned call", sourceId: "g:3:c0" }]);
+  assert.ok(transcript.startSelecting());
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [["tool-work", "g:3:c0"]]);
 });
 
 test("notifications flash transiently instead of accumulating in the transcript", () => {

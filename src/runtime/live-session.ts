@@ -1,3 +1,4 @@
+import { personChatBindings, userText } from "../domain/chat-identity.js";
 /**
  * The live session (§4, §5.7).
  *
@@ -41,6 +42,7 @@ import type { BrainStore } from "./brain-store.js";
 import {
   collapse,
   generationPaths,
+  ephemeralItemId,
   newGenerationId,
   reconcileGenerations,
   removedPartKeys,
@@ -49,7 +51,7 @@ import {
   type CollapseOptions,
   type CollapseReport,
 } from "./collapse.js";
-import { writeSnapshot } from "./projection-files.js";
+import { snapshotPaths, writeSnapshot } from "./projection-files.js";
 import {
   appendCollapseLog,
   brainCountsOf,
@@ -347,18 +349,20 @@ export async function submitInput(session: LiveSession, text: UserInput, whenBus
   // itself still goes in as the turn the agent answers. A message carried over
   // a collapse is admitted without passing here, so it is recorded once.
   const said = inputText(text);
+  let recordId: string | undefined;
   if (said.trim().length > 0 && said.trim() !== STATE_BLOCK_MARKER) {
+    recordId = `chat:person:${randomUUID()}`;
     const at = session.now();
     await session.brain.apply(
-      { kind: "chat.record", record: { id: `chat:person:${randomUUID()}`, author: "user", text: said, createdAt: at, updatedAt: at } },
+      { kind: "chat.record", record: { id: recordId, author: "user", text: said, createdAt: at, updatedAt: at } },
       at,
     );
   }
-  return admitInput(session, text, whenBusy);
+  return admitInput(session, text, whenBusy, recordId);
 }
 
 /** Admit an input without treating it as the person's new word; the one path every input takes. */
-async function admitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp") {
+async function admitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp", recordId?: string) {
   // Admit the message and invalidate the rest in one commit. Whichever of a
   // wake or this message reaches the session line first wins; a crash cannot
   // leave an admitted message alongside an eligible old wake.
@@ -376,7 +380,7 @@ async function admitInput(session: LiveSession, text: UserInput, whenBusy: "stee
         cursor = page.next;
       } while (cursor !== undefined);
     }
-    const id = await session.conversation.submit(tx, { type: "input", content: text, whenBusy });
+    const id = await session.conversation.submit(tx, { type: "input", content: text, whenBusy, ...(recordId === undefined ? {} : { entry: { kind: "carto.user", data: { chatRecordId: recordId } } }) });
     rest.active = null;
     rest.legacyAllowed = false;
     return { id, oldTasks };
@@ -495,6 +499,29 @@ export async function applyRecordActionNow(
   id: string,
   action: "archive" | "delete",
 ): Promise<boolean> {
+  if (kind === "chat") {
+    const before = await brain.read();
+    const record = before.chat.find((candidate) => candidate.id === id);
+    if (record === undefined) return false;
+    const entries = await sessionTranscript(session);
+    if (record.author === "user") {
+      const headIds = await readFile(snapshotPaths(root, session.generation).sidecar, "utf8")
+        .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? before.chat.map((record) => record.id))
+        .catch(() => before.chat.map((record) => record.id));
+      const bindings = personChatBindings(entries, before.chat, new Set(headIds));
+      const entry = entries.find((candidate) => bindings.get(candidate.id) === id);
+      if (entry !== undefined && !(await applyOmitNow(session, ephemeralItemId(session.generation, entry.id, "x0")))) return false;
+    } else if (record.author === "agent" && id.startsWith("chat:")) {
+      const callId = id.slice(5);
+      for (const entry of entries) {
+        const message = entry.model[0];
+        if (message?.role !== "assistant") continue;
+        const index = message.content.findIndex((part) => part.type === "toolCall" && part.id === callId && part.name === "chat");
+        const key = entry.partKeys?.[index];
+        if (index >= 0 && key !== undefined && !(await applyOmitNow(session, ephemeralItemId(session.generation, entry.id, key)))) return false;
+      }
+    }
+  }
   const applied = await brain.applyRecordAction({ kind, id, action, generation: session.generation, now: Date.now() });
   if (!applied.found) return false;
   rewriteHeadSnapshot(root, session.generation, applied.brain, session.state.person, Date.now());
@@ -761,18 +788,20 @@ export interface CollapseFollow {
 }
 
 /** The text of a user input, for the places that need to show or compare it. */
-const inputText = (content: UserInput): string =>
-  typeof content === "string"
-    ? content
-    : content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("");
+const inputText = userText;
 
 /**
  * The person's messages a collapse would otherwise lose: those still queued in
  * the old store, and those of a run that failed — pi settles them unanswered and
  * the sweep archives them, so the rebuilt agent would never see what it was asked.
  */
-async function unansweredInputs(session: LiveSession): Promise<Array<{ content: UserInput; whenBusy: "steer" | "followUp" }>> {
-  const carried: Array<{ content: UserInput; whenBusy: "steer" | "followUp" }> = [];
+async function unansweredInputs(session: LiveSession): Promise<Array<{ content: UserInput; whenBusy: "steer" | "followUp"; recordId?: string }>> {
+  const carried: Array<{ content: UserInput; whenBusy: "steer" | "followUp"; recordId?: string }> = [];
+  const records = (await session.brain.read()).chat;
+  const head = await readFile(snapshotPaths(session.root, session.generation).sidecar, "utf8")
+    .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? records.map((record) => record.id))
+    .catch(() => records.map((record) => record.id));
+  const bindings = personChatBindings(await sessionTranscript(session), records, new Set(head));
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
   const failure = live?.runFailure;
   if (failure !== undefined && failure.reason === "model_error") {
@@ -783,13 +812,16 @@ async function unansweredInputs(session: LiveSession): Promise<Array<{ content: 
       if (record === undefined || record.type !== "input" || record.entry === undefined) continue;
       const message = view.entries.find((entry) => entry.id === record.entry)?.model?.[0];
       if (message?.role !== "user" || inputText(message.content).trim() === STATE_BLOCK_MARKER) continue;
-      carried.push({ content: message.content, whenBusy: "followUp" });
+      const recordId = bindings.get(record.entry);
+      carried.push({ content: message.content, whenBusy: "followUp", ...(recordId === undefined ? {} : { recordId }) });
     }
   }
   const inbox = await session.harness.snapshot(InboxDoc, session.conversation.id, BACKGROUND_CONTEXT);
   for (const item of inbox?.items ?? []) {
     if (item.mode === "write") continue;
-    carried.push({ content: item.content as unknown as UserInput, whenBusy: item.mode });
+    const data = item.entry?.data as { chatRecordId?: unknown } | undefined;
+    const recordId = typeof data?.chatRecordId === "string" ? data.chatRecordId : undefined;
+    carried.push({ content: item.content as unknown as UserInput, whenBusy: item.mode, ...(recordId === undefined ? {} : { recordId }) });
   }
   return carried;
 }
@@ -869,7 +901,7 @@ export async function collapseLiveSession(
   // string names: one name, carried from the session that built it.
   const report = await collapse(session.root, options.brain, {
     person: session.state.person,
-    carriedTexts: carry.map((input) => inputText(input.content)),
+    carriedChatIds: carry.flatMap((input) => input.recordId === undefined ? [] : [input.recordId]),
     ...ceremony,
   });
   const brainAfter = brainCountsOf(await options.brain.read());
@@ -882,7 +914,7 @@ export async function collapseLiveSession(
     // The person's own words are never held back by a pause, which only stops
     // the agent starting on its own; a state block is that, so it waits.
     if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
-    for (const input of carry) await admitInput(next, input.content, input.whenBusy);
+    for (const input of carry) await admitInput(next, input.content, input.whenBusy, input.recordId);
     resumed = carry.length > 0 || !paused;
   }
   const reportedTotal =

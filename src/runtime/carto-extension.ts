@@ -298,12 +298,6 @@ export function deriveStateAttention(params: {
   if (activeWork && params.brain.ledger.length === 0) {
     cues.push("Ledger is empty -> track your active leaf, open questions, and current progress in `ledger`.");
   }
-  const markedChatCount = params.brain.chat.filter((record) => record.mark !== undefined).length;
-  if (params.brain.chat.length >= 8 && markedChatCount < 2) {
-    cues.push(
-      `Head carries ${params.brain.chat.length} Chat records -> \`mark\` resolved older Chat handles for archive before your next \`collapse\`.`,
-    );
-  }
   const needyJobs = params.jobs.filter((job) => job.unreadLines > 0 || job.status === "exited");
   if (needyJobs.length > 0) {
     cues.push(

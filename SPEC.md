@@ -153,7 +153,14 @@ the `chat` tool's result; the head does not repeat either until a collapse ends
 that body. Both are Chat records in the Brain, so they stay until someone deletes
 them, and the collapse places them in the head (§3.2, §5.1): the conversation
 goes on across a collapse, and the transcript and the Context view are two views
-of the same records. Chat is swept like every Brain record: only a delete or an
+of the same records. New person messages carry their Chat identity in the live
+entry, including when carried across an automatic collapse. Applying a Chat
+record action now removes its corresponding live contribution as well as the
+record; unrelated identical messages and sibling tool calls remain. Legacy
+entries without an identity are matched only when there is one live occurrence
+and one available record with that text; ambiguous lines remain separately
+actionable as live contributions, without guessing which Brain record they are.
+Chat is swept like every Brain record: only a delete or an
 archive mark removes one, and an archived record moves out as the record, never
 also as a swept line. A rebuild in the middle of a generation (an apply-now)
 keeps to the Chat the head held at the freeze, and a message handed on as the new
@@ -452,8 +459,8 @@ dashboard about its Brain and the project, and it reports:
   `flow:` checklist at the tail, plus conditional `attention:` cues derived
   strictly from live facts (such as `bash` used for file edits, pinned files
   drifting on disk since collapse, an untouched/flat Brain after several tool
-  calls, bloated Chat history, or persistent jobs with unread output). Omitted
-  when clean.
+  calls or persistent jobs with unread output). It does not instruct the agent
+  to archive or delete Chat. Omitted when clean.
 
 A long pending list is the signal to collapse.
 

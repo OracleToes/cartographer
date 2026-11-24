@@ -1,3 +1,4 @@
+import { personChatBindings, userText } from "../domain/chat-identity.js";
 /**
  * The workspace (§8).
  *
@@ -202,6 +203,7 @@ function countSidebar(
 interface ContextEntryLike {
   id?: number;
   kind?: string;
+  data?: unknown;
   model?: unknown;
   partKeys?: readonly string[] | undefined;
 }
@@ -546,6 +548,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         .map(messageOf)
         .filter((message): message is MessageLike => message !== undefined) as unknown as BlockMessageLike[],
     );
+    const headIdsForContext = await readFile(snapshotPaths(options.root, generation).sidecar, "utf8")
+      .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? brainState.chat.map((record) => record.id))
+      .catch(() => brainState.chat.map((record) => record.id));
+    const personBindings = personChatBindings(entries, brainState.chat, new Set(headIdsForContext));
     const transcriptMessages: ContextDialogueMessage[] = [];
     const toolWorkItems: ContextWorkItem[] = [];
 
@@ -575,11 +581,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const id = entry.id ?? i;
       const ts = message.timestamp;
       if (role === "user") {
-        const textContent = typeof message.content === "string" ? message.content : undefined;
+        const textContent = userText(message.content);
         if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
           // The entry number is the order; the id may be composite for other
           // kinds, so the view is told where the body sits rather than guessing.
-          transcriptMessages.push({ id, targetId: ephemeralItemId(generation, id, "x0"), entry: i, order: -1, role, text: textContent, timestamp: ts });
+          transcriptMessages.push({ id, targetId: ephemeralItemId(generation, id, "x0"), entry: i, order: -1, role, text: textContent, timestamp: ts, recordId: personBindings.get(id) ?? null });
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
@@ -1474,8 +1480,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const message = messageOf(entry);
         if (message === undefined) continue;
         const role = typeof message.role === "string" ? message.role : "";
-        if (role === "user" && typeof message.content === "string") {
-          const text = message.content;
+        if (role === "user") {
+          const text = userText(message.content);
           if (text.trim() === STATE_BLOCK_MARKER || text.trim().length === 0) continue;
           const t = timestampOf(message);
           person.push({ key: id, entry: { kind: "person", text } });
@@ -1545,7 +1551,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             if (part.name === "chat" && callId !== undefined && output !== undefined && toolErrors.get(callId) !== true && isRecord(part.arguments) && typeof part.arguments.text === "string") {
               const record = brainState.chat.find((candidate) => candidate.id === `chat:${callId}`);
               const chatHandle = record === undefined ? undefined : handleOf(brainState.handles, "chat", record.id);
-              agent.push({ key: key + 0.00001, entry: { kind: "agent", text: part.arguments.text, ...(record === undefined ? {} : { recordId: record.id, mark: record.mark }), ...(chatHandle === undefined ? {} : { handle: chatHandle }) } });
+              agent.push({ key: key + 0.00001, entry: { kind: "agent", text: part.arguments.text, ...(record === undefined ? source : { recordId: record.id, mark: record.mark }), ...(chatHandle === undefined ? {} : { handle: chatHandle }) } });
             }
             cards.push({
               key,
@@ -1598,14 +1604,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
       // A live person line is its Chat record when one was recorded on submit.
       // Head records are already represented above and cannot claim a body line.
-      const unclaimed = new Map<string, string[]>();
-      const headIds = new Set(headChat);
-      for (const record of brainState.chat) {
-        if (record.author === "user" && !headIds.has(record.id)) unclaimed.set(record.text, [...(unclaimed.get(record.text) ?? []), record.id]);
-      }
+      const bindings = personChatBindings(entries, brainState.chat, new Set(Array.isArray(sidecar.chat) ? headChat : brainState.chat.map((record) => record.id)));
       for (const item of person) {
         if (item.entry.kind !== "person") continue;
-        const id = unclaimed.get(item.entry.text)?.shift();
+        const id = bindings.get(item.key);
         if (id === undefined) {
           item.entry = { ...item.entry, sourceId: ephemeralItemId(state.session.generation, item.key, "x0") };
         } else {

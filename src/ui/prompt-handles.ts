@@ -17,6 +17,7 @@
  */
 
 /** One item the prompt holds, in prompt order. */
+import { userText } from "../domain/chat-identity.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 import { ephemeralItemId } from "../runtime/collapse.js";
@@ -60,9 +61,10 @@ export function promptItemsOf(entries: readonly PromptContextEntry[], generation
     const make = (key: string, kind: PinnedEphemeral["kind"], text: string, entity?: PinnedEphemeral["entity"]): PinnedEphemeral => ({
       id: ephemeralItemId(generation, id, key), kind, text, createdAt, pinned: "agent", ...(entity === undefined ? {} : { entity }),
     });
-    if (message.role === "user" && typeof message.content === "string") {
-      if (!message.content.trim() || message.content.trim() === STATE_BLOCK_MARKER) continue;
-      items.push({ kind: "person", key: String(id), item: make("x0", "personMessage", message.content) });
+    if (message.role === "user") {
+      const text = userText(message.content);
+      if (!text.trim() || text.trim() === STATE_BLOCK_MARKER) continue;
+      items.push({ kind: "person", key: String(id), item: make("x0", "personMessage", text) });
     } else if (message.role === "assistant" && Array.isArray(message.content)) {
       message.content.forEach((part: unknown, index: number) => {
         if (!object(part)) return;

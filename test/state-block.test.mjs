@@ -167,6 +167,7 @@ test("state block includes compact mode-aware decision flow and conditional atte
   assert.match(editBlock, /\nflow:\n/);
   assert.match(editBlock, /use `read`, `edit`, `create`/);
   assert.match(editBlock, /`chat` OracleToes/);
+  assert.doesNotMatch(editBlock, /mark` resolved `chat`/i);
   assert.doesNotMatch(editBlock, /\nattention:\n/);
   assert.doesNotMatch(editBlock.slice(editBlock.indexOf("\nflow:\n")), /—/);
 
@@ -239,7 +240,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
     assert.match(block, /Brain has 0 writes after 3 tool calls/);
     assert.match(block, /Atlas has only 1 node/);
     assert.match(block, /Ledger is empty/);
-    assert.match(block, /Head carries 8 Chat records/);
+    assert.doesNotMatch(block, /older Chat handles|Head carries 8 Chat records/);
 
     // Once the latest turn switches back to `edit`, the bash-file-op cue disappears.
     const recovered = await renderLiveStateBlock(

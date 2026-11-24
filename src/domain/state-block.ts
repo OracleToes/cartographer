@@ -130,7 +130,7 @@ function decisionFlowLines(mode: "edit" | "read only", person: string): string[]
     return [
       "flow:",
       `  - Exploring in read only mode? -> use \`read\` and \`tree\` without modifying files; map findings in \`atlas\`/\`ledger\` and answer ${person} via \`chat\`.`,
-      "  - Head bloated or finished exploring? -> `mark` resolved items, `collapse`, or `sleep` when nothing is left to check.",
+      "  - Head bloated or finished exploring? -> `mark` resolved task items, `collapse`, or `sleep` when nothing is left to check.",
     ];
   }
   return [
@@ -139,7 +139,7 @@ function decisionFlowLines(mode: "edit" | "read only", person: string): string[]
     "  - Reading, editing, or creating files? -> use `read`, `edit`, `create` (not `bash` sed/cat/python file edits) and `pin` active files.",
     "  - Testing or running long-lived processes? -> extend one reusable interactive harness in place (no piling up test scripts); use `proc` for persistent processes.",
     "  - Changed code or learned something? -> update your `atlas`/`ledger` handle in place now, then verify edge cases through the harness.",
-    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved \`chat\`/leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
+    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved task leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
   ];
 }
 
