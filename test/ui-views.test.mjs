@@ -117,6 +117,54 @@ test("Sidebar mouse click switches view", () => {
   assert.equal(selected, "context");
 });
 
+test("sidebar's ordered prompt strip supports hover, click, grouping, and short screens", () => {
+  let height = 26;
+  const sidebar = new Sidebar(() => height);
+  const node = (kind, handle, label, tokens) => ({ kind, handle, label, tokens });
+  const sections = [
+    { title: "head", nodes: [node("system", "H", "system prompt", 100)] },
+    { title: "body", nodes: [node("person", "U1", "you", 100)] },
+    { title: "tail", nodes: [node("state", "B", "state block", 100)] },
+  ];
+  assert.equal(sidebar.setContextSections(sections), true);
+  assert.equal(sidebar.setContextSections(sections), false);
+  let lines = sidebar.render(28);
+  const strip = lines.flatMap((line, row) => plain(line).includes("███") ? [row] : []);
+  assert.equal(strip.length, 9);
+  assert.ok(lines[strip[0]].includes(tokens.muted("███")), "head is first");
+  assert.ok(lines[strip[3]].includes(tokens.person("███")), "body follows head");
+  assert.ok(lines[strip[8]].includes(tokens.warn("███")), "tail is last");
+  assert.ok(lines.every((line) => visibleWidth(line) === 28));
+  const mouse = (type, y, x = 4) => ({ type, button: "left", x, y, screenX: x + 2, screenY: y + 3, width: 28, height, shift: false, alt: false, ctrl: false });
+  const tooltip = () => sidebar.render(28).slice(strip[0]).map((line) => plain(line).slice(8).trim()).join(" ");
+  assert.ok(sidebar.handleMouse(mouse("move", strip[0]))?.render);
+  let text = tooltip();
+  assert.match(text, /head · H · ~100 tok · system prompt/);
+  assert.equal(sidebar.pointerMoved(6, strip[0] + 3), false);
+  assert.equal(sidebar.pointerMoved(40, 1), true, "moving to another pane clears hover");
+  assert.doesNotMatch(tooltip(), /system prompt/);
+  assert.ok(sidebar.handleMouse(mouse("click", strip[8]))?.handled, "click fallback does not switch views");
+  assert.match(tooltip(), /tail · B · ~100 tok · state block/);
+
+  height = 15;
+  sidebar.setContextSections([
+    { title: "head", nodes: [node("system", "H", "system", 1), node("tool", "Y1", "tool", 1)] },
+    { title: "body", nodes: [node("person", "U1", "you", 1), node("reasoning", "X1", "thinking", 1)] },
+    { title: "tail", nodes: [node("state", "B", "state block", 2)] },
+  ]);
+  lines = sidebar.render(28);
+  const grouped = lines.findIndex((line) => plain(line).includes("███"));
+  sidebar.handleMouse(mouse("move", grouped));
+  text = sidebar.render(28).slice(grouped).map((line) => plain(line).slice(8).trim()).join(" ");
+  assert.match(text, /2 entries/);
+  assert.match(text, /~2 tok/);
+  assert.match(text, /system, tool/);
+  height = 14;
+  lines = sidebar.render(28);
+  assert.ok(!plain(lines.join("\n")).includes("███"), "navigation takes priority on short screens");
+  assert.ok(plain(lines.join("\n")).includes("transcript"));
+});
+
 test("the transcript follows the frozen head and its actions target the same items as context", () => {
   let brain = emptyBrain();
   const record = (id, author, text, time) => ({ id, author, text, createdAt: time, updatedAt: time });
@@ -165,6 +213,10 @@ test("the transcript follows the frozen head and its actions target the same ite
   const context = new ContextView();
   context.setData({ brain, projectionText: projection.text, headEphemera: frozenItems, systemPrompt: "", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "" });
   const contextText = plain(context.render(100).join("\n"));
+  const sections = context.promptSections();
+  assert.deepEqual(sections.map((section) => section.title), ["head", "body", "tail"]);
+  assert.ok(sections[0].nodes.some((node) => node.handle === "X1"), "sidebar source keeps the frozen head item");
+  assert.ok(!JSON.stringify(sections).includes("not in model context"), "sidebar source excludes unrelated live Brain records");
   assert.ok(contextText.indexOf("C1") < contextText.indexOf("C2") && contextText.indexOf("C2") < contextText.indexOf("C3") && contextText.indexOf("C3") < contextText.indexOf("X1"));
   assert.match(context.nodeFor("ephemera", "kept-result")?.body ?? "", /frozen file/, "an unpinned head item remains actionable in context");
   // If a Brain record has disappeared without a head rewrite, its frozen text

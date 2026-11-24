@@ -133,7 +133,7 @@ export type MarkTarget = {
   id: string | number;
 };
 
-type NodeKind =
+export type NodeKind =
   | "system"
   | "tool"
   | "atlas"
@@ -180,7 +180,7 @@ export interface PromptSection {
   nodes: PromptNode[];
 }
 
-const KIND_INK: Record<NodeKind, (text: string) => string> = {
+export const contextKindInk: Record<NodeKind, (text: string) => string> = {
   system: tokens.muted,
   tool: tokens.tool,
   atlas: tokens.atlas,
@@ -345,6 +345,11 @@ export class ContextView implements Component, Focusable {
       for (let at = oldCursor + 1; at < oldRows.length && held < 0; at += 1) held = findOld(oldRows[at]);
     }
     this.cursor = held >= 0 ? held : this.firstEntry();
+  }
+
+  /** The ordered prompt used by both the full view and the sidebar map. */
+  promptSections(): readonly PromptSection[] {
+    return this.sections;
   }
 
   /** Estimated size of everything the model reads, for the header. */
@@ -936,7 +941,7 @@ export class ContextView implements Component, Focusable {
     const who = this.data?.person ?? "you";
     const open = this.isOpen(node);
     const confirmed = node.target !== undefined && this.archiveConfirmation === `${node.target.part}:${String(node.target.id)}`;
-    const ink = confirmed ? tokens.danger : KIND_INK[node.kind];
+    const ink = confirmed ? tokens.danger : contextKindInk[node.kind];
     const cursor = selected ? (confirmed ? tokens.danger("▌") : tokens.accent("▌")) : " ";
     const glyph = open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));

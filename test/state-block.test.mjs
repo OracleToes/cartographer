@@ -218,7 +218,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       work: newGenerationWork(),
       rebuiltAutomatically: false,
       toolWorkAtLastReport: 0,
-      toolWorkAtLastRequest: 0,
+      toolWorkAtLastRequest: 77,
     };
 
     const messages = [
@@ -231,6 +231,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       { root, brain: { read: async () => brain }, session, markdownPath: snapPath },
       messages,
     );
+    assert.equal(session.toolWorkAtLastRequest, 77, "a UI preview must not alter the in-flight request accounting baseline");
     assert.match(block, /pinned copy in head is older than disk; collapse to refresh/);
     assert.match(block, /\nattention:\n/);
     assert.match(block, /Last `bash` call touched files directly/);

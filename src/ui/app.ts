@@ -398,7 +398,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
-  const sidebar = new Sidebar();
+  const sidebar = new Sidebar(() => Math.max(0, terminal.rows - 3
+    - (terminal.rows >= 20 ? 2 : 0) - (terminal.rows >= 26 ? 2 : 0)));
   const transcriptScroll = new PaneScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
   /**
    * The prompt's frame: Posting puts the name of the thing at the top of it, so
@@ -514,6 +515,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    const session = state.session;
     // The generation whose store these entries are in: an item's pin id is built
     // from it, so the pin names the item the sweep will name (§3.1).
     const generation = state.session.generation;
@@ -652,15 +654,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (held === undefined) continue;
       item.pinned = held.pinned;
     }
+    const headEphemera = await frozenItemsOf();
+    if (session !== state.session || state.collapsing) return;
     contextView.setData({
       brain: brainState,
       systemPrompt: cartoInstructions(state.session.state.person),
       person: state.session.state.person,
-      // The frozen bytes the carto-context section renders; a missing file
-      // falls back to re-rendering the Brain, the same fallback pi itself
-      // uses — the view never fabricates a projection.
-      ...(projectionText === undefined ? {} : { projectionText }),
-      headEphemera: await frozenItemsOf(),
+      // Never replace a missing frozen snapshot with today's mutable Brain.
+      // Keep the last snapshot of this generation if one was read already.
+      projectionText: projectionText ?? (lastFrozen?.generation === generation ? lastFrozen.text : ""),
+      headEphemera,
       tools: allTools,
       transcriptMessages,
       toolWorkItems,
@@ -670,6 +673,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // handle the tree shows it under (§5.4) and not by a second count.
       treeHandles: Object.fromEntries(treeOf(brainState).handles),
     });
+    if (sidebar.setContextSections(contextView.promptSections())) tui.requestRender();
   };
 
   /** The tree the person is looking at, from the session's anchor and depth. */
@@ -1662,9 +1666,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         tui.requestRender();
       }
 
-      if (state.view === "context" && state.layer === "context") {
-        await syncContextView(brainState);
-      }
+      // The sidebar map stays current on every view, using the exact same
+      // ordered nodes as the Context view rather than a second projection.
+      await syncContextView(brainState);
 
       // The books follow the Brain on this same drain: Chat streams, and the
       // agent writes Atlas and Ledger mid-run, so the open book and the
@@ -2899,6 +2903,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   tui.addInputListener((data) => {
+    // Pi dispatches motion to the pane under the pointer, not to the one it
+    // left. Observe coordinates without consuming them so the sidebar can
+    // dismiss its hover when the pointer enters another pane or overlay.
+    const mouse = /^\x1b\[<\d+;(\d+);(\d+)[Mm]$/.exec(data);
+    if (mouse !== null && sidebar.pointerMoved(Number(mouse[1]) - 1, Number(mouse[2]) - 1)) tui.requestRender();
     if (state.overlayOpen) return undefined;
     // The registry sees keys first: a command that is not available returns the
     // keystroke untouched, so the focused view still gets it.

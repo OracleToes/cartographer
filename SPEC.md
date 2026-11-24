@@ -846,6 +846,14 @@ sidebar's counts with it, judged by a digest of what the books show so a quiet
 Brain costs a read and a comparison, not a redraw. The Context view and the Tree
 follow on the same drain.
 
+The sidebar also has a single vertical, token-weighted map of the occupied
+prompt, using the Context view's ordered entries and their type colours: frozen
+head at the top, live body in occurrence order, and state-block tail at the
+bottom. It does not show unused capacity. Hovering a row shows its region,
+entry and estimated size; a row shared by several entries says so. Clicking a
+row provides the same detail when mouse motion is unavailable. On short screens
+the map yields to navigation. Hovering or clicking it does not change focus.
+
 **The transcript renders everything the model does.** The Chat the head holds is
 drawn first, in the head's order, before anything the generation did — after a
 reload as before it, and whatever the entries' timestamps say; Chat written since

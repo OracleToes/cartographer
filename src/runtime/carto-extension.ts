@@ -350,7 +350,6 @@ export async function renderLiveStateBlock(
 ): Promise<string> {
   const brain = await options.brain.read();
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
-  options.session.toolWorkAtLastRequest = toolWorkTokens;
   let tree: { root: string; depth: number; lines: string[] };
   try {
     tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
@@ -519,6 +518,9 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             }
             options.session.liveEphemera = live;
           }
+          // Only an actual request sets the accounting baseline. UI previews
+          // also render the state block and must not change an in-flight one.
+          options.session.toolWorkAtLastRequest = splitContextMessages(visible).toolWorkTokens;
           const block = await renderLiveStateBlock(options, visible, (input) => {
             const work = options.session.work;
             if (work.requests === 0) work.startFill = contextFillPercent(input);
