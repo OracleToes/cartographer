@@ -45,7 +45,7 @@ import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
-import { canvasLine, padLine, tokens } from "./tokens.js";
+import { canvasLine, padLine, surfaceLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
 
 export interface ContextToolItem {
@@ -168,6 +168,8 @@ export interface PromptNode {
   payload?: { callId: string; tool?: string | undefined; path?: string | undefined } | undefined;
   /** Who keeps this entry in the head, for an entry the person pinned. */
   pinned?: "user" | "agent" | undefined;
+  /** Estimated token cost of this entry as the model receives it. */
+  tokens: number;
 }
 
 export interface PromptSection {
@@ -200,6 +202,8 @@ const BODY_GUTTER = `     ${tokens.rule("│")} `;
 const BODY_INSET = 7;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+const formatTokenCost = (count: number): string => `~${count.toLocaleString("en-US")} tok`;
 
 /** One entry of the frozen head, as the bytes the model reads. */
 interface FrozenEntry {
@@ -385,6 +389,7 @@ export class ContextView implements Component, Focusable {
       summary: oneLine(data.systemPrompt),
       body: data.systemPrompt,
       real: data.systemPrompt,
+      tokens: estimateTokens(data.systemPrompt),
     });
     data.tools.forEach((tool, index) => {
       head.push({
@@ -396,6 +401,7 @@ export class ContextView implements Component, Focusable {
         body: `${tool.description}\n\n${JSON.stringify(tool.parameters, null, 2)}`,
         real: JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2),
         target: { part: "tools", id: tool.name },
+        tokens: estimateSerialized(tool),
       });
     });
 
@@ -424,6 +430,7 @@ export class ContextView implements Component, Focusable {
     const frozenRecord = (entry: FrozenEntry & { kind: "atlas" | "ledger" | "chat" | "ephemera" }): PromptNode => {
       const at = locate(entry.kind, entry.key);
       const { summary, body } = readable(entry);
+      const real = entry.lines.join("\n");
       const unpinned = entry.kind === "ephemera" && at !== undefined && at.pinned === undefined;
       return {
         id: `${entry.kind}-${at?.id ?? entry.key}`,
@@ -432,7 +439,8 @@ export class ContextView implements Component, Focusable {
         label: entry.kind === "ephemera" ? at?.label ?? /^\S+ \[([^\]]*)\]/.exec(entry.lines[0] ?? "")?.[1] ?? "pinned" : entry.kind,
         summary,
         body,
-        real: entry.lines.join("\n"),
+        real,
+        tokens: estimateTokens(real),
         ...(at === undefined ? { marked: GONE } : { target: { part: entry.kind, id: at.id } }),
         ...(at === undefined ? {} : mark(at.mark)),
         ...(unpinned ? { marked: "unpinned since the freeze · leaves the head at the next collapse" } : {}),
@@ -469,6 +477,7 @@ export class ContextView implements Component, Focusable {
       shownFiles.add(entry.key);
       const file = pinnedFiles.get(entry.key);
       const { summary, body } = readable(entry);
+      const real = entry.lines.join("\n");
       head.push({
         id: `file-${file?.path ?? entry.key}`,
         handle: treeHandle(entry.key),
@@ -476,7 +485,8 @@ export class ContextView implements Component, Focusable {
         label: "file",
         summary,
         body,
-        real: entry.lines.join("\n"),
+        real,
+        tokens: estimateTokens(real),
         // A file the head holds is a row you can act on whether or not it is still
         // pinned: `p` unpins it, and on the row that says it is leaving, `p` pins it
         // again, so the head keeps it.
@@ -517,6 +527,7 @@ export class ContextView implements Component, Focusable {
             label: "thinking",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
+            tokens: estimateTokens(item.text ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -533,11 +544,13 @@ export class ContextView implements Component, Focusable {
             label: "text",
             summary: oneLine(item.text ?? ""),
             body: item.text ?? "",
+            tokens: estimateTokens(item.text ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
         });
       } else if (item.kind === "toolCall") {
+        const callText = item.args ? `${item.name ?? ""}\n${item.args}` : (item.name ?? "");
         candidates.push({
           key,
           order: suffix,
@@ -548,6 +561,7 @@ export class ContextView implements Component, Focusable {
             label: item.name ?? "call",
             summary: oneLine(item.args ?? ""),
             body: item.args ?? "",
+            tokens: estimateTokens(callText),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
           },
@@ -565,6 +579,7 @@ export class ContextView implements Component, Focusable {
             label: "result",
             summary: oneLine(item.output ?? ""),
             body: item.output ?? "",
+            tokens: estimateTokens(item.output ?? ""),
             target: { part: "tool-work", id: String(item.id) },
             pinned: item.pinned,
             payload: item.payload,
@@ -590,6 +605,7 @@ export class ContextView implements Component, Focusable {
           label: "you",
           summary: oneLine(message.text),
           body: message.text,
+          tokens: estimateTokens(message.text),
           target: chatRecord === undefined ? { part: "transcript", id: message.targetId ?? message.id } : { part: "chat", id: chatRecord.id },
           ...(chatMark === undefined ? {} : { marked: `${chatMark.action} on collapse · ${chatMark.author === "user" ? (data.person ?? "you") : "agent"}` }),
         },
@@ -640,6 +656,7 @@ export class ContextView implements Component, Focusable {
         summary: oneLine(data.stateBlockText),
         body: data.stateBlockText,
         real: data.stateBlockText,
+        tokens: estimateTokens(data.stateBlockText),
         ...(waiting.length === 0 ? {} : { marked: `pin on collapse · ${waiting.join(", ")}` }),
       },
     ];
@@ -928,16 +945,36 @@ export class ContextView implements Component, Focusable {
     const paddedName = `${clippedName}${" ".repeat(Math.max(1, NAME_COLUMN - visibleWidth(clippedName)))}`;
     // Put the pending action before the name and preview so it survives narrow panes.
     const head = `${cursor} ${tokens.muted(glyph)} ${handle}${mark}${mark === "" ? "" : " "}${paddedName}${pinned}`;
+    const costText = formatTokenCost(node.tokens);
+    const cost = confirmed ? tokens.danger(costText) : tokens.muted(costText);
+    const costWidth = visibleWidth(costText);
+    const headWidth = visibleWidth(head);
     const lines: string[] = [];
 
     if (!open) {
-      const room = Math.max(8, width - visibleWidth(head) - 2);
+      // Right-align each entry's token cost so costs can be scanned down a column,
+      // leaving room for the preview (and keeping pending marks intact on narrow panes).
+      const roomWithCost = width - headWidth - costWidth - 3;
+      if (roomWithCost >= 8) {
+        const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", roomWithCost, "…");
+        const styledPreview = confirmed ? tokens.danger(preview) : tokens.faint(preview);
+        const gap = Math.max(2, width - headWidth - visibleWidth(preview) - costWidth - 1);
+        lines.push(surfaceLine(`${head}${styledPreview}${" ".repeat(gap)}${cost}`, width));
+        return lines;
+      }
+      if (headWidth + costWidth + 2 <= width) {
+        const gap = width - headWidth - costWidth - 1;
+        lines.push(surfaceLine(`${head}${" ".repeat(gap)}${cost}`, width));
+        return lines;
+      }
+      const room = Math.max(8, width - headWidth - 2);
       const preview = truncateToWidth(node.summary.length > 0 ? node.summary : "(empty)", room, "…");
-      lines.push(canvasLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
+      lines.push(surfaceLine(`${head}${confirmed ? tokens.danger(preview) : tokens.faint(preview)}`, width));
       return lines;
     }
 
-    lines.push(canvasLine(head, width));
+    const openGap = width - headWidth - costWidth - 1;
+    lines.push(surfaceLine(openGap >= 1 ? `${head}${" ".repeat(openGap)}${cost}` : head, width));
     lines.push(...this.renderBody(node, width, ink));
     return lines;
   }

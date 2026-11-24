@@ -1,5 +1,6 @@
 // These independent suites do not mutate process-wide state. Loading them in
 // one test worker keeps every assertion while avoiding repeated Node startups.
+import "./agent-reminder.mjs";
 import "./brain.test.mjs";
 import "./brain-store.test.mjs";
 import "./freshness.test.mjs";
@@ -11,3 +12,4 @@ import "./state-block.test.mjs";
 import "./ui-views.test.mjs";
 import "./compose.test.mjs";
 import "./person.test.mjs";
+import "./guard-reminder.test.mjs";

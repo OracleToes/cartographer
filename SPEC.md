@@ -83,17 +83,27 @@ What is in the Brain is what is in focus. The agent decides when a record has
 stopped earning its place and deletes it, or moves it to a more permanent Atlas
 entry. Nothing removes a record on the agent's behalf, and nothing scores it.
 
+Atlas also holds the agent's loose task/plan graph: larger goals linked to
+smaller steps down to atomic leaves, attached to the files they touch, with
+leaves worked before stems and no forced order beyond that. As leaves finish,
+the agent updates them in place, retires completed task nodes via `mark`, or
+folds lasting understanding into permanent Atlas notes.
+
 ### 2.2 Ledger
 
-The Ledger is the agent's working book: goals, notes, questions, instructions,
-and progress through a problem.
+The Ledger is the agent's lightweight active working state: current focus and
+active leaf, open questions, what has been solved, and live progress through a
+problem. Updating existing Atlas and Ledger handles in place as changes happen
+keeps the Brain ready for a collapse at any moment — even mid-step — without
+losing the agent's way or piling up bookkeeping records.
 
 ### 2.3 Chat
 
 Chat is deliberate dialogue, recorded.
 
-- **Agent Chat** is written through the `chat` tool.
+- **Agent Chat** is written through the `chat` tool, or via the required `message` field of `collapse`.
 - **Person Chat** is the person's own message, recorded as it is sent.
+- **System Chat** is written when a forced automatic collapse happens (context overflow, declined compaction, or recoverable length stop), so both the person and the rebuilt agent see why the context reset.
 
 Chat is not plain model output. Reasoning, plain model text, and tool calls are
 never Chat, and are never recorded as Chat.
@@ -285,9 +295,10 @@ about the project, the agent pins what it needs to know, arranges its context so
 nothing in it is a distraction, collapses, and then begins — so it works inside a
 context built for the problem rather than one it accumulated on the way there.
 
-Either side may collapse at any moment. At an estimated 75% context fill, the
-state block warns the agent to prepare the Brain and collapse before it runs out
-of room. The percentage is an estimate, not a guarantee of available output.
+Either side may collapse at any moment. At an estimated 75% context fill by
+default (adjustable in config), the state block warns the agent to prepare the
+Brain and collapse before it runs out of room. The percentage is an estimate,
+not a guarantee of available output.
 
 **The agent keeps itself small, and nobody un-sticks it.** The agent is long
 running, so a collapse it asks for, or one the model's limits force, is carried
@@ -296,7 +307,8 @@ the new generation starts on a state block, with no message from the person.
 This holds for every host and for a run that nothing of the person's started,
 such as a timed rest waking.
 
-- **The warning.** At an estimated 75% of a known window the state block says
+- **The warning.** At an estimated fill reaching the configured collapse warning
+  percentage (default 75%) of a known window the state block says
   `[COLLAPSE NEEDED]` on every request until the context is rebuilt: write what
   you need to continue to the Brain, mark what is obsolete, then collapse. An
   unknown window is reported as unknown; no percentage is invented.
@@ -315,6 +327,7 @@ such as a timed rest waking.
   carried into the new generation and are what it starts on. A message sent while
   the rebuild is under way waits for the new session. A paused agent is not
   restarted, but the person's own messages are still delivered.
+- **Collapse communication.** When the agent calls `collapse`, it passes a required `message` recorded into Chat so the person and the rebuilt agent know why it collapsed and what comes next. When a forced automatic collapse happens (overflow, declined compaction, or recoverable length limit), Carto records a System Chat notice before freezing the new head so both sides see that an automatic collapse occurred.
 - **The cost is accepted.** A collapse forced by a limit loses whatever the agent
   had not written to the Brain. Nothing removes unmarked Brain records.
 
@@ -419,18 +432,28 @@ dashboard about its Brain and the project, and it reports:
 
 - **Context fullness** — the server's input and output count for the last
   response, plus estimated tool work added since. When the window is known,
-  report estimated percentage and warn `[COLLAPSE NEEDED]` at 75%; when it is
-  unknown, do not invent a percentage.
+  report estimated percentage and warn `[COLLAPSE NEEDED]` at the configured
+  collapse warning percentage (default 75%); when it is unknown, do not invent
+  a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
 - **Pending changes** — one line per Brain write since the last collapse, named
   by handle.
 - **New and stale entries** — Brain records written since the last collapse, and
   read results whose file changed since the read, named by handle (§5.5).
+- **Persistent jobs** — when persistent piped processes exist, one compact
+  status line per `J` handle (label, running/exited status, unread line count,
+  quiet/active indicator); never scrollback buffers, and omitted when none exist.
 - **The project tree** — as described in §6.3.
 - **Pinned entries** — every pinned entry, with its author.
 - **Marks** — every entry carrying a mark, with its action and its author (§4.1).
 - **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
+- **Decision flow & state-reactive attention cues** — a compact mode-aware
+  `flow:` checklist at the tail, plus conditional `attention:` cues derived
+  strictly from live facts (such as `bash` used for file edits, pinned files
+  drifting on disk since collapse, an untouched/flat Brain after several tool
+  calls, bloated Chat history, or persistent jobs with unread output). Omitted
+  when clean.
 
 A long pending list is the signal to collapse.
 
@@ -487,6 +510,7 @@ when something changed.
 | `X` | an ephemeral item, pinned or not |
 | `R` | the result of a tool call |
 | `S` | the result of `bash` |
+| `J` | a persistent piped process (`proc`) |
 | `E` | a Brain entry written since the last collapse, seen in the body |
 | `U` | the person's message |
 
@@ -563,9 +587,11 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 - The block arrives as a user-role message. A system message cannot start a turn.
 - The block is rendered fresh at the tail of every request and is removed after
-  use. It never accumulates, so its cost is one block and nothing more.
-- It is purely informative and never instructive. It does not ask the agent to
-  do anything.
+  use. Because the model never sees prior blocks, it never accumulates and
+  every request sees the tail fresh at its attention peak.
+- It guides rather than coerces: its compact `flow:` decision tree and
+  condition-triggered `attention:` cues reflect observed live state so the agent
+  steers itself cleanly without blocking tool calls or imposing rigid phases (§1).
 
 ## 6. Project files
 
@@ -684,8 +710,9 @@ and `create` takes a path because the file it makes has no handle yet.
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
+| `proc` | Starts, drives, reads, and stops persistent piped processes (`J` handles) that live in host memory, survive collapse, and are shared live in the `jobs` view. |
 | `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
-| `collapse` | Ends the context here and rebuilds it from the Brain. |
+| `collapse` | Ends the context here and rebuilds it from the Brain, recording a required Chat `message` to the person. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 
 `read`, `edit`, and `bash` are taken from the durable package. Carto supplies
@@ -736,7 +763,8 @@ Neither the spec nor the runtime supplies a size limit to enforce in its place.
 **The screen is surfaces, darkest outermost.** The chrome (the margin round the
 frame, the header row, the key bar and the context bar) sits on the deepest tone;
 the sidebar and the working area are raised out of it, each on its own step;
-the prompt and a selected row are raised again. The frame has a margin of two
+the prompt, entry headers in the transcript and context views, and a selected
+row are raised again. The frame has a margin of two
 cells and one row, one cell on a narrow terminal and none on a very small one,
 with a breathing row between the bands only when the terminal has rows to
 spare. Every cell of the frame is painted: a pane that is shorter than its room
@@ -746,8 +774,9 @@ something. None of this changes what a view shows or what a key does.
 
 **The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Every entry is collapsible, and every entry starts collapsed: a row
-is its handle, its name, and a one-line summary until it is opened. Each tool
-gets one collapsible entry in its own sub-tree. Schema-shaped content has a
+is its handle, its name, a one-line summary, and its estimated token cost until
+it is opened (when the token cost stays on its header). Each tool gets one
+collapsible entry in its own sub-tree. Schema-shaped content has a
 human-readable view and a real view. A row that trails off is readable in full
 somewhere.
 

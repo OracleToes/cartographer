@@ -65,7 +65,6 @@ export class ArchiveView implements Component, Focusable {
    * costs work, so it is armed explicitly every time and clears itself.
    */
   private nowArmed = false;
-  private scrollOffset = 0;
 
   /**
    * The item under the cursor, so a palette entry can do what the key does.
@@ -134,25 +133,21 @@ export class ArchiveView implements Component, Focusable {
     if (matchesKey(data, "j") || matchesKey(data, "down")) {
       this.armed = undefined;
       this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + 1);
-      this.scrollOffset = 0;
       return;
     }
     if (matchesKey(data, "k") || matchesKey(data, "up")) {
       this.armed = undefined;
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-      this.scrollOffset = 0;
       return;
     }
     if (matchesKey(data, "g")) {
       this.armed = undefined;
       this.selectedIndex = 0;
-      this.scrollOffset = 0;
       return;
     }
     if (data === "G") {
       this.armed = undefined;
       this.selectedIndex = Math.max(0, this.items.length - 1);
-      this.scrollOffset = 0;
       return;
     }
     if (selected === undefined) return;

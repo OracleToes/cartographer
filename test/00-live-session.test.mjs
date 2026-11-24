@@ -1,3 +1,4 @@
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -319,7 +320,7 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("collapse", {}, { id: "call-collapse" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { message: "Saved notes to Atlas; collapsing now." }, { id: "call-collapse" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession(options());
   const previousGeneration = session.generation;
@@ -344,8 +345,13 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     assert.equal(outcome.report.swept, previousGeneration);
     assert.deepEqual(outcome.report.dropped, []);
     // The Brain survived; handles were rebuilt, not carried over.
-    const nodes = (await brain.read()).atlas;
+    const brainAfter = await brain.read();
+    const nodes = brainAfter.atlas;
     assert.equal(nodes.length, 1);
+    assert.ok(
+      brainAfter.chat.some((record) => record.author === "agent" && record.text === "Saved notes to Atlas; collapsing now."),
+      "collapse records its required message into Chat",
+    );
     const { handleOf } = await import("../dist/domain/handles.js");
     assert.equal(handleOf((await brain.read()).handles, "atlas", nodes[0].id), "A1");
     // The fresh session starts empty and its tree wiring is the root again.

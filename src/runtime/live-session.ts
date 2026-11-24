@@ -50,10 +50,18 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
+import {
+  appendCollapseLog,
+  brainCountsOf,
+  collectCollapseBodyEntries,
+  type CollapseTrigger,
+} from "./collapse-log.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
 import { createModelTelemetry } from "./model-telemetry.js";
-import { STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
+import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
+import { estimateContextTokens } from "../domain/estimate.js";
+import { createJobTable, type JobTable } from "./jobs.js";
 
 export interface LiveSessionOptions {
   /**
@@ -75,6 +83,13 @@ export interface LiveSessionOptions {
    * the same person and nothing guesses a second time.
    */
   person?: string;
+  /**
+   * Context fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the
+   * state block. Default: 75 (COLLAPSE_WARNING_PERCENT).
+   */
+  collapseWarningPercent?: number;
+  /** Persistent piped jobs owned by the host; preserved across context collapses. */
+  jobs?: JobTable;
   now?: () => number;
   onReport?: HarnessOptions["onReport"];
 }
@@ -90,6 +105,8 @@ export interface LiveSession {
   readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
   /** The Brain this session reads and writes: where the person's words are recorded as they are sent (§2.3). */
   readonly brain: BrainStore;
+  /** Persistent piped processes owned by the host; survives collapse. */
+  readonly jobs: JobTable;
   /** The session's clock, so a record the host writes is stamped the way the tools stamp theirs. */
   readonly now: () => number;
   /** The mutable present; named fields, no hidden state (§5.3). */
@@ -109,7 +126,7 @@ export interface LiveSession {
 /** What a requested collapse comes to once the bound on automatic collapse has judged it. */
 export type CollapseVerdict =
   | { readonly kind: "none" }
-  | { readonly kind: "collapse"; readonly reason: string }
+  | { readonly kind: "collapse"; readonly reason: string; readonly trigger: "agent" | "automatic" }
   | { readonly kind: "stop"; readonly reason: string; readonly explanation: string };
 
 /** The words a host shows when it declines to collapse a second time in a row. */
@@ -150,10 +167,12 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const state: LiveSessionState = {
     person: options.person ?? personName(),
     contextWindow,
+    collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
     paused: false,
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
+    collapseTrigger: null,
     readOnly: false,
     generation,
     lastReportedInput: undefined,
@@ -162,12 +181,14 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     rebuiltAutomatically: false,
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
+    lastStateBlock: undefined,
   };
 
   // One gate per session, around every model call the session makes (§9).
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
   const gatedModels = freeze.gate(options.models, createModelTelemetry(state));
+  const jobs = options.jobs ?? createJobTable({ root, now });
 
   let harness: Harness | undefined;
   try {
@@ -177,6 +198,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         root,
         brain: options.brain,
         session: state,
+        jobs,
         markdownPath: paths.markdown,
         now,
       }),
@@ -202,19 +224,30 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
+    // `harness.root` skips `configure` when reopening an existing generation
+    // store, leaving the persisted `pi.agent` stuck on the previous model.
+    // Reconcile the persisted model with the configured one immediately so a
+    // `config.json` or `--model` change takes effect on restart without a
+    // collapse.
+    const persisted = (await conversation.agent(BACKGROUND_CONTEXT)).model;
+    if (persisted?.provider !== modelRef.provider || persisted?.modelId !== modelRef.modelId) {
+      await conversation.configure({ model: modelRef }, BACKGROUND_CONTEXT);
+    }
     // The latest response is durable in Pi's context. Rehydrate its reported
     // usage on reopen instead of resetting the bar to an unrelated estimate.
     const prior = (await conversation.context(BACKGROUND_CONTEXT)).messages;
-    for (let index = prior.length - 1; index >= 0; index -= 1) {
-      const message = prior[index];
-      if (message?.role !== "assistant") continue;
-      const usage = message.usage;
-      const input = usage.input + usage.cacheRead + usage.cacheWrite;
-      if (input <= 0) continue;
-      state.lastReportedInput = input;
-      state.lastReportedOutput = usage.output;
-      state.toolWorkAtLastReport = splitContextMessages(prior.slice(0, index + 1)).toolWorkTokens;
-      break;
+    const usageEstimate = estimateContextTokens(prior);
+    if (usageEstimate.lastUsageIndex !== null) {
+      const message = prior[usageEstimate.lastUsageIndex];
+      if (message?.role === "assistant") {
+        const usage = message.usage;
+        const input = usage.input + usage.cacheRead + usage.cacheWrite;
+        if (input > 0) {
+          state.lastReportedInput = input;
+          state.lastReportedOutput = usage.output;
+          state.toolWorkAtLastReport = splitContextMessages(prior.slice(0, usageEstimate.lastUsageIndex + 1)).toolWorkTokens;
+        }
+      }
     }
     harness.resume();
     const session: LiveSession = {
@@ -226,24 +259,29 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       conversation,
       database,
       brain: options.brain,
+      jobs,
       now: options.now ?? Date.now,
       state,
       freeze,
       takeCollapseRequest() {
         const reason = state.collapseRequested;
         state.collapseRequested = null;
+        state.collapseTrigger = null;
         return reason;
       },
       reviewCollapseRequest() {
         const reason = state.collapseRequested;
+        const trigger = state.collapseTrigger;
         state.collapseRequested = null;
+        state.collapseTrigger = null;
         if (reason === null) return { kind: "none" };
         // A generation that was itself rebuilt automatically and did nothing
         // before asking again is the loop this bound exists to break.
-        if (state.rebuiltAutomatically && !generationProgressed(state.work)) {
+        if (state.rebuiltAutomatically && !generationProgressed(state.work, state.collapseWarningPercent)) {
           return { kind: "stop", reason, explanation: stalledCollapseExplanation(reason) };
         }
-        return { kind: "collapse", reason };
+        const resolvedTrigger: "agent" | "automatic" = trigger ?? (reason === "the agent collapsed" ? "agent" : "automatic");
+        return { kind: "collapse", reason, trigger: resolvedTrigger };
       },
     };
     // Only restores already committed by a collapse are retried here. Ordinary
@@ -266,28 +304,12 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 }
 
 /**
- * Wait for the current chain of runs to end, without waiting for a sleeping
- * conversation-owned task. Submission.wait settles before Pi's after-run tasks
- * have queued their follow-ups; the live run remains present until they finish.
+ * Wait for the current chain of runs (and any non-background after-run tasks
+ * such as `TreeReadTask`) to settle, without waiting for a sleeping
+ * background rest (`SleepTask`).
  */
 export async function waitForRunEnd(session: LiveSession): Promise<void> {
-  const watch = await session.harness.watchDoc(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
-  if (watch === undefined) return;
-  try {
-    if (watch.value?.run === undefined) return;
-    await new Promise<void>((resolve, reject) => {
-      watch.start(async (call) => {
-        if (call.kind === "failed") reject(call.error);
-        else if (call.value.run === undefined) resolve();
-      });
-      void watch.closed.then((end) => {
-        if (end.kind === "failed" || end.kind === "listener_error") reject(end.error);
-        else resolve();
-      });
-    });
-  } finally {
-    await watch.stop();
-  }
+  await session.conversation.waitForIdle(BACKGROUND_CONTEXT);
 }
 
 /** Submit a person message; the submission settles when its run answers. */
@@ -547,6 +569,49 @@ export async function togglePause(session: LiveSession, to?: boolean): Promise<P
   };
 }
 
+export interface ResumeOutcome {
+  /**
+   * - `"running"`: a run is already active (not held) — strict non-action.
+   * - `"unpaused"`: a held mid-stream reply was unpaused without sending a state block.
+   * - `"started"`: admitted `STATE_BLOCK_MARKER` to start/resume the agent without a person message.
+   */
+  readonly kind: "running" | "unpaused" | "started";
+  readonly submission?: Awaited<ReturnType<typeof admitInput>>;
+  readonly line: string;
+}
+
+/**
+ * Start or resume the agent without sending a person message.
+ *
+ * - If held mid-stream (`^v`), unpauses the held stream without admitting a
+ *   state block (sending a block would break the stream).
+ * - If already running (and not paused/held), returns `"running"` as a strict
+ *   non-action.
+ * - Otherwise (idle, sleeping, stopped, or paused while idle), clears pause
+ *   and the automatic-collapse stall guard, cancels any dormant `SleepTask`,
+ *   and admits `STATE_BLOCK_MARKER` so the agent starts from a fresh
+ *   `<carto-state>` with no Chat record written to the Brain.
+ */
+export async function resumeSession(session: LiveSession): Promise<ResumeOutcome> {
+  if (session.state.paused && session.freeze.frozen()) {
+    const outcome = await togglePause(session, false);
+    return { kind: "unpaused", line: outcome.line };
+  }
+  const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
+  if (live?.run !== undefined) {
+    return { kind: "running", line: "already running" };
+  }
+  const wasPaused = session.state.paused;
+  session.state.paused = false;
+  session.state.rebuiltAutomatically = false;
+  const submission = await admitInput(session, STATE_BLOCK_MARKER, "followUp");
+  return {
+    kind: "started",
+    submission,
+    line: wasPaused ? "resumed — state block sent" : "started — state block sent",
+  };
+}
+
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
 export async function interruptRun(session: LiveSession): Promise<void> {
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
@@ -667,6 +732,8 @@ export interface CollapseFollow {
    * starts on its own, so nobody has to un-stick the agent.
    */
   readonly automatic?: boolean;
+  /** Distinguish an agent `collapse` tool call from a forced automatic limit collapse. */
+  readonly trigger?: "agent" | "automatic";
 }
 
 /** The text of a user input, for the places that need to show or compare it. */
@@ -724,13 +791,54 @@ export async function collapseLiveSession(
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
   const automatic = follow.automatic === true;
+  const trigger: CollapseTrigger = !automatic
+    ? "person"
+    : (follow.trigger ?? (reason === "the agent collapsed" ? "agent" : "automatic"));
   // Read before anything is withdrawn: aborting settles queued inputs, and the
   // sweep removes the store that holds the rest.
   const carry = automatic ? await unansweredInputs(session) : [];
   const paused = session.state.paused;
-  if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT);
+  const preCollapseEntries = await sessionTranscript(session).catch(() => []);
+  const brainBefore = brainCountsOf(await options.brain.read());
+  const snapshotMeta = {
+    fromGeneration: session.generation,
+    model: `${options.model.provider}/${options.model.modelId}`,
+    contextWindow: session.state.contextWindow,
+    lastReportedInput: session.state.lastReportedInput ?? null,
+    toolWorkAtLastReport: session.state.toolWorkAtLastReport,
+    work: {
+      requests: session.state.work.requests,
+      steps: session.state.work.steps,
+      startFill: session.state.work.startFill ?? null,
+    },
+    pendingWrites: session.state.pending.length,
+    lastStateBlock: session.state.lastStateBlock ?? null,
+    bodyEntries: collectCollapseBodyEntries(preCollapseEntries),
+  };
+  if (automatic) await session.conversation.abort(BACKGROUND_CONTEXT, { background: true });
   else await interruptRun(session);
   await closeLiveSession(session);
+  // A forced automatic collapse (context overflow, declined compaction, or
+  // recoverable length limit) happened without the agent calling `collapse`, so
+  // record a System Chat message before freezing the new head: both the person
+  // and the rebuilt agent see why the context reset.
+  if (trigger === "automatic") {
+    const at = options.now?.() ?? Date.now();
+    const id = `chat:system-collapse:${snapshotMeta.fromGeneration}:${at}`;
+    await options.brain.apply(
+      {
+        kind: "chat.record",
+        record: {
+          id,
+          author: "system",
+          text: `Automatic context collapse (${reason}). Rebuilt from the Brain.`,
+          createdAt: at,
+          updatedAt: at,
+        },
+      },
+      at,
+    );
+  }
   // The Brain moves the marked records itself; what the new generation's frozen
   // prefill is built from is the Brain as it stands after that move (§3.3).
   // The head the next generation freezes names the same person every other
@@ -740,17 +848,88 @@ export async function collapseLiveSession(
     carriedTexts: carry.map((input) => inputText(input.content)),
     ...ceremony,
   });
-  const next = await openLiveSession(options);
+  const brainAfter = brainCountsOf(await options.brain.read());
+  const next = await openLiveSession({ ...options, jobs: options.jobs ?? session.jobs });
+  let resumed = false;
+  if (automatic) {
+    next.state.rebuiltAutomatically = true;
+    // A pause is the person's, and it outlives a collapse: nothing starts of its own.
+    next.state.paused = paused;
+    // The person's own words are never held back by a pause, which only stops
+    // the agent starting on its own; a state block is that, so it waits.
+    if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
+    for (const input of carry) await admitInput(next, input.content, input.whenBusy);
+    resumed = carry.length > 0 || !paused;
+  }
+  const reportedTotal =
+    snapshotMeta.lastReportedInput === null ? null : snapshotMeta.lastReportedInput + snapshotMeta.toolWorkAtLastReport;
+  const fillPercent =
+    reportedTotal !== null && snapshotMeta.contextWindow > 0
+      ? Math.round((reportedTotal / snapshotMeta.contextWindow) * 100)
+      : null;
+  appendCollapseLog(session.root, {
+    at: new Date(options.now?.() ?? Date.now()).toISOString(),
+    fromGeneration: snapshotMeta.fromGeneration,
+    toGeneration: report.generation,
+    trigger,
+    reason,
+    model: snapshotMeta.model,
+    contextWindow: snapshotMeta.contextWindow,
+    lastReportedInput: snapshotMeta.lastReportedInput,
+    toolWorkAtLastReport: snapshotMeta.toolWorkAtLastReport,
+    fillPercent,
+    work: snapshotMeta.work,
+    pendingWrites: snapshotMeta.pendingWrites,
+    brainBefore,
+    brainAfter,
+    swept: report.swept ?? null,
+    archivedCount: report.archived.length,
+    droppedCount: report.dropped.length,
+    carried: automatic ? carry.length : 0,
+    resumed,
+    lastStateBlock: snapshotMeta.lastStateBlock,
+    bodyEntries: snapshotMeta.bodyEntries,
+  });
   // Opening retries committed ephemeral restores and acknowledges each one
   // only after placement. Do not submit the report's items a second time.
-  if (!automatic) return { session: next, report, reason, carried: 0, resumed: false };
-  next.state.rebuiltAutomatically = true;
-  // A pause is the person's, and it outlives a collapse: nothing starts of its own.
-  next.state.paused = paused;
-  // The person's own words are never held back by a pause, which only stops
-  // the agent starting on its own; a state block is that, so it waits.
-  if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
-  for (const input of carry) await admitInput(next, input.content, input.whenBusy);
-  return { session: next, report, reason, carried: carry.length, resumed: carry.length > 0 || !paused };
+  return { session: next, report, reason, carried: automatic ? carry.length : 0, resumed };
 }
+
+export interface SwitchModelResult {
+  readonly model: ModelRef;
+  readonly changed: boolean;
+  readonly contextWindow: number;
+}
+
+/**
+ * Switch the live session's active model.
+ *
+ * Pi resolves `agent.model` in `generation`'s `prepare` phase at the start of
+ * each LLM request and fixes it for that request, so updating `AgentDoc` via
+ * `conversation.configure({ model })` leaves any in-flight request undisturbed
+ * and takes effect at the next natural boundary (the next step or next turn).
+ */
+export async function switchSessionModel(
+  session: LiveSession,
+  models: Models,
+  model: ModelRef,
+): Promise<SwitchModelResult> {
+  const resolved = models.getModel(model.provider, model.modelId);
+  if (resolved === undefined) {
+    throw new Error(`Model "${model.provider}/${model.modelId}" is not in the provider catalog.`);
+  }
+  const current = (await session.conversation.agent(BACKGROUND_CONTEXT)).model;
+  const changed = current?.provider !== model.provider || current?.modelId !== model.modelId;
+  if (changed) {
+    await session.conversation.configure({ model }, BACKGROUND_CONTEXT);
+  }
+  session.state.contextWindow = resolved.contextWindow;
+  session.state.desiredMaxOutput = resolved.maxTokens;
+  return {
+    model,
+    changed,
+    contextWindow: resolved.contextWindow,
+  };
+}
+
 

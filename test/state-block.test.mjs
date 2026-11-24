@@ -1,6 +1,11 @@
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { emptyBrain } from "../dist/domain/records.js";
 import {
   STATE_BLOCK_MARKER,
   appendStateBlock,
@@ -8,6 +13,7 @@ import {
   splitContextMessages,
   stripStateBlocks,
 } from "../dist/domain/state-block.js";
+import { newGenerationWork, renderLiveStateBlock } from "../dist/runtime/carto-extension.js";
 
 const input = (overrides = {}) => ({
   // The name the agent reads for the person at the keyboard: a name, never a role.
@@ -90,7 +96,7 @@ test("an unknown window renders as unknown, never as a number; a pin or advertis
   assert.match(known, /context: ~12,410 \/ 131,072 tokens/);
 });
 
-test("fullness warns at 75 percent, including the last response's output", () => {
+test("fullness warns at the configured threshold (default 75 percent), including the last response's output", () => {
   const base = { contextWindow: 1000, lastReportedInput: 700, toolWorkSince: 25 };
   const below = renderStateBlock(input({ ...base, lastReportedOutput: 24 }));
   assert.match(below, /context fill: ~74%/);
@@ -101,6 +107,13 @@ test("fullness warns at 75 percent, including the last response's output", () =>
   assert.match(warning, /Write down what you need to continue/);
   const estimated = renderStateBlock(input({ contextWindow: 1000, lastReportedInput: undefined, systemTokens: 250, transcriptTokens: 250, toolWorkTokens: 250 }));
   assert.match(estimated, /context fill: ~75% · \[COLLAPSE NEEDED\]/);
+
+  // A custom threshold overrides the default in both directions.
+  const lowered = renderStateBlock(input({ ...base, lastReportedOutput: 0, collapseWarningPercent: 70 }));
+  assert.match(lowered, /context fill: ~72% · \[COLLAPSE NEEDED\]/);
+  const raised = renderStateBlock(input({ ...base, lastReportedOutput: 25, collapseWarningPercent: 80 }));
+  assert.match(raised, /context fill: ~75%/);
+  assert.doesNotMatch(raised, /\[COLLAPSE NEEDED\]/);
 });
 
 test("marker messages are dropped from payloads; everything else survives", () => {
@@ -147,4 +160,93 @@ test("appendStateBlock strips markers and leaves the block last", () => {
   assert.equal(appended[0].role, "user");
   assert.equal(appended[1].content, block);
   assert.equal(appended[1].timestamp, 1_700_000_000_000);
+});
+
+test("state block includes compact mode-aware decision flow and conditional attention cues", () => {
+  const editBlock = renderStateBlock(input());
+  assert.match(editBlock, /\nflow:\n/);
+  assert.match(editBlock, /use `read`, `edit`, `create`/);
+  assert.match(editBlock, /`chat` OracleToes/);
+  assert.doesNotMatch(editBlock, /\nattention:\n/);
+  assert.doesNotMatch(editBlock.slice(editBlock.indexOf("\nflow:\n")), /—/);
+
+  const roBlock = renderStateBlock(input({ mode: "read only" }));
+  assert.match(roBlock, /Exploring in read only mode\?/);
+  assert.doesNotMatch(roBlock, /Reading, editing, or creating files\?/);
+
+  const withAttention = renderStateBlock(input({ attention: ["Atlas has only 1 node -> map leaves."] }));
+  assert.match(withAttention, /\nattention:\n  - Atlas has only 1 node -> map leaves\.\n<\/carto-state>$/);
+});
+
+test("renderLiveStateBlock emits state-reactive attention cues and detects modified pinned files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "carto-flow-"));
+  try {
+    const filePath = join(root, "dice.js");
+    const snapPath = join(root, "snapshot.md");
+    writeFileSync(filePath, "const x = 1;\n");
+    writeFileSync(snapPath, "# frozen\n");
+    // Ensure snapshot is older than the modified pinned file on disk.
+    const past = new Date(Date.now() - 5_000);
+    utimesSync(snapPath, past, past);
+    const now = new Date();
+    utimesSync(filePath, now, now);
+
+    const brain = {
+      ...emptyBrain(),
+      atlas: [{ id: "a1", kind: "project", title: "Dice", body: "Soft die", links: [], attachments: [], createdAt: 1, updatedAt: 1 }],
+      chat: Array.from({ length: 8 }, (_, idx) => ({
+        id: `c${idx}`,
+        author: idx % 2 === 0 ? "user" : "agent",
+        text: `msg ${idx}`,
+        createdAt: idx + 1,
+        updatedAt: idx + 1,
+      })),
+      files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }],
+    };
+    const session = {
+      person: "OracleToes",
+      contextWindow: 40_960,
+      collapseWarningPercent: 75,
+      paused: false,
+      pending: [],
+      tree: { anchor: root, depth: 2 },
+      collapseRequested: null,
+      readOnly: false,
+      generation: "gen-flow",
+      lastReportedInput: undefined,
+      desiredMaxOutput: 4000,
+      work: newGenerationWork(),
+      rebuiltAutomatically: false,
+      toolWorkAtLastReport: 0,
+      toolWorkAtLastRequest: 0,
+    };
+
+    const messages = [
+      { role: "assistant", content: [{ type: "toolCall", id: "1", name: "bash", arguments: { command: "node test_sim.js" } }] },
+      { role: "assistant", content: [{ type: "toolCall", id: "2", name: "bash", arguments: { command: "sed -n '1,60p' dice.js" } }] },
+      { role: "assistant", content: [{ type: "toolCall", id: "3", name: "bash", arguments: { command: "python3 -c \"open('dice.js','w').write('x')\"" } }] },
+    ];
+
+    const block = await renderLiveStateBlock(
+      { root, brain: { read: async () => brain }, session, markdownPath: snapPath },
+      messages,
+    );
+    assert.match(block, /pinned copy in head is older than disk; collapse to refresh/);
+    assert.match(block, /\nattention:\n/);
+    assert.match(block, /Last `bash` call touched files directly/);
+    assert.match(block, /Pinned file\(s\) changed on disk since collapse/);
+    assert.match(block, /Brain has 0 writes after 3 tool calls/);
+    assert.match(block, /Atlas has only 1 node/);
+    assert.match(block, /Ledger is empty/);
+    assert.match(block, /Head carries 8 Chat records/);
+
+    // Once the latest turn switches back to `edit`, the bash-file-op cue disappears.
+    const recovered = await renderLiveStateBlock(
+      { root, brain: { read: async () => brain }, session, markdownPath: snapPath },
+      [...messages, { role: "assistant", content: [{ type: "toolCall", id: "4", name: "edit", arguments: { path: "dice.js" } }] }],
+    );
+    assert.doesNotMatch(recovered, /Last `bash` call touched files directly/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

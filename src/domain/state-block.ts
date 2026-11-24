@@ -37,7 +37,7 @@
  * Empty sections say `none` rather than lying by omission, and nothing is
  * omitted. No section asks for anything; the block reports.
  */
-import { estimateSerialized, estimateTokens } from "./estimate.js";
+import { estimateSerialized } from "./estimate.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
 export const STATE_BLOCK_CLOSE = "</carto-state>";
@@ -60,6 +60,18 @@ export interface MarkLine {
   author: "user" | "agent";
 }
 
+/** One persistent job's compact status line in `<carto-state>` (§5.3); never holds scrollback. */
+export interface JobSummaryLine {
+  readonly handle: string;
+  readonly label: string;
+  readonly status: "running" | "exited";
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+  readonly unreadLines: number;
+  readonly quietMs: number;
+  readonly active: boolean;
+}
+
 export interface StateBlockInput {
   /**
    * The name the agent calls the person by: the configured name, or the
@@ -69,6 +81,8 @@ export interface StateBlockInput {
   person: string;
   /** The server's advertised window; 0 = unknown, never a made-up number. */
   contextWindow: number;
+  /** Fill percentage (1–100) that triggers `[COLLAPSE NEEDED]`; defaults to COLLAPSE_WARNING_PERCENT (75). */
+  collapseWarningPercent?: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
   /** Output of that response also occupies the context. */
@@ -100,9 +114,47 @@ export interface StateBlockInput {
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
   /** Every entry carrying a mark, with its action and its author (§4.1). */
   marks: MarkLine[];
+  /** Persistent piped jobs currently held in host RAM; omitted from the block when empty. */
+  jobs?: readonly JobSummaryLine[];
+  /** State-reactive cues triggered by live observations right now; omitted when empty. */
+  attention?: readonly string[];
   /** The project root, so the tree's anchor reads `.` where the agent stands rather than an absolute path. */
   projectRoot?: string;
   tree: { root: string; depth: number; lines: string[] };
+}
+
+function decisionFlowLines(mode: "edit" | "read only", person: string): string[] {
+  if (mode === "read only") {
+    return [
+      "flow:",
+      `  - Exploring in read only mode? -> use \`read\` and \`tree\` without modifying files; map findings in \`atlas\`/\`ledger\` and answer ${person} via \`chat\`.`,
+      "  - Head bloated or finished exploring? -> `mark` resolved items, `collapse`, or `sleep` when nothing is left to check.",
+    ];
+  }
+  return [
+    "flow:",
+    "  - Task unmapped or plan stale? -> map goals, steps, and atomic leaves in `atlas`; track your active leaf in `ledger`.",
+    "  - Reading, editing, or creating files? -> use `read`, `edit`, `create` (not `bash` sed/cat/python file edits) and `pin` active files.",
+    "  - Testing or running long-lived processes? -> extend one reusable interactive harness in place (no piling up test scripts); use `proc` for persistent processes.",
+    "  - Changed code or learned something? -> update your `atlas`/`ledger` handle in place now, then verify edge cases through the harness.",
+    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved \`chat\`/leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
+  ];
+}
+
+function formatJobSummary(job: JobSummaryLine): string {
+  const unread =
+    job.unreadLines > 0
+      ? `${job.unreadLines} unread line${job.unreadLines === 1 ? "" : "s"}`
+      : null;
+  if (job.status === "exited") {
+    const code = job.exitSignal !== null ? job.exitSignal : job.exitCode === null ? "?" : String(job.exitCode);
+    return `  ${job.handle} "${job.label}" · exited(${code})${unread === null ? "" : ` · ${unread}`}`;
+  }
+  if (unread !== null) {
+    const activity = job.active ? "active" : `quiet ${Math.max(1, Math.round(job.quietMs / 1000))}s`;
+    return `  ${job.handle} "${job.label}" · running · ${unread} (${activity})`;
+  }
+  return `  ${job.handle} "${job.label}" · running · idle`;
 }
 
 const thousands = (value: number): string => Math.round(value).toLocaleString("en-US");
@@ -156,7 +208,7 @@ export function contextFillPercent(input: StateBlockInput): number | undefined {
   return input.contextWindow > 0 ? estimatedContextTokens(input) / input.contextWindow * 100 : undefined;
 }
 
-/** The fill at which the block asks the agent to collapse. */
+/** The default fill at which the block asks the agent to collapse. */
 export const COLLAPSE_WARNING_PERCENT = 75;
 
 export function renderStateBlock(input: StateBlockInput): string {
@@ -164,6 +216,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const output = input.lastReportedOutput ?? 0;
   const estimated = estimatedContextTokens(input);
   const percentage = contextFillPercent(input);
+  const warningPercent = input.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT;
   // The provider's own count is the only number here that is not an estimate,
   // and a window nobody advertised is unknown rather than a made-up figure.
   const fullness =
@@ -174,7 +227,7 @@ export function renderStateBlock(input: StateBlockInput): string {
       : reported === undefined
         ? `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
         : `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)}`;
-  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= COLLAPSE_WARNING_PERCENT ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
+  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= warningPercent ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
@@ -202,11 +255,35 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.marks.length === 0
       ? "marks: none"
       : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author, input.person)}`)].join("\n");
+  const jobsLines: string[] =
+    input.jobs !== undefined && input.jobs.length > 0
+      ? ["jobs:", ...input.jobs.map(formatJobSummary)]
+      : [];
+  const flowLines = decisionFlowLines(input.mode, input.person);
+  const attentionLines: string[] =
+    input.attention !== undefined && input.attention.length > 0
+      ? ["attention:", ...input.attention.map((line) => `  - ${line}`)]
+      : [];
   // `T1` names the tree itself (§5.4): the block carries a handle for the
   // thing the block renders, so the agent can point at what it is looking at.
   const treeLines = [`T1 tree: ${treeLabel(input.tree.root, input.projectRoot)} (depth ${input.tree.depth})`, ...input.tree.lines.map((line) => `  ${line}`)];
   const mode = input.mode === "read only" ? "[READ ONLY MODE]" : "[EDIT MODE]";
-  return [STATE_BLOCK_OPEN, mode, fullness, ...percentageLine, space, pending, stale, ...treeLines, pinned, marks, STATE_BLOCK_CLOSE].join("\n");
+  return [
+    STATE_BLOCK_OPEN,
+    mode,
+    fullness,
+    ...percentageLine,
+    space,
+    pending,
+    stale,
+    ...jobsLines,
+    ...treeLines,
+    pinned,
+    marks,
+    ...flowLines,
+    ...attentionLines,
+    STATE_BLOCK_CLOSE,
+  ].join("\n");
 }
 
 export { estimateSerialized };
@@ -236,16 +313,7 @@ export function splitContextMessages(messages: readonly MessageLike[]): {
   let toolWorkTokens = 0;
   for (const message of messages) {
     if (message.role === "system") {
-      const parts: string[] = [];
-      const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "");
-      if (content.length > 0) parts.push(content);
-      for (const value of Object.values(message.sections ?? {})) {
-        if (typeof value === "string" && value.length > 0) parts.push(value);
-      }
-      if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) {
-        parts.push(JSON.stringify(message.toolsAdded));
-      }
-      systemTokens += estimateTokens(parts.join("\n\n"));
+      systemTokens += estimateSerialized(message);
       continue;
     }
     const toolWork =

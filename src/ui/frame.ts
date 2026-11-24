@@ -14,9 +14,17 @@
  * and clipped by the layout to the room it has. It is a margin when given a
  * fixed size, and a pane's floor when given `grow`.
  */
-import { HStack, VStack, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import {
+  HStack,
+  ScrollView,
+  VStack,
+  type Component,
+  type ScrollViewOptions,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
-import { fillLine } from "./tokens.js";
+import { fillLine, scrollbarStyles } from "./tokens.js";
 
 /** What a stack entry's `visible` is handed. */
 export interface Viewport {
@@ -130,5 +138,51 @@ export class Inset implements Component {
     const x = event.x - this.left;
     if (x < 0 || x >= event.width - this.left - this.right) return undefined;
     return this.child.handleMouse?.({ ...event, x, width: event.width - this.left - this.right });
+  }
+}
+
+export interface PaneScrollViewOptions
+  extends Omit<ScrollViewOptions, "scrollbar" | "scrollbarTrackStyle" | "scrollbarThumbStyle"> {
+  /** Surface background hex behind the scrollbar gutter; defaults to the working canvas. */
+  backgroundHex?: string;
+}
+
+/**
+ * A `ScrollView` with a permanent, Carto-themed dynamic-size scrollbar gutter.
+ *
+ * Delegates geometry, proportional thumb sizing, painting, hover highlight,
+ * track click-to-jump, thumb dragging, and selection clipping to pi-tui's
+ * `ScrollView`. Reserves the rightmost column (`scrollbar: "always"`) so text
+ * never overlaps or reflows when content crosses the viewport height; paints
+ * the pane's own background in that column while everything fits, and shows the
+ * proportional track and thumb whenever the pane can scroll.
+ */
+export class PaneScrollView extends ScrollView {
+  private readonly scrollState: { scrollable: boolean };
+
+  constructor(component: Component, options: PaneScrollViewOptions = {}) {
+    const { backgroundHex, ...rest } = options;
+    const styles = scrollbarStyles(backgroundHex);
+    const scrollState = { scrollable: false };
+    super(component, {
+      ...rest,
+      scrollbar: "always",
+      scrollbarTrackStyle: (glyph) => (scrollState.scrollable ? styles.track(glyph) : styles.blank()),
+      scrollbarThumbStyle: (glyph) => {
+        if (!scrollState.scrollable) return styles.blank();
+        return glyph === "█" ? styles.activeThumb(glyph) : styles.thumb(glyph);
+      },
+    });
+    this.scrollState = scrollState;
+  }
+
+  /** Whether the latest layout pass had more content lines than viewport rows. */
+  get isScrollable(): boolean {
+    return this.scrollState.scrollable;
+  }
+
+  override updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+    this.scrollState.scrollable = viewportHeight > 0 && contentHeight > viewportHeight;
+    super.updateLayout(contentHeight, viewportHeight, requestRender);
   }
 }

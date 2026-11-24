@@ -9,7 +9,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 
-import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
+import { arr, bool, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
@@ -25,6 +25,16 @@ import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
+import {
+  createJobTable,
+  formatExit,
+  readJob,
+  sendJob,
+  startJob,
+  stopJob,
+  type JobActionResult,
+  type JobTable,
+} from "./jobs.js";
 
 export interface ToolSession {
   /**
@@ -38,6 +48,8 @@ export interface ToolSession {
   tree: { anchor: string; depth: number };
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
+  /** Who triggered the pending collapse request (`agent` tool call vs forced `automatic` limit). */
+  collapseTrigger?: "agent" | "automatic" | null;
 
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
@@ -49,6 +61,23 @@ export interface ToolDeps {
   root: string;
   brain: BrainStore;
   session: ToolSession;
+  jobs?: JobTable;
+}
+
+function formatJobResult(verb: string, result: JobActionResult): string {
+  const state =
+    result.status === "running"
+      ? result.settled
+        ? "running"
+        : "running (still active)"
+      : `exited(${formatExit(result.exitCode, result.exitSignal)})`;
+  const header = `${verb} ${result.handle} "${result.label}" [${state}]`;
+  const note =
+    result.omittedLines > 0
+      ? `\n(${result.omittedLines} older buffered line${result.omittedLines === 1 ? "" : "s"} dropped)`
+      : "";
+  if (result.output.length === 0) return `${header}${note}`;
+  return `${header}${note}\n${result.output}`;
 }
 
 // §1 and §2.5: no length limit the person did not set. An empty entry is the
@@ -160,8 +189,8 @@ function scopedRead(root: string): ToolRegistration {
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
-    // Carto adds is how the file is named and what the result becomes.
-    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project. The result is an item in the context with a handle of its own, and pinning it keeps that reading rather than the file. Read before you write about a file.`,
+    // Carto adds is how the file is named and how to keep reads slim.
+    description: `${base.description ?? ""} Name the file by its tree handle or a project path, using \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
       guardedPath(root, pathOf(args));
       return base.execute(args, api, context);
@@ -179,8 +208,8 @@ function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
-    // Carto adds is how the file is named and what the mode means here.
-    description: `${base.description ?? ""} The file is named by a handle the tree shows, or by a path inside the project, and it must already exist: making one is \`create\`'s job. Every replacement is matched against the file as it is now, and the call lands all of them or none. Read the part you are changing first. Read only mode refuses this call.`,
+    // Carto adds is how the file is named, atomic pacing, and read-only mode.
+    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       guardedPath(root, pathOf(args));
@@ -199,7 +228,7 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
     ...write,
     name: "create",
     description:
-      "Create a file at a path that is free. It never overwrites: a path that already exists is an error, because changing a file is `edit`'s job and an overwrite would discard text you may never have read. Parent directories are made as needed. Read only mode refuses this call.",
+      "Create a new file at a path that is free, starting with minimal boilerplate or a clean skeleton (types, signatures, stubs) so you can grow it incrementally with `edit`. Never overwrites an existing path; parent directories are made as needed. Refused in read only mode.",
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = pathOf(args);
@@ -226,13 +255,14 @@ const pathOf = (args: object): string => String((args as { path?: unknown }).pat
 function refuseWhenReadOnly(readOnly: boolean): void {
   if (readOnly) {
     throw new Error(
-      "The project is in read only mode: you make no edit and no other destructive change while it is on. Read, answer, and say what you would change when you are asked for it — there is nothing to queue or to ask permission for.",
+      "The project is in read only mode: you make no edit and no other destructive change while it is on. Read, answer, and say what you would change when you are asked for it. There is nothing to queue or to ask permission for.",
     );
   }
 }
 
 export function createTools(deps: ToolDeps): ToolRegistration[] {
   const { root, brain, session } = deps;
+  const jobs = deps.jobs ?? createJobTable({ root });
   // Said once, then read from here: a tool description is something the agent
   // reads, so it names the person it works for rather than a role.
   const them = session.person;
@@ -241,7 +271,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "chat",
       description:
-        `Say something to ${them}. This is the only channel that reaches them: your plain text is your own reasoning and they never see it. One thought per call, in your own words, without reporting the call. An empty turn needs no call at all.`,
+        `Say something to ${them}. This is the only channel ${them} sees; your plain text is private reasoning. Speak plainly when you have a result, question, or decision. No call is needed on quiet working turns.`,
       parameters: obj({ text: Text }),
       replay: "safe",
       execute: async (args, api) => {
@@ -255,10 +285,10 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Write what you understand about the project: one node, a name and the understanding itself. A node may link to other nodes and may attach to what it is about — a file by path, or a record by handle. Pass a handle to rewrite that node; links and attachments are replaced wholesale, so send the whole set you want. Without a handle it is a new node. Nothing requires a node to connect to anything.",
+        "Create or update an Atlas node: either lasting project understanding or a node in your task/plan graph (goals linked to steps down to atomic leaves, worked leaves-before-stems, attached to the files they touch). Pass `handle` to update an existing node in place as work progresses; omit `handle` for a new node. Links and attachments replace the existing set on update, and nodes need not connect to anything.",
       parameters: obj({
         handle: opt(HandleRef),
-        title: str({ description: "The node's name: what this understanding is about." }),
+        title: str({ description: "The node's name: what this understanding or task node is about." }),
         text: Text,
         links: opt(arr(HandleRef)),
         attachments: opt(
@@ -302,7 +332,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "ledger",
       description:
-        `Write one Ledger record: a goal, a note, a question, an instruction, or progress — what you are working on, kept. Pass a handle to rewrite that record; without one it is a new record. A question takes an answer and a status, so answering one ${them} asked is the same call as writing it. A plan is made of these records: the goal, then one record per step in the order you will take them, with progress naming the step it moved. A plan written here reaches ${them} in their Ledger, and is in your head at the next collapse without your reading it again.`,
+        `Create or update a lightweight Ledger record (goal, note, question, instruction, or progress) holding your active working state: current leaf, what is solved, open questions, and live progress. Pass \`handle\` to update an existing record in place as you go so a collapse at any moment preserves where you are; omit \`handle\` for a new record. A question takes \`answer\` and \`status\` so answering one ${them} asked uses the same call.`,
       parameters: obj({
         handle: opt(HandleRef),
         kind: oneOf(["goal", "note", "question", "instruction", "progress"] as const),
@@ -340,7 +370,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin one entry, or take your pin off it: "keep this here". The entry is named by a handle of at least 1 character — the handle is the whole argument, so an empty one names nothing — and it is a file's from the tree; a pinned file is read again at every collapse so the head holds the file as it now stands rather than a reading of it. A pin carries no reason. A pin you place is yours to remove; a pin ${them} placed is theirs alone, and the state block says who placed each one.`,
+        `Pin or unpin a file from the tree by its handle (at least 1 character). Pinned files are re-read fresh into the head at every collapse, so pin the files you are actively building in before collapsing. Only ${them} can remove a pin ${them} placed.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -382,7 +412,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "mark",
       description:
-        `Decide what one record is for, or withdraw the decision. The record is named by a handle of at least 1 character: an empty handle names nothing, and there is nothing else to act on. \`archive\` retires it from the Brain, \`delete\` removes it for good and leaves nothing behind, \`none\` withdraws a mark of your own. Nothing happens yet — the record stays in the context and in your view until the next collapse, and a later mark replaces an earlier one. When something has to go at once, mark it and collapse: the collapse is how you apply a mark now. An archived record leaves the context for good: it is not in your view afterwards and there is nothing to ask for. \`delete\` is the heavier of the two, so when you mark for delete, tell ${them} what you are letting go of first. A mark ${them} placed is theirs to withdraw, so leave it.`,
+        `Mark a Brain record by handle (at least 1 character) for \`archive\` or \`delete\` at the next collapse, or \`none\` to withdraw your own mark. Use this to retire finished task-leaves and obsolete notes so the Brain stays sharp; when marking for \`delete\`, tell ${them} in \`chat\` first. Only ${them} can withdraw a mark ${them} placed.`,
       parameters: obj({
         handle: ExistingHandle,
         action: oneOf(["archive", "delete", "none"] as const),
@@ -423,7 +453,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Move the project tree in your state block to where your attention is, and end the turn so you can read it: the block arrives as your next turn with the tree rendered at the anchor you just set. The arguments are optional and stick — an anchor by path, or a directory by the handle the tree gave it, and how many levels below it to render. Every file and directory the tree shows carries its own handle, and a file also carries the handles of the Atlas nodes attached to it. The tree is `T1` there. Nothing is returned here beyond the fact of the move.",
+        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str()),
@@ -466,13 +496,32 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "collapse",
       description:
-        `End this context and rebuild it from the Brain. Collapse at a task boundary: the work is finished and the Brain holds it, or a long piece of work is about to start and you have pinned what you will need to begin inside a context built for it. Nothing needs approval from either side. Say anything ${them} must see first, because this context is about to be gone and whatever you did not write down goes with it.`,
-      parameters: obj({}),
+        `End this context and rebuild cleanly from the Brain and pinned files. Use naturally at boundaries (after mapping a plan into Atlas and pinning active files, after finishing a leaf, or before starting new work) as well as when context fills. Always include \`message\` (at least 1 character): a brief Chat update to ${them} explaining why you are collapsing and what comes next. Update Atlas/Ledger before calling; everything unpinned outside the Brain is swept.`,
+      parameters: obj({
+        message: str({
+          minLength: 1,
+          description: `Brief Chat message to ${them} explaining why you are collapsing and what comes next (at least 1 character).`,
+        }),
+      }),
       replay: "safe",
-      execute: async () => {
+      execute: async (args, api) => {
+        const message = args.message.trim();
+        if (message.length === 0) {
+          throw new Error(`\`collapse\` requires a non-empty \`message\` for ${them} explaining why you are collapsing and what comes next.`);
+        }
+        const id = `chat:${api.callId}`;
+        const existing = await brain.read();
+        if (!existing.chat.some((record) => record.id === id)) {
+          await brain.apply(
+            { kind: "chat.record", record: { id, author: "agent", text: message, createdAt: api.now(), updatedAt: api.now() } },
+            api.now(),
+          );
+          pendingWrite(session, { kind: "chat", action: "record", id });
+        }
         session.collapseRequested = "the agent collapsed";
+        session.collapseTrigger = "agent";
         return {
-          output: [{ type: "text" as const, text: "This run ends here. The context rebuilds from the Brain, and the state block is your next turn." }],
+          output: [{ type: "text" as const, text: `Said to ${them}. This run ends here. The context rebuilds from the Brain, and the state block is your next turn.` }],
           control: { terminate: true },
         };
       },
@@ -481,7 +530,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "sleep",
       description:
-        `End the turn and rest — the honest way to stop. With no argument you stay stopped until ${them} messages you. With whole seconds — at least 1, because a rest of no time is no rest — you wait that long, then start again on your own from the state block. Either way a message from ${them} brings you back sooner. Nothing is said to ${them} by this call.`,
+        `Last resort: end the turn and rest only after you have thoroughly exercised and verified your work and can find nothing else to fix, probe, or improve. Omit \`seconds\` to rest until ${them} messages you, or pass whole seconds (at least 1) to wake on your own from \`<carto-state>\`. A message from ${them} wakes you early.`,
       parameters: obj({ seconds: opt(int({ minimum: 1, description: `Whole seconds to rest before starting again. Omit to rest until ${them} messages you.` })) }),
       replay: "safe",
       execute: async (args, api, context) => {
@@ -505,7 +554,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           const hasInput = inbox.items.some((item) => item.mode !== "write");
           rest.legacyAllowed = false;
           if (!hasInput) {
-            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" } });
+            rest.active = await tx.createTask(SleepTask, { seconds, tracked: true }, { ownership: { kind: "conversation" }, background: true });
           } else {
             rest.active = null;
           }
@@ -515,6 +564,77 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           output: [{ type: "text" as const, text: `Resting ${args.seconds} second${args.seconds === 1 ? "" : "s"}, then starting again from the state block.` }],
           control: { terminate: true },
         };
+      },
+    }),
+
+    defineTool({
+      name: "proc",
+      description:
+        `Run and drive persistent piped processes (REPLs, dev servers, interactive testing harnesses) in the project root that stay alive across turns and context collapse until stopped or Carto exits. Actions: "start" spawns \`command\` (optional \`label\`, \`waitMs\` default 1000, max 30000, pass 0 to return immediately) and returns a J handle; "send" writes \`input\` to stdin (newline appended unless \`raw\` is true) or sends \`signal\` ("SIGINT" or "SIGTERM") to \`handle\`; "read" returns unread output since the last read (or the last \`tailLines\` lines, from 1 up to 2000, optional \`waitMs\` default 0, max 30000); "stop" terminates \`handle\` and removes it. \`start\` and \`send\` settle after 150ms of quiet output (capped at \`waitMs\`) and return without killing the process if it stays active. Output is buffered up to 2000 lines per job and shared live with ${them} in the jobs view. Not sandboxed in read only mode, where what stops a command that writes is you.`,
+      parameters: obj({
+        action: oneOf(["start", "send", "read", "stop"], {
+          description: 'Operation to perform: "start", "send", "read", or "stop".',
+        }),
+        handle: opt(str({ description: 'Job handle such as "J1". Required for "send", "read", and "stop".' })),
+        command: opt(str({ description: 'Shell command to start in the project root. Required for "start".' })),
+        label: opt(str({ description: 'Short display label for the job shown in the state block and jobs view. Optional for "start".' })),
+        input: opt(str({ description: 'Text to write to stdin for "send". A trailing newline is added unless `raw` is true.' })),
+        raw: opt(bool({ description: 'When true, send `input` verbatim without adding a trailing newline.' })),
+        signal: opt(oneOf(["SIGINT", "SIGTERM"], { description: 'Signal to send to the job process group during "send".' })),
+        waitMs: opt(int({
+          maximum: 30000,
+          description: 'Max milliseconds to wait for quiet output (150ms idle settle, max 30000). Defaults to 1000 for "start"/"send" and 0 for "read". Pass 0 or less to return immediately.',
+        })),
+        tailLines: opt(int({
+          minimum: 1,
+          maximum: 2000,
+          description: 'For "read", return the last N buffered lines (1 to 2000) instead of only unread output.',
+        })),
+      }),
+      replay: "unsafe",
+      execute: async (args, _api, context) => {
+        const waitMs = args.waitMs === undefined ? undefined : Math.max(0, args.waitMs);
+        if (args.action === "start") {
+          if (args.command === undefined || args.command.trim().length === 0) {
+            throw new Error('`proc` with action "start" requires a non-empty `command`.');
+          }
+          const result = await startJob(jobs, {
+            command: args.command,
+            ...(args.label === undefined ? {} : { label: args.label }),
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(context.abortSignal === undefined ? {} : { signal: context.abortSignal }),
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Started", result) }] };
+        }
+        if (args.handle === undefined || args.handle.trim().length === 0) {
+          throw new Error(`\`proc\` with action "${args.action}" requires \`handle\`.`);
+        }
+        if (args.action === "send") {
+          if (args.input === undefined && args.signal === undefined) {
+            throw new Error('`proc` with action "send" requires `input` or `signal`.');
+          }
+          const result = await sendJob(jobs, {
+            handle: args.handle,
+            ...(args.input === undefined ? {} : { input: args.input }),
+            ...(args.raw === undefined ? {} : { raw: args.raw }),
+            ...(args.signal === undefined ? {} : { signal: args.signal }),
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(context.abortSignal === undefined ? {} : { abortSignal: context.abortSignal }),
+            source: "agent",
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Sent to", result) }] };
+        }
+        if (args.action === "read") {
+          const result = await readJob(jobs, {
+            handle: args.handle,
+            ...(waitMs === undefined ? {} : { waitMs }),
+            ...(args.tailLines === undefined ? {} : { tailLines: args.tailLines }),
+            ...(context.abortSignal === undefined ? {} : { abortSignal: context.abortSignal }),
+          });
+          return { output: [{ type: "text" as const, text: formatJobResult("Read", result) }] };
+        }
+        const result = await stopJob(jobs, args.handle);
+        return { output: [{ type: "text" as const, text: formatJobResult("Stopped", result) }] };
       },
     }),
   ];

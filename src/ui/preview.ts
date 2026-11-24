@@ -12,6 +12,8 @@
  */
 import { HeaderView, FooterView } from "./chrome.js";
 import { Registry, type Command } from "./commands.js";
+import { CURSOR_MARKER } from "@earendil-works/pi-tui";
+
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { Sidebar } from "./sidebar.js";
 import { TranscriptView } from "./transcript.js";
@@ -20,14 +22,12 @@ import { ContextView, type ContextViewData } from "./context-view.js";
 import { TreeView } from "./tree-view.js";
 import { HelpPanel, type HelpExtra } from "./help-panel.js";
 import { Palette } from "./palette.js";
-import { bandLine, canvasLine, chromeLine, tokens, visibleWidth } from "./tokens.js";
+import { bandLine, canvasLine, chromeLine, padLine, tokens, visibleWidth } from "./tokens.js";
 import { sidebarWidth } from "./sidebar.js";
 import { emptyBrain } from "../domain/records.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 /**
  * The transcript as it sits in the working column: a seam under the header, the
@@ -447,10 +447,7 @@ export function previewPalette(width = 64): string {
   ]);
   // The input renders with a software cursor marker; a frame of text has no cursor.
   return frame(
-    palette
-      .render(width)
-      .map((line) => line.replace(/\x1b_pi:[a-z/]+\x07/g, ""))
-      .map((line) => line.replace(/\x1b\[[0-9;]*m/g, (escape) => escape)),
+    palette.render(width).map((line) => line.replaceAll(CURSOR_MARKER, "")),
     width,
   );
 }
@@ -472,8 +469,9 @@ function workspace(header: HeaderView, sidebarLines: string[], main: (width: num
   const rows: string[] = [...header.render(width), chromeLine("", width)];
   for (let index = 0; index < count; index += 1) {
     const left = sidebarLines[index] ?? bandLine("", sidebarWidth);
-    const right = mainLines[index] ?? "";
-    rows.push(frame([left], sidebarWidth) + chromeLine("", 1) + canvasLine(right, mainWidth));
+    const right = mainLines[index];
+    const rightCell = right !== undefined && right.startsWith("\u001b[48") ? padLine(right, mainWidth) : canvasLine(right ?? "", mainWidth);
+    rows.push(frame([left], sidebarWidth) + chromeLine("", 1) + rightCell);
   }
   return rows;
 }
@@ -488,4 +486,4 @@ export const previews = (width = 110): Record<string, string> => ({
   palette: previewPalette(64),
 });
 
-export { plain };
+export { stripTerminalSequences as plain } from "@earendil-works/pi-tui";

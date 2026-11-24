@@ -21,11 +21,15 @@ import { truncateToWidth, visibleWidth, type Component, type TuiMouseEvent, type
 
 import { bandLine, padLine, tokens } from "./tokens.js";
 
-export type BookKind = "chat" | "context" | "atlas" | "ledger" | "tree";
+export type BookKind = "chat" | "jobs" | "context" | "atlas" | "ledger" | "tree";
 export type SidebarLayer = "context" | "archive";
 
 export interface SidebarCounts {
   chat: number;
+  /** Persistent piped jobs (running + retained exited); defaults to 0 when omitted. */
+  jobs?: number;
+  /** Persistent jobs carrying unread output; defaults to 0 when omitted. */
+  jobsUnread?: number;
   contextTokens: number;
   atlas: number;
   ledger: number;
@@ -86,7 +90,9 @@ export class Sidebar implements Component {
   }
 
   setActiveBook(item: string): void {
-    if (item === "chat" || item === "context" || item === "atlas" || item === "ledger" || item === "tree") this.activeItem = item;
+    if (item === "chat" || item === "jobs" || item === "context" || item === "atlas" || item === "ledger" || item === "tree") {
+      this.activeItem = item;
+    }
   }
 
   setLayer(layer: SidebarLayer): void {
@@ -116,6 +122,10 @@ export class Sidebar implements Component {
   /** The figure a row shows: a count, or a compact token figure for the context itself. */
   private figure(kind: BookKind): string {
     if (kind === "chat") return String(this.counts.chat);
+    if (kind === "jobs") {
+      const count = this.counts.jobs ?? 0;
+      return count > 0 ? String(count) : "0";
+    }
     if (kind === "context") {
       const tokens = this.counts.contextTokens;
       if (tokens <= 0) return "—";
@@ -129,9 +139,10 @@ export class Sidebar implements Component {
     return String(kind === "atlas" ? this.counts.atlas : this.counts.ledger);
   }
 
-  /** The quiet marks after a figure: marks, stale. One glyph each, never a sentence. */
+  /** The quiet marks after a figure: marks, stale, unread jobs. One glyph each, never a sentence. */
   private marksOf(kind: BookKind): string {
     const parts: string[] = [];
+    if (kind === "jobs" && (this.counts.jobsUnread ?? 0) > 0) parts.push(tokens.warn("●"));
     if ((this.counts.marked[kind] ?? 0) > 0) parts.push(tokens.warn("◆"));
     if ((this.counts.stale[kind] ?? 0) > 0) parts.push(tokens.warn("!"));
     return parts.join(" ");
@@ -184,6 +195,7 @@ export class Sidebar implements Component {
     lines.push(fill(`   ${tokens.faint("WORKSPACE")}`));
     lines.push(fill(""));
     book("chat", "transcript");
+    book("jobs", "jobs");
     book("context", "context");
 
     blank();

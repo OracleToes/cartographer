@@ -1,8 +1,10 @@
+import "./agent-reminder.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
+import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
 import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
 import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
@@ -722,6 +724,66 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   state.session.state.serverLost = true;
   bar.invalidate();
   assert.match(plain(bar.render(60)[0]), /8,000 \/ 32,768/);
+});
+
+test("the context bar draws live prefill progress even when the window is unknown, with uncached % and ETA", () => {
+  const state = {
+    session: {
+      state: {
+        contextWindow: 0,
+        prefillActive: true,
+        prefillTotal: 10_000,
+        prefilledTokens: 6_000,
+        prefillCached: 2_000,
+        prefillRate: 200,
+      },
+    },
+    parts: { system: 1_000, transcript: 500, toolWork: 500 },
+  };
+  const bar = new TokenBarView(state);
+  const line = plain(bar.render(120)[0]);
+  assert.match(line, /window unknown/);
+  assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
+  assert.match(line, /█/, "cached prefix is visible even before the window is known");
+  assert.match(line, /▓/, "active prefill bar renders even when contextWindow is 0");
+});
+
+test("model telemetry tracks delta-based prefill rate across heartbeats, handles missing cache, and detects generation start", () => {
+  let responses = 0;
+  const state = { onResponse: () => { responses += 1; } };
+  const telemetry = createModelTelemetry(state);
+  const id = telemetry.start();
+
+  // Server headers arrive: onResponse fires once per request.
+  telemetry.response(id);
+  telemetry.response(id);
+  assert.equal(responses, 1);
+
+  // Chunk 1 omits cache: defaults to 0 instead of dropping the chunk.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 500, time_ms: 1000 } });
+  assert.equal(state.prefillTotal, 2000);
+  assert.equal(state.prefilledTokens, 500);
+  assert.equal(state.prefillCached, 0);
+  assert.equal(state.prefillRate, 500);
+
+  // Heartbeat chunk with unchanged processed keeps the previous valid rate.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 500, time_ms: 1500 } });
+  assert.equal(state.prefillRate, 500);
+
+  // Delta rate: +500 tokens over +2500ms (from baseline 500@1000ms to 1000@3500ms) -> 200 tok/s.
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 1000, time_ms: 3500 } });
+  assert.equal(state.prefillRate, 200);
+  assert.equal(state.prefillActive, true);
+
+  // delta.reasoning clears prefillActive (matching pi-prefill).
+  telemetry.event(id, { choices: [{ index: 0, delta: { reasoning: "thinking..." }, finish_reason: null }] });
+  assert.equal(state.prefillActive, false);
+
+  // Next request: finish_reason != null also clears prefillActive.
+  const id2 = telemetry.start();
+  telemetry.event(id2, { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+  assert.equal(state.prefillActive, false);
+  assert.equal(responses, 2, "first stream event also marks the request as responded");
 });
 
 test("the command registry drives the footer, and a key only fires where it is available", () => {
@@ -1514,6 +1576,146 @@ test("the token count includes a head that was rendered from the Brain when no f
   assert.ok(count(undefined) > count(""), "the fallback head is counted");
 });
 
+test("every entry in the context view shows its estimated token cost, folded and open", () => {
+  const view = new ContextView();
+  const longText = "x".repeat(400);
+  view.setData({
+    brain: frozenBrain(),
+    person: "OracleToes",
+    systemPrompt: longText,
+    projectionText: FROZEN_HEAD,
+    tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
+    transcriptMessages: [{ id: 1, entry: 1, order: -1, role: "user", text: "hello world!" }],
+    toolWorkItems: [
+      { id: "g:2:t0", entry: 2, order: 0, kind: "reasoning", text: "abcd".repeat(10) },
+      { id: "g:2:c1", entry: 2, order: 1, kind: "toolCall", name: "read", args: '{"path":"a.ts"}' },
+      { id: "g:3:r", entry: 3, order: 99, kind: "toolResult", output: "y".repeat(80) },
+    ],
+    stateBlockText: "<carto-state>\n[EDIT MODE]\n</carto-state>",
+    treeHandles: { "notes.md": "F1", "src/gone.ts": "F2" },
+  });
+
+  const checkEntries = (lines, label) => {
+    for (const line of lines) assert.equal(visibleWidth(line), 100, `${label}: exact pane width`);
+    const rows = lines.map(plain);
+    const rowFor = (handle) => rows.find((line) => new RegExp(`^\\s*[▌ ]\\s*[▸▾]\\s+${handle}\\b`).test(line));
+    // Every entry across head, body, and tail carries a `~N tok` indicator.
+    for (const handle of ["H", "Y1", "A1", "F1", "X1", "U1", "X2", "R1", "B"]) {
+      const row = rowFor(handle);
+      assert.ok(row !== undefined, `${label}: ${handle} row rendered`);
+      assert.match(row, /~[\d,]+ tok\s*$/, `${label}: ${handle} shows its token cost on the right`);
+    }
+    assert.match(rowFor("H"), /~115 tok\s*$/, `${label}: 400-byte system prompt estimates via pi-ai (3.5 chars/tok) to ~115 tok`);
+    assert.match(rowFor("U1"), /~4 tok\s*$/, `${label}: 12-byte message estimates via pi-ai (3.5 chars/tok) to ~4 tok`);
+    assert.match(rowFor("R1"), /~23 tok\s*$/, `${label}: 80-byte tool result estimates via pi-ai (3.5 chars/tok) to ~23 tok`);
+  };
+
+  checkEntries(view.render(100), "folded");
+  view.toggleAll();
+  checkEntries(view.render(100), "open");
+});
+
+test("every transcript and context entry header sits on a slightly different background colour from its body", async () => {
+  const { setCapabilityOverrides } = await import("@earendil-works/pi-tui");
+  const { canvasLine, surfaceLine } = await import("../dist/ui/tokens.js");
+  setCapabilityOverrides({ trueColor: true });
+  try {
+    const leadingBg = (line) => {
+      const match = line.match(/^\x1b\[48;[0-9;]+m/);
+      return match?.[0] ?? "";
+    };
+    const headerBg = leadingBg(surfaceLine("", 10));
+    const bodyBg = leadingBg(canvasLine("", 10));
+    assert.ok(headerBg.length > 0 && bodyBg.length > 0, "both surfaces emit a background ANSI escape");
+    assert.notEqual(headerBg, bodyBg, "header and body backgrounds are distinct colours");
+
+    // 1. TranscriptView: person, agent (with mark), reasoning, output, tool, live tool, queued.
+    const transcript = new TranscriptView();
+    transcript.setEntries(
+      [
+        { kind: "person", text: "person body line", handle: "U1", recordId: "c-u" },
+        { kind: "agent", text: "agent body line", handle: "C1", recordId: "c-a", mark: { action: "archive", author: "user" } },
+        { kind: "reasoning", id: "r1", handle: "X1", text: "reasoning body line" },
+        { kind: "output", id: "o1", handle: "X2", text: "output body line" },
+        { kind: "tool", id: "t1", handle: "X3", name: "read", args: "path: src/a.ts", output: "tool body line" },
+      ],
+      [{ text: "queued body line", mode: "steer" }],
+    );
+    transcript.setLive([
+      { kind: "tool", id: "live-1", handle: "X4", name: "bash", args: "command: ls", output: "live tool body line", live: true, status: "running" },
+    ]);
+    const findLine = (lines, needle) => {
+      const found = lines.find((line) => plain(line).includes(needle));
+      assert.ok(found !== undefined, `expected line containing "${needle}"`);
+      return found;
+    };
+
+    // Folded landed cards still paint their header row with the header background.
+    const foldedTranscript = transcript.render(90);
+    for (const headerNeedle of ["▌ you U1", "▌ carto C1", "X1", "X2", "X3", "X4", "⏸ you"]) {
+      assert.equal(leadingBg(findLine(foldedTranscript, headerNeedle)), headerBg, `folded transcript header "${headerNeedle}" uses surface background`);
+    }
+
+    // First toggle folds the open live card; second toggle opens every card so every entry has header + body.
+    transcript.toggleAllCards();
+    transcript.toggleAllCards();
+
+    const transcriptLines = transcript.render(90);
+    for (const line of transcriptLines) assert.equal(visibleWidth(line), 90, "transcript line exact width");
+    for (const headerNeedle of ["▌ you U1", "▌ carto C1", "X1", "X2", "X3", "X4", "⏸ you"]) {
+      assert.equal(leadingBg(findLine(transcriptLines, headerNeedle)), headerBg, `transcript header "${headerNeedle}" uses surface background`);
+    }
+    for (const bodyNeedle of [
+      "person body line",
+      "agent body line",
+      "archive on collapse · you",
+      "reasoning body line",
+      "output body line",
+      "tool body line",
+      "live tool body line",
+      "queued body line",
+    ]) {
+      assert.equal(leadingBg(findLine(transcriptLines, bodyNeedle)), bodyBg, `transcript body "${bodyNeedle}" uses canvas background`);
+    }
+
+    // 2. ContextView: every entry header (folded and open) vs its expanded body and section headings.
+    const context = new ContextView();
+    context.setData({
+      brain: frozenBrain(),
+      person: "OracleToes",
+      systemPrompt: "system prompt body text",
+      projectionText: FROZEN_HEAD,
+      tools: [{ name: "read", description: "read a file", parameters: { type: "object" } }],
+      transcriptMessages: [{ id: 1, entry: 1, order: -1, role: "user", text: "user prompt body text" }],
+      toolWorkItems: [{ id: "g:2:r", entry: 2, order: 1, kind: "reasoning", text: "context reasoning body" }],
+      stateBlockText: "<carto-state>\nstate block body text\n</carto-state>",
+      treeHandles: { "notes.md": "F1", "src/gone.ts": "F2" },
+    });
+
+    const checkContextHeaders = (lines, state) => {
+      for (const line of lines) assert.equal(visibleWidth(line), 100, `context (${state}): exact width`);
+      for (const heading of ["HEAD ·", "BODY ·", "TAIL ·"]) {
+        assert.equal(leadingBg(findLine(lines, heading)), bodyBg, `context (${state}): section heading "${heading}" stays on canvas`);
+      }
+      const headerRows = lines.filter((line) => /^\s*[▌ ] [▸▾] /.test(plain(line)));
+      assert.ok(headerRows.length >= 6, `context (${state}): every entry has a header row`);
+      for (const row of headerRows) {
+        assert.equal(leadingBg(row), headerBg, `context (${state}): entry header "${plain(row).trim()}" uses surface background`);
+      }
+    };
+
+    checkContextHeaders(context.render(100), "folded");
+    context.toggleAll();
+    const openContextLines = context.render(100);
+    checkContextHeaders(openContextLines, "open");
+    for (const bodyNeedle of ["system prompt body text", "user prompt body text", "context reasoning body", "state block body text"]) {
+      assert.equal(leadingBg(findLine(openContextLines, bodyNeedle)), bodyBg, `context (open): body "${bodyNeedle}" uses canvas background`);
+    }
+  } finally {
+    setCapabilityOverrides({ trueColor: undefined });
+  }
+});
+
 test("the system message is the instructions first and the frozen projection second (§5.1)", async () => {
   const { createCartoExtension, cartoInstructions } = await import("../dist/runtime/carto-extension.js");
   const extension = createCartoExtension({
@@ -1624,4 +1826,269 @@ test("a pane's margin, floor and seam are one box, and a click lands on the row 
   assert.ok(!inset.handleMouse({ type: "click", button: "left", x: 19, y: 0, screenX: 19, screenY: 0, width: 20, height: 5, shift: false, alt: false, ctrl: false }), "nor one on the seam");
   inset.handleMouse({ type: "click", button: "left", x: 5, y: 1, screenX: 5, screenY: 1, width: 20, height: 5, shift: false, alt: false, ctrl: false });
   assert.deepEqual(clicks, [[3, 1, 17]], "the pane sees the click as its own, shifted by the margin");
+});
+
+test("HelpPanel clamps its scroll offset to the last row instead of scrolling into empty space", async () => {
+  const { HelpPanel } = await import("../dist/ui/help-panel.js");
+  const panel = new HelpPanel(
+    [
+      { id: "a", group: "one", label: "first", key: "ctrl+a", available: () => true, run: () => undefined },
+      { id: "b", group: "one", label: "second", key: "ctrl+b", available: () => true, run: () => undefined },
+    ],
+    () => [],
+  );
+  for (let i = 0; i < 50; i += 1) panel.handleInput("j");
+  const lines = panel.render(60).map(plain);
+  assert.ok(lines.some((line) => line.includes("second")), "clamped at the final row");
+});
+
+test("Atlas, Ledger, and Tree filter bars use pi-tui Input and fuzzyFilter", async () => {
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const brain = emptyBrain();
+  brain.atlas.push(
+    { id: "a1", title: "SessionStorage", text: "sqlite backing", links: [], attachments: [], createdAt: 1, updatedAt: 1 },
+    { id: "a2", title: "ColorTokens", text: "palette", links: [], attachments: [], createdAt: 2, updatedAt: 2 },
+  );
+  brain.ledger.push(
+    { id: "l1", kind: "goal", text: "AdoptInputFilter", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+    { id: "l2", kind: "note", text: "UnrelatedNote", status: "open", answer: null, createdAt: 2, updatedAt: 2 },
+  );
+  brain.handles.entries.push(
+    { kind: "atlas", id: "a1", handle: "A1", timestamp: 1 },
+    { kind: "atlas", id: "a2", handle: "A2", timestamp: 2 },
+    { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 },
+    { kind: "ledger", id: "l2", handle: "L2", timestamp: 2 },
+  );
+
+  // Atlas: fuzzy match "ssg" matches SessionStorage and not ColorTokens; Esc clears.
+  const atlas = new AtlasView();
+  atlas.setData(brain, []);
+  atlas.handleInput("/");
+  assert.equal(atlas.isFiltering(), true);
+  for (const ch of "ssg") atlas.handleInput(ch);
+  assert.equal(atlas.selectedId(), "a1");
+  atlas.handleInput("\r");
+  assert.equal(atlas.isFiltering(), false);
+  assert.equal(atlas.selectedId(), "a1", "Enter commits the filter");
+  atlas.handleInput("/");
+  atlas.handleInput("\x1b");
+  assert.equal(atlas.isFiltering(), false);
+
+  // Ledger: fuzzy match "aif" matches AdoptInputFilter.
+  const ledger = new LedgerView();
+  ledger.setData(brain);
+  ledger.handleInput("/");
+  for (const ch of "aif") ledger.handleInput(ch);
+  assert.equal(ledger.selectedId(), "l1");
+  ledger.handleInput("\x1b");
+  assert.equal(ledger.isFiltering(), false);
+
+  // Tree: fuzzy match "ctx" matches context-bar.ts.
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-filter-"));
+  try {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "context-bar.ts"), "export {};\n");
+    writeFileSync(join(root, "src", "readme.md"), "hi\n");
+    const tree = new TreeView();
+    tree.setData({ root, anchor: { anchor: root, depth: 2 }, brain });
+    tree.handleInput("/");
+    for (const ch of "ctxb") tree.handleInput(ch);
+    const rendered = tree.render(100).map(plain).join("\n");
+    assert.match(rendered, /context-bar\.ts/);
+    assert.doesNotMatch(rendered, /readme\.md/);
+    tree.handleInput("\x1b");
+    assert.match(tree.render(100).map(plain).join("\n"), /readme\.md/, "Esc clears the filter");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Atlas and Ledger expose split-pane ScrollViews with no fixed line cap", async () => {
+  const { ScrollView } = await import("@earendil-works/pi-tui");
+  const brain = emptyBrain();
+  const longText = Array.from({ length: 40 }, (_, i) => `- item ${i + 1}: detail line`).join("\n");
+  brain.atlas.push({ id: "a1", title: "LongNode", text: longText, links: [], attachments: [], createdAt: 1, updatedAt: 1 });
+  brain.ledger.push({ id: "l1", kind: "goal", text: longText, status: "open", answer: null, createdAt: 1, updatedAt: 1 });
+  brain.handles.entries.push(
+    { kind: "atlas", id: "a1", handle: "A1", timestamp: 1 },
+    { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 },
+  );
+
+  for (const [name, view] of [["atlas", new AtlasView()], ["ledger", new LedgerView()]]) {
+    if (name === "atlas") view.setData(brain, []);
+    else view.setData(brain);
+    const listScroll = new ScrollView(view.listPane, { primary: false, overscroll: "contain" });
+    const detailScroll = new ScrollView(view.detailPane, { primary: false, overscroll: "contain" });
+    view.attachScrolls(listScroll, detailScroll);
+
+    const detailLines = view.detailPane.render(60);
+    assert.ok(detailLines.length > 40, `${name}: detail pane renders all lines without a 28-line cap`);
+    assert.ok(!plain(detailLines.join("\n")).includes("more lines"), `${name}: no manual ⋯ scroll footer`);
+    detailScroll.updateLayout(detailLines.length, 10, () => {});
+    view.handleInput("l");
+    view.handleInput("j");
+    assert.equal(detailScroll.scrollTop, 1, `${name}: j scrolls the detail ScrollView`);
+    view.handleInput("G");
+    assert.equal(detailScroll.scrollTop, detailLines.length - 10, `${name}: G jumps to the end of detailScroll`);
+    view.handleInput("g");
+    assert.equal(detailScroll.scrollTop, 0, `${name}: g returns to the start of detailScroll`);
+  }
+});
+
+test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList", async () => {
+  const { Palette } = await import("../dist/ui/palette.js");
+  const ran = [];
+  let closed = 0;
+  const palette = new Palette([
+    { id: "a", group: "views", label: "open Atlas", key: "ctrl+o", run: () => ran.push("a") },
+    { id: "b", group: "session", label: "collapse now", key: "ctrl+k", run: () => ran.push("b") },
+  ]);
+  palette.onClose = () => {
+    closed += 1;
+  };
+  const lines = palette.render(64);
+  for (const line of lines) assert.equal(visibleWidth(line), 64, "exact width");
+  assert.match(plain(lines.join("\n")), /open Atlas/);
+  assert.match(plain(lines.join("\n")), /collapse now/);
+
+  // Mouse click on the second item (4 header rows + index 1 = y 5) runs it.
+  palette.handleMouse({ type: "press", button: "left", x: 6, y: 5, screenX: 6, screenY: 5, width: 64, height: 10, shift: false, alt: false, ctrl: false });
+  palette.handleMouse({ type: "click", button: "left", x: 6, y: 5, screenX: 6, screenY: 5, width: 64, height: 10, shift: false, alt: false, ctrl: false });
+  assert.deepEqual(ran, ["b"]);
+  assert.equal(closed, 1);
+
+  // Fuzzy filter + Enter runs the matching command.
+  for (const ch of "atl") palette.handleInput(ch);
+  palette.handleInput("\r");
+  assert.deepEqual(ran, ["b", "a"]);
+});
+
+test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", async () => {
+  const { retainAfterCollapse } = await import("../dist/ui/transcript.js");
+  const transcript = new TranscriptView();
+  const entries = [
+    { kind: "agent", handle: "C1", recordId: "c1", text: "## Summary\n\n- **Bold** item with `code`" },
+    { kind: "system", handle: "C2", recordId: "c2", text: "Automatic context collapse (context overflow). Rebuilt from the Brain." },
+  ];
+  transcript.setEntries(entries);
+  const lines = transcript.render(80);
+  for (const line of lines) assert.equal(visibleWidth(line), 80, "every markdown line fits the pane width");
+  const text = plain(lines.join("\n"));
+  assert.match(text, /Summary/);
+  assert.match(text, /Bold/);
+  assert.match(text, /code/);
+  assert.match(text, /system C2/);
+  assert.match(text, /Automatic context collapse/);
+  assert.doesNotMatch(text, /\*\*Bold\*\*/, "markdown emphasis delimiters are rendered, not left raw");
+  assert.match(transcript.toPlainText(), /^system: Automatic context collapse/m);
+  const retained = retainAfterCollapse(entries, []);
+  assert.equal(retained.filter((entry) => entry.kind === "system").length, 1, "system Chat survives retainAfterCollapse");
+});
+
+test("estimate.ts delegates to pi-ai/utils/estimate", async () => {
+  const { estimateTokens, estimateSerialized } = await import("../dist/domain/estimate.js");
+  assert.equal(estimateTokens("a".repeat(35)), 10);
+  assert.equal(
+    estimateSerialized({ role: "user", content: "a".repeat(35), timestamp: 1 }),
+    10,
+    "Pi messages use estimateMessageTokens rather than JSON stringification",
+  );
+});
+
+test("PaneScrollView renders a dynamic-size scrollbar when overflowing and stays blank when content fits", async () => {
+  const { stripTerminalSequences, TuiAltScreen } = await import("@earendil-works/pi-tui");
+  const { Column, PaneScrollView } = await import("../dist/ui/frame.js");
+  const { rawPalette, canvasLine } = await import("../dist/ui/tokens.js");
+  const { readFileSync } = await import("node:fs");
+
+  const terminal = {
+    columns: 40,
+    rows: 10,
+    kittyProtocolActive: false,
+    start() {},
+    stop() {},
+    async drainInput() {},
+    write() {},
+    moveBy() {},
+    hideCursor() {},
+    showCursor() {},
+    clearLine() {},
+    clearFromCursor() {},
+    clearScreen() {},
+    setTitle() {},
+    setProgress() {},
+    setProgramStatus() {},
+  };
+
+  let lineCount = 5;
+  const doc = {
+    invalidate() {},
+    render(width) {
+      return Array.from({ length: lineCount }, (_, i) => canvasLine(`line ${i + 1}`, width));
+    },
+  };
+
+  const scroll = new PaneScrollView(doc, { primary: true, backgroundHex: rawPalette.surface });
+  const tui = new TuiAltScreen(terminal, false, undefined, { mouse: false });
+  tui.setLayoutRoot(new Column([{ component: scroll, basis: 0, grow: 1, minSize: 1 }]));
+
+  const renderFrame = async () => {
+    tui.requestRender(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    return tui.getScreenLines().map(stripTerminalSequences);
+  };
+
+  try {
+    tui.start();
+
+    // 1. Content fits (5 lines in 10 rows): gutter is blank, no scrollbar glyphs.
+    const shortFrame = await renderFrame();
+    assert.equal(scroll.isScrollable, false);
+    const shortGutter = shortFrame.map((line) => line.at(-1) ?? "");
+    assert.ok(shortGutter.every((ch) => ch !== "┃" && ch !== "│" && ch !== "█"), "no scrollbar when content fits");
+
+    // 2. Content is 2x viewport (20 lines in 10 rows): proportional thumb is ~5 rows at top.
+    lineCount = 20;
+    const mediumFrame = await renderFrame();
+    assert.equal(scroll.isScrollable, true);
+    const mediumGutter = mediumFrame.map((line) => line.at(-1) ?? "");
+    const mediumThumbCount = mediumGutter.filter((ch) => ch === "┃").length;
+    const mediumTrackCount = mediumGutter.filter((ch) => ch === "│").length;
+    assert.equal(mediumThumbCount, 5, "thumb is 50% of track when content is 2x viewport");
+    assert.equal(mediumTrackCount, 5, "remaining track cells render track hairline");
+    assert.equal(mediumGutter[0], "┃", "thumb starts at top when scrollTop is 0");
+    assert.equal(mediumGutter[9], "│", "track sits at bottom when scrollTop is 0");
+
+    // 3. Content grows to 5x viewport (50 lines in 10 rows): thumb shrinks dynamically to 2 rows.
+    lineCount = 50;
+    const tallFrame = await renderFrame();
+    const tallGutter = tallFrame.map((line) => line.at(-1) ?? "");
+    const tallThumbCount = tallGutter.filter((ch) => ch === "┃").length;
+    assert.equal(tallThumbCount, 2, "thumb shrinks proportionally as content grows");
+    assert.ok(tallThumbCount < mediumThumbCount, "dynamic thumb is smaller for taller content");
+
+    // 4. Scrolling to end moves the thumb to the bottom of the track.
+    scroll.scrollToEnd();
+    const bottomFrame = await renderFrame();
+    const bottomGutter = bottomFrame.map((line) => line.at(-1) ?? "");
+    assert.equal(bottomGutter[0], "│", "track sits at top when scrolled to end");
+    assert.equal(bottomGutter[9], "┃", "thumb reaches bottom when scrolled to end");
+
+    // 5. Hover/active state swaps thumb glyph to solid block.
+    scroll.setScrollbarActive(true);
+    const activeFrame = await renderFrame();
+    const activeGutter = activeFrame.map((line) => line.at(-1) ?? "");
+    assert.equal(activeGutter.filter((ch) => ch === "█").length, 2, "active/hovered scrollbar highlights thumb");
+  } finally {
+    tui.stop();
+  }
+
+  // Every ScrollView mounted in app.ts uses PaneScrollView so no view lacks a scrollbar.
+  const appSource = readFileSync("src/ui/app.ts", "utf8");
+  assert.doesNotMatch(appSource, /new ScrollView\(/, "all views in app.ts mount PaneScrollView");
+  assert.match(appSource, /new PaneScrollView\(/);
 });

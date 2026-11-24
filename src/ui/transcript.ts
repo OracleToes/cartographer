@@ -48,7 +48,7 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 
 import type { Mark, PinnedEphemeral } from "../domain/records.js";
-import { canvasLine, statusLine, statusWarnLine, tokens } from "./tokens.js";
+import { canvasLine, renderMarkdown, statusLine, statusWarnLine, surfaceLine, tokens } from "./tokens.js";
 import { RecordControls, type RecordAction } from "./record-controls.js";
 
 /**
@@ -84,6 +84,7 @@ export type CardEntry =
 export type TranscriptEntry =
   | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; mark?: Mark | undefined }
   | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
+  | { kind: "system"; text: string; /** The Brain chat record this system notice is (e.g. automatic collapse). */ recordId?: string; handle?: string; mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
@@ -121,7 +122,7 @@ export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: r
     if (entry.kind === "person") {
       // U handles belong to the old generation, not to historical dialogue.
       retained.push({ kind: "person", text: entry.text });
-    } else if (entry.kind === "agent") {
+    } else if (entry.kind === "agent" || entry.kind === "system") {
       if (entry.recordId !== undefined && seenChat.has(entry.recordId)) continue;
       if (entry.recordId !== undefined) seenChat.add(entry.recordId);
       retained.push(entry);
@@ -535,6 +536,7 @@ export class TranscriptView implements Component, Focusable {
     for (const entry of this.items) {
       if (entry.kind === "person") lines.push(`you: ${entry.text}`);
       else if (entry.kind === "agent") lines.push(`carto: ${entry.text}`);
+      else if (entry.kind === "system") lines.push(`system: ${entry.text}`);
       else if (entry.kind === "status") lines.push(`· ${entry.text}`);
       else if (entry.kind === "reasoning") lines.push(`thinking: ${entry.text}`);
       else if (entry.kind === "output") lines.push(`text: ${entry.text}`);
@@ -550,12 +552,12 @@ export class TranscriptView implements Component, Focusable {
   }
 
   /**
-   * A voice block: a coloured spine, a label in its own hue, the text in body
-   * ink, and every continuation line aligned under the text column.
+   * A voice block: a header row carrying the coloured spine, label and handle,
+   * followed by body lines in body ink so the header sits on its own surface.
    */
-  private block(who: "you" | "carto", text: string, width: number, handle?: string, extra?: string): string[] {
-    const tint = who === "you" ? tokens.person : tokens.agent;
-    const label = who === "you" ? "you" : "carto";
+  private block(who: "you" | "carto" | "system", text: string, width: number, handle?: string, extra?: string): string[] {
+    const tint = who === "you" ? tokens.person : who === "system" ? tokens.warn : tokens.agent;
+    const label = who;
     const marker = [
       handle === undefined || handle.length === 0 ? "" : tokens.faint(handle),
       extra === undefined || extra.length === 0 ? "" : tokens.pin(extra),
@@ -563,21 +565,23 @@ export class TranscriptView implements Component, Focusable {
       .filter((part) => part.length > 0)
       .map((part) => ` ${part}`)
       .join("");
-    // The text is wrapped once, at the body's width, and a pin rides on the last
-    // line if there is room for it there. Wrapping it twice — narrower for the
-    // first line, wider for the rest — would move the column, which is worse.
-    const body = Math.max(1, width - INSET - PREFIX_WIDTH);
-    const lines = wrapTextWithAnsi(text, body).map((line, index) =>
-      index === 0
-        ? `${tint(SPINE)} ${tint(tokens.bold(label.padEnd(LABEL_WIDTH)))}${tokens.text(line)}`
-        : `${" ".repeat(PREFIX_WIDTH)}${tokens.text(line)}`,
-    );
-    if (marker.length > 0) {
-      const room = Math.max(0, body - visibleWidth(wrapTextWithAnsi(text, body).at(-1) ?? ""));
-      if (room >= visibleWidth(marker) + 1) {
-        lines[lines.length - 1] = `${lines[lines.length - 1]}${marker}`;
-      } else {
-        lines.push(`${" ".repeat(PREFIX_WIDTH)}${marker.trimStart()}`);
+    const header = `${tint(SPINE)} ${tint(tokens.bold(label))}${marker}`;
+    const body = Math.max(1, width - INSET - 2);
+    const lines: string[] = [header];
+    if (who === "carto") {
+      const rendered = renderMarkdown(text, body, tokens.text);
+      if (rendered.length === 0) lines.push("  ");
+      else for (const line of rendered) lines.push(`  ${line}`);
+      return lines;
+    }
+    const bodyInk = who === "system" ? tokens.muted : tokens.text;
+    for (const logical of text.split("\n")) {
+      if (logical.length === 0) {
+        lines.push("  ");
+        continue;
+      }
+      for (const line of wrapTextWithAnsi(logical, body)) {
+        lines.push(`  ${bodyInk(line)}`);
       }
     }
     return lines;
@@ -732,6 +736,7 @@ export class TranscriptView implements Component, Focusable {
     if (this.cacheWidth === width) return this.cacheLines;
     this.lastWidth = width;
     const lines: string[] = [];
+    const headers = new Set<number>();
     const total = this.items.length + this.liveCards.length + this.queued.length;
     this.ranges = [];
     this.selectables = [];
@@ -748,6 +753,7 @@ export class TranscriptView implements Component, Focusable {
     const pushCard = (card: CardEntry) => {
       gap();
       const start = lines.length;
+      headers.add(start);
       const drawn = this.renderCard(card, width, start);
       lines.push(...drawn.lines);
       this.ranges.push(drawn.range);
@@ -762,13 +768,15 @@ export class TranscriptView implements Component, Focusable {
         continue;
       }
       gap();
-      if (entry.kind === "person" || entry.kind === "agent") {
+      if (entry.kind === "person" || entry.kind === "agent" || entry.kind === "system") {
         const start = lines.length;
-        lines.push(...this.block(entry.kind === "person" ? "you" : "carto", entry.text, width, entry.handle));
+        headers.add(start);
+        const speaker = entry.kind === "person" ? "you" : entry.kind === "system" ? "system" : "carto";
+        lines.push(...this.block(speaker, entry.text, width, entry.handle));
         if (entry.mark !== undefined) {
           const mark = `◆ ${entry.mark.action} on collapse · ${entry.mark.author === "user" ? "you" : "agent"}`;
-          for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - PREFIX_WIDTH))) {
-            lines.push(`${" ".repeat(PREFIX_WIDTH)}${tokens.warn(line)}`);
+          for (const line of wrapTextWithAnsi(mark, Math.max(1, width - INSET - 2))) {
+            lines.push(`  ${tokens.warn(line)}`);
           }
         }
         if (entry.recordId !== undefined) {
@@ -782,14 +790,17 @@ export class TranscriptView implements Component, Focusable {
     for (const card of this.liveCards) pushCard(card);
     for (const item of this.queued) {
       gap();
+      const start = lines.length;
+      headers.add(start);
       const label = item.mode === "after run" ? "sends after the run" : item.mode === "now" ? "sends now" : "steers at the next boundary";
-      const head = `${tokens.faint("⏸")} ${tokens.person(tokens.bold("you".padEnd(LABEL_WIDTH)))}`;
-      const room = Math.max(1, width - INSET - visibleWidth(head));
-      lines.push(`  ${head}${tokens.faint(tokens.italic(truncateToWidth(item.text, room, "…")))}`);
-      lines.push(`  ${" ".repeat(PREFIX_WIDTH)}${tokens.faint(`· ${label}`)}`);
+      lines.push(`${tokens.faint("⏸")} ${tokens.person(tokens.bold("you"))} ${tokens.faint(`· ${label}`)}`);
+      const body = Math.max(1, width - INSET - 2);
+      for (const line of wrapTextWithAnsi(item.text, body)) {
+        lines.push(`  ${tokens.faint(tokens.italic(line))}`);
+      }
     }
     this.cacheWidth = width;
-    this.cacheLines = this.inset(lines, width, this.cursorLines());
+    this.cacheLines = this.inset(lines, width, this.cursorLines(), headers);
     return this.cacheLines;
   }
 
@@ -811,16 +822,18 @@ export class TranscriptView implements Component, Focusable {
   /**
    * The body breathes: a left margin on every line, and the page's own colour
    * run to the pane's right edge, so the transcript reads as a surface rather
-   * than as glyphs floating on whatever the terminal had.
+   * than as glyphs floating on whatever the terminal had. Entry headers sit
+   * one step above the body so each entry's boundary reads at a glance.
    */
-  private inset(lines: string[], width: number, selected?: { start: number; end: number }): string[] {
+  private inset(lines: string[], width: number, selected?: { start: number; end: number }, headers?: ReadonlySet<number>): string[] {
     const armed = selected !== undefined && this.archiveConfirmation === this.cursorKey;
     return lines.map((line, index) => {
       if (line.length === 0) return canvasLine("", width);
       // The cursor is a bar in the margin, red when the next key archives.
       const inside = selected !== undefined && index >= selected.start && index < selected.end;
       const margin = inside ? `${armed ? tokens.danger("▌") : tokens.accent("▌")} ` : "  ";
-      return canvasLine(`${margin}${line}`, width);
+      const paint = headers?.has(index) ? surfaceLine : canvasLine;
+      return paint(`${margin}${line}`, width);
     });
   }
 }

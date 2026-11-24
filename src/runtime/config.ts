@@ -15,6 +15,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { cartoConfigPath, cartoHome } from "./paths.js";
+import { COLLAPSE_WARNING_PERCENT } from "../domain/state-block.js";
 
 export interface GlobalConfig {
   version: 1;
@@ -24,6 +25,8 @@ export interface GlobalConfig {
   llamaSwapEndpoint?: string;
   /** The pinned context window: it always wins (it can raise the server's advertised capacity). Unset: the server's advertised capacity is used. */
   contextWindow?: number;
+  /** Context fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the state block. Unset: 75. */
+  collapseWarningPercent?: number;
   /**
    * What the agent calls the person at the keyboard. Unset: the account that
    * launched Carto, resolved at run time — a name, never a role word.
@@ -57,6 +60,14 @@ function parseContextWindow(value: unknown, where: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
     throw new ConfigError(`${where}: contextWindow must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+function parseCollapseWarningPercent(value: unknown, where: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1 || value > 100) {
+    throw new ConfigError(`${where}: collapseWarningPercent must be an integer from 1 to 100 (default ${COLLAPSE_WARNING_PERCENT}); got ${JSON.stringify(value)}.`);
   }
   return value;
 }
@@ -103,12 +114,14 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
   parseModelRef(record.model); // validates shape
   const llamaSwapEndpoint = parseEndpoint(record.llamaSwapEndpoint, where);
   const contextWindow = parseContextWindow(record.contextWindow, where);
+  const collapseWarningPercent = parseCollapseWarningPercent(record.collapseWarningPercent, where);
   const userName = parseUserName(record.userName, where);
   return {
     version: 1,
     model: record.model,
     ...(llamaSwapEndpoint === undefined ? {} : { llamaSwapEndpoint }),
     ...(contextWindow === undefined ? {} : { contextWindow }),
+    ...(collapseWarningPercent === undefined ? {} : { collapseWarningPercent }),
     ...(userName === undefined ? {} : { userName }),
   };
 }
@@ -132,6 +145,8 @@ export interface LoadOptions {
   llamaSwapEndpointOverride?: string;
   /** Applies in memory; written to disk only when the file is being created. */
   contextWindowOverride?: number;
+  /** Applies in memory; written to disk only when the file is being created. Overrides `collapseWarningPercent`. */
+  collapseWarningPercentOverride?: number;
   /** Applies in memory; written to disk only when the file is being created. Overrides `userName`. */
   userNameOverride?: string;
   environment?: NodeJS.ProcessEnv;
@@ -165,6 +180,7 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
         model: options.modelOverride,
         ...(options.llamaSwapEndpointOverride === undefined ? {} : { llamaSwapEndpoint: options.llamaSwapEndpointOverride }),
         ...(options.contextWindowOverride === undefined ? {} : { contextWindow: options.contextWindowOverride }),
+        ...(options.collapseWarningPercentOverride === undefined ? {} : { collapseWarningPercent: options.collapseWarningPercentOverride }),
         ...(options.userNameOverride === undefined ? {} : { userName: options.userNameOverride }),
       },
       path,
@@ -180,17 +196,59 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
     throw new ConfigError(`${path}: not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
   }
   const config = parseConfig(parsed, path);
+  let model = config.model;
+  if (options.modelOverride !== undefined) {
+    const trimmed = options.modelOverride.trim();
+    parseModelRef(trimmed);
+    model = trimmed;
+  }
   const endpoint = options.llamaSwapEndpointOverride === undefined ? undefined : parseEndpoint(options.llamaSwapEndpointOverride, "--endpoint");
   const contextWindow = options.contextWindowOverride === undefined ? undefined : parseContextWindow(options.contextWindowOverride, "--context-window");
+  const collapseWarningPercent =
+    options.collapseWarningPercentOverride === undefined
+      ? undefined
+      : parseCollapseWarningPercent(options.collapseWarningPercentOverride, "--collapse-warning");
   const userName = options.userNameOverride === undefined ? undefined : parseUserName(options.userNameOverride, "--user");
-  const merged: GlobalConfig = { version: 1, model: config.model };
+  const merged: GlobalConfig = { version: 1, model };
   const llamaSwapEndpoint = endpoint ?? config.llamaSwapEndpoint;
   const effectiveWindow = contextWindow ?? config.contextWindow;
+  const effectiveCollapseWarning = collapseWarningPercent ?? config.collapseWarningPercent;
   if (llamaSwapEndpoint !== undefined) merged.llamaSwapEndpoint = llamaSwapEndpoint;
   if (effectiveWindow !== undefined) merged.contextWindow = effectiveWindow;
+  if (effectiveCollapseWarning !== undefined) merged.collapseWarningPercent = effectiveCollapseWarning;
   const effectiveName = userName ?? config.userName;
   if (effectiveName !== undefined) merged.userName = effectiveName;
   return { config: merged, path, created: false };
+}
+
+/**
+ * Update only `model` in an existing global config file, preserving all other
+ * fields on disk. No-op if the config file does not exist.
+ */
+export async function updateConfigModel(
+  model: string,
+  home: string = cartoHome(),
+): Promise<boolean> {
+  const trimmed = model.trim();
+  parseModelRef(trimmed);
+  const path = cartoConfigPath(home);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw new ConfigError(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ConfigError(`${path}: not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const current = parseConfig(parsed, path);
+  if (current.model === trimmed) return false;
+  await saveTo(path, { ...current, model: trimmed });
+  return true;
 }
 
 function isMissingFile(error: unknown): boolean {

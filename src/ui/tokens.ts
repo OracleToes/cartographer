@@ -17,19 +17,17 @@
 import {
   backgroundAnsi,
   getTerminalColorMode,
+  Markdown,
   parseColor,
   styleText,
   truncateToWidth,
   visibleWidth,
+  type MarkdownTheme,
   type TerminalColorMode,
   type TextStyle,
 } from "@earendil-works/pi-tui";
 
-let cachedMode: TerminalColorMode | undefined;
-function mode(): TerminalColorMode {
-  if (cachedMode === undefined) cachedMode = getTerminalColorMode();
-  return cachedMode;
-}
+const mode = (): TerminalColorMode => getTerminalColorMode();
 
 const style = (hex: string, extra: Omit<TextStyle, "fg"> = {}) => {
   const color = parseColor(hex);
@@ -70,7 +68,7 @@ export const canvasLine = (line: string, width: number): string => fillLine(line
 /** A line of the chrome (header, key bar, context bar): the deepest tone, around the panes. */
 export const chromeLine = (line: string, width: number): string => fillLine(line, width, palette.chrome);
 
-/** A line of a raised input surface, the prompt's. */
+/** A line of a raised surface: the prompt, and entry headers above their bodies. */
 export const surfaceLine = (line: string, width: number): string => fillLine(line, width, palette.surface);
 
 /** Any band's line, filled to the width: the sidebar uses it for its own colour. */
@@ -101,16 +99,12 @@ export const bandLine = (line: string, width: number): string => fillLine(line, 
 
 export { visibleWidth, truncateToWidth };
 /**
- * Fit a line to the width: pad it, and clip it only when it is genuinely too
- * long. `>=` here was a real defect — a body line that filled the column
- * exactly was handed to `truncateToWidth`, which reserves room for its
- * ellipsis and so ate three characters out of the middle of a paragraph that
- * had nothing wrong with it. A line already at the width is left alone.
+ * Fit a line to the width: truncate with ellipsis when wider than `width`,
+ * pad with spaces when narrower, and leave exact-width lines untouched.
+ * Delegates to pi-tui's `truncateToWidth(..., pad = true)`.
  */
 export function padLine(str: string, width: number): string {
-  const w = visibleWidth(str);
-  if (w > width) return truncateToWidth(str, width);
-  return w === width ? str : str + " ".repeat(width - w);
+  return truncateToWidth(str, width, "...", true);
 }
 
 /**
@@ -228,11 +222,45 @@ export const tokens = {
   closedBadge: both(palette.textDim, palette.panelRaised),
   chip: (label: string, fgHex: string, bgHex: string) => badge(fgHex, bgHex)(label),
 
+  /** Search highlights for TuiAltScreen's built-in viewport search. */
+  searchMatch: both(palette.text, "#3d3217"),
+  searchCurrentMatch: both("#12151a", palette.gold, { bold: true }),
+
   bold: (text: string) => styleText(text, { bold: true }, mode()),
   italic: (text: string) => styleText(text, { italic: true }, mode()),
   dim: (text: string) => styleText(text, { dim: true }, mode()),
   underline: (text: string) => styleText(text, { underline: true }, mode()),
+  strikethrough: (text: string) => styleText(text, { strikethrough: true }, mode()),
 } as const;
+
+/** Shared Markdown theme using Carto's semantic palette. */
+export const markdownTheme: MarkdownTheme = {
+  heading: (text) => tokens.bold(tokens.accent(text)),
+  link: (text) => tokens.underline(tokens.accent(text)),
+  linkUrl: (text) => tokens.faint(text),
+  code: (text) => tokens.tool(text),
+  codeBlock: (text) => tokens.text(text),
+  codeBlockBorder: (text) => tokens.rule(text),
+  quote: (text) => tokens.muted(tokens.italic(text)),
+  quoteBorder: (text) => tokens.rule(text),
+  hr: (text) => tokens.rule(text),
+  listBullet: (text) => tokens.accent(text),
+  bold: (text) => tokens.bold(text),
+  italic: (text) => tokens.italic(text),
+  strikethrough: (text) => tokens.strikethrough(text),
+  underline: (text) => tokens.underline(text),
+};
+
+/**
+ * Render Markdown prose via pi-tui's `Markdown` component for a given content
+ * width, trimming trailing padding spaces so callers can indent and paint the
+ * enclosing surface edge to edge.
+ */
+export function renderMarkdown(text: string, width: number, color: (text: string) => string = tokens.text): string[] {
+  if (text.trim().length === 0) return [];
+  const md = new Markdown(text, 0, 0, markdownTheme, { color });
+  return md.render(Math.max(1, width)).map((line) => line.replace(/[ ]+$/, ""));
+}
 
 /** A book's hue by name, so a view can colour a handle without a branch at every call site. */
 export const kindTint = {
@@ -266,3 +294,27 @@ export const partTokens = {
 
 /** Raw palette read, for the bar's blended cells and for anything drawing a track. */
 export const rawPalette = palette;
+
+/**
+ * Scrollbar cell styles for a given pane background: a hairline track, a quiet
+ * thumb that steps up in weight and accent when hovered or dragged, and a blank
+ * gutter cell painted in the pane's own background when the pane fits without
+ * scrolling.
+ */
+export function scrollbarStyles(bgHex: string = palette.background): {
+  track: (glyph: string) => string;
+  thumb: (glyph: string) => string;
+  activeThumb: (glyph: string) => string;
+  blank: () => string;
+} {
+  const track = both(palette.rule, bgHex);
+  const thumb = both(palette.textFaint, bgHex);
+  const activeThumb = both(palette.focus, bgHex);
+  const blank = background(bgHex);
+  return {
+    track,
+    thumb,
+    activeThumb,
+    blank: () => blank(" "),
+  };
+}

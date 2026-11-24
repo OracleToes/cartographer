@@ -23,6 +23,9 @@ export type MarkAction = "archive" | "delete" | "restore";
 /** Who placed a mark or a pin. The person may withdraw either; the agent only its own. */
 export type Author = "user" | "agent";
 
+/** Who authored a Chat record: the person, the agent, or the system (e.g. automatic collapse notice). */
+export type ChatAuthor = Author | "system";
+
 /** A pending action on one entry, with its author (§4.1). Cleared when a collapse applies it. */
 export interface Mark {
   action: MarkAction;
@@ -31,7 +34,7 @@ export interface Mark {
 
 export interface ChatRecord {
   id: RecordId;
-  author: "user" | "agent";
+  author: ChatAuthor;
   text: string;
   /** The pending mark the next collapse applies (§4.1); its author rides with it. */
   mark?: Mark;

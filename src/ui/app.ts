@@ -31,13 +31,13 @@ import { basename, relative, resolve } from "node:path";
 import {
   Editor,
   ProcessTerminal,
-  ScrollView,
   TuiAltScreen,
   type Component,
   type OverlayHandle,
+  type ScrollView,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
+import { ConversationTranscript, LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 
 import {
   applyOmitNow,
@@ -46,16 +46,31 @@ import {
   collapseLiveSession,
   interruptRun,
   openLiveSession,
+  resumeSession,
   sessionTranscript,
   submitInput,
+  switchSessionModel,
   togglePause,
   waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
+import type { ModelRef } from "../runtime/config.js";
+import { formatModelRef, indexModels, listIndexedModels, resolveIndexedModel } from "../runtime/model-catalog.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { createTools } from "../runtime/tools.js";
+import {
+  createJobTable,
+  onJobsChange,
+  sendJob,
+  snapshotJobs,
+  startJob,
+  stopAllJobs,
+  stopJob,
+  summarizeJobs,
+} from "../runtime/jobs.js";
 import { ephemeralItemId, generationPaths, readGenerationEphemera, refreshFreshness, rewriteHeadSnapshot } from "../runtime/collapse.js";
+import { formatArchiveSummary, formatCollapseHistory, readCollapseLog } from "../runtime/collapse-log.js";
 import { restoreEphemeral } from "../runtime/live-session.js";
 import { bashTool as cartoBashTool, cartoInstructions, liveStaleMarks, renderLiveStateBlock } from "../runtime/carto-extension.js";
 import { projectTreeBlock, projectTreeView, type TreeEntry } from "../runtime/project-tree.js";
@@ -71,21 +86,25 @@ import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
+import { ModelPicker } from "./model-picker.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
 import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
+import { JobsView } from "./jobs-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
-import { Column, Fill, Inset, margin, Row, type Viewport } from "./frame.js";
+import { Column, Fill, Inset, margin, PaneScrollView, Row, type Viewport } from "./frame.js";
 import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
   refreshCapacity?: boolean;
+  /** Called after the person switches models in the UI so the host can persist or track the selection. */
+  onModelChange?: (model: ModelRef) => Promise<void> | void;
 }
 
 interface PendingItem {
@@ -96,6 +115,7 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
+  model: ModelRef;
   sendMode: SendMode;
   view: ViewMode;
   /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
@@ -135,6 +155,7 @@ function countSidebar(
   contextTokens: number = 0,
   archive?: { total: number; pinned: number },
   tree?: { anchor: string; depth: number },
+  jobs?: { total: number; unread: number },
 ): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
   const stale: Partial<Record<"atlas" | "ledger" | "chat" | "context", number>> = {};
@@ -165,6 +186,8 @@ function countSidebar(
   }
   return {
     chat: brainState.chat.length,
+    jobs: jobs?.total ?? 0,
+    jobsUnread: jobs?.unread ?? 0,
     contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
@@ -359,14 +382,17 @@ function generationHandles(live: LiveState | undefined, landed: readonly PromptI
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
   const brain = options.brain;
+  let activeModel: ModelRef = { ...options.model };
   const refresh = async () => {
-    await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
+    await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
   };
   if (options.refreshCapacity === true) await refresh();
 
-  const session = await openLiveSession(options);
+  const jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+  const session = await openLiveSession({ ...options, jobs });
   const state: TuiState = {
     session,
+    model: activeModel,
     sendMode: "steer",
     view: "chat",
     layer: "context",
@@ -386,13 +412,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const terminal = new ProcessTerminal();
-  const tui = new TuiAltScreen(terminal, undefined, undefined, { copySelection: createSelectionCopier() });
+  const tui = new TuiAltScreen(terminal, undefined, undefined, {
+    copySelection: createSelectionCopier(),
+    searchMatchStyle: tokens.searchMatch,
+    searchCurrentMatchStyle: tokens.searchCurrentMatch,
+    searchNavigationButtonStyle: (text, hovered) =>
+      hovered ? tokens.selectedBg(tokens.accent(text)) : tokens.muted(text),
+    scrollToEndIndicator: () => tokens.selectedBg(` ${tokens.accent("↓")} ${tokens.text("jump to latest")} `),
+  });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
-  const modelLabel = `${options.model.provider}/${options.model.modelId}`;
+  const modelLabel = () => formatModelRef(state.model);
+  const sessionOptions = (): LiveSessionOptions => ({ ...options, model: state.model, jobs });
   const headerState = {
     project,
-    modelLabel,
+    modelLabel: modelLabel(),
     session: state.session,
     view: state.view,
     layer: state.layer,
@@ -403,14 +437,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const barState: ContextBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
   // Pi reports raw llama.cpp progress between durable transcript updates.
-  // Repaint the bar on those events, without rebuilding the whole transcript.
+  // Repaint the bar on those events, without rebuilding the whole transcript;
+  // when a cold server first answers and the window is still unknown, re-query
+  // the catalog immediately so the bar populates during the first run.
   const bindTelemetry = (session: LiveSession) => {
     session.state.onTelemetry = () => tui.requestRender();
+    session.state.onResponse = () => {
+      if (options.refreshCapacity === true && !shutdownRequested && session === state.session && session.state.contextWindow <= 0) {
+        void refreshAdvertisedWindow().catch(() => undefined);
+      }
+    };
   };
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
   const sidebar = new Sidebar();
-  const transcriptScroll = new ScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
+  const transcriptScroll = new PaneScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
   /**
    * The prompt's frame: Posting puts the name of the thing at the top of it, so
    * the box says what it is for. One rule above, `message` in it, one rule below.
@@ -439,16 +480,35 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
+  const jobsView = new JobsView();
   const contextView = new ContextView();
   const treeView = new TreeView();
   const archiveView = new ArchiveView();
 
-  // Each pannable view gets its own scroll view: Posting's "one scrolling pane in
-  // front" — the wheel and the arrow keys move whatever is focused.
-  const atlasScroll = new ScrollView(atlasView, { primary: false, overscroll: "contain" });
-  const ledgerScroll = new ScrollView(ledgerView, { primary: false, overscroll: "contain" });
-  const contextScroll = new ScrollView(contextView, { primary: false, overscroll: "contain" });
-  const treeScroll = new ScrollView(treeView, { primary: false, overscroll: "contain" });
+  // Each pannable view gets its own scroll view with a dynamic-size scrollbar
+  // matching its surface; Atlas, Ledger, and Jobs mount their list and detail
+  // panes in independent ScrollViews on wide viewports.
+  const atlasListScroll = new PaneScrollView(atlasView.listPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.panel });
+  const atlasDetailScroll = new PaneScrollView(atlasView.detailPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.surface });
+  const atlasNarrowScroll = new PaneScrollView(atlasView, { primary: false, overscroll: "contain" });
+  atlasView.attachScrolls(atlasListScroll, atlasDetailScroll);
+  atlasView.onFocus = () => tui.setFocus(atlasView);
+
+  const ledgerListScroll = new PaneScrollView(ledgerView.listPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.panel });
+  const ledgerDetailScroll = new PaneScrollView(ledgerView.detailPane, { primary: false, overscroll: "contain", backgroundHex: rawPalette.surface });
+  const ledgerNarrowScroll = new PaneScrollView(ledgerView, { primary: false, overscroll: "contain" });
+  ledgerView.attachScrolls(ledgerListScroll, ledgerDetailScroll);
+  ledgerView.onFocus = () => tui.setFocus(ledgerView);
+
+  const jobsListScroll = new PaneScrollView(jobsView.listPane, { primary: false, overscroll: "contain" });
+  const jobsDetailScroll = new PaneScrollView(jobsView.detailPane, { primary: false, follow: "end", overscroll: "contain" });
+  const jobsNarrowScroll = new PaneScrollView(jobsView, { primary: false, overscroll: "contain" });
+  jobsView.attachScrolls(jobsListScroll, jobsDetailScroll);
+  jobsView.onFocus = () => tui.setFocus(jobsView);
+  jobsView.onChange = () => tui.requestRender();
+
+  const contextScroll = new PaneScrollView(contextView, { primary: false, overscroll: "contain" });
+  const treeScroll = new PaneScrollView(treeView, { primary: false, overscroll: "contain" });
   // A ScrollView does not follow a child's cursor, and the tree is taller than
   // the pane in any real project: keep the selected row in view, with a row of
   // context on either side rather than the cursor pinned to an edge.
@@ -459,7 +519,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (line < top + 1) treeScroll.scrollTo(line - 1);
     else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
   };
-  const archiveScroll = new ScrollView(archiveView, { primary: false, overscroll: "contain" });
+  const archiveScroll = new PaneScrollView(archiveView, { primary: false, overscroll: "contain" });
 
   sidebar.onSelect = (book) => void switchToView(book);
   sidebar.onToggleLayer = (layer) => void switchLayer(layer);
@@ -468,6 +528,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const brainState = await brain.read();
     const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
+    const jobSummaries = summarizeJobs(jobs);
     sidebar.setCounts(
       countSidebar(
         brainState,
@@ -480,6 +541,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         // The same anchor and depth the `tree` tool last set: the sidebar counts
         // what the view shows, not a second tree of its own.
         state.session.state.tree,
+        {
+          total: jobSummaries.length,
+          unread: jobSummaries.filter((job) => job.unreadLines > 0).length,
+        },
       ),
     );
     sidebar.setActiveBook(state.view);
@@ -501,6 +566,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       root: options.root,
       brain,
       session: state.session.state,
+      jobs,
     });
     // The tools the model is offered, as the extension registers them: `bash`
     // is the one with Carto's sentence in its description, not the package's.
@@ -614,7 +680,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
 
     const stateBlock = await renderLiveStateBlock(
-      { root: options.root, brain, session: state.session.state, markdownPath: state.session.markdownPath },
+      { root: options.root, brain, session: state.session.state, jobs, markdownPath: state.session.markdownPath },
       messages,
     );
 
@@ -664,6 +730,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       return;
     }
     if (state.view === "chat") tui.setFocus(transcript.isSelecting() ? transcript : editor);
+    else if (state.view === "jobs") tui.setFocus(jobsView);
     else if (state.view === "atlas") tui.setFocus(atlasView);
     else if (state.view === "ledger") tui.setFocus(ledgerView);
     else if (state.view === "tree") tui.setFocus(treeView);
@@ -672,13 +739,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const switchToView = async (view: ViewMode) => {
     if (view !== "chat") transcript.stopSelecting();
+    if (view !== "jobs") jobsView.exitTyping();
     state.view = view;
     headerState.view = view;
     sidebar.setActiveBook(view);
     focusCurrent();
     const brainState = await brain.read();
 
-    if (view === "atlas") {
+    if (view === "jobs") {
+      jobsView.setData(snapshotJobs(jobs));
+    } else if (view === "atlas") {
       atlasView.setData(brainState, liveStaleMarks(brainState, options.root));
     } else if (view === "ledger") {
       ledgerView.setData(brainState);
@@ -707,6 +777,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sidebar.setLayer(layer);
     if (layer === "archive") {
       await refreshArchive();
+    } else if (state.view === "jobs") {
+      jobsView.setData(snapshotJobs(jobs));
     } else if (state.view === "context") {
       await syncContextView(await brain.read());
     } else if (state.view === "atlas") {
@@ -725,6 +797,32 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   atlasView.onBack = () => void switchToView("chat");
   ledgerView.onBack = () => void switchToView("chat");
+  jobsView.onBack = () => void switchToView("chat");
+  jobsView.onStart = (command) => {
+    void startJob(jobs, { command, waitMs: 0 })
+      .then((res) => pushStatus(`started ${res.handle} "${res.label}"`))
+      .catch((error) => pushStatus(`start failed: ${errorText(error)}`));
+  };
+  jobsView.onSend = (handle, input) => {
+    void sendJob(jobs, { handle, input, source: "user", waitMs: 0 })
+      .catch((error) => pushStatus(`send failed: ${errorText(error)}`));
+  };
+  jobsView.onSignal = (handle, signal) => {
+    void sendJob(jobs, { handle, signal, source: "user", waitMs: 0 })
+      .then(() => pushStatus(`sent ${signal} to ${handle}`))
+      .catch((error) => pushStatus(`signal failed: ${errorText(error)}`));
+  };
+  jobsView.onStop = (handle) => {
+    void stopJob(jobs, handle)
+      .then(() => pushStatus(`stopped ${handle}`))
+      .catch((error) => pushStatus(`stop failed: ${errorText(error)}`));
+  };
+  const unsubJobs = onJobsChange(jobs, () => {
+    if (shutdownRequested) return;
+    jobsView.setData(snapshotJobs(jobs));
+    void refreshSidebar().catch(() => undefined);
+    tui.requestRender();
+  });
   contextView.onBack = () => void switchToView("chat");
   treeView.onBack = () => void switchToView("chat");
   contextView.onCollapse = () => void runCollapse("context surgery");
@@ -1205,16 +1303,86 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // A scrolling view takes the height of its content, up to the room there is,
   // and the pane's own colour fills the rest.
   const scrolled = (component: Component, visible: () => boolean) => ({ component, basis: "auto" as const, shrink: 1, minSize: 3, visible });
+  const bookSplit = (
+    headerPane: Component,
+    listScroll: ScrollView,
+    detailScroll: ScrollView,
+    narrowScroll: ScrollView,
+    listBasis: number,
+    listFloorHex: string = rawPalette.panel,
+    detailFloorHex: string = rawPalette.surface,
+  ) =>
+    new Column([
+      {
+        component: new Column([
+          { component: headerPane, basis: 2 },
+          {
+            component: new Row([
+              {
+                component: new Column([
+                  { component: listScroll, basis: "auto", shrink: 1, minSize: 1 },
+                  { ...pane(0, listFloorHex), grow: 1 },
+                ]),
+                basis: listBasis,
+                minSize: 24,
+                shrink: 1,
+              },
+              pane(2),
+              {
+                component: new Column([
+                  { component: detailScroll, basis: "auto", shrink: 1, minSize: 1 },
+                  { ...pane(0, detailFloorHex), grow: 1 },
+                ]),
+                basis: 0,
+                grow: 1,
+                minSize: 30,
+              },
+            ]),
+            basis: 0,
+            grow: 1,
+            minSize: 3,
+          },
+        ]),
+        basis: 0,
+        grow: 1,
+        minSize: 3,
+        visible: (viewport: Viewport) => viewport.width >= 72,
+      },
+      {
+        component: new Column([
+          { component: narrowScroll, basis: "auto", shrink: 1, minSize: 3 },
+          { ...pane(0), grow: 1 },
+        ]),
+        basis: 0,
+        grow: 1,
+        minSize: 3,
+        visible: (viewport: Viewport) => viewport.width < 72,
+      },
+    ]);
+  const atlasSplit = bookSplit(atlasView.headerPane, atlasListScroll, atlasDetailScroll, atlasNarrowScroll, 36);
+  const ledgerSplit = bookSplit(ledgerView.headerPane, ledgerListScroll, ledgerDetailScroll, ledgerNarrowScroll, 38);
+  const jobsSplit = bookSplit(
+    jobsView.headerPane,
+    jobsListScroll,
+    jobsDetailScroll,
+    jobsNarrowScroll,
+    32,
+    rawPalette.background,
+    rawPalette.background,
+  );
+  const inSplitBook = () => state.layer === "context" && (state.view === "atlas" || state.view === "ledger" || state.view === "jobs");
   const workArea = new Column([
     scrolled(transcriptScroll, () => state.view === "chat" && state.layer === "context"),
-    scrolled(atlasScroll, () => state.view === "atlas" && state.layer === "context"),
-    scrolled(ledgerScroll, () => state.view === "ledger" && state.layer === "context"),
+    { component: jobsSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "jobs" && state.layer === "context" },
+    { component: atlasSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" && state.layer === "context" },
+    { component: ledgerSplit, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" && state.layer === "context" },
     scrolled(treeScroll, () => state.view === "tree" && state.layer === "context"),
     scrolled(contextScroll, () => state.view === "context" && state.layer === "context"),
     scrolled(archiveScroll, () => state.layer === "archive"),
-    { ...pane(0), grow: 1 },
+    { ...pane(0), grow: 1, visible: () => !inSplitBook() },
   ]);
   const inChatLayer = () => state.view === "chat" && state.layer === "context";
+  const inJobsLayer = () => state.view === "jobs" && state.layer === "context";
   // The working pane: a row of air above the content, the prompt (only where
   // you type) across its foot, and a row below it where there is no prompt. The
   // views indent themselves, so there is no column of air either side: every
@@ -1223,7 +1391,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     pane(1),
     { component: workArea, basis: 0, grow: 1, minSize: 3 },
     { component: editor, basis: "auto", minSize: 3, visible: inChatLayer },
-    { ...pane(1), visible: () => !inChatLayer() },
+    { component: jobsView.inputPane, basis: "auto", minSize: 1, visible: inJobsLayer },
+    { ...pane(1), visible: () => !inChatLayer() && !inJobsLayer() },
   ]);
   // The panes' row, margins included: one cell of chrome either side on a
   // narrow terminal, two on a wide one. The sidebar's margin, its panel below the
@@ -1273,7 +1442,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   tui.setFocus(editor);
 
   // ── Input ─────────────────────────────────────────────────────────────────
+  let activeModelPicker: ModelPicker | undefined;
   const closeOverlay = () => {
+    activeModelPicker = undefined;
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
@@ -1290,10 +1461,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const shutdown = async (code: number): Promise<void> => {
     if (shutdownRequested) return;
     shutdownRequested = true;
+    unsubJobs();
     if (liveTimer !== undefined) clearInterval(liveTimer);
     tui.stop();
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
+    await stopAllJobs(jobs).catch(() => undefined);
     await closeLiveSession(state.session);
     resolveRun?.(code);
   };
@@ -1449,7 +1622,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // Once a carried item is unpinned or deleted it is no longer history:
       // remove its content from the retained prefix, not just from the render.
       state.sealed = retained;
-      const retainedChat = new Set(retained.flatMap((entry) => entry.kind === "agent" && entry.recordId !== undefined ? [entry.recordId] : []));
+      const retainedChat = new Set(
+        retained.flatMap((entry) => (entry.kind === "agent" || entry.kind === "system") && entry.recordId !== undefined ? [entry.recordId] : []),
+      );
       const chatRecords = await brain.readChat();
       // The Chat the frozen head holds, in the head's order: it is drawn where
       // the head is, before the generation's work, as the Context view lists it.
@@ -1506,7 +1681,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         agent.push({
           key: chatKeyOf(record, headChat, frame),
           entry: {
-            kind: "agent",
+            kind: record.author === "system" ? "system" : "agent",
             text: record.text,
             recordId: record.id,
             ...(chatHandle === undefined ? {} : { handle: chatHandle }),
@@ -1632,26 +1807,41 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return transcriptRebuild;
   };
 
-  let lastLiveRebuild = 0;
   const startLiveWatch = async (): Promise<void> => {
-    const watch = await state.session.harness.watchDoc(LiveDoc, state.session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+    const session = state.session;
+    const watch = await session.conversation.watch(BACKGROUND_CONTEXT).catch(() => undefined);
     if (watch === undefined) return;
+    if (session !== state.session) {
+      await watch.stop().catch(() => undefined);
+      return;
+    }
     state.liveWatch = watch;
+    const entryStream = new ConversationTranscript((query, limit, ctx) =>
+      session.conversation.entries(query, limit, undefined, ctx),
+    );
+    let lastItems: readonly unknown[] | undefined = watch.value === undefined ? undefined : entryStream.merge(watch.value).items;
+    let cachedPromptItems: PromptItem[] | undefined;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value") return;
-      const live = call.value as LiveState;
+      if (call.kind !== "value" || session !== state.session) return;
+      const merged = entryStream.merge(call.value);
+      const entriesChanged = merged.items !== lastItems;
+      lastItems = merged.items;
+      if (entriesChanged || cachedPromptItems === undefined) {
+        // Reload landed contributions only when committed entries change (including
+        // apply-now edits), rather than re-reading SQLite on every streaming token.
+        const landedEntries = (await sessionTranscript(session).catch(() => [])) as unknown as ContextEntryLike[];
+        cachedPromptItems = promptItemsOf(landedEntries);
+      }
+      const live = (call.value.docs[LiveDoc.definition.kind] as LiveState | undefined) ?? LiveDoc.definition.initial();
       // The partial continues the prompt's numbering rather than starting a
       // second one: a card in flight is the next item after everything the
       // generation already holds, and it wears the handle of the item it is.
-      const landedEntries = (await sessionTranscript(state.session).catch(() => [])) as unknown as ContextEntryLike[];
-      const cards = liveCardsOf(live, generationHandles(live, promptItemsOf(landedEntries)));
+      const cards = liveCardsOf(live, generationHandles(live, cachedPromptItems));
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
-      const now = Date.now();
-      if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
-        lastLiveRebuild = now;
+      if (entriesChanged || (hadLive && !hasLive)) {
         setImmediate(() => {
           void rebuildTranscript().catch(() => undefined);
         });
@@ -1659,7 +1849,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hadLive = hasLive;
       // The agent runs without a line from the person — a rest wakes it — so a
       // collapse it asked for is carried out here, when its run has ended.
-      if (live.run === undefined && state.session.state.collapseRequested !== null) {
+      if (live.run === undefined && session.state.collapseRequested !== null) {
         void serviceCollapseRequest().catch(() => undefined);
       }
     });
@@ -1675,10 +1865,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return run;
   };
 
-  const runCollapse = (reason: string, automatic = false): Promise<void> => {
+  const runCollapse = (reason: string, automatic = false, trigger?: "agent" | "automatic"): Promise<void> => {
     if (state.collapsing) return Promise.resolve();
     state.collapsing = true;
-    return admitting(() => collapseNow(reason, automatic));
+    return admitting(() => collapseNow(reason, automatic, trigger));
   };
 
   /**
@@ -1698,10 +1888,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.requestRender();
       return;
     }
-    await runCollapse(verdict.reason, true);
+    await runCollapse(verdict.reason, true, verdict.trigger);
   };
 
-  const collapseNow = async (reason: string, automatic: boolean) => {
+  const collapseNow = async (reason: string, automatic: boolean, trigger?: "agent" | "automatic") => {
     const previous = state.session.generation;
     pushStatus(`collapsing context at ${suffix(previous)}: ${reason}…`);
     // The person's collapse drops what is queued. An automatic one carries it:
@@ -1727,7 +1917,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       await rebuildTranscript(true);
       transcript.setLive([]);
       oldTranscript = transcript.snapshot();
-      const outcome = await collapseLiveSession(state.session, options, reason, {}, { automatic });
+      const outcome = await collapseLiveSession(
+        state.session,
+        sessionOptions(),
+        reason,
+        {},
+        { automatic, ...(trigger === undefined ? {} : { trigger }) },
+      );
       state.collapseEpoch += 1;
       state.session = outcome.session;
       state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
@@ -1755,7 +1951,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // harness (or guessing which generation survived).
       try {
         await closeLiveSession(state.session).catch(() => undefined);
-        const recovered = await openLiveSession(options);
+        const recovered = await openLiveSession(sessionOptions());
         if (recovered.generation !== previous && oldTranscript !== undefined) {
           state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
         }
@@ -1782,16 +1978,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
   };
 
+  let capacityRefreshFlight: Promise<void> | undefined;
   const refreshAdvertisedWindow = async () => {
-    const sink = new Writable({
-      write(chunk, _encoding, callback) {
-        const line = String(chunk).trim();
-        if (line.length > 0) pushStatus(line);
-        callback();
-      },
-    });
-    await applyCapacityRefresh(state.session, refresh, options.models, options.model.provider, options.model.modelId, sink);
-    await rebuildTranscript();
+    if (capacityRefreshFlight !== undefined) return capacityRefreshFlight;
+    const work = (async () => {
+      const sink = new Writable({
+        write(chunk, _encoding, callback) {
+          const line = String(chunk).trim();
+          if (line.length > 0) pushStatus(line);
+          callback();
+        },
+      });
+      await applyCapacityRefresh(state.session, refresh, options.models, state.model.provider, state.model.modelId, sink);
+      if (shutdownRequested) return;
+      headerState.windowUnknown = state.session.state.contextWindow <= 0;
+      tui.requestRender();
+      await rebuildTranscript();
+    })();
+    capacityRefreshFlight = work;
+    try {
+      await work;
+    } finally {
+      if (capacityRefreshFlight === work) capacityRefreshFlight = undefined;
+    }
   };
 
   const runSubmission = async (message: string) => {
@@ -1860,26 +2069,37 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const copySession = async () => {
     const brainState = await brain.read();
+    const archiveState = await brain.readArchive().catch(() => ({ version: 1 as const, items: [] }));
+    const collapses = readCollapseLog(options.root);
     const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
     const lines: string[] = [
       `# carto session dump — ${new Date().toISOString()}`,
       `project: ${options.root}`,
-      `generation: ${state.session.generation}`,
-      `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
+      `generation: ${state.session.generation} · collapses recorded: ${collapses.length}`,
+      `model: ${modelLabel()} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
       `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
-      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length}`,
+      `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length} · pinned files ${brainState.files.length} · archive ${archiveState.items.length}`,
+    ];
+    if (collapses.length > 0) {
+      lines.push("", `## collapse history (${collapses.length} recorded; oldest first)`, formatCollapseHistory(collapses));
+    }
+    if (state.session.state.lastStateBlock !== undefined && state.session.state.lastStateBlock.trim().length > 0) {
+      lines.push("", "## live <carto-state> (last sent to model)", state.session.state.lastStateBlock);
+    }
+    lines.push(
       "",
       "## transcript (what the person saw)",
       transcript.toPlainText(),
       "",
       "## context (what the model sees; oldest first; state-block markers stripped)",
-    ];
+    );
     for (const entry of entries) {
       const flat = flattenEntry(entry as { kind?: string; id?: number; model?: unknown });
       if (flat === undefined) continue;
       if (flat.body.trim() === STATE_BLOCK_MARKER) continue;
       lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
     }
+    lines.push("", "## archive (waiting out grace)", formatArchiveSummary(archiveState));
     const text = lines.join("\n");
     const result = await copyWithFallback(text, "session");
     pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);
@@ -1903,6 +2123,59 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  /**
+   * Start or resume the agent without sending a person message (`ctrl+r` / `/resume`).
+   * Unpauses a held stream without injecting a state block; non-action when
+   * already running; otherwise sends a fresh `<carto-state/>` marker.
+   */
+  const runResume = async () => {
+    if (state.collapsing) {
+      pushStatus("collapsing — hold on");
+      tui.requestRender();
+      return;
+    }
+    if (state.running && !state.session.state.paused) return;
+    const epoch = state.collapseEpoch;
+    try {
+      const outcome = await resumeSession(state.session);
+      if (outcome.kind === "running") return;
+      if (outcome.kind === "unpaused") {
+        pushStatus(outcome.line);
+        await rebuildTranscript();
+        tui.requestRender();
+        return;
+      }
+      if (outcome.submission === undefined) return;
+      state.notes = [];
+      state.inFlight += 1;
+      state.running = true;
+      headerState.running = true;
+      pushStatus(outcome.line);
+      tui.requestRender();
+      try {
+        const settled = await outcome.submission.wait(BACKGROUND_CONTEXT);
+        await waitForRunEnd(state.session);
+        if (settled.status !== "done" && epoch === state.collapseEpoch && !state.collapsing && state.session.state.collapseRequested === null) {
+          pushStatus(`the run ended with status "${settled.status}"`);
+        }
+      } catch (error) {
+        if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
+      }
+      state.inFlight = Math.max(0, state.inFlight - 1);
+      state.running = state.inFlight > 0;
+      headerState.running = state.running;
+      if (shutdownRequested) return;
+      await rebuildTranscript();
+      await serviceCollapseRequest();
+      if (options.refreshCapacity === true) await refreshAdvertisedWindow();
+      await refreshSidebar();
+      tui.requestRender();
+    } catch (error) {
+      if (!shutdownRequested) pushStatus(`resume failed: ${errorText(error)}`);
+      tui.requestRender();
+    }
+  };
+
   const submitMessage = (message: string) => {
     // A line written while the agent is held in its stream lets go of that
     // stream first (§9): the held reply ends here, and this line is the next
@@ -1923,10 +2196,69 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     });
   };
 
+  const switchModel = async (next: ModelRef) => {
+    const label = formatModelRef(next);
+    if (next.provider === state.model.provider && next.modelId === state.model.modelId) {
+      pushStatus(`already using ${label}`);
+      tui.requestRender();
+      return;
+    }
+    try {
+      await switchSessionModel(state.session, options.models, next);
+      activeModel = { ...next };
+      state.model = activeModel;
+      headerState.modelLabel = modelLabel();
+      headerState.windowUnknown = state.session.state.contextWindow <= 0;
+      try {
+        await options.onModelChange?.(next);
+      } catch (persistError) {
+        pushStatus(`model → ${label} (could not save config: ${errorText(persistError)})`);
+        await rebuildTranscript();
+        tui.requestRender();
+        return;
+      }
+      pushStatus(state.running ? `model → ${label} (takes effect at the next step)` : `model → ${label}`);
+      await rebuildTranscript();
+      tui.requestRender();
+    } catch (error) {
+      pushStatus(`model switch failed: ${errorText(error)}`);
+      tui.requestRender();
+    }
+  };
+
+  const handleModelSlash = async (argument: string) => {
+    const query = argument.trim();
+    if (query.length === 0) {
+      showModelPicker();
+      return;
+    }
+    let resolved = resolveIndexedModel(options.models, query, state.model.provider);
+    if (resolved === undefined) {
+      await indexModels(options.models, { refresh: true, active: state.model });
+      if (shutdownRequested) return;
+      resolved = resolveIndexedModel(options.models, query, state.model.provider);
+    }
+    if (resolved !== undefined) {
+      await switchModel(resolved);
+      return;
+    }
+    showModelPicker(query);
+  };
+
   editor.onSubmit = (text: string) => {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    if (message === "/resume") {
+      void runResume();
+      return;
+    }
+    if (message === "/model" || message.startsWith("/model ")) {
+      void handleModelSlash(message.slice("/model".length)).catch((error: unknown) => {
+        if (!shutdownRequested) pushStatus(`model switch failed: ${errorText(error)}`);
+      });
+      return;
+    }
     submitMessage(message);
   };
 
@@ -2084,6 +2416,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => state.running,
     },
     {
+      id: "resume",
+      group: "the run",
+      label: "resume",
+      hint: "start or resume with a fresh state block (or let a held reply finish)",
+      key: "ctrl+r",
+      run: () => void runResume(),
+      available: () => !state.running || state.session.state.paused,
+    },
+    {
       id: "pause",
       group: "the run",
       // The label says what pressing it does, so the palette reads as an act
@@ -2112,6 +2453,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       group: "the run",
       label: "collapse now",
       run: () => void runCollapse("person requested (palette)"),
+      available: () => true,
+    },
+    {
+      id: "model",
+      group: "the run",
+      label: "switch model",
+      hint: "pick a model from the provider catalog",
+      key: "ctrl+l",
+      quiet: true,
+      run: () => showModelPicker(),
       available: () => true,
     },
     {
@@ -2415,6 +2766,58 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => !inChat(),
     },
     {
+      id: "view-jobs",
+      group: "go to",
+      label: "jobs",
+      hint: "persistent piped processes and live console",
+      run: () => void switchToView("jobs"),
+      available: () => !inView("jobs"),
+    },
+    {
+      id: "jobs-send",
+      group: "jobs",
+      label: "send stdin",
+      key: "i",
+      run: () => {
+        jobsView.enterSend();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob()?.status === "running",
+    },
+    {
+      id: "jobs-start",
+      group: "jobs",
+      label: "start job",
+      key: "n",
+      run: () => {
+        jobsView.enterStart();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping(),
+    },
+    {
+      id: "jobs-signal",
+      group: "jobs",
+      label: "SIGINT",
+      key: "s",
+      run: () => {
+        jobsView.signalSelected("SIGINT");
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob()?.status === "running",
+    },
+    {
+      id: "jobs-stop",
+      group: "jobs",
+      label: "stop job",
+      key: "d",
+      run: () => {
+        jobsView.stopSelected();
+        tui.requestRender();
+      },
+      available: () => inView("jobs") && !jobsView.isTyping() && jobsView.selectedJob() !== undefined,
+    },
+    {
       id: "view-atlas",
       group: "go to",
       label: "the atlas",
@@ -2465,7 +2868,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       label: "back to the transcript",
       key: "escape",
       run: () => void switchToView("chat"),
-      available: () => state.layer === "context" && state.view !== "chat",
+      available: () => state.layer === "context" && state.view !== "chat" && !(state.view === "jobs" && jobsView.isTyping()),
     },
   ] satisfies Command[]);
 
@@ -2477,9 +2880,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   }
 
   const helpExtras = (): HelpExtra[] => [
+    { group: "type it", key: "ctrl+shift+f", label: "search the viewport" },
     { group: "type it", key: "/copy", label: "copy the transcript" },
     { group: "type it", key: "/copy-session", label: "full diagnostic dump of the session" },
     { group: "type it", key: "/help", label: "the command list in the transcript" },
+    { group: "type it", key: "/model", label: "pick or switch the model (/model <name>)" },
+    { group: "type it", key: "/resume", label: "start or resume the agent with a fresh state block" },
     { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 
@@ -2505,7 +2911,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       .map((command) => ({
         id: command.id,
         group: command.group,
-        label: command.label,
+        label: command.id === "model" ? `Model: ${modelLabel()}` : command.label,
         ...(command.key === undefined ? {} : { key: command.key }),
         ...(command.hint === undefined ? {} : { hint: command.hint }),
         run: () => command.run(),
@@ -2544,6 +2950,42 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
     tui.requestRender();
+  };
+
+  const showModelPicker = (initialQuery?: string) => {
+    if (state.overlayOpen) return;
+    state.overlayOpen = true;
+    const picker = new ModelPicker({
+      models: listIndexedModels(options.models, state.model),
+      activeLabel: modelLabel(),
+      running: state.running,
+      loading: true,
+      ...(initialQuery === undefined ? {} : { initialQuery }),
+    });
+    activeModelPicker = picker;
+    const refreshCatalog = () => {
+      picker.setLoading(true);
+      tui.requestRender();
+      void indexModels(options.models, { refresh: true, active: state.model }).then((result) => {
+        if (shutdownRequested || activeModelPicker !== picker) return;
+        const firstError = result.errors[0];
+        picker.setModels(result.models, {
+          activeLabel: modelLabel(),
+          running: state.running,
+          loading: false,
+          ...(firstError === undefined ? {} : { error: `${firstError.provider}: ${firstError.message}` }),
+        });
+        tui.requestRender();
+      });
+    };
+    picker.onClose = closeOverlay;
+    picker.onRefresh = refreshCatalog;
+    picker.onSelect = (picked) => {
+      void switchModel({ provider: picked.provider, modelId: picked.modelId });
+    };
+    state.overlayHandle = tui.showOverlay(picker, { width: 72, anchor: "bottom-center", offsetY: -3 });
+    tui.setFocus(picker);
+    refreshCatalog();
   };
 
   const showJump = () => {

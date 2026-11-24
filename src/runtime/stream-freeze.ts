@@ -182,7 +182,8 @@ export function createStreamFreeze(): StreamFreeze {
         Object.defineProperty(gated, name, {
           value: (model: { provider?: string }, context: unknown, options: {
             fetch?: typeof fetch;
-            samplingParams?: Record<string, unknown>;
+            onPayload?: (payload: unknown, payloadModel: unknown) => unknown | Promise<unknown>;
+            onResponse?: (response: unknown, responseModel: unknown) => void | Promise<void>;
             onProviderStreamEvent?: (event: unknown, model: unknown) => void | Promise<void>;
           } = {}) => {
             const observe = model.provider === "llama-swap" && telemetry !== undefined;
@@ -191,7 +192,17 @@ export function createStreamFreeze(): StreamFreeze {
               ...options,
               fetch: gatedFetch(options.fetch ?? globalThis.fetch),
               ...(observe ? {
-                samplingParams: { ...options.samplingParams, return_progress: true, timings_per_token: true },
+                onPayload: async (payload: unknown, payloadModel: unknown) => {
+                  const next = (await options.onPayload?.(payload, payloadModel)) ?? payload;
+                  if (next !== null && typeof next === "object" && !Array.isArray(next) && (next as Record<string, unknown>).stream !== false) {
+                    return { ...(next as Record<string, unknown>), return_progress: true, timings_per_token: true };
+                  }
+                  return next;
+                },
+                onResponse: async (response: unknown, responseModel: unknown) => {
+                  telemetry!.response(id!);
+                  await options.onResponse?.(response, responseModel);
+                },
                 onProviderStreamEvent: async (event: unknown, eventModel: unknown) => {
                   telemetry!.event(id!, event);
                   await options.onProviderStreamEvent?.(event, eventModel);

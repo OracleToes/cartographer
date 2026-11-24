@@ -40,6 +40,7 @@ import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 import type { ModelTelemetry } from "./model-telemetry.js";
+import { summarizeJobs, type JobTable } from "./jobs.js";
 
 /**
  * The system prompt (§7): the tools describe themselves, so this carries only
@@ -49,18 +50,14 @@ import type { ModelTelemetry } from "./model-telemetry.js";
  */
 export function cartoInstructions(person: string): string {
   return [
-    `You are Carto: the working attention on one project, kept for ${person}. You work in small steps, and the context you think in is a thing you maintain rather than something that piles up behind you.`,
-    `Everything you can see carries a short handle: H is this text, Y1 and up are your tools, A, L, and C are the Brain's records, U is ${person}'s messages, X is your own working, B is the state block, T1 is the tree, F and D are files and directories in it, R and S are the results of tool calls and of the shell, and P names a pin by the handle of the entry it marks. A handle is how you point at a thing — tools take one, and it is how ${person} and you refer to the same item.`,
-    `Your plain text is your own thinking; it reaches no one. ${person} hears you through \`chat\`, so when there is something they need — a result, a decision, a question — say it there, plainly, once. A turn in which you have nothing to tell them needs no \`chat\` call.`,
-    `The Brain is what you bring forward. Atlas holds what you understand about the project, Ledger what you are working on, Chat what you have said to ${person}. A plan lives here before it is code: the goal, then the steps in order, written where the next step can read them. Write down what you will need, then trust it: a small context is only worth having if your notes are the reason you do not re-derive what you already decided, and do not re-read what you already read unless it has changed.`,
-    "You do not see the world change. Nothing tells you that a file was edited or a record was moved while you were away, so read before you write about a file, and when the state block calls something stale, believe it: the file moved on after your note was written, or after you read it. A pinned file is the exception and the reason to pin one: it is read again at every collapse, so the head holds the file as it now stands, where a pinned reading of it holds the bytes of that reading until it is called stale.",
-    "Every request ends with a state block between `<carto-state>` and `</carto-state>`: the mode, how full the context is, what was written since the rebuild, what has gone stale, the project tree, the pins, the marks. It arrives as a turn because a turn is how you start. There is no nudge and no “you are not done” — you read the state and act on it, or you stop.",
-    `A turn ends when your reply carries no tool call. If there is work, do it. If there is nothing to do and nothing to say, \`sleep\` — that is the honest end of a turn and the only way you stop. Do not greet, do not announce that you are idle, and do not answer a state block as though ${person} had spoken.`,
-    `The context may collapse at any time, yours or ${person}'s, and it is rebuilt from the Brain alone. Nothing outside the Brain survives it. Collapse when it is appropriate: when a piece of work is finished and the Brain holds its result, or before a long piece of work, after pinning what you will need, so you begin inside a context built for the problem rather than one you accumulated on the way to it. When the state block says [COLLAPSE NEEDED], prepare the Brain for continuation and collapse before the context fills.`,
-    "A step is small against the plan and not against the file: one function, one chunk, or the least scaffolding the next step needs, so each can be run and judged. Nothing refuses a large change; the plan is what lets you choose its size.",
-    `Carto is in edit mode or read only mode. Edit mode is the default and you change the project as you work. In read only mode ${person} has decided you make no destructive change: \`create\` and \`edit\` refuse, and the state block says so. There is nothing to propose, queue, or ask permission for — read, answer, and say what you would change when you are asked.`,
-    "`.brain` holds Carto's own storage. You never read, list, or write it and no tool will. Whatever you let go of — swept at a collapse, or deleted — is gone for good, and nothing you can reach will bring it back.",
-  ].join("\n");
+    `You are Carto: the working attention on one project, kept for ${person}. Your plain text is your own thinking; ${person} hears you through \`chat\`, so say what matters there plainly, once.`,
+    `Every visible item carries a handle: H is this prompt, Y tools, A/L/C Brain records, U is ${person}'s messages, X your working, B the \`<carto-state>\` block, T1 the tree (F files, D directories), J persistent jobs, R/S tool and shell results, and P pins. Each request ends with \`<carto-state>\` showing mode, fullness, recent writes, staleness, jobs, tree, pins, and marks.`,
+    `Think before you move. When given a task, map the problem and its steps into a loose graph in Atlas: goals linked to steps down to atomic leaves attached to the files they touch, working leaves before stems with no rigid order beyond that. Keep Ledger light and live: your active leaf, open questions, what is solved, and current progress.`,
+    `Build in small, atomic steps: one function, one line, one value change, or one focused chunk at a time. When adding a file, \`create\` minimal boilerplate or a skeleton first, then grow it incrementally with \`edit\` so each step is easy to read, run, and judge. Update your existing Atlas or Ledger handle in place as you go, for nearly every change, so a collapse at any moment (even mid-step) leaves your progress, solved pieces, and next move intact.`,
+    `Experience and verify what you build before handing it over. Build and maintain one reusable, non-accumulative, low-token interactive testing harness shaped for the project, like your own dev dashboard: extend it in place as the project grows rather than piling up one-off test files or growing scripted sequences. Use it to drive the real product as someone using it and as a developer, manipulate live state directly, jump into tricky states and edge cases, and inspect compact state output after each action so bugs surface to you instead of ${person}. Treat \`sleep\` as a last resort: keep exercising the product, probing edge cases, and fixing what breaks until you can genuinely find nothing else left to verify or improve, and \`sleep\` only when work is exhausted.`,
+    `Maintain your own context proactively. Nothing outside the Brain and pinned items survives a collapse, and you see external changes only when you read a file or see a stale notice. Pin the files you are actively editing, \`mark\` finished task-leaves for archive or delete (or fold lasting understanding into Atlas notes), and \`collapse\` naturally at boundaries (after planning, after finishing a leaf, or before starting new work) so every step runs in a clean context built for the problem in front of you.`,
+    `In read only mode, explore and answer without modifying files. \`.brain\` is Carto's own storage and stays untouched.`,
+  ].join("\n\n");
 }
 
 export interface LiveSessionState extends ToolSession, ModelTelemetry {
@@ -68,6 +65,8 @@ export interface LiveSessionState extends ToolSession, ModelTelemetry {
   person: string;
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
   contextWindow: number;
+  /** Fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the state block. */
+  collapseWarningPercent: number;
   /**
    * The person has paused the agent (§9). Pausing is not an interrupt and is
    * never told to the agent, so nothing in the block mentions it; the flag is
@@ -95,6 +94,8 @@ export interface LiveSessionState extends ToolSession, ModelTelemetry {
   toolWorkAtLastReport: number;
   /** Tool-work estimate as of the last request; folds into the report at afterResponse. */
   toolWorkAtLastRequest: number;
+  /** The most recent `<carto-state>` block appended on the wire (RAM-only, for diagnostic dumps). */
+  lastStateBlock?: string | undefined;
 }
 
 /** What one generation has done, counted from the hooks, for the bound on automatic collapse. */
@@ -110,15 +111,17 @@ export interface GenerationWork {
 export const newGenerationWork = (): GenerationWork => ({ requests: 0, startFill: undefined, steps: 0 });
 
 /** Whether a generation that asks to collapse again has done anything the last collapse made room for. */
-export function generationProgressed(work: GenerationWork): boolean {
+export function generationProgressed(work: GenerationWork, warningPercent: number = COLLAPSE_WARNING_PERCENT): boolean {
   if (work.steps === 0) return false;
-  return !(work.startFill !== undefined && work.startFill >= COLLAPSE_WARNING_PERCENT);
+  return !(work.startFill !== undefined && work.startFill >= warningPercent);
 }
 
 export interface CartoExtensionOptions {
   root: string;
   brain: BrainStore;
   session: LiveSessionState;
+  /** Persistent piped jobs owned by the host (survives collapse). */
+  jobs?: JobTable;
   /** Absolute path of the frozen projection for this generation. */
   markdownPath: string;
   now?: () => number;
@@ -175,36 +178,134 @@ function staleMarksFor(
   brain: CartoBrain,
   root: string,
   session: CartoExtensionOptions["session"],
-): Array<{ handle: string; why: string }> {
-  const marks: Array<{ handle: string; why: string }> = [];
+  markdownPath: string,
+): { items: Array<{ handle: string; why: string }>; modifiedPins: string[] } {
+  const items: Array<{ handle: string; why: string }> = [];
   for (const mark of liveStaleMarks(brain, root)) {
-    marks.push({ handle: mark.label, why: "the file changed after this note" });
+    items.push({ handle: mark.label, why: "the file changed after this note" });
   }
-  for (const handle of staleFileHandles(brain, root, session)) {
-    marks.push({ handle, why: "pinned, and the file is gone" });
+  const pinDrift = staleFileHandles(brain, root, session, markdownPath);
+  const modifiedPins: string[] = [];
+  for (const drift of pinDrift) {
+    items.push({ handle: drift.handle, why: drift.why });
+    if (drift.modified) modifiedPins.push(drift.handle);
   }
   for (const handle of staleReadResultHandles(brain, root)) {
-    marks.push({ handle, why: "a pinned reading, and the file has changed since" });
+    items.push({ handle, why: "a pinned reading, and the file has changed since" });
   }
-  return marks;
+  return { items, modifiedPins };
 }
 
 /**
- * Handles of pinned files that cannot be read as they were pinned: gone, or not
- * a text file. A pin is a promise the head holds the file, so a pin that cannot
- * be kept says so (§5.1, §5.5).
+ * Handles of pinned files that are gone or changed on disk since the head was
+ * frozen. A pin is a promise the head holds the current file, so drift says so
+ * (§5.1, §5.5).
  */
-function staleFileHandles(brain: CartoBrain, root: string, session: CartoExtensionOptions["session"]): string[] {
+function staleFileHandles(
+  brain: CartoBrain,
+  root: string,
+  session: CartoExtensionOptions["session"],
+  markdownPath: string,
+): Array<{ handle: string; why: string; modified: boolean }> {
   if (brain.files.length === 0) return [];
   const tree = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
-  const names: string[] = [];
+  const snapshotMtime = statMtimeSafe(markdownPath);
+  const drifted: Array<{ handle: string; why: string; modified: boolean }> = [];
   for (const file of brain.files) {
     const real = lexicalProjectPathSafe(root, file.path);
-    const readable = real !== null && statMtimeSafe(real) !== null;
-    if (readable) continue;
-    for (const [path, handle] of tree.handles) if (path === file.path) names.push(handle);
+    const mtime = real === null ? null : statMtimeSafe(real);
+    let handle: string | undefined;
+    for (const [path, named] of tree.handles) if (path === file.path) handle = named;
+    const label = handle ?? file.path;
+    if (mtime === null) {
+      drifted.push({ handle: label, why: "pinned, and the file is gone", modified: false });
+    } else if (snapshotMtime !== null && mtime > snapshotMtime + 50) {
+      drifted.push({ handle: label, why: "pinned copy in head is older than disk; collapse to refresh", modified: true });
+    }
   }
-  return names.sort((left, right) => left.localeCompare(right));
+  return drifted.sort((left, right) => left.handle.localeCompare(right.handle));
+}
+
+const BASH_FILE_OP_PATTERN =
+  /(?:^|[;&|]\s*)(?:sed\s+-(?:n|i)|head\s|tail\s|cat\s+[^<>|&;\n]+)|cat\s*>>?\s*\S|tee\s+\S|perl\s+-i|python3?\b[\s\S]*?\bopen\s*\(/;
+
+interface GenerationToolActivity {
+  totalCalls: number;
+  lastTurnUsedBashForFiles: boolean;
+}
+
+function inspectToolActivity(visibleMessages: readonly import("../domain/state-block.js").MessageLike[]): GenerationToolActivity {
+  let totalCalls = 0;
+  let lastAssistantCalls: Array<{ name: string; command?: string }> = [];
+  for (const message of visibleMessages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const calls: Array<{ name: string; command?: string }> = [];
+    for (const part of message.content as Array<Record<string, unknown>>) {
+      if (part === null || typeof part !== "object" || part.type !== "toolCall") continue;
+      totalCalls += 1;
+      const name = typeof part.name === "string" ? part.name : "";
+      const args = part.arguments as Record<string, unknown> | undefined;
+      const command = typeof args?.command === "string" ? args.command : undefined;
+      calls.push(command === undefined ? { name } : { name, command });
+    }
+    if (calls.length > 0) lastAssistantCalls = calls;
+  }
+  const lastTurnUsedBashForFiles = lastAssistantCalls.some(
+    (call) => call.name === "bash" && call.command !== undefined && BASH_FILE_OP_PATTERN.test(call.command),
+  );
+  return { totalCalls, lastTurnUsedBashForFiles };
+}
+
+/**
+ * State-reactive attention cues rendered at the tail of `<carto-state>` (§5.3, §5.7).
+ * Every cue is grounded in live facts from the Brain, generation, or jobs table;
+ * nothing is emitted when the condition is not present.
+ */
+export function deriveStateAttention(params: {
+  brain: CartoBrain;
+  mode: "edit" | "read only";
+  pendingCount: number;
+  modifiedPins: readonly string[];
+  jobs: readonly import("../domain/state-block.js").JobSummaryLine[];
+  activity: GenerationToolActivity;
+}): string[] {
+  const cues: string[] = [];
+  if (params.activity.lastTurnUsedBashForFiles) {
+    cues.push(
+      "Last `bash` call touched files directly -> use `read`/`edit`/`create` instead of `bash` sed/cat/python, and extend one reusable harness rather than creating extra test scripts.",
+    );
+  }
+  if (params.modifiedPins.length > 0) {
+    cues.push(
+      `Pinned file(s) changed on disk since collapse (${params.modifiedPins.join(", ")}) -> \`read\` current disk content or \`collapse\` at the next boundary to refresh the head.`,
+    );
+  }
+  if (params.activity.totalCalls >= 3 && params.pendingCount === 0) {
+    cues.push(
+      `Brain has 0 writes after ${params.activity.totalCalls} tool calls this generation -> update your active \`ledger\`/\`atlas\` handle in place now so progress survives collapse.`,
+    );
+  }
+  const activeWork = params.brain.chat.length >= 2 || params.activity.totalCalls >= 2;
+  if (params.mode === "edit" && activeWork && params.brain.atlas.length <= 1) {
+    const count = params.brain.atlas.length === 0 ? "no nodes" : "only 1 node";
+    cues.push(`Atlas has ${count} -> map goals, steps, and atomic leaves in \`atlas\`.`);
+  }
+  if (activeWork && params.brain.ledger.length === 0) {
+    cues.push("Ledger is empty -> track your active leaf, open questions, and current progress in `ledger`.");
+  }
+  const markedChatCount = params.brain.chat.filter((record) => record.mark !== undefined).length;
+  if (params.brain.chat.length >= 8 && markedChatCount < 2) {
+    cues.push(
+      `Head carries ${params.brain.chat.length} Chat records -> \`mark\` resolved older Chat handles for archive before your next \`collapse\`.`,
+    );
+  }
+  const needyJobs = params.jobs.filter((job) => job.unreadLines > 0 || job.status === "exited");
+  if (needyJobs.length > 0) {
+    cues.push(
+      `Persistent job(s) have unread output or exited (${needyJobs.map((job) => job.handle).join(", ")}) -> call \`proc\` \`read\` or \`stop\`.`,
+    );
+  }
+  return cues;
 }
 
 /**
@@ -288,9 +389,22 @@ export async function renderLiveStateBlock(
   collectMarks("atlas", brain.atlas);
   collectMarks("ledger", brain.ledger);
   collectMarks("chat", brain.chat);
+  const mode: "edit" | "read only" = options.session.readOnly ? "read only" : "edit";
+  const jobs = options.jobs === undefined ? [] : summarizeJobs(options.jobs);
+  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath);
+  const activity = inspectToolActivity(visibleMessages);
+  const attention = deriveStateAttention({
+    brain,
+    mode,
+    pendingCount: options.session.pending.length,
+    modifiedPins: stale.modifiedPins,
+    jobs,
+    activity,
+  });
   const input: StateBlockInput = {
     person: options.session.person,
     contextWindow: options.session.contextWindow,
+    collapseWarningPercent: options.session.collapseWarningPercent,
     lastReportedInput: options.session.lastReportedInput,
     lastReportedOutput: options.session.lastReportedOutput,
     systemTokens,
@@ -306,11 +420,13 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
-    // Atlas notes drift, a pinned file that is gone drifts, and a pinned `read`
-    // result whose file changed is the same fact about a quotation (§5.5).
-    stale: staleMarksFor(brain, options.root, options.session),
+    ...(jobs.length === 0 ? {} : { jobs }),
+    ...(attention.length === 0 ? {} : { attention }),
+    // Atlas notes drift, pinned files gone or modified since freeze drift, and
+    // pinned `read` results whose file changed are the same fact about drift (§5.5).
+    stale: stale.items,
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
-    mode: options.session.readOnly ? "read only" : "edit",
+    mode,
     projectRoot: options.root,
     tree,
   };
@@ -327,7 +443,7 @@ export function bashTool(): ToolRegistration {
   const base = createBashTool();
   return defineTool({
     ...base,
-    description: `${base.description ?? "Run a command."} The command runs in the project root. The shell is not sandboxed in read only mode, where what stops a command that writes is you.`,
+    description: `${base.description ?? "Run a command."} Runs in the project root for shell commands (builds, tests, linters, git). Do not use bash to read, create, or edit project files (use read, edit, or create) or for long-lived interactive processes (use proc). Not sandboxed in read only mode, where what stops a command that writes is you.`,
   });
 }
 
@@ -367,7 +483,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // Compaction is declined: the context is gardened by collapse, not
           // by Pi rewriting the transcript. The collapse rebuilds from the
           // Brain — the same rebuild the agent's collapse tool asks for.
-          options.session.collapseRequested ??= "context overflow; compaction declined";
+          if (options.session.collapseRequested === null) {
+            options.session.collapseRequested = "context overflow; compaction declined";
+            options.session.collapseTrigger = "automatic";
+          }
           return { decline: true };
         },
       }),
@@ -379,6 +498,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             if (work.requests === 0) work.startFill = contextFillPercent(input);
             work.requests += 1;
           });
+          options.session.lastStateBlock = block;
           return { messages: asPiMessages(appendStateBlock(visible, block, now())) };
         },
         afterResponse: (message) => {
@@ -399,7 +519,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // run before `onYield`. The provider's own error is the signal, so the
           // collapse is asked for here, where the failure is still seen.
           if (isContextOverflow(message, session.contextWindow > 0 ? session.contextWindow : undefined)) {
-            session.collapseRequested ??= `the context overflowed${message.errorMessage === undefined ? "" : `: ${message.errorMessage}`}`;
+            if (session.collapseRequested === null) {
+              session.collapseRequested = `the context overflowed${message.errorMessage === undefined ? "" : `: ${message.errorMessage}`}`;
+              session.collapseTrigger = "automatic";
+            }
           }
         },
         onYield: (message) => {
@@ -413,6 +536,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           // on as any answer does.
           if (message.stopReason === "length" && isRecoverableLength(message, session.desiredMaxOutput)) {
             session.collapseRequested = `a response stopped at its length limit with room left in its output (${message.usage.output} of ${session.desiredMaxOutput} tokens)`;
+            session.collapseTrigger = "automatic";
             return undefined;
           }
           return { continue: STATE_BLOCK_MARKER };
@@ -430,7 +554,12 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       }),
     ],
     tools: [
-      ...createTools({ root: options.root, brain: options.brain, session: options.session }),
+      ...createTools({
+        root: options.root,
+        brain: options.brain,
+        session: options.session,
+        ...(options.jobs === undefined ? {} : { jobs: options.jobs }),
+      }),
       // `bash` is pi-durable's own (§7, §12): it runs through the env wired in
       // live-session, an abort kills the command, and its retained tail and
       // spill file are the package's bounds, stated in its description (§1).

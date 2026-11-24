@@ -4,6 +4,7 @@
  * runs against injected fakes, the driver against the faux provider, and the
  * CLI against a fresh CARTO_HOME that never reaches the network.
  */
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -12,6 +13,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import test, { describe } from "node:test";
 
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
@@ -19,7 +21,7 @@ import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
-import { openLiveSession, closeLiveSession } from "../dist/runtime/live-session.js";
+import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "carto-r4-"));
@@ -45,7 +47,7 @@ test("parseModelRef splits on the first slash; the model id keeps the rest", () 
   assert.throws(() => parseModelRef("llama-swap/"), ConfigError);
 });
 
-test("parseConfig rejects a bad version, model, endpoint, and context window", () => {
+test("parseConfig rejects a bad version, model, endpoint, context window, and collapse warning", () => {
   assert.throws(() => parseConfig({ version: 2, model: "llama-swap/x" }), /version must be 1/);
   assert.throws(() => parseConfig({ version: 1, model: 42 }), /model must be a string/);
   assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "not-a-url" }), /not a valid URL/);
@@ -55,6 +57,14 @@ test("parseConfig rejects a bad version, model, endpoint, and context window", (
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 512 }).contextWindow, 512, "the pin is the person's number — any integer ≥ 0 wins");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 0 }).contextWindow, 0, "0 is the valid 'no pin' pin");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 75_000 }).contextWindow, 75_000);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 0 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 101 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 0.75 }), /from 1 to 100/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: "75" }), /from 1 to 100/);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x" }).collapseWarningPercent, undefined);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 1 }).collapseWarningPercent, 1);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 60 }).collapseWarningPercent, 60);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 100 }).collapseWarningPercent, 100);
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {
@@ -73,11 +83,11 @@ test("a missing config without --model fails with the one-liner that creates it"
 test("a missing config with --model is created; a later load reads it back", async () => {
   const home = tempDir();
   try {
-    const first = await loadGlobalConfig({ home, modelOverride: "llama-swap/ByteShape", llamaSwapEndpointOverride: "http://localhost:8888/v1/", contextWindowOverride: 75_000 });
+    const first = await loadGlobalConfig({ home, modelOverride: "llama-swap/ByteShape", llamaSwapEndpointOverride: "http://localhost:8888/v1/", contextWindowOverride: 75_000, collapseWarningPercentOverride: 80 });
     assert.equal(first.created, true);
     assert.equal(first.config.llamaSwapEndpoint, "http://localhost:8888/v1");
     const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
-    assert.deepEqual(raw, { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000 });
+    assert.deepEqual(raw, { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000, collapseWarningPercent: 80 });
 
     const second = await loadGlobalConfig({ home });
     assert.equal(second.created, false);
@@ -90,13 +100,15 @@ test("a missing config with --model is created; a later load reads it back", asy
 test("overrides against an existing config apply in memory; the file is untouched", async () => {
   const home = tempDir();
   try {
-    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000 }, home);
-    const overridden = await loadGlobalConfig({ home, contextWindowOverride: 40_960, llamaSwapEndpointOverride: "http://example:9/v1" });
+    await saveGlobalConfig({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: "http://localhost:8888/v1", contextWindow: 75_000, collapseWarningPercent: 80 }, home);
+    const overridden = await loadGlobalConfig({ home, contextWindowOverride: 40_960, llamaSwapEndpointOverride: "http://example:9/v1", collapseWarningPercentOverride: 60 });
     assert.equal(overridden.config.contextWindow, 40_960);
     assert.equal(overridden.config.llamaSwapEndpoint, "http://example:9/v1");
+    assert.equal(overridden.config.collapseWarningPercent, 60);
     const onDisk = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
     assert.equal(onDisk.contextWindow, 75_000);
     assert.equal(onDisk.llamaSwapEndpoint, "http://localhost:8888/v1");
+    assert.equal(onDisk.collapseWarningPercent, 80);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -338,6 +350,132 @@ test("pi's catalog refresh over a real HTTP socket lowers the model's advertised
   }
 });
 
+test("bare llama-server (GGUF filename id) and /props fallback populate the configured model's context window", async () => {
+  // 1) Bare llama-server returning a single owned_by: "llamacpp" entry with its GGUF filename.
+  const bareServer = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "Qwen3-32B-Q4_K_M.gguf", owned_by: "llamacpp", meta: { n_ctx: 65_536 } }] }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => bareServer.listen(0, "127.0.0.1", resolveListen));
+  try {
+    const { port } = bareServer.address();
+    const models = configuredModels(
+      { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+      { provider: "llama-swap", modelId: "ByteShape" },
+    );
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 65_536, "lone llamacpp entry mirrors capacity onto route name");
+  } finally {
+    await new Promise((resolveClose) => bareServer.close(resolveClose));
+  }
+
+  // 2) Server whose /v1/models omits capacity but whose passive /props exposes default_generation_settings.n_ctx.
+  const propsServer = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "ByteShape" }] }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/props") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ default_generation_settings: { n_ctx: 49_152 } }));
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => propsServer.listen(0, "127.0.0.1", resolveListen));
+  try {
+    const { port } = propsServer.address();
+    const models = configuredModels(
+      { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+      { provider: "llama-swap", modelId: "ByteShape" },
+    );
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.equal(models.getModel("llama-swap", "ByteShape").contextWindow, 49_152, "/props n_ctx fills in when /v1/models omits capacity");
+  } finally {
+    await new Promise((resolveClose) => propsServer.close(resolveClose));
+  }
+});
+
+test("cold llama-swap discovers the context window mid-first-run as soon as the model responds", async () => {
+  const { root, brain, cleanup } = await headlessFixture();
+  let loaded = false;
+  let releaseStream;
+  const held = new Promise((resolve) => { releaseStream = resolve; });
+  const server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "content-type": "application/json" });
+      const listing = loaded ? { data: [{ id: "ByteShape", context_length: 65_536 }] } : { data: [{ id: "ByteShape" }] };
+      response.end(JSON.stringify(listing));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/chat/completions") {
+      request.resume();
+      request.on("end", () => {
+        loaded = true;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        // Send a prefill progress frame and hold the stream open so we can verify
+        // that capacity discovery completes WHILE the first turn is still prefilling.
+        response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: null }, finish_reason: null }], prompt_progress: { total: 1000, cache: 200, processed: 600, time_ms: 500 } })}\n\n`);
+        void held.then(() => {
+          const call = { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "sleep", arguments: "{}" } }] };
+          response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: call, finish_reason: null }] })}\n\n`);
+          response.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\ndata: [DONE]\n\n`);
+        });
+      });
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const { port } = server.address();
+  const models = configuredModels(
+    { version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: `http://127.0.0.1:${port}/v1` },
+    { provider: "llama-swap", modelId: "ByteShape" },
+  );
+  await models.refresh({ providers: ["llama-swap"] });
+  const session = await openLiveSession({ root, brain, models, model: { provider: "llama-swap", modelId: "ByteShape" }, now: FIXED_NOW });
+  const out = captureStream();
+  try {
+    assert.equal(session.state.contextWindow, 0, "cold startup begins with window unknown");
+    let refreshed;
+    const discovered = new Promise((resolve) => { refreshed = resolve; });
+    session.state.onResponse = () => {
+      if (session.state.contextWindow <= 0) {
+        void applyCapacityRefresh(
+          session,
+          () => models.refresh({ providers: ["llama-swap"] }).then(() => undefined),
+          models,
+          "llama-swap",
+          "ByteShape",
+          out.stream,
+        ).then(refreshed);
+      }
+    };
+    const submission = await submitInput(session, "hello");
+    await discovered;
+    assert.equal(session.state.contextWindow, 65_536, "window is discovered while the first response is still streaming");
+    assert.equal(session.state.prefillActive, true, "discovered before generation even starts");
+    releaseStream();
+    await submission.wait(BACKGROUND_CONTEXT);
+  } finally {
+    releaseStream();
+    await closeLiveSession(session);
+    await new Promise((resolveClose) => {
+      server.closeAllConnections();
+      server.close(resolveClose);
+    });
+    await cleanup();
+  }
+});
+
 // ---------- the CLI, end to end without a server ----------
 
 const cliEnv = (home) => ({ ...process.env, CARTO_HOME: home });
@@ -373,6 +511,8 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     assert.match(help, /workspace TUI/);
     assert.match(help, /--headless/);
     assert.match(help, /--model llama-swap\/ByteShape/);
+    assert.match(help, /--collapse-warning <n>/);
+    assert.match(help, /collapseWarningPercent/);
     assert.match(help, /--user <name>/);
     assert.match(help, /userName/);
   });
@@ -399,13 +539,14 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
     const root = projectRoot();
     try {
       const first = await runCli(
-        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--user", "OracleToes", "--root", root],
+        ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--context-window", "75000", "--collapse-warning", "65", "--user", "OracleToes", "--root", root],
         { home, input: "" },
       );
       assert.match(first, /carto · llama-swap\/ByteShape/);
       const raw = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
       assert.equal(raw.model, "llama-swap/ByteShape");
       assert.equal(raw.contextWindow, 75_000);
+      assert.equal(raw.collapseWarningPercent, 65);
       assert.equal(raw.userName, "OracleToes", "--user is persisted instead of the login name");
     } finally {
       rmSync(home, { recursive: true, force: true });

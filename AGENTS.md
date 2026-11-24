@@ -43,6 +43,8 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [pi — `packages/schema`](https://github.com/earendil-works/pi/tree/main/packages/schema) | agent | Tool parameter validation for the product tools (`defineTool` arguments) | `@earendil-works/pi-schema` 1.5.2 |
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
 | [canop/broot](https://github.com/canop/broot) | person | Inspiration for the tree view only: how a whole hierarchy is made readable in one pane. Not a dependency and not a port target | reference only |
+| [eliaskg/pi-prefill](https://github.com/eliaskg/pi-prefill) | person | Reference for live prefill progress (`return_progress`, `prompt_progress`, delta-based rate and ETA). Not a dependency and not a port target | reference only |
+| [tomooshi/condensed-milk-pi](https://github.com/tomooshi/condensed-milk-pi) | person | Evaluated for context compression and bash output filtering; not adopted (retroactive masking conflicts with Carto's short-generation collapse model) | reference only (not adopted) |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at
@@ -190,6 +192,11 @@ substitute for reading the code.
   See `docs/tests.md` for the full policy.
 - Do not chase a number. Do not add tests to keep a count up. Do not delete the
   only guard for a real break to make a failure disappear.
+- **Every test run must echo the `AGENTS.md` and compaction-disclosure reminder.**
+  `test/guard.mjs` and every `test/*.test.mjs` suite (via `test/agent-reminder.mjs`)
+  print instructions to read `AGENTS.md` immediately and inform `OracleToes` if
+  the session was compacted on that turn. An agent must **never** remove, shorten,
+  or silence this reminder from the test harness or any test suite.
 - **A probe is allowed** when you genuinely need to check something before
   you rely on it. Run probes only at the end of the stage, after the push, and
   never keep them. A probe is not a test and cannot be used to dodge the budget.
@@ -203,6 +210,7 @@ substitute for reading the code.
 - Do not use a probe to replace a test, or a test to replace reading the code.
 - Do not build what `@earendil-works/pi-tui`, `pi-durable`, or `pi-ai` already
   provide.
+- Do not remove, shorten, or silence the `AGENTS.md` and compaction-disclosure reminder from `test/guard.mjs`, `test/agent-reminder.mjs`, or any test suite.
 - Do not end a turn with work that is not pushed.
   tested without having seen the test pass.
 - Do not be sycophantic. No performed agreement, no unearned praise, no

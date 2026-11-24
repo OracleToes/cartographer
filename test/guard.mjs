@@ -13,6 +13,8 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { printAgentReminder } from "./agent-reminder.mjs";
+
 const BUDGET_MS = 10_000;
 
 // The collapse worker also imports fast-suite, which imports these small suites.
@@ -20,7 +22,7 @@ const BUDGET_MS = 10_000;
 const grouped = new Set([
   "brain.test.mjs", "brain-store.test.mjs", "freshness.test.mjs", "gitignore.test.mjs",
   "handles.test.mjs", "project-tree.test.mjs", "projection.test.mjs", "state-block.test.mjs", "ui-views.test.mjs",
-  "compose.test.mjs", "person.test.mjs",
+  "compose.test.mjs", "person.test.mjs", "guard-reminder.test.mjs",
 ]);
 const files = readdirSync("test")
   .filter((name) => name.endsWith(".test.mjs") && !grouped.has(name))
@@ -42,7 +44,11 @@ const timer = setTimeout(() => {
 process.on("SIGINT", killChild);
 
 const run = (command, args) => new Promise((resolve, reject) => {
-  child = spawn(command, args, { stdio: "inherit", detached: true });
+  child = spawn(command, args, {
+    stdio: "inherit",
+    detached: true,
+    env: { ...process.env, CARTO_GUARD_REMINDER: "1" },
+  });
   child.once("error", reject);
   child.once("exit", (code) => resolve(code ?? 1));
 });
@@ -60,11 +66,14 @@ try {
   clearTimeout(timer);
   if (aborted) {
     console.error(`build and test suite exceeded ${BUDGET_MS / 1000} seconds — aborting the run`);
+    printAgentReminder();
     process.exit(1);
   }
+  printAgentReminder();
   process.exit(code);
 } catch (error) {
   clearTimeout(timer);
   console.error(error);
+  printAgentReminder();
   process.exit(1);
 }

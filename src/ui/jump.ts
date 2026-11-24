@@ -18,13 +18,14 @@ export interface JumpTarget {
   /** Single lowercase letter. */
   key: string;
   /** The view it lands on. */
-  view: "chat" | "atlas" | "ledger" | "tree" | "context";
+  view: "chat" | "jobs" | "atlas" | "ledger" | "tree" | "context";
   label: string;
   description: string;
 }
 
 export const JUMP_TARGETS: JumpTarget[] = [
   { key: "c", view: "chat", label: "transcript", description: "the conversation" },
+  { key: "j", view: "jobs", label: "jobs", description: "persistent piped processes and live console" },
   { key: "a", view: "atlas", label: "atlas", description: "nodes, links and attachments" },
   { key: "l", view: "ledger", label: "ledger", description: "goals, notes, questions, progress" },
   { key: "t", view: "tree", label: "tree", description: "the project, under its handles" },

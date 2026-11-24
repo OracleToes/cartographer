@@ -1,4 +1,5 @@
 // Run the independent small suites in this worker to avoid a fifth Node startup.
+import "./agent-reminder.mjs";
 import "./fast-suite.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";

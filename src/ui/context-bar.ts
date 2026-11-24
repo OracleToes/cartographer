@@ -53,6 +53,33 @@ export interface ContextBarState {
 const clamp01 = (value: number): number => (value <= 0 ? 0 : value >= 1 ? 1 : value);
 const thousands = (value: number): string => Math.round(value).toLocaleString("en-US");
 
+const formatEta = (seconds: number): string => {
+  if (seconds < 1) return "now";
+  if (seconds < 60) return `~${Math.ceil(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return secs > 0 ? `~${minutes}m ${secs}s` : `~${minutes}m`;
+};
+
+const formatPrefill = (
+  processed: number | undefined,
+  total: number | undefined,
+  cached: number | undefined,
+  rate: number | undefined,
+): { full: string; compact: string } => {
+  if (processed === undefined || total === undefined) {
+    return { full: " · prefill ?", compact: " · prefill ?" };
+  }
+  const compact = ` · prefill ${thousands(processed)}/${thousands(total)}`;
+  const cache = Math.min(cached ?? 0, total);
+  const uncachedTotal = Math.max(0, total - cache);
+  const computed = Math.max(0, processed - cache);
+  const pct = uncachedTotal > 0 ? Math.round(clamp01(computed / uncachedTotal) * 100) : 100;
+  const remaining = Math.max(0, total - processed);
+  const eta = rate !== undefined && rate > 0 && remaining > 0 ? ` ${formatEta(remaining / rate)}` : "";
+  return { full: `${compact} ${pct}%${eta}`, compact };
+};
+
 /** Half-block cells: a bar that reads as a continuous surface rather than a row of boxes. */
 const FULL = "█";
 const PREFILL = "▓";
@@ -106,15 +133,18 @@ export class TokenBarView implements Component {
     const shown = unknown ? `${thousands(used)} · window unknown` : `${thousands(used)} / ${thousands(contextWindow)}`;
     const qualifier = measured && toolWorkSince === 0 ? "" : "~";
     const rate = (value: number | undefined) => value === undefined ? "—" : value.toFixed(1);
-    const progress = prefillActive
-      ? ` · prefill ${prefilledTokens === undefined || prefillTotal === undefined ? "?" : `${thousands(prefilledTokens)}/${thousands(prefillTotal)}`}`
-      : "";
+    const prefillText = prefillActive
+      ? formatPrefill(prefilledTokens, prefillTotal, prefillCached, prefillRate)
+      : { full: "", compact: "" };
     const rates = ` · P ${rate(prefillRate)} D ${rate(decodeRate)} tok/s`;
     const base = `${qualifier}${shown}`;
     // Keep some bar on narrow terminals; show progress before speed if both
     // will not fit. A missing value is shown as unknown, never zero progress.
-    const label = width >= visibleWidth(base + progress + rates) + 8 ? base + progress + rates
-      : width >= visibleWidth(base + progress) + 8 ? base + progress : base;
+    const label = width >= visibleWidth(base + prefillText.full + rates) + 8 ? base + prefillText.full + rates
+      : width >= visibleWidth(base + prefillText.compact + rates) + 8 ? base + prefillText.compact + rates
+      : width >= visibleWidth(base + prefillText.full) + 8 ? base + prefillText.full
+      : width >= visibleWidth(base + prefillText.compact) + 8 ? base + prefillText.compact
+      : base;
     const barWidth = Math.max(0, width - visibleWidth(label) - 1);
     const ratio = unknown ? 0 : clamp01(used / window);
     const filled = Math.round(ratio * barWidth);
@@ -141,13 +171,22 @@ export class TokenBarView implements Component {
       cursor = end;
     }
     for (let cell = cursor; cell < filled; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.toolWork(FULL);
-    if (prefillActive && !unknown && prefillTotal !== undefined && prefilledTokens !== undefined && prefillCached !== undefined) {
-      const scale = (n: number) => Math.min(barWidth, Math.max(0, Math.round(n / window * barWidth)));
-      const cached = scale(prefillCached);
+    if (prefillActive && prefillTotal !== undefined && prefillTotal > 0 && prefilledTokens !== undefined) {
+      const denom = unknown ? prefillTotal : window;
+      const scale = (n: number) => Math.min(barWidth, Math.max(0, Math.round(n / denom * barWidth)));
+      const cached = scale(prefillCached ?? 0);
       const prefilled = scale(prefilledTokens);
       const total = scale(prefillTotal);
-      for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (cell < filled ? tokens.prefillOnFill : tokens.warn)(PREFILL);
-      for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (cell < filled ? tokens.prefillPendingOnFill : tokens.rule)(PREFILL);
+      if (unknown) {
+        // When the server has not yet advertised a context window, scale the
+        // live prefill bar against the prompt being read so prefill is visible.
+        for (let cell = 0; cell < cached; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.system(FULL);
+        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = serverLost ? tokens.faint(PREFILL) : tokens.warn(PREFILL);
+        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = tokens.rule(PREFILL);
+      } else {
+        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (cell < filled ? tokens.prefillOnFill : tokens.warn)(PREFILL);
+        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (cell < filled ? tokens.prefillPendingOnFill : tokens.rule)(PREFILL);
+      }
     }
 
     const tint = serverLost ? tokens.faint : unknown ? tokens.muted : measured ? tokens.muted : tokens.faint;

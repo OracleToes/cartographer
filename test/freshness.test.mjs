@@ -1,3 +1,4 @@
+import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { utimesSync } from "node:fs";

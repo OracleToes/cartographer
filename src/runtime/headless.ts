@@ -36,12 +36,17 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  resumeSession,
   submitInput,
+  switchSessionModel,
   togglePause,
   waitForRunEnd,
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
+import type { ModelRef } from "./config.js";
+import { formatModelRef, indexModels, resolveIndexedModel } from "./model-catalog.js";
+import { createJobTable, formatExit, stopAllJobs, summarizeJobs } from "./jobs.js";
 
 export interface HeadlessOptions extends LiveSessionOptions {
   input: Readable;
@@ -56,10 +61,15 @@ export interface HeadlessOptions extends LiveSessionOptions {
    * known window stands.
    */
   refreshCapacity?: boolean;
+  /** Called after `/model` switches models so the host can persist or track the selection. */
+  onModelChange?: (model: ModelRef) => Promise<void> | void;
 }
 
 const HELP = [
   "Type to the agent; it answers in `chat`, and its plain text stays its own thinking.",
+  "  /model     list provider models (/model <name> switches at the next step)",
+  "  /jobs      list persistent piped jobs",
+  "  /resume    start or resume the agent with a fresh state block (no message)",
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /help      see this",
@@ -70,13 +80,16 @@ function writeLine(stream: Writable, line: string): void {
   stream.write(`${line}\n`);
 }
 
-/** New agent-authored chat records since `seen`; adds them to `seen`. */
-async function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<string>): Promise<string[]> {
-  const lines: string[] = [];
+/** New agent- or system-authored chat records since `seen`; adds them to `seen`. */
+async function drainVisibleChat(
+  brain: LiveSessionOptions["brain"],
+  seen: Set<string>,
+): Promise<Array<{ author: "agent" | "system"; text: string }>> {
+  const lines: Array<{ author: "agent" | "system"; text: string }> = [];
   for (const record of (await brain.read()).chat) {
-    if (record.author !== "agent" || seen.has(record.id)) continue;
+    if ((record.author !== "agent" && record.author !== "system") || seen.has(record.id)) continue;
     seen.add(record.id);
-    lines.push(record.text);
+    lines.push({ author: record.author, text: record.text });
   }
   return lines;
 }
@@ -108,9 +121,16 @@ async function runCollapse(
   output: Writable,
   reason: string,
   automatic = false,
+  trigger?: "agent" | "automatic",
 ): Promise<LiveSession> {
   const previousGeneration = session.generation;
-  const outcome = await collapseLiveSession(session, options, reason, {}, { automatic });
+  const outcome = await collapseLiveSession(
+    session,
+    options,
+    reason,
+    {},
+    { automatic, ...(trigger === undefined ? {} : { trigger }) },
+  );
   const swept = outcome.report.swept === undefined ? "" : `; swept ${outcome.report.swept}`;
   const archived = outcome.report.archived.length === 0 ? "" : `; archived ${outcome.report.archived.length}`;
   const dropped = outcome.report.dropped.length === 0 ? "" : `; dropped ${outcome.report.dropped.length} past grace`;
@@ -125,13 +145,45 @@ async function runCollapse(
 export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
+  let activeModel: ModelRef = { ...options.model };
+  const jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+  const sessionOptions = (): HeadlessOptions => ({ ...options, model: activeModel, jobs });
   const refresh = async () => {
     // Silent on failure: an unreachable server leaves the last known window standing.
-    await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
+    await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
   };
   if (options.refreshCapacity === true) await refresh();
-  let session = await openLiveSession(options);
-  const seenChat = new Set<string>((await options.brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id));
+  let session = await openLiveSession(sessionOptions());
+  let capacityRefreshFlight: Promise<void> | undefined;
+  const refreshWindow = async () => {
+    if (options.refreshCapacity !== true) return;
+    if (capacityRefreshFlight !== undefined) return capacityRefreshFlight;
+    const work = applyCapacityRefresh(session, refresh, options.models, activeModel.provider, activeModel.modelId, output);
+    capacityRefreshFlight = work;
+    try {
+      await work;
+    } finally {
+      if (capacityRefreshFlight === work) capacityRefreshFlight = undefined;
+    }
+  };
+  const bindResponseRefresh = (target: LiveSession) => {
+    target.state.onResponse = () => {
+      if (options.refreshCapacity === true && target === session && target.state.contextWindow <= 0) {
+        void refreshWindow().catch(() => undefined);
+      }
+    };
+  };
+  bindResponseRefresh(session);
+  const seenChat = new Set<string>(
+    (await options.brain.read()).chat
+      .filter((record) => record.author === "agent" || record.author === "system")
+      .map((record) => record.id),
+  );
+  const printVisibleChat = async (): Promise<void> => {
+    for (const item of await drainVisibleChat(options.brain, seenChat)) {
+      writeLine(output, `${item.author === "system" ? "system" : "carto"}: ${item.text}`);
+    }
+  };
 
   writeLine(output, `carto · ${options.model.provider}/${options.model.modelId} · ${options.root}`);
   writeLine(output, HELP);
@@ -164,7 +216,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       await waitForRunEnd(session);
       // Silence is a real answer: an agent with nothing to say ends its turn
       // without a chat call, and that needs no remark from the driver.
-      for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+      await printVisibleChat();
       const verdict = session.reviewCollapseRequest();
       if (verdict.kind === "none") break;
       if (verdict.kind === "stop") {
@@ -172,7 +224,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         break;
       }
       try {
-        session = await runCollapse(session, options, output, verdict.reason, true);
+        session = await runCollapse(session, sessionOptions(), output, verdict.reason, true, verdict.trigger);
+        await printVisibleChat();
       } catch (err) {
         writeLine(error, `(the collapse failed: ${err instanceof Error ? err.message : String(err)})`);
         break;
@@ -180,7 +233,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       await watchSession();
     }
     if (options.refreshCapacity === true) {
-      await applyCapacityRefresh(session, refresh, options.models, options.model.provider, options.model.modelId, output);
+      await refreshWindow();
     }
   };
 
@@ -192,6 +245,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     watch = undefined;
     await previous?.stop().catch(() => undefined);
     const mine = session;
+    bindResponseRefresh(mine);
     const next = await mine.harness.watchDoc(LiveDoc, mine.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
     if (next === undefined) return;
     watch = next;
@@ -215,6 +269,23 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         writeLine(output, HELP);
         continue;
       }
+      if (line === "/jobs") {
+        const list = summarizeJobs(jobs);
+        if (list.length === 0) {
+          writeLine(output, "(no persistent jobs)");
+        } else {
+          for (const job of list) {
+            const state =
+              job.status === "exited"
+                ? `exited(${formatExit(job.exitCode, job.exitSignal)})`
+                : job.unreadLines > 0
+                  ? `running · ${job.unreadLines} unread`
+                  : "running · idle";
+            writeLine(output, `${job.handle} "${job.label}" · ${state}`);
+          }
+        }
+        continue;
+      }
       if (line === "/pause" || line.startsWith("/pause ")) {
         const argument = line.slice("/pause".length).trim();
         const to = argument === "on" ? true : argument === "off" ? false : argument === "" ? undefined : null;
@@ -230,11 +301,74 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         }
         continue;
       }
+      if (line === "/resume") {
+        // Unfreezing a held mid-stream reply must run outside `exclusive`,
+        // because the held run is currently holding that lock.
+        if (session.state.paused && session.freeze.frozen()) {
+          try {
+            writeLine(output, (await resumeSession(session)).line);
+          } catch (err) {
+            writeLine(error, `(resume failed: ${err instanceof Error ? err.message : String(err)})`);
+          }
+          continue;
+        }
+        // Strict non-action when already running and not held.
+        const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+        if (live?.run !== undefined) continue;
+        await exclusive(async () => {
+          try {
+            const outcome = await resumeSession(session);
+            if (outcome.kind !== "started" || outcome.submission === undefined) return;
+            const settled = await outcome.submission.wait(BACKGROUND_CONTEXT);
+            await waitForRunEnd(session);
+            if (settled.status !== "done" && session.state.collapseRequested === null) {
+              writeLine(error, `(the run ended ${settled.status} — nothing was left to do)`);
+            }
+          } catch (err) {
+            writeLine(error, `(resume failed: ${err instanceof Error ? err.message : String(err)})`);
+          }
+          await settle();
+        });
+        continue;
+      }
+      if (line === "/model" || line.startsWith("/model ")) {
+        const argument = line.slice("/model".length).trim();
+        const indexed = await indexModels(options.models, { refresh: true, active: activeModel });
+        if (argument === "") {
+          if (indexed.errors.length > 0) {
+            for (const err of indexed.errors) writeLine(error, `(model refresh ${err.provider}: ${err.message})`);
+          }
+          for (const entry of indexed.models) {
+            const mark = entry.active ? "*" : " ";
+            const window = entry.contextWindow > 0 ? entry.contextWindow.toLocaleString() : "window unknown";
+            writeLine(output, `${mark} ${entry.provider}/${entry.modelId} (${window})`);
+          }
+          continue;
+        }
+        const resolved = resolveIndexedModel(options.models, argument, activeModel.provider);
+        if (resolved === undefined) {
+          writeLine(error, `(unknown model "${argument}"; run /model to list indexed models)`);
+          continue;
+        }
+        try {
+          await switchSessionModel(session, options.models, resolved);
+          activeModel = { ...resolved };
+          try {
+            await options.onModelChange?.(resolved);
+          } catch (persistErr) {
+            writeLine(error, `(model switched, could not save config: ${persistErr instanceof Error ? persistErr.message : String(persistErr)})`);
+          }
+          writeLine(output, `model → ${formatModelRef(resolved)}`);
+        } catch (err) {
+          writeLine(error, `(model switch failed: ${err instanceof Error ? err.message : String(err)})`);
+        }
+        continue;
+      }
       if (line === "/collapse") {
         await exclusive(async () => {
-          session = await runCollapse(session, options, output, "person requested (/collapse)");
+          session = await runCollapse(session, sessionOptions(), output, "person requested (/collapse)");
           await watchSession();
-          for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+          await printVisibleChat();
         });
         continue;
       }
@@ -265,6 +399,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   } finally {
     await queue;
     await watch?.stop().catch(() => undefined);
+    await stopAllJobs(jobs).catch(() => undefined);
     await closeLiveSession(session);
   }
   if (linesSeen === 0 && !inputIsTTY) {
