@@ -26,6 +26,7 @@
  * about a request changes; only the body that comes back.
  */
 import type { Models } from "@earendil-works/pi-ai/models";
+import type { ModelRef } from "@earendil-works/pi-durable";
 import type { createModelTelemetry } from "./model-telemetry.js";
 
 export interface StreamFreeze {
@@ -47,7 +48,7 @@ export interface StreamFreeze {
    * The models to hand the harness: the registry's own, except that every
    * request's response body goes through the gate. Call once, before opening.
    */
-  gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>): Models;
+  gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>, selected?: () => ModelRef): Models;
 }
 
 /** One upstream body in flight, with its own dying mark. */
@@ -168,15 +169,30 @@ export function createStreamFreeze(): StreamFreeze {
 
   return {
     /**
-     * A shallow copy of the registry with its two streaming calls gated. Every
-     * read and every other method is the registry's own, so auth, the catalog,
-     * and refresh behave exactly as they would. The gate belongs here rather
+     * A shallow copy of the registry with its two streaming calls gated and
+     * recovered llama-swap model lookups reconciled with the selection. Auth,
+     * catalog enumeration, and refresh remain the registry's own. The gate belongs here rather
      * than on the provider object because the provider is shared by every
      * session on it (`configuredModels` builds it once): wrapping it would
      * outlive the session that froze it, and double-wrap after a collapse.
      */
-    gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>): Models {
+    gate(models: Models, telemetry?: ReturnType<typeof createModelTelemetry>, selected?: () => ModelRef): Models {
       const gated = Object.create(models) as Models;
+      // A durable generation can be reopened after preparation committed but
+      // before its request started. Its checkpoint still names the old model,
+      // even though the agent document has been updated. Resolve that request
+      // to the person's current llama-swap selection, including its capacity
+      // and endpoint, rather than sending the checkpoint's stale id. This is
+      // per session and never alters a stream already in flight.
+      Object.defineProperty(gated, "getModel", {
+        value: (provider: string, id: string) => {
+          const current = selected?.();
+          if (provider === "llama-swap" && current?.provider === provider) {
+            return models.getModel(current.provider, current.modelId);
+          }
+          return models.getModel(provider, id);
+        },
+      });
       for (const name of ["stream", "streamSimple"] as const) {
         const inner = models[name].bind(models);
         Object.defineProperty(gated, name, {

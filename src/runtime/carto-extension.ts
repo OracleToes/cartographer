@@ -16,6 +16,7 @@ import { statSync } from "node:fs";
 import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, runEndTask, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
+import type { ModelRef } from "@earendil-works/pi-durable";
 import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai/utils/overflow";
 
 import { handleOf } from "../domain/handles.js";
@@ -61,6 +62,8 @@ export function cartoInstructions(person: string): string {
 }
 
 export interface LiveSessionState extends ToolSession, ModelTelemetry {
+  /** The person's current model selection, including across recovered requests. */
+  activeModel: ModelRef;
   /** What the agent calls the person: the configured name, or the launching account. */
   person: string;
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */

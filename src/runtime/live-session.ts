@@ -177,6 +177,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // server advertises one (the driver re-discovers after every settled run).
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
+    activeModel: { ...modelRef },
     person: options.person ?? personName(),
     contextWindow,
     collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
@@ -201,7 +202,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // One gate per session, around every model call the session makes (§9).
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
-  const gatedModels = freeze.gate(options.models, createModelTelemetry(state));
+  const gatedModels = freeze.gate(options.models, createModelTelemetry(state), () => state.activeModel);
   const jobs = options.jobs ?? createJobTable({ root, now });
 
   let harness: Harness | undefined;
@@ -927,10 +928,10 @@ export interface SwitchModelResult {
 /**
  * Switch the live session's active model.
  *
- * Pi resolves `agent.model` in `generation`'s `prepare` phase at the start of
- * each LLM request and fixes it for that request, so updating `AgentDoc` via
- * `conversation.configure({ model })` leaves any in-flight request undisturbed
- * and takes effect at the next natural boundary (the next step or next turn).
+ * Updating `AgentDoc` via `conversation.configure({ model })` leaves an
+ * in-flight stream undisturbed and takes effect on the next request. A
+ * per-session lookup also reconciles a prepared llama-swap checkpoint with the
+ * selection when that next request starts, including after a restart.
  */
 export async function switchSessionModel(
   session: LiveSession,
@@ -946,6 +947,7 @@ export async function switchSessionModel(
   if (changed) {
     await session.conversation.configure({ model }, BACKGROUND_CONTEXT);
   }
+  session.state.activeModel = { ...model };
   session.state.contextWindow = resolved.contextWindow;
   session.state.desiredMaxOutput = resolved.maxTokens;
   return {
