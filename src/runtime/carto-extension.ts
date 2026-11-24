@@ -419,7 +419,7 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
-    ...(options.session.liveEphemera === undefined ? {} : { working: [...options.session.liveEphemera].map(([handle, item]) => ({ handle, kind: item.kind, text: item.text })) }),
+    ...(options.session.liveEphemera === undefined ? {} : { working: [...options.session.liveEphemera].map(([handle, item]) => ({ handle, kind: item.kind })) }),
     ...(jobs.length === 0 ? {} : { jobs }),
     ...(attention.length === 0 ? {} : { attention }),
     // Atlas notes drift, pinned files gone or modified since freeze drift, and

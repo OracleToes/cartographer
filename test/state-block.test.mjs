@@ -76,6 +76,18 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(renderStateBlock(input({ mode: "read only" })), /^<carto-state>\n\[READ ONLY MODE\]\n/);
 });
 
+test("live items in the state block contain only their handles and types", () => {
+  const working = [
+    { handle: "X15", kind: "plainText", text: "a private preview" },
+    { handle: "X16", kind: "toolCall", text: '{"path":"physics.js"}' },
+    { handle: "R6", kind: "readResult", text: "the file contents" },
+  ];
+  const block = renderStateBlock(input({ working }));
+  assert.match(block, /live items:\n  X15 · plainText\n  X16 · toolCall\n  R6 · readResult\npins:/);
+  assert.doesNotMatch(block, /a private preview|physics\.js|the file contents/);
+  assert.doesNotMatch(renderStateBlock(input({ working: [] })), /live items:/);
+});
+
 test("empty pending, marks, and stale say none; missing provider report is explicit", () => {
   const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], marks: [], lastReportedInput: undefined }));
   assert.match(block, /since the rebuild: nothing written/);
@@ -220,6 +232,10 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       rebuiltAutomatically: false,
       toolWorkAtLastReport: 0,
       toolWorkAtLastRequest: 77,
+      liveEphemera: new Map([
+        ["X1", { id: "reasoning", kind: "reasoning", text: "unrepeated reasoning" }],
+        ["R1", { id: "read", kind: "readResult", text: "unrepeated result" }],
+      ]),
     };
 
     const messages = [
@@ -233,6 +249,8 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       messages,
     );
     assert.equal(session.toolWorkAtLastRequest, 77, "a UI preview must not alter the in-flight request accounting baseline");
+    assert.match(block, /live items:\n  X1 · reasoning\n  R1 · readResult\npins:/);
+    assert.doesNotMatch(block, /unrepeated reasoning|unrepeated result/);
     assert.match(block, /pinned copy in head is older than disk; collapse to refresh/);
     assert.match(block, /\nattention:\n/);
     assert.match(block, /Last `bash` call touched files directly/);

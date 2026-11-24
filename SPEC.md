@@ -542,10 +542,10 @@ so its number comes from where it sits: `X3` is the third ephemeral item in the
 prompt in both views, because a handle is only useful if it names the same thing
 wherever the person reads it.
 
-The state block lists live ephemeral handles with short identifying previews, so
-the agent can select an item without rewriting the cached prompt body. Pinned
-items already in the frozen head keep their `X` handles; live `X` numbering
-starts after those handles.
+The state block lists live ephemeral items by handle and type only, without
+repeating their content, so the agent can select an item without rewriting the
+cached prompt body. Pinned items already in the frozen head keep their `X`
+handles; live `X` numbering starts after those handles.
 
 A tool row in the transcript is one row — the call's arguments and its result —
 so it wears the result's handle, `R` or `S`, which is the text a person quotes
