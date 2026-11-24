@@ -131,10 +131,13 @@ test("sidebar's ordered prompt strip supports hover, click, grouping, and short 
   assert.equal(sidebar.setContextSections(sections), false);
   let lines = sidebar.render(28);
   const strip = lines.flatMap((line, row) => plain(line).includes("███") ? [row] : []);
-  assert.equal(strip.length, 9);
+  assert.equal(strip.length, 8);
+  assert.equal(lines.length, height);
+  assert.equal(strip.at(-1), height - 2, "one row separates the strip from the bottom");
+  assert.equal(plain(lines.at(-1)).trim(), "", "the bottom row is padding");
   assert.ok(lines[strip[0]].includes(tokens.muted("███")), "head is first");
   assert.ok(lines[strip[3]].includes(tokens.person("███")), "body follows head");
-  assert.ok(lines[strip[8]].includes(tokens.warn("███")), "tail is last");
+  assert.ok(lines[strip[7]].includes(tokens.warn("███")), "tail is last");
   assert.ok(lines.every((line) => visibleWidth(line) === 28));
   const mouse = (type, y, x = 4) => ({ type, button: "left", x, y, screenX: x + 2, screenY: y + 3, width: 28, height, shift: false, alt: false, ctrl: false });
   const tooltip = () => sidebar.render(28).slice(strip[0]).map((line) => plain(line).slice(8).trim()).join(" ");
@@ -144,10 +147,11 @@ test("sidebar's ordered prompt strip supports hover, click, grouping, and short 
   assert.equal(sidebar.pointerMoved(6, strip[0] + 3), false);
   assert.equal(sidebar.pointerMoved(40, 1), true, "moving to another pane clears hover");
   assert.doesNotMatch(tooltip(), /system prompt/);
-  assert.ok(sidebar.handleMouse(mouse("click", strip[8]))?.handled, "click fallback does not switch views");
+  assert.ok(sidebar.handleMouse(mouse("click", strip[7]))?.handled, "click fallback does not switch views");
   assert.match(tooltip(), /tail · B · ~100 tok · state block/);
+  assert.equal(sidebar.pointerMoved(6, height - 1 + 3), true, "padding is outside the hover target");
 
-  height = 15;
+  height = 16;
   sidebar.setContextSections([
     { title: "head", nodes: [node("system", "H", "system", 1), node("tool", "Y1", "tool", 1)] },
     { title: "body", nodes: [node("person", "U1", "you", 1), node("reasoning", "X1", "thinking", 1)] },
@@ -160,7 +164,8 @@ test("sidebar's ordered prompt strip supports hover, click, grouping, and short 
   assert.match(text, /2 entries/);
   assert.match(text, /~2 tok/);
   assert.match(text, /system, tool/);
-  height = 14;
+  assert.equal(plain(lines.at(-1)).trim(), "", "compact layouts keep the bottom padding too");
+  height = 15;
   lines = sidebar.render(28);
   assert.ok(!plain(lines.join("\n")).includes("███"), "navigation takes priority on short screens");
   assert.ok(plain(lines.join("\n")).includes("transcript"));

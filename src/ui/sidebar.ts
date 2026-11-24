@@ -320,8 +320,9 @@ export class Sidebar implements Component {
     lines.push(fill(`     ${tokens.faint(archiveActive ? "^t back" : "^t swap")}`));
 
     // Leave the navigation untouched on short terminals. The map is one
-    // vertical strip; a row may cover multiple ordered prompt entries.
-    const mapHeight = Math.max(0, Math.floor(this.availableRows()) - lines.length - (compact ? 0 : 1));
+    // vertical strip; a row may cover multiple ordered prompt entries. Reserve
+    // a row below it as well as the optional gap above it.
+    const mapHeight = Math.max(0, Math.floor(this.availableRows()) - lines.length - (compact ? 0 : 1) - 1);
     this.mapCells = width >= 12 && mapHeight >= 3 ? contextCells(this.mapEntries, mapHeight) : [];
     if (this.mapCells.length > 0) {
       blank();
@@ -352,6 +353,7 @@ export class Sidebar implements Component {
         const hint = tooltip[row - tipStart] ?? "";
         lines.push(fill(`   ${cell.ink("███")}  ${tokens.muted(hint)}`));
       }
+      lines.push(fill(""));
     } else {
       this.mapStart = lines.length;
       this.hoveredRow = undefined;
