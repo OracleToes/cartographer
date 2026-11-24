@@ -433,9 +433,8 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         next = applyWrite(next, { kind: "delete", target: change.kind, id: change.id }, change.now);
         let archive = await readArchiveFrom(tx);
         if (change.action === "archive") {
-          // Stamped with the collapse that last ran, so the record waits out the
-          // same one collapse of grace a swept record does (§3.3): the next
-          // collapse keeps it, the one after that drops it.
+          // Stamped with the last collapse, so an item archived between
+          // collapses is dropped at the next one unless pinned or restored.
           const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
           const item: ArchivedItem = {
             id: `record:${change.kind}:${change.id}`,

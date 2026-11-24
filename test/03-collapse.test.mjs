@@ -217,7 +217,7 @@ test("a record marked for delete is deleted for real at the collapse and leaves 
   }
 });
 
-test("grace is one collapse: an item swept at a collapse survives the next one and is dropped by the one after", async () => {
+test("an unpinned item swept at a collapse is dropped at the next collapse", async () => {
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live005", 1_700_000_100);
@@ -229,14 +229,38 @@ test("grace is one collapse: an item swept at a collapse survives the next one a
     assert.deepEqual(first.archived, ["c1"]);
     assert.deepEqual(first.dropped, [], "nothing is dropped by the collapse that swept it");
 
+    assert.equal((await store.readArchive()).items.length, 1, "it remains available during the following period");
     const second = await collapse(root, store);
-    assert.deepEqual(second.dropped, [], "it lives through the collapse after the sweep");
-    assert.equal((await store.readArchive()).items.length, 1);
-
-    const third = await collapse(root, store);
-    assert.equal(third.dropped.length, 1, "the collapse after that drops it");
+    assert.equal(second.dropped.length, 1, "the next collapse drops the old item");
     assert.equal((await store.readArchive()).items.length, 0);
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("items archived between collapses expire at the next collapse, while new sweep items wait", async () => {
+  const root = tempRoot();
+  try {
+    const generation = "gen-20261116T020000Z-live0aa";
+    fakeGeneration(root, generation, 1_700_000_100);
+    const store = await openBrain(":memory:");
+    try {
+      const record = (id) => ({ id, author: "user", text: id, createdAt: at(1), updatedAt: at(1) });
+      await store.apply({ kind: "chat.record", record: record("immediate") }, at(1));
+      await store.applyRecordAction({ kind: "chat", id: "immediate", action: "archive", generation, now: at(2) });
+      await store.archiveEphemeral({ id: "ephemeral-now", layer: "ephemeral", ephemeral: { kind: "plainText", text: "archived now" } }, generation, at(2));
+      await store.apply({ kind: "chat.record", record: record("new-sweep") }, at(1));
+      await store.apply({ kind: "mark.set", target: "chat", id: "new-sweep", action: "archive", author: "user" }, at(2));
+      const report = await collapse(root, store);
+      assert.deepEqual(new Set(report.dropped), new Set(["record:chat:immediate", "ephemeral-now"]));
+      const remaining = (await store.readArchive()).items;
+      assert.deepEqual(remaining.map((item) => item.record?.value.id), ["new-sweep"], "the current collapse's sweep is not dropped immediately");
+      const next = await collapse(root, store);
+      assert.deepEqual(next.dropped, ["record:chat:new-sweep"]);
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -266,6 +290,27 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
     assert.equal(brain.ledger.length, 1);
     assert.equal(brain.ledger[0].text, "a note");
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an old pinned archive item expires on the first collapse after unpinning", async () => {
+  const root = tempRoot();
+  try {
+    const generation = "gen-20261116T020000Z-live0ab";
+    fakeGeneration(root, generation, 1_700_000_100);
+    const store = await openBrain(":memory:");
+    try {
+      await store.archiveEphemeral({ id: "pinned-old", layer: "ephemeral", ephemeral: { kind: "plainText", text: "kept" } }, generation, at(1));
+      await store.applyArchive({ kind: "pin", id: "pinned-old", pinned: "user" });
+      assert.deepEqual((await collapse(root, store)).dropped, []);
+      assert.deepEqual((await collapse(root, store)).dropped, []);
+      await store.applyArchive({ kind: "pin", id: "pinned-old", pinned: null });
+      assert.deepEqual((await collapse(root, store)).dropped, ["pinned-old"]);
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

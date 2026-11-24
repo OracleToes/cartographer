@@ -7,7 +7,7 @@
  *
  * - **fill**, occupied context in one colour;
  * - **prefilled** and **to prefill**, during a prompt read, each in its own
- *   colour, including cached tokens in the completed prefill.
+ *   colour over only the uncached tail. The cached prefix keeps the fill colour.
  *
  * Occupancy uses reported usage when available and estimates otherwise. The
  * progress comes from llama.cpp, never from a provider's headers. When a server
@@ -143,31 +143,35 @@ export class TokenBarView implements Component {
       : { full: "", compact: "", eta: "" };
     const rates = ` · P ${rate(prefillRate)} D ${rate(decodeRate)} tok/s`;
     const base = `${qualifier}${shown}`;
-    // Keep some bar on narrow terminals; show progress before speed if both
-    // will not fit. A missing value is shown as unknown, never zero progress.
-    const label = width >= visibleWidth(base + prefillText.full + rates) + 8 ? base + prefillText.full + rates
-      : width >= visibleWidth(base + prefillText.compact + rates) + 8 ? base + prefillText.compact + rates
-      : width >= visibleWidth(base + prefillText.full) + 8 ? base + prefillText.full
-      : width >= visibleWidth(base + prefillText.compact) + 8 ? base + prefillText.compact
+    // Reserve a stable label area based only on terminal width. Progress, ETA,
+    // and rates change length as they update; none may resize the token bar or
+    // move its cached prefix. On narrow terminals the label yields to the bar.
+    const labelWidth = Math.min(78, Math.max(0, Math.floor(width * 0.7)));
+    const label = visibleWidth(base + prefillText.full + rates) <= labelWidth ? base + prefillText.full + rates
+      : visibleWidth(base + prefillText.full) <= labelWidth ? base + prefillText.full
+      : visibleWidth(base + prefillText.compact + rates) <= labelWidth ? base + prefillText.compact + rates
+      : visibleWidth(base + prefillText.compact) <= labelWidth ? base + prefillText.compact
       : base;
-    const barWidth = Math.max(0, width - visibleWidth(label) - 1);
+    const barWidth = Math.max(0, width - labelWidth - 1);
     const ratio = unknown ? 0 : clamp01(used / window);
     const filled = Math.round(ratio * barWidth);
 
     const track = serverLost ? tokens.faint(TRACK) : tokens.rule(TRACK);
     const cells: string[] = new Array(barWidth).fill(track);
     // One colour for occupied context, regardless of its contents. A live
-    // prompt overlays it; the old fill remains visible outside that prompt.
+    // prompt overlays only its uncached tail; the rest stays as it was.
     for (let cell = 0; cell < filled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.fill)(FULL);
     if (prefillActive && prefillTotal !== undefined && prefillTotal > 0 && prefilledTokens !== undefined) {
       // Without a window, show progress against the prompt's own length.
       const denom = unknown ? prefillTotal : window;
       const scale = (n: number) => Math.min(barWidth, Math.max(0, Math.round(n / denom * barWidth)));
-      const prefilled = scale(Math.min(prefilledTokens, prefillTotal));
+      const cached = scale(Math.min(prefillCached ?? 0, prefillTotal));
+      const prefilled = Math.max(cached, scale(Math.min(prefilledTokens, prefillTotal)));
       const total = scale(prefillTotal);
-      // Processed includes the cached prefix. All completed prefill has the
-      // same colour, whether reused or newly evaluated and wherever it falls.
-      for (let cell = 0; cell < prefilled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.prefilled)(PREFILL);
+      // The reported cached prefix is already occupied, even when the previous
+      // usage is unavailable. It is never painted as prefill progress.
+      for (let cell = 0; cell < cached; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.fill)(FULL);
+      for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.prefilled)(PREFILL);
       for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.pending)(PREFILL);
     }
 

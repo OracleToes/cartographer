@@ -870,7 +870,8 @@ test("the context bar draws live prefill progress even when the window is unknow
   assert.match(line, /window unknown/);
   assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
   const barWidth = line.indexOf(" ");
-  assert.equal(styled.split(barTokens.prefilled("▓")).length - 1, Math.round(barWidth * 0.6), "completed includes the cached prefix");
+  assert.equal(styled.split(barTokens.fill("█")).length - 1, Math.round(barWidth * 0.2), "the cached prefix uses the normal fill color");
+  assert.equal(styled.split(barTokens.prefilled("▓")).length - 1, Math.round(barWidth * 0.6) - Math.round(barWidth * 0.2), "only newly processed tokens are colored as prefill");
   assert.equal(styled.split(barTokens.pending("▓")).length - 1, barWidth - Math.round(barWidth * 0.6));
 });
 
@@ -888,15 +889,59 @@ test("the context bar colors occupancy and prefill by status, not content type",
   const reading = bar.render(120)[0];
   const width = plain(reading).indexOf(" ");
   const count = (style, glyph) => reading.split(style(glyph)).length - 1;
-  assert.equal(count(barTokens.prefilled, "▓"), Math.round(width * 0.2), "all processed tokens, including cache, use one color");
+  assert.equal(count(barTokens.prefilled, "▓"), Math.round(width * 0.2) - Math.round(width * 0.1), "only the uncached processed tail changes color");
   assert.equal(count(barTokens.pending, "▓"), Math.round(width * 0.6) - Math.round(width * 0.2));
-  assert.equal(count(barTokens.fill, "█"), Math.round(width * 0.8) - Math.round(width * 0.6), "prior fill remains beyond the overlay");
+  assert.equal(count(barTokens.fill, "█"), Math.round(width * 0.1) + Math.round(width * 0.8) - Math.round(width * 0.6), "the cache and prior fill beyond the prompt keep their color");
   assert.equal(visibleWidth(reading), 120);
 
   session.prefillActive = false;
   assert.ok(bar.render(120)[0].includes(barTokens.fill("█")), "fill returns when prefill ends");
   session.serverLost = true;
   assert.ok(bar.render(120)[0].includes(tokens.faint("█")), "lost server figures are faint");
+});
+
+test("prefill changes only the uncached tail without resizing or moving the rest of the bar", () => {
+  const session = { contextWindow: 10_000, lastReportedInput: 8_000, requestActive: true };
+  const bar = new TokenBarView({ session: { state: session }, parts: { system: 0, transcript: 0, toolWork: 0 } });
+  const cells = (line) => plain(line
+    .replaceAll(barTokens.fill("█"), "F")
+    .replaceAll(barTokens.prefilled("▓"), "C")
+    .replaceAll(barTokens.pending("▓"), "P")).match(/^[FCP░]*/)[0];
+  for (const width of [60, 100, 130]) {
+    session.prefillActive = false;
+    const idle = cells(bar.render(width)[0]);
+    Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefillCached: 1_000, prefilledTokens: 1_000, prefillRate: 10 });
+    const start = cells(bar.render(width)[0]);
+    const cached = Math.round(idle.length * 0.1);
+    const total = Math.round(idle.length * 0.6);
+    assert.equal(start.length, idle.length, "prefill status cannot change the bar width");
+    assert.equal(start.slice(0, cached), idle.slice(0, cached), "the cached prefix is unchanged");
+    assert.equal(start.slice(total), idle.slice(total), "everything beyond the prompt is unchanged");
+    assert.equal(start.slice(cached, total), "P".repeat(total - cached));
+    session.prefilledTokens = 4_000;
+    session.prefillRate = 1000;
+    const during = cells(bar.render(width)[0]);
+    const processed = Math.round(idle.length * 0.4);
+    assert.equal(during.length, idle.length, "changing counts, ETA and rate never shifts the bar");
+    assert.equal(during.slice(0, cached), idle.slice(0, cached));
+    assert.equal(during.slice(cached, processed), "C".repeat(processed - cached));
+    assert.equal(during.slice(processed, total), "P".repeat(total - processed));
+    assert.equal(during.slice(total), idle.slice(total));
+    session.prefilledTokens = 6_000;
+    const done = cells(bar.render(width)[0]);
+    assert.equal(done.slice(0, cached), idle.slice(0, cached));
+    assert.equal(done.slice(cached, total), "C".repeat(total - cached));
+    assert.equal(done.slice(total), idle.slice(total));
+    session.prefillTotal = undefined;
+    assert.equal(cells(bar.render(width)[0]), idle, "unknown progress does not invent an overlay");
+    Object.assign(session, { prefillTotal: 6_000, prefillCached: 6_000, prefilledTokens: 6_000 });
+    const allCached = cells(bar.render(width)[0]);
+    assert.equal(allCached, idle, "an entirely cached prompt does not recolor anything");
+    Object.assign(session, { prefillCached: 0, prefilledTokens: 0 });
+    const uncached = cells(bar.render(width)[0]);
+    assert.equal(uncached.slice(0, total), "P".repeat(total), "a fully invalidated prompt starts prefill at the beginning");
+    assert.equal(uncached.slice(total), idle.slice(total));
+  }
 });
 
 test("the context bar highlights only live prefill ETA and the current phase's speed", () => {

@@ -209,8 +209,9 @@ everything a collapse sweeps and for ephemeral entries the person archives
 immediately (§4.1).
 
 - It holds swept ephemeral items and Brain records marked for archive.
-- It grants one collapse of grace. An unpinned item in the archive is deleted
-  for good at the following collapse.
+- It holds unpinned items for one collapse period. An item archived during a
+  collapse or between collapses is deleted for good at the next collapse, unless
+  it is pinned or restored.
 - A pinned item in the archive remains until it is unpinned or restored.
 
 Restoring puts an entry back where it came from, as its original type: a Brain
@@ -887,12 +888,13 @@ It shows three quantities, each in its own colour:
 
 - **Fill** — how much of the context is occupied, in one colour regardless of
   content type. It is restored from the session's last measured response after
-  reopening. During a prompt read, the prefill status overlays this fill, which
-  remains visible beyond the prompt's extent.
-- **Prefilled** — during a prompt read, how much has been read so far, including
-  the reused prefix, in a second colour.
-- **To prefill** — during a prompt read, how much is still to read, in a third
-  colour. With an unknown context window, the progress bar scales to the prompt.
+  reopening. During a prompt read, the cached prefix keeps its position and fill
+  colour, as does the prior fill beyond the prompt's extent.
+- **Prefilled** — during a prompt read, the newly processed part of the uncached
+  tail is shown in a second colour; the cached prefix is not recoloured.
+- **To prefill** — the remainder of that tail is shown in a third colour. With
+  an unknown context window, the progress bar scales to the prompt. The bar's
+  width does not change as progress labels, speeds or ETA change.
 
 The bar also shows prefill and decode speeds in tokens per second. During an
 active prompt read, the prefill speed and remaining-time estimate are highlighted;
