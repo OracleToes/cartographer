@@ -1,6 +1,8 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -134,6 +136,59 @@ test("reopening an existing generation store with a changed model updates pi.age
   } finally {
     await closeLiveSession(second);
     await cleanup();
+  }
+});
+
+test("config model on restart is the model sent over HTTP, not the old generation's model", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carto-model-config-"));
+  const root = mkdtempSync(join(tmpdir(), "carto-model-project-"));
+  const requests = [];
+  const propsRequests = [];
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "Swift" }, { id: "DaisyRose" }] }));
+    } else if (req.method === "GET" && req.url?.startsWith("/props")) {
+      propsRequests.push(req.url);
+      res.writeHead(409);
+      res.end();
+    } else if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      let raw = "";
+      req.on("data", (part) => { raw += part; });
+      req.on("end", () => {
+        requests.push(JSON.parse(raw));
+        const frame = (delta, finish) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(frame({ role: "assistant", tool_calls: [{ index: 0, id: `sleep-${requests.length}`, type: "function", function: { name: "sleep", arguments: "{}" } }] }, null));
+        res.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+      });
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+  const run = () => new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, ["bin/carto.mjs", "--headless", "--root", root], {
+      cwd: process.cwd(), env: { ...process.env, CARTO_HOME: home }, encoding: "utf8",
+    }, (error, stdout, stderr) => error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(stdout));
+    child.stdin.end("hello\n");
+  });
+  try {
+    await saveGlobalConfig({ version: 1, model: "llama-swap/Swift", llamaSwapEndpoint: endpoint }, home);
+    assert.match(await run(), /llama-swap\/Swift/);
+    await saveGlobalConfig({ version: 1, model: "llama-swap/DaisyRose", llamaSwapEndpoint: endpoint }, home);
+    assert.match(await run(), /llama-swap\/DaisyRose/);
+    assert.deepEqual(requests.map((request) => request.model), ["Swift", "DaisyRose"], "the actual HTTP model follows the config after reopening the same project");
+    assert.ok(propsRequests.includes("/props?model=Swift&autoload=false"));
+    assert.ok(propsRequests.includes("/props?model=DaisyRose&autoload=false"));
+    assert.ok(propsRequests.every((url) => url.includes("autoload=false")), "window discovery never requests another model to load");
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

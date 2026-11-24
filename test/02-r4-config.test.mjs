@@ -381,7 +381,7 @@ test("bare llama-server (GGUF filename id) and /props fallback populate the conf
       response.end(JSON.stringify({ data: [{ id: "ByteShape" }] }));
       return;
     }
-    if (request.method === "GET" && request.url === "/props") {
+    if (request.method === "GET" && request.url === "/props?model=ByteShape&autoload=false") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ default_generation_settings: { n_ctx: 49_152 } }));
       return;
@@ -401,6 +401,27 @@ test("bare llama-server (GGUF filename id) and /props fallback populate the conf
   } finally {
     await new Promise((resolveClose) => propsServer.close(resolveClose));
   }
+});
+
+test("capacity discovery addresses the active model without asking llama-swap to load it", async () => {
+  let active = "org/Swift";
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(url);
+    if (url.endsWith("/v1/models")) return { ok: true, async json() { return { data: [{ id: "org/Swift" }, { id: "DaisyRose" }] }; } };
+    return { ok: false, status: 409, async json() { return {}; } };
+  };
+  const models = configuredModels(
+    { version: 1, model: "llama-swap/org/Swift", llamaSwapEndpoint: "http://localhost:8888/v1" },
+    { provider: "llama-swap", modelId: active },
+    { fetchImpl, activeModelId: () => active },
+  );
+  await models.refresh({ providers: ["llama-swap"], force: true });
+  active = "DaisyRose";
+  await models.refresh({ providers: ["llama-swap"], force: true });
+  const props = urls.filter((url) => new URL(url).pathname === "/props").map((url) => new URL(url).searchParams);
+  assert.deepEqual(props.map((query) => [query.get("model"), query.get("autoload")]), [["org/Swift", "false"], ["DaisyRose", "false"]]);
+  assert.equal(models.getModel("llama-swap", "DaisyRose").contextWindow, 0, "a cold model's capacity remains unknown");
 });
 
 test("cold llama-swap discovers the context window mid-first-run as soon as the model responds", async () => {
