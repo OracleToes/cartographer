@@ -67,8 +67,7 @@ export interface ArchivedItem {
   sweptAtGeneration: string;
   /**
    * Which collapse swept this item in, counted from the first. Grace is counted
-   * from it: an item swept by collapse N is dropped by collapse N+2, and
-   * survives N+1.
+   * from it: an item swept by collapse N is dropped by collapse N+1.
    */
   sweptAtCollapse: number;
   /** Who placed the pin, if any (§3.2). A pinned item is never dropped. */

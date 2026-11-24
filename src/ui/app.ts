@@ -471,13 +471,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
   };
   const archiveScroll = new PaneScrollView(archiveView, { primary: false, overscroll: "contain" });
+  archiveView.onFocus = () => tui.setFocus(archiveView);
+  archiveView.onReveal = (line) => {
+    const height = archiveScroll.viewportHeight;
+    if (height <= 0) return;
+    const top = archiveScroll.scrollTop;
+    if (line < top + 1) archiveScroll.scrollTo(Math.max(0, line - 1));
+    else if (line >= top + height - 1) archiveScroll.scrollTo(Math.max(0, line - height + 2));
+  };
 
   sidebar.onSelect = (book) => void switchToView(book);
   sidebar.onToggleLayer = (layer) => void switchLayer(layer);
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
-    const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
+    const archive = await brain.readArchiveCounts().catch(() => ({ total: 0, pinned: 0 }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
     const jobSummaries = summarizeJobs(jobs);
     sidebar.setCounts(
@@ -485,10 +493,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         brainState,
         options.root,
         contextTokens,
-        {
-          total: archive.items.length,
-          pinned: archive.items.filter((item) => item.pinned !== undefined).length,
-        },
+        archive,
         // The same anchor and depth the `tree` tool last set: the sidebar counts
         // what the view shows, not a second tree of its own.
         state.session.state.tree,
@@ -806,8 +811,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * and no handle that names an archived item: the agent does not know the
    * archive exists.
    */
+  // Serialize the person's actions, including the two presses of delete. A
+  // fast second press must not race the mark or an older refresh.
+  let archiveActionQueue: Promise<void> = Promise.resolve();
+  const queueArchiveAction = (action: () => Promise<void>) => {
+    archiveActionQueue = archiveActionQueue.then(action).catch((error: unknown) => {
+      pushStatus(`archive action failed: ${errorText(error)}`);
+      tui.requestRender();
+    });
+  };
   archiveView.onTogglePin = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const archive = await brain.readArchive();
       const item = archive.items.find((candidate) => candidate.id === id);
       if (item === undefined) return;
@@ -815,11 +829,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus(`${item.pinned === undefined ? "pinned" : "unpinned"} an archived item`);
       await refreshArchive();
       await refreshSidebar();
-    })();
+    });
   };
   /** Mark one archived item for restore, applied by the next collapse (§4.1). */
   archiveView.onRestore = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
       pushStatus(
         result.refused
@@ -828,7 +842,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
   /**
    * Apply an archive mark now (§4.1).
@@ -839,8 +853,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * status line says so rather than pretending the head was untouched.
    */
   archiveView.onApplyNow = (id, action) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       if (action === "delete") {
+        const marked = (await brain.readArchive()).items.find((item) => item.id === id);
+        if (marked?.mark?.action !== "delete" || marked.mark.author !== "user") {
+          pushStatus("delete was not marked; the item remains in the archive");
+          return;
+        }
         await brain.applyArchive({ kind: "drop", id });
         pushStatus("an archived item is deleted for good");
         await refreshArchive();
@@ -869,20 +888,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
       if (state.view === "context") await syncContextView(await brain.read());
       tui.requestRender();
-    })();
+    });
   };
   /** Withdraw the mark on an archived item: the item stays where it is (§4.1). */
   archiveView.onWithdrawMark = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: null, author: "user" });
       pushStatus(result.refused ? "that mark is the agent's, and it stays until the agent withdraws it" : "mark withdrawn");
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
   /** Mark one archived item for delete; the next collapse is what deletes it (§4.1). */
   archiveView.onDelete = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: "delete", author: "user" });
       pushStatus(
         result.refused
@@ -891,7 +910,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
 
   // Block selection in the transcript acts through the Context view's own
@@ -2236,7 +2255,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // order, and the footer shows the first ones that fit.
   const inChat = () => state.layer === "context" && state.view === "chat";
   const inView = (view: ViewMode) => state.layer === "context" && state.view === view;
-  const onArchive = () => state.layer === "archive";
+  const onArchive = () => state.layer === "archive" && !archiveView.isFiltering();
   /** The book the person is in, when it is Atlas or Ledger. */
   const bookOf = () => (state.view === "atlas" ? atlasView : state.view === "ledger" ? ledgerView : undefined);
   /** A book is open and not taking a `/` filter, so its command keys are commands. */
@@ -2607,6 +2626,33 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // What the person can do on the archive layer, named where every other act
     // is named: the footer, `f1` and the palette all read this list.
     {
+      id: "archive-filter",
+      group: "the archive",
+      label: "filter the archive",
+      hint: "search content and metadata; enter or escape ends editing",
+      key: "/",
+      run: () => { archiveView.handleInput("/"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
+      id: "archive-detail",
+      group: "the archive",
+      label: "open or close full item",
+      hint: "scroll to read the complete content and stored fields",
+      key: "enter",
+      run: () => { archiveView.handleInput("\r"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
+      id: "archive-now",
+      group: "the archive",
+      label: "apply restore now",
+      hint: "then r; deleting now always takes two d presses",
+      key: "!",
+      run: () => { archiveView.handleInput("!"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
       id: "archive-pin",
       group: "the archive",
       label: "pin or unpin the item",
@@ -2615,10 +2661,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // are declared here so the footer, `f1` and the palette name them (§3.3:
       // the same UI, so the same list).
       key: "p",
-      run: () => {
-        const item = archiveView.selectedItem();
-        if (item !== undefined) archiveView.onTogglePin?.(item.id);
-      },
+      run: () => archiveView.pinSelected(),
       available: onArchive,
     },
     {
@@ -2628,7 +2671,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "at the next collapse; `!r` restores it now",
       key: "r",
       run: () => {
-        if (archiveView.restoreSelected() === "applied") pushStatus("restored now, not at the next collapse");
+        archiveView.restoreSelected();
         tui.requestRender();
       },
       available: onArchive,

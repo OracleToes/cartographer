@@ -56,6 +56,8 @@ export interface BrainStore {
   apply(write: BrainWrite, now: number): Promise<CartoBrain>;
   /** The archive as it stands. The agent never sees it (§3.3). */
   readArchive(): Promise<Archive>;
+  /** Sidebar counts without loading or parsing archived content. */
+  readArchiveCounts(): Promise<{ total: number; pinned: number }>;
   /** Durable cross-store collapse intent and commit status, if cleanup is pending. */
   readCollapseJournal(): Promise<CollapseJournal | undefined>;
   /** Reserve a transition before creating the next generation's files. */
@@ -249,6 +251,10 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     return { version: 1, items };
   };
 
+  const writeArchiveItem = async (source: SqliteExecutor, item: ArchivedItem): Promise<void> => {
+    await source.run(ARCHIVE_INSERT, item.id, item.sweptAtCollapse, item.sweptAtGeneration, item.pinned ?? null, JSON.stringify(item));
+  };
+
   /** Write the archive's rows to match a value: insert or update what is there, delete what is not. */
   const writeArchiveRows = async (source: SqliteExecutor, archive: Archive): Promise<void> => {
     const existing = await source.all<{ id: string }>("SELECT id FROM archive_item");
@@ -299,6 +305,12 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       }),
 
     readArchive: () => readArchiveFrom(database),
+    readArchiveCounts: async () => {
+      const row = await database.get<{ total: number; pinned: number }>(
+        "SELECT COUNT(*) AS total, COUNT(pinned) AS pinned FROM archive_item",
+      );
+      return { total: row?.total ?? 0, pinned: row?.pinned ?? 0 };
+    },
 
     readChat: async () => {
       // Both places a Chat record can be: the Brain, and the archive —
@@ -370,7 +382,8 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         const now = Date.now();
         if (write.kind === "pin") {
           const next = setArchivePin(current, write.id, write.pinned);
-          await writeArchiveRows(tx, next);
+          const changed = next.items.find((item) => item.id === write.id);
+          if (changed !== undefined) await writeArchiveItem(tx, changed);
           return { archive: next, refused: false };
         }
         if (write.kind === "mark") {
@@ -387,7 +400,8 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
               return rest;
             }),
           };
-          await writeArchiveRows(tx, archive);
+          const changed = archive.items.find((item) => item.id === write.id);
+          if (changed !== undefined) await writeArchiveItem(tx, changed);
           return { archive, refused: false };
         }
         const item = current.items.find((candidate) => candidate.id === write.id);
@@ -406,7 +420,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           const brain = applyWrite(await readFrom(tx), back, now);
           await tx.run(UPSERT, JSON.stringify(brain));
         }
-        await writeArchiveRows(tx, archive);
+        await tx.run(ARCHIVE_DELETE, item.id);
         return { archive, item, refused: false };
       }),
 
@@ -417,7 +431,8 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         // Retrying after interruption must not reset its grace or overwrite a pin.
         if (current.items.some((candidate) => candidate.id === item.id)) return;
         const counter = await tx.get<{ collapses: number }>("SELECT collapses FROM archive_counter WHERE id = 1");
-        await writeArchiveRows(tx, sweep(current, generation, counter?.collapses ?? 0, now, [item]));
+        const added = sweep(emptyArchive(), generation, counter?.collapses ?? 0, now, [item]).items[0];
+        if (added !== undefined) await writeArchiveItem(tx, added);
       }),
 
     applyRecordAction: (change) =>

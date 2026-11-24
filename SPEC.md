@@ -230,6 +230,11 @@ context layer and the archive layer, and the person then works the UI as they
 would anywhere else: pin, unpin, and restore from there. There is no separate
 recovery screen and no mode of its own. The archive is the same UI over a
 different layer, which is why a pin means the same thing on both (§3.2).
+The person can filter the archive, navigate or click its items, and open the
+complete stored item, including its original content and metadata. The list
+shows a bounded page around the selection rather than drawing the entire
+archive on every frame. `r` marks a restore, `!r` restores now, `d` marks a
+delete and a second `d` deletes now; `u` withdraws a mark.
 
 ### 3.4 Deleted text is really gone
 

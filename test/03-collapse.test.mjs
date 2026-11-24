@@ -276,7 +276,9 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
     await collapse(root, store);
     const item = (await store.readArchive()).items[0];
     assert.ok(item !== undefined);
+    assert.deepEqual(await store.readArchiveCounts(), { total: 1, pinned: 0 });
     await store.applyArchive({ kind: "pin", id: item.id, pinned: "user" });
+    assert.deepEqual(await store.readArchiveCounts(), { total: 1, pinned: 1 });
 
     await collapse(root, store);
     await collapse(root, store);

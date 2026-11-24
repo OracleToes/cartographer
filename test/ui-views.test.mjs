@@ -1214,6 +1214,51 @@ test("the archive's u withdraws the mark on the selected item, and refuses when 
   assert.deepEqual(withdrawn, ["1", "1"], "u withdraws the selected item's mark");
 });
 
+test("archive filtering, bounded pages, full content and selection survive refresh", () => {
+  const view = new ArchiveView();
+  const items = Array.from({ length: 85 }, (_, i) => ({
+    id: `item-${i}`, layer: "ephemeral", ephemeral: { kind: "toolResult", text: `result ${i} ${"long ".repeat(80)}needle-${i}`, data: { path: `file-${i}` } },
+    sweptAtGeneration: "gen", sweptAtCollapse: 1, sweptAt: i,
+  }));
+  view.setData({ version: 1, items });
+  const initial = plain(view.render(80).join("\n"));
+  assert.match(initial, /items 1–20 of 85/);
+  assert.ok(view.render(80).length < 100, "the list is bounded, not proportional to the archive");
+  view.handleInput("G");
+  assert.equal(view.selectedItem().id, "item-0");
+  assert.match(plain(view.render(80).join("\n")), /items 81–85 of 85/);
+  view.setData({ version: 1, items: [...items, { ...items[0], id: "new", sweptAt: 100 }] });
+  assert.equal(view.selectedItem().id, "item-0", "refresh keeps the item, not the old index");
+  view.handleInput("\r");
+  const detail = plain(view.render(80).join("\n"));
+  assert.match(detail, /needle-0/);
+  assert.match(detail, /file-0/, "the full stored payload is accessible");
+  view.handleInput("/");
+  for (const char of "needle-42") view.handleInput(char);
+  assert.equal(view.isFiltering(), true);
+  view.handleInput("\r");
+  assert.equal(view.selectedItem().id, "item-42");
+  assert.equal(view.isFiltering(), false);
+  assert.match(plain(view.render(80).join("\n")), /filter: needle-42/);
+});
+
+test("archive mouse selection and delete confirmation are cancelled by other actions", () => {
+  const view = new ArchiveView();
+  view.setData({ version: 1, items: ["one", "two"].map((id, i) => ({ id, layer: "ephemeral", ephemeral: { kind: "plainText", text: id }, sweptAtGeneration: "g", sweptAtCollapse: 0, sweptAt: 2 - i })) });
+  const frame = view.render(80).map(plain);
+  const secondRow = frame.findIndex((line) => line.includes("two"));
+  view.handleMouse({ type: "click", button: "left", x: 2, y: secondRow, screenX: 2, screenY: secondRow, width: 80, height: 20, shift: false, alt: false, ctrl: false });
+  assert.equal(view.selectedItem().id, "two");
+  const applied = [];
+  view.onApplyNow = (id, action) => applied.push([id, action]);
+  view.deleteSelected();
+  view.restoreSelected();
+  assert.equal(view.deleteSelected(), "marked", "restore cancels the delete confirmation");
+  view.handleInput("!");
+  assert.equal(view.deleteSelected(), "marked", "! does not bypass delete confirmation");
+  assert.deepEqual(applied, []);
+});
+
 test("the archive keeps a restored item's type and the author of its pin", () => {
   const frame = plain(previewArchive(110));
   assert.ok(frame.includes("you"), "a pin says who placed it");
