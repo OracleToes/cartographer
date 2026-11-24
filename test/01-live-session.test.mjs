@@ -1,6 +1,6 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -458,6 +458,41 @@ test("apply-now removes only the selected work row from the prompt, view and lat
     assert.ok(sweptText.includes("keep this text"));
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("the head stays byte-identical across Brain writes and a projection read failure", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "first note" }, { id: "call-head-1" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-head-2" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "second note" }, { id: "call-head-3" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-head-4" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
+  // The head as pi carries it: every system entry's sections and tool set.
+  const headOf = (messages) => JSON.stringify(
+    messages.filter((message) => message.role === "system").map((message) => ({ sections: message.sections, tools: message.toolsAdded })),
+  );
+  try {
+    const first = await submitInput(session, "first turn");
+    await first.wait(BACKGROUND_CONTEXT);
+    const head = headOf(captured[0]);
+    assert.ok(head.includes("carto-context"), "the first request carried the frozen projection");
+
+    // The projection file goes away: the next read must keep the shown bytes,
+    // not re-project the Brain (which the agent has since written to).
+    const markdown = generationPaths(root, session.generation).markdown;
+    chmodSync(markdown, 0o644);
+    rmSync(markdown);
+
+    const second = await submitInput(session, "second turn");
+    await second.wait(BACKGROUND_CONTEXT);
+    assert.equal(headOf(captured.at(-1)), head, "the head is byte-identical across Brain writes and a projection read failure");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });

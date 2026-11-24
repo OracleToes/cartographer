@@ -32,7 +32,6 @@ import {
   type MarkLine,
   type StateBlockInput,
 } from "../domain/state-block.js";
-import { projectContext } from "../domain/projection.js";
 import { projectTreeBlock } from "./project-tree.js";
 import { lexicalProjectPath } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
@@ -470,10 +469,17 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        * The frozen projection for this generation: written once at creation,
        * read verbatim ever since, so the prompt prefix stays byte-stable
        * between collapses. A crash reopens the identical bytes.
+       *
+       * No fallback when the read fails. A live re-projection from the Brain
+       * would drift as the agent writes, breaking the head from a transient
+       * error; instead the read throws and pi keeps the section's shown text,
+       * so the head stays byte-identical. The file is sealed read-only and
+       * written atomically, so a failure here is a real problem, not a state
+       * to paper over by changing the prompt.
        */
       section(
         "carto-context",
-        async () => readFile(options.markdownPath, "utf8").catch(async () => projectContext(await options.brain.read(), new Map(), options.session.person).text),
+        async () => readFile(options.markdownPath, "utf8"),
         { tag: false },
       ),
     ],
