@@ -63,12 +63,9 @@ export interface BrainStore {
   /** Serialize filesystem recovery with other journal writers, clearing only after success. */
   recoverCollapseJournal(recover: (journal: CollapseJournal) => Promise<void>): Promise<void>;
   /**
-   * Every Chat record that still exists anywhere, the person's and the
-   * agent's — in the Brain, or in the archive because a collapse swept it out.
-   * A Chat record does not leave the agent's context when a collapse rebuilds
-   * it, and the transcript is where the person reads the conversation, so it
-   * stays on screen; this is how the transcript finds it after the store it
-   * was written in is gone.
+   * Every Chat record that still exists anywhere, in the Brain or the archive.
+   * This is a storage query, not the agent's context: archived Chat must not be
+   * used to populate the live transcript.
    */
   readChat(): Promise<ChatRecord[]>;
   /**

@@ -7,7 +7,8 @@ import { TokenBarView } from "../dist/ui/context-bar.js";
 import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
 import { Registry } from "../dist/ui/commands.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
-import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
+import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, orderTranscript } from "../dist/ui/transcript.js";
+import { projectContext } from "../dist/domain/projection.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
@@ -116,38 +117,75 @@ test("Sidebar mouse click switches view", () => {
   assert.equal(selected, "context");
 });
 
-test("collapse retains dialogue and pinned work, without swept halves or duplicate Chat", () => {
-  const entries = [
-    { kind: "person", text: "hello", handle: "U1" },
-    { kind: "agent", text: "hi", recordId: "chat-1", handle: "C1" },
-    { kind: "reasoning", id: "think", sourceId: "think-id", text: "swept thought" },
-    { kind: "output", id: "out", sourceId: "out-id", text: "kept output" },
-    { kind: "tool", id: "tool-result-pin", sourceId: "call1", resultId: "result1", name: "read", args: "swept arguments", output: "old result" },
-    { kind: "tool", id: "tool-call-pin", sourceId: "call2", resultId: "result2", name: "bash", args: "kept arguments", output: "swept result", failed: true },
-    { kind: "status", text: "stopped: toolUse" },
-    { kind: "agent", text: "hi", recordId: "chat-1" },
-    { kind: "person", text: "hello", handle: "U2" },
+test("the transcript follows the frozen head and its actions target the same items as context", () => {
+  let brain = emptyBrain();
+  const record = (id, author, text, time) => ({ id, author, text, createdAt: time, updatedAt: time });
+  brain = applyWrite(brain, { kind: "chat.record", record: record("person-1", "user", "same words", 1) }, 1);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("person-2", "user", "same words", 2) }, 2);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("agent-1", "agent", "frozen answer", 3) }, 3);
+  brain = applyWrite(brain, { kind: "ephemeral.pin", item: { id: "kept-result", kind: "readResult", text: "frozen file", entity: { callId: "r", tool: "read", path: "x" }, createdAt: 4, pinned: "user" } }, 4);
+  const projection = projectContext(brain, new Map(), "OracleToes");
+  const frozenItems = new Map(projection.ephemeralItems.map(({ handle, item }) => [handle, item]));
+  // Later Brain changes do not rewrite the head. An unrelated non-head record
+  // must not be invented as history, and an unpinned head item is still visible.
+  brain = applyWrite(brain, { kind: "chat.update", id: "agent-1", text: "new Brain text", updatedAt: 5 }, 5);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("not-in-head", "agent", "not in model context", 6) }, 6);
+  brain = applyWrite(brain, { kind: "ephemeral.unpin", id: "kept-result" }, 7);
+  const head = frozenTranscript(projection.text, brain, projection.chatIds, frozenItems, "OracleToes");
+  const body = [
+    { key: 9, entry: { kind: "output", id: "work", sourceId: "g:9:x0", text: "new work" } },
+    { key: 3, entry: { kind: "person", text: "live line", recordId: "live-chat" } },
   ];
-  const pins = [
-    { id: "out-id", kind: "plainText", text: "kept output", pinned: "user", createdAt: 1 },
-    { id: "result1", kind: "readResult", text: "refreshed result", pinned: "user", createdAt: 1 },
-    { id: "call2", kind: "toolCall", text: "kept arguments", pinned: "agent", createdAt: 1 },
-  ];
-  const first = retainAfterCollapse(entries, pins);
-  assert.deepEqual(first.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello"], "identical person messages are distinct");
-  assert.equal(first.filter((entry) => entry.kind === "agent").length, 1, "the same Chat record is kept only once");
-  assert.equal(first[0].handle, undefined, "old generation U handles are not reused");
-  const view = new TranscriptView();
-  view.setEntries(first);
-  const text = view.toPlainText();
-  assert.match(text, /kept output/);
-  assert.match(text, /refreshed result/);
-  assert.match(text, /kept arguments/);
-  assert.doesNotMatch(text, /swept thought|swept arguments|swept result|stopped: toolUse/);
-  const second = retainAfterCollapse([...first, { kind: "agent", text: "hi", recordId: "chat-1" }, { kind: "person", text: "next" }], [pins[0]]);
-  assert.equal(second.filter((entry) => entry.kind === "agent").length, 1);
-  assert.equal(second.filter((entry) => entry.kind === "tool").length, 0, "unpinned work disappears on the next collapse");
-  assert.deepEqual(second.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello", "next"]);
+  const ordered = orderTranscript(head, body);
+  assert.deepEqual(ordered.map((entry) => entry.kind), ["person", "person", "agent", "tool", "person", "output"]);
+  assert.deepEqual(ordered.slice(0, 3).map((entry) => entry.recordId), ["person-1", "person-2", "agent-1"]);
+  assert.equal(ordered[2].text, "frozen answer");
+  assert.equal(ordered[3].output, "frozen file");
+  assert.ok(!JSON.stringify(ordered).includes("not in model context"));
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id, now) => actions.push([part, id, now]);
+  transcript.onTogglePin = (part, id) => actions.push(["pin", part, id]);
+  transcript.setEntries(ordered);
+  transcript.render(100);
+  assert.ok(transcript.startSelecting());
+  transcript.handleInput("g");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.pinSelected();
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [
+    ["chat", "person-1", false], ["chat", "person-2", false], ["chat", "agent-1", false],
+    ["pin", "ephemera", "kept-result"], ["ephemera", "kept-result", false],
+  ]);
+  const context = new ContextView();
+  context.setData({ brain, projectionText: projection.text, headEphemera: frozenItems, systemPrompt: "", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "" });
+  const contextText = plain(context.render(100).join("\n"));
+  assert.ok(contextText.indexOf("C1") < contextText.indexOf("C2") && contextText.indexOf("C2") < contextText.indexOf("C3") && contextText.indexOf("C3") < contextText.indexOf("X1"));
+  assert.match(context.nodeFor("ephemera", "kept-result")?.body ?? "", /frozen file/, "an unpinned head item remains actionable in context");
+  // If a Brain record has disappeared without a head rewrite, its frozen text
+  // is still in the prompt but must never act on another record.
+  brain = applyWrite(brain, { kind: "delete", target: "chat", id: "person-1" }, 8);
+  const stale = frozenTranscript(projection.text, brain, projection.chatIds, frozenItems, "OracleToes");
+  assert.equal(stale[0].text, "same words");
+  assert.equal(stale[0].recordId, undefined);
+  assert.equal(stale[1].recordId, "person-2");
+});
+
+test("a live person entry without a Chat record targets its prompt identity", () => {
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id, now) => actions.push([part, id, now]);
+  transcript.onTogglePin = (part, id) => actions.push(["pin", part, id]);
+  transcript.setEntries([{ kind: "person", handle: "U1", text: "carried line", sourceId: "generation:1:x0" }]);
+  assert.ok(transcript.startSelecting());
+  transcript.pinSelected();
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [["pin", "tool-work", "generation:1:x0"], ["tool-work", "generation:1:x0", false]]);
 });
 
 test("notifications flash transiently instead of accumulating in the transcript", () => {
@@ -1733,20 +1771,6 @@ test("the system message is the instructions first and the frozen projection sec
   assert.equal(first, cartoInstructions("OracleToes"));
 });
 
-test("Chat the head holds is drawn before the generation's work, whatever the entries' times say", () => {
-  // A reloaded generation: its entries are all newer than the Chat the head holds,
-  // and two of them (a system entry, a result) carry no time of their own.
-  const frame = [{ id: 1, t: 0 }, { id: 2, t: 5_000 }, { id: 3, t: 6_000 }, { id: 9, t: 0 }];
-  const head = ["c-first", "c-second"];
-  const first = chatKeyOf({ id: "c-first", createdAt: 1_000 }, head, frame);
-  const second = chatKeyOf({ id: "c-second", createdAt: 2_000 }, head, frame);
-  assert.ok(first < second, "in the head's own order");
-  for (const entryId of [1, 2, 3, 9]) assert.ok(second < entryId, `before entry ${entryId}`);
-  // Not in the head: after the last entry written before it. An entry with no time anchors nothing.
-  assert.equal(chatKeyOf({ id: "later", createdAt: 5_500 }, head, frame), 2.5);
-  assert.equal(chatKeyOf({ id: "older", createdAt: 100 }, [], frame), 0.5, "older than every entry: before them all, not after a timeless one");
-});
-
 test("the frame paints every cell: fills are solid, resets re-arm the surface, and the chrome is exact to its width", async () => {
   const { Fill, margin } = await import("../dist/ui/frame.js");
   const { fillLine } = await import("../dist/ui/tokens.js");
@@ -1971,7 +1995,6 @@ test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList
 });
 
 test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", async () => {
-  const { retainAfterCollapse } = await import("../dist/ui/transcript.js");
   const transcript = new TranscriptView();
   const entries = [
     { kind: "agent", handle: "C1", recordId: "c1", text: "## Summary\n\n- **Bold** item with `code`" },
@@ -1988,8 +2011,6 @@ test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact wi
   assert.match(text, /Automatic context collapse/);
   assert.doesNotMatch(text, /\*\*Bold\*\*/, "markdown emphasis delimiters are rendered, not left raw");
   assert.match(transcript.toPlainText(), /^system: Automatic context collapse/m);
-  const retained = retainAfterCollapse(entries, []);
-  assert.equal(retained.filter((entry) => entry.kind === "system").length, 1, "system Chat survives retainAfterCollapse");
 });
 
 test("estimate.ts delegates to pi-ai/utils/estimate", async () => {

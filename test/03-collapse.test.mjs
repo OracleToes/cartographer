@@ -17,7 +17,7 @@ import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { projectContext } from "../dist/domain/projection.js";
-import { retainAfterCollapse } from "../dist/ui/transcript.js";
+import { frozenTranscript } from "../dist/ui/transcript.js";
 
 const at = (n) => 1_700_000_000_000 + n * 1_000;
 
@@ -183,9 +183,13 @@ test("the agent can mark Atlas, Ledger, and Chat records for archive at collapse
     for (const record of [before.atlas[0], before.ledger[0], before.chat[0]]) {
       assert.deepEqual(record.mark, { action: "archive", author: "agent" });
     }
-    await collapse(root, store);
+    const report = await collapse(root, store);
     const after = await store.read();
     assert.equal(after.atlas.length + after.ledger.length + after.chat.length, 0);
+    const paths = generationPaths(root, report.generation);
+    const sidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+    const head = frozenTranscript(readFileSync(paths.markdown, "utf8"), after, sidecar.chat, new Map(), "OracleToes");
+    assert.equal(head.some((entry) => entry.text === "chat work"), false, "archived Chat is absent from the new prompt and transcript");
     const archived = (await store.readArchive()).items.filter((item) => item.layer === "record");
     assert.deepEqual(archived.map((item) => item.record.kind).sort(), ["atlas", "chat", "ledger"]);
   } finally {
@@ -671,12 +675,12 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
       await store.read(),
     );
 
-    const generation = "gen-20261116T020000Z-live009";
-    const work = await readGenerationEphemera(generationPaths(root, generation).store, generation);
-    const transcript = work.map((item) => ({ kind: "reasoning", id: item.id, sourceId: item.id, text: item.ephemeral.text }));
     const report = await collapse(root, store, { person: "OracleToes" });
-    const retained = retainAfterCollapse(transcript, (await store.read()).ephemera);
-    assert.deepEqual(retained.map((entry) => entry.text), ["this one is worth keeping"], "the transcript follows the actual sweep and pin identities");
+    const paths = generationPaths(root, report.generation);
+    const sidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+    const head = frozenTranscript(readFileSync(paths.markdown, "utf8"), await store.read(), sidecar.chat, new Map(sidecar.ephemeralItems.map(({ handle, item }) => [handle, item])), "OracleToes");
+    assert.deepEqual(head.map((entry) => entry.text), ["this one is worth keeping"], "the transcript follows the new head, not the swept store");
+    assert.equal(head[0].sourceId, pinId);
     const archived = (await store.readArchive()).items;
     assert.equal(
       archived.some((item) => item.ephemeral?.text === "this one is worth keeping"),
@@ -694,6 +698,14 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
     assert.match(markdown, /X1 \[reasoning\] this one is worth keeping/);
     assert.equal((await store.read()).ephemera.length, 1, "the pin survives the collapse it carried it through");
     await store.close();
+    const reopened = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      const reopenedSidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+      const reopenedHead = frozenTranscript(readFileSync(paths.markdown, "utf8"), await reopened.read(), reopenedSidecar.chat, new Map(reopenedSidecar.ephemeralItems.map(({ handle, item }) => [handle, item])), "OracleToes");
+      assert.deepEqual(reopenedHead, head, "reopening recovers the same head and actionable item identity");
+    } finally {
+      await reopened.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

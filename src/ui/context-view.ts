@@ -43,7 +43,7 @@ import {
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
-import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
+import type { CartoBrain, ChatRecord, Mark, PinnedEphemeral } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, surfaceLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
@@ -101,6 +101,8 @@ export interface ContextViewData {
   systemPrompt: string;
   /** The frozen projection's exact bytes — the carto-context section the model reads. */
   projectionText?: string | undefined;
+  /** Frozen head identities, including items unpinned since the freeze. */
+  headEphemera?: ReadonlyMap<string, PinnedEphemeral> | undefined;
   tools: ContextToolItem[];
   transcriptMessages: ContextDialogueMessage[];
   toolWorkItems: ContextWorkItem[];
@@ -206,7 +208,7 @@ const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 const formatTokenCost = (count: number): string => `~${count.toLocaleString("en-US")} tok`;
 
 /** One entry of the frozen head, as the bytes the model reads. */
-interface FrozenEntry {
+export interface FrozenEntry {
   /** `A3`, `L1`, `C2`, `X1` for a record; the path for a pinned file. */
   key: string;
   kind: "atlas" | "ledger" | "chat" | "ephemera" | "files";
@@ -221,7 +223,7 @@ interface FrozenEntry {
  * are found by their handle; a pinned file by its header line, since every line
  * of a file's text is indented and only its header is not.
  */
-function parseProjection(text: string): FrozenEntry[] {
+export function parseProjection(text: string): FrozenEntry[] {
   const entries: FrozenEntry[] = [];
   let region: FrozenEntry["kind"] | undefined;
   let current: FrozenEntry | undefined;
@@ -417,6 +419,13 @@ export class ContextView implements Component, Focusable {
 
     type Located = { id: string; mark?: Mark | undefined; label?: string; pinned?: "user" | "agent" | undefined } | undefined;
     const locate = (kind: "atlas" | "ledger" | "chat" | "ephemera", handle: string): Located => {
+      if (kind === "ephemera") {
+        const frozen = data.headEphemera?.get(handle);
+        if (frozen !== undefined) {
+          const held = data.brain.ephemera.find((candidate) => candidate.id === frozen.id);
+          return { id: frozen.id, label: frozen.kind, pinned: held?.pinned };
+        }
+      }
       const id = handles.entries.find((entry) => entry.kind === kind && entry.handle === handle)?.id;
       if (id === undefined) return undefined;
       if (kind === "atlas") return data.brain.atlas.find((node) => node.id === id) === undefined ? undefined : { id, mark: data.brain.atlas.find((node) => node.id === id)?.mark };

@@ -857,9 +857,10 @@ in flight inside a limited-height window, and folds to a one-line header at the
 boundary. A header click folds or opens a card; a click on a long card's body or
 hidden-lines indicator toggles between the preview and full content. A toggle
 folds or opens every card in view, and the wheel scrolls the transcript. Chat remains the only channel
-that addresses the person. When a collapse sweeps work out of the context, that
-work disappears from the transcript as well; the person's messages and the
-agent's Chat remain. Pinned work that survives the collapse remains visible.
+that addresses the person. The transcript shows the Chat and ephemera the model
+actually sees, in the frozen head's order followed by the live body; it does not
+retain a separate historical transcript. After collapse, archived or deleted
+Chat and swept work disappear, while Chat and pinned work in the new head remain.
 Session notifications are transient UI notices, not transcript messages.
 
 **The context bar spans the whole bottom of the application and is always
