@@ -30,7 +30,11 @@ export interface ContextBarState {
       lastReportedOutput?: number | undefined;
       /** Estimated tool-work tokens as of the last response; the bar adds only what came after. */
       toolWorkAtLastReport?: number | undefined;
-      /** True while a request is being sent and no response has come back yet: llama.cpp is reading the prompt. */
+      /** True while a model request is prefilling or generating. */
+      requestActive?: boolean | undefined;
+      /** A held stream is not making progress. */
+      paused?: boolean | undefined;
+      /** True while llama.cpp is reading the prompt. */
       prefillActive?: boolean | undefined;
       /** Tokens of the current prompt already read, when the server is reporting progress. */
       prefilledTokens?: number | undefined;
@@ -66,9 +70,9 @@ const formatPrefill = (
   total: number | undefined,
   cached: number | undefined,
   rate: number | undefined,
-): { full: string; compact: string } => {
+): { full: string; compact: string; eta: string } => {
   if (processed === undefined || total === undefined) {
-    return { full: " · prefill ?", compact: " · prefill ?" };
+    return { full: " · prefill ?", compact: " · prefill ?", eta: "" };
   }
   const compact = ` · prefill ${thousands(processed)}/${thousands(total)}`;
   const cache = Math.min(cached ?? 0, total);
@@ -77,7 +81,7 @@ const formatPrefill = (
   const pct = uncachedTotal > 0 ? Math.round(clamp01(computed / uncachedTotal) * 100) : 100;
   const remaining = Math.max(0, total - processed);
   const eta = rate !== undefined && rate > 0 && remaining > 0 ? ` ${formatEta(remaining / rate)}` : "";
-  return { full: `${compact} ${pct}%${eta}`, compact };
+  return { full: `${compact} ${pct}%${eta}`, compact, eta };
 };
 
 /** Half-block cells: a bar that reads as a continuous surface rather than a row of boxes. */
@@ -104,6 +108,8 @@ export class TokenBarView implements Component {
     const { contextWindow, lastReportedInput, lastReportedOutput, toolWorkAtLastReport,
       prefillTotal, prefilledTokens, prefillCached, prefillRate, decodeRate } = this.state.session.state;
     const prefillActive = this.state.session.state.prefillActive === true;
+    const requestActive = this.state.session.state.requestActive === true;
+    const paused = this.state.session.state.paused === true;
     const serverLost = this.state.session.state.serverLost === true;
     const { system, transcript, toolWork } = this.state.parts;
     const unknown = contextWindow <= 0;
@@ -123,6 +129,7 @@ export class TokenBarView implements Component {
       Math.round(toolWork),
       measured ? "measured" : "estimated",
       prefillActive ? "prefill" : "",
+      requestActive ? "active" : "", paused ? "paused" : "",
       prefillTotal ?? "?", prefilledTokens ?? "?", prefillCached ?? "?",
       prefillRate ?? "?", decodeRate ?? "?",
       serverLost ? "lost" : "",
@@ -135,7 +142,7 @@ export class TokenBarView implements Component {
     const rate = (value: number | undefined) => value === undefined ? "—" : value.toFixed(1);
     const prefillText = prefillActive
       ? formatPrefill(prefilledTokens, prefillTotal, prefillCached, prefillRate)
-      : { full: "", compact: "" };
+      : { full: "", compact: "", eta: "" };
     const rates = ` · P ${rate(prefillRate)} D ${rate(decodeRate)} tok/s`;
     const base = `${qualifier}${shown}`;
     // Keep some bar on narrow terminals; show progress before speed if both
@@ -190,7 +197,21 @@ export class TokenBarView implements Component {
     }
 
     const tint = serverLost ? tokens.faint : unknown ? tokens.muted : measured ? tokens.muted : tokens.faint;
-    const right = tint(label);
+    // Only the current phase's figures are live. Keep stale figures and a lost
+    // server quiet, and don't suggest progress while a stream is held paused.
+    const active = requestActive && !paused && !serverLost;
+    const prefillTint = active && prefillActive ? tokens.warn : tint;
+    const decodeTint = active && !prefillActive ? tokens.accent : tint;
+    const hasRates = label.endsWith(rates);
+    const progress = label.slice(base.length, hasRates ? -rates.length : undefined);
+    const eta = prefillText.eta && progress.endsWith(prefillText.eta) ? prefillText.eta : "";
+    const right = tint(base)
+      + tint(eta ? progress.slice(0, -eta.length) : progress)
+      + (eta ? prefillTint(eta) : "")
+      + (hasRates
+        ? tint(" · ") + prefillTint(`P ${rate(prefillRate)}`) + tint(" ")
+          + decodeTint(`D ${rate(decodeRate)}`) + tint(" tok/s")
+        : "");
     const gap = Math.max(1, width - barWidth - visibleWidth(right));
     const line = chromeLine(truncateToWidth(`${cells.join("")}${" ".repeat(gap)}${right}`, width, ""), width);
     this.cacheLines = [line];

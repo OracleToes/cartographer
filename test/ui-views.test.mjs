@@ -789,6 +789,48 @@ test("the context bar draws live prefill progress even when the window is unknow
   assert.match(line, /▓/, "active prefill bar renders even when contextWindow is 0");
 });
 
+test("the context bar highlights only live prefill ETA and the current phase's speed", () => {
+  const session = { contextWindow: 10000, lastReportedInput: 1000, paused: false };
+  const bar = new TokenBarView({ session: { state: session }, parts: { system: 1000, transcript: 0, toolWork: 0 } });
+  const telemetry = createModelTelemetry(session);
+  const id = telemetry.start();
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 1000, time_ms: 10000 } });
+  let line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.warn("P 100.0")));
+  assert.ok(line.includes(tokens.warn(" ~10s")));
+  assert.ok(line.includes(tokens.muted("D —")));
+  assert.equal(visibleWidth(line), 100);
+
+  telemetry.event(id, { choices: [{ delta: { content: "hello" } }], timings: { predicted_per_second: 42 } });
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("P 100.0")));
+  assert.ok(line.includes(tokens.accent("D 42.0")));
+  assert.doesNotMatch(plain(line), /prefill/);
+
+  session.paused = true;
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("D 42.0")), "paused figures are not live");
+  session.paused = false;
+  assert.ok(bar.render(100)[0].includes(tokens.accent("D 42.0")), "unpausing invalidates the cached colors");
+  telemetry.end(id, false);
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("D 42.0")), "finished figures are not live");
+  assert.ok(!line.includes(tokens.accent("D 42.0")));
+
+  const lostId = telemetry.start();
+  telemetry.event(lostId, { timings: { predicted_n: 1, predicted_per_second: 42 } });
+  telemetry.end(lostId, true);
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.faint("D 42.0")), "lost server remains faint");
+  assert.equal(visibleWidth(bar.render(20)[0]), 20, "narrow rendering still fits");
+
+  const currentId = telemetry.start();
+  telemetry.end(lostId, true);
+  assert.equal(session.requestActive, true, "an obsolete request cannot end the current one");
+  telemetry.end(currentId, false);
+  assert.equal(session.requestActive, false);
+});
+
 test("model telemetry tracks delta-based prefill rate across heartbeats, handles missing cache, and detects generation start", () => {
   let responses = 0;
   const state = { onResponse: () => { responses += 1; } };
