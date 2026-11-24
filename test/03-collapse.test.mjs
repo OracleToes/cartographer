@@ -11,6 +11,7 @@ import test from "node:test";
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
+import { createTools } from "../dist/runtime/tools.js";
 import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths, rewriteHeadSnapshot } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -161,6 +162,34 @@ test("a record marked for archive leaves the Brain and lands in the archive", as
     assert.equal(item.sweptAtCollapse, 1);
     await store.close();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the agent can mark Atlas, Ledger, and Chat records for archive at collapse", async () => {
+  const root = tempRoot();
+  let store;
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-agentarchive", 1_700_000_100);
+    store = await openBrain(":memory:");
+    await store.apply({ kind: "atlas.upsert", node: { id: "a1", title: "Done", text: "atlas work", links: [], attachments: [], createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "ledger work", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "chat.record", record: { id: "c1", author: "agent", text: "chat work", createdAt: at(1), updatedAt: at(1) } }, at(1));
+    const session = { person: "OracleToes", pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-20261116T020000Z-agentarchive", readOnly: false };
+    const mark = createTools({ root, brain: store, session }).find((tool) => tool.name === "mark");
+    const api = { now: () => at(2) };
+    for (const handle of ["A1", "L1", "C1"]) await mark.execute({ handle, action: "archive" }, api, {});
+    const before = await store.read();
+    for (const record of [before.atlas[0], before.ledger[0], before.chat[0]]) {
+      assert.deepEqual(record.mark, { action: "archive", author: "agent" });
+    }
+    await collapse(root, store);
+    const after = await store.read();
+    assert.equal(after.atlas.length + after.ledger.length + after.chat.length, 0);
+    const archived = (await store.readArchive()).items.filter((item) => item.layer === "record");
+    assert.deepEqual(archived.map((item) => item.record.kind).sort(), ["atlas", "chat", "ledger"]);
+  } finally {
+    if (store !== undefined) await store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
