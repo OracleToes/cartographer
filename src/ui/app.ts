@@ -98,7 +98,7 @@ import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
 import { Column, Fill, Inset, margin, PaneScrollView, Row, type Viewport } from "./frame.js";
-import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
+import { promptHandles, toolRowHandle, type PromptHandles, type PromptItem } from "./prompt-handles.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
@@ -1508,7 +1508,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
       const landedTexts: Array<{ text: string; t: number }> = [];
       const toolErrors = new Map<string, boolean>();
-      const toolOutputs = new Map<string, { text: string; resultId: string }>();
+      const toolOutputs = new Map<string, { text: string; resultId: string; entryKey: string }>();
       const assistantParts: Array<{ entryId: number; parts: unknown[]; partKeys?: readonly string[] | undefined; stopReason?: string }> = [];
       // One order, one numbering, both views (§5.4).
       const promptItems = promptItemsOf(entries);
@@ -1539,7 +1539,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             } else if (typeof message.content === "string") {
               out = message.content;
             }
-            toolOutputs.set(callId, { text: out, resultId: ephemeralItemId(state.session.generation, id, "r") });
+            toolOutputs.set(callId, { text: out, resultId: ephemeralItemId(state.session.generation, id, "r"), entryKey: String(id) });
           }
         }
       }
@@ -1584,6 +1584,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             const callId = typeof part.id === "string" ? part.id : undefined;
             const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
+            const handle = toolRowHandle(handles, `${entryId}-${partIndex}`, output?.entryKey);
             cards.push({
               key,
               entry: {
@@ -1591,7 +1592,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
                 id: `ctx-${entryId}-${partIndex}`,
                 name: part.name,
                 args: formatToolArgs(part.arguments, part.name),
-                ...itemHandle,
+                ...(handle === undefined ? {} : { handle }),
                 ...source,
                 ...(output === undefined ? {} : { output: output.text, resultId: output.resultId }),
                 ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
@@ -1599,16 +1600,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             });
           }
         });
-      }
-
-      // A tool row is the call and its result together, so it wears the
-      // result's handle: that is the text the person quotes, and pinning it
-      // pins the text that came back (§5.5).
-      for (const item of cards) {
-        const card = item.entry;
-        if (!isCard(card) || card.kind !== "tool") continue;
-        const handle = handles.result(String(card.id).replace(/^ctx-/, ""));
-        if (handle !== undefined) card.handle ??= handle;
       }
 
       // Agent Chat is the conversation, so every record is on screen: one

@@ -64,7 +64,7 @@ type Selectable = { key: string; target: BlockTarget; start: number; end: number
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
   id: string;
-  /** The prompt's ephemeral handle (§5.4): `X3` for one item, or the call's own handle on its result. */
+  /** The prompt handle (§5.4): `X3` for an item, or `R`/`S` for a completed tool result. */
   handle?: string;
   /** True while fed from the live partial: defaults its fold open and is replaced when the round lands. */
   live?: boolean;

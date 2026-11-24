@@ -51,6 +51,11 @@ export function pinHandle(entryHandle: string): string {
   return `P ${entryHandle}`;
 }
 
+/** A completed transcript tool row names its result; an unfinished call names itself. */
+export function toolRowHandle(handles: PromptHandles, callKey: string, resultKey?: string): string | undefined {
+  return (resultKey === undefined ? undefined : handles.result(resultKey)) ?? handles.ephemeral(callKey);
+}
+
 export function promptHandles(items: readonly PromptItem[]): PromptHandles {
   const ephemeral = new Map<string, string>();
   const person = new Map<string, string>();

@@ -14,7 +14,7 @@ import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { applyWrite } from "../dist/domain/brain.js";
-import { promptHandles } from "../dist/ui/prompt-handles.js";
+import { promptHandles, toolRowHandle } from "../dist/ui/prompt-handles.js";
 import { renderStateBlock } from "../dist/domain/state-block.js";
 import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
@@ -331,6 +331,9 @@ test("every item in the prompt carries its own handle, and a bash result takes S
   assert.equal(handles.result("3"), "R1", "a tool result has a handle like any other item");
   assert.equal(handles.ephemeral("2-2"), "X4", "and the other items are still counted in prompt order");
   assert.equal(handles.result("5"), "S1", "a bash result is the subdivision of R that gets quoted");
+  assert.equal(toolRowHandle(handles, "2-1", "3"), "R1", "the completed row uses the result entry, not the call entry");
+  assert.equal(toolRowHandle(handles, "4-0", "5"), "S1", "a completed shell row uses its S handle");
+  assert.equal(toolRowHandle(handles, "2-1"), "X2", "a call without a result retains its own handle");
 
   // The transcript draws them: a person's line, a card, and a tool row that
   // carries the handle of the result it holds.
