@@ -5,19 +5,17 @@
  * `-c` setting — and filling it is a picture of the context, not a gauge against
  * a budget. It reports three quantities, each in its own colour:
  *
- * - **fill**, solid, in three parts: the stable system and tool prefix, the
- *   transcript, and tool work;
- * - **prefilled** and **to prefill**, during a prompt read, so the slow half of a
- *   long context is visible as it is paid for.
+ * - **fill**, occupied context in one colour;
+ * - **prefilled** and **to prefill**, during a prompt read, each in its own
+ *   colour, including cached tokens in the completed prefill.
  *
- * All three figures come from llama.cpp, never from a provider's headers. Before
- * the first measured request the bar says so in its own glyph and colour rather
- * than inventing a number; when a server that was reporting goes quiet the last
- * values stay, greyed, so the person can still see where the context stood.
+ * Occupancy uses reported usage when available and estimates otherwise. The
+ * progress comes from llama.cpp, never from a provider's headers. When a server
+ * that was reporting goes quiet the last values stay, greyed.
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { chromeLine, partTokens, rawPalette, tokens } from "./tokens.js";
+import { barTokens, chromeLine, rawPalette, tokens } from "./tokens.js";
 
 /** What the bar knows. The app mutates it in place and rebinds `session` at collapse. */
 export interface ContextBarState {
@@ -156,44 +154,21 @@ export class TokenBarView implements Component {
     const ratio = unknown ? 0 : clamp01(used / window);
     const filled = Math.round(ratio * barWidth);
 
-    // Three parts of the fill, in the parts' own hues, cumulative-rounded so they add up.
-    const shares: Array<[number, (text: string) => string]> = estimate > 0
-      ? [
-          [Math.max(0, system) / estimate, partTokens.system],
-          [Math.max(0, transcript) / estimate, partTokens.transcript],
-          [Math.max(0, toolWork) / estimate, partTokens.toolWork],
-        ]
-      : [[1, partTokens.toolWork]];
-
     const track = serverLost ? tokens.faint(TRACK) : tokens.rule(TRACK);
     const cells: string[] = new Array(barWidth).fill(track);
-    // Always draw the last known occupied context first, even while a new
-    // prompt is being read. Prefill is an overlay, not a replacement for fill.
-    let cursor = 0;
-    let cumulative = 0;
-    for (const [share, tint] of shares) {
-      cumulative += share * filled;
-      const end = Math.min(barWidth, Math.round(cumulative));
-      for (let cell = cursor; cell < end; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : tint(FULL);
-      cursor = end;
-    }
-    for (let cell = cursor; cell < filled; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.toolWork(FULL);
+    // One colour for occupied context, regardless of its contents. A live
+    // prompt overlays it; the old fill remains visible outside that prompt.
+    for (let cell = 0; cell < filled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.fill)(FULL);
     if (prefillActive && prefillTotal !== undefined && prefillTotal > 0 && prefilledTokens !== undefined) {
+      // Without a window, show progress against the prompt's own length.
       const denom = unknown ? prefillTotal : window;
       const scale = (n: number) => Math.min(barWidth, Math.max(0, Math.round(n / denom * barWidth)));
-      const cached = scale(prefillCached ?? 0);
-      const prefilled = scale(prefilledTokens);
+      const prefilled = scale(Math.min(prefilledTokens, prefillTotal));
       const total = scale(prefillTotal);
-      if (unknown) {
-        // When the server has not yet advertised a context window, scale the
-        // live prefill bar against the prompt being read so prefill is visible.
-        for (let cell = 0; cell < cached; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.system(FULL);
-        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = serverLost ? tokens.faint(PREFILL) : tokens.warn(PREFILL);
-        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = tokens.rule(PREFILL);
-      } else {
-        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (cell < filled ? tokens.prefillOnFill : tokens.warn)(PREFILL);
-        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (cell < filled ? tokens.prefillPendingOnFill : tokens.rule)(PREFILL);
-      }
+      // Processed includes the cached prefix. All completed prefill has the
+      // same colour, whether reused or newly evaluated and wherever it falls.
+      for (let cell = 0; cell < prefilled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.prefilled)(PREFILL);
+      for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.pending)(PREFILL);
     }
 
     const tint = serverLost ? tokens.faint : unknown ? tokens.muted : measured ? tokens.muted : tokens.faint;

@@ -185,9 +185,6 @@ export const tokens = {
   output: style(palette.output),
   /** Tool cards: the machinery of the work, its own hue. */
   tool: style(palette.tool),
-  /** Prefill over already occupied context: background keeps the fill visible. */
-  prefillOnFill: both(palette.gold, "#354c61"),
-  prefillPendingOnFill: both(palette.textDim, "#354c61"),
   /** Pin marker: warm gold. */
   pin: style(palette.gold),
 
@@ -282,14 +279,11 @@ export const spine = (tint: (text: string) => string): string => tint("▌");
 export const statusLine = (text: string): string => tokens.faint(tokens.italic(text));
 export const statusWarnLine = (text: string): string => tokens.warn(tokens.italic(text));
 
-/** The context bar's parts: one hue each, so a bar reads as a division of the context. */
-export const partTokens = {
-  /** System prompt + tool declarations: the stable prefix. */
-  system: style(palette.textFaint),
-  /** The conversation so far. */
-  transcript: style(palette.you),
-  /** Tool results and tool-calling rounds. */
-  toolWork: style(palette.tool),
+/** Context bar colours distinguish status, not the contents of the context. */
+export const barTokens = {
+  fill: style(palette.focus),
+  prefilled: style(palette.gold),
+  pending: style(palette.textDim),
 } as const;
 
 /** Raw palette read, for the bar's blended cells and for anything drawing a track. */

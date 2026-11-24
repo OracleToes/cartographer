@@ -1,7 +1,7 @@
 import "./agent-reminder.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
+import { barTokens, padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
@@ -737,15 +737,13 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   assert.equal(visibleWidth(lines[0]), 60, "it spans the whole width");
   assert.match(plain(lines[0]), /8,000 \/ 32,768/);
 
-  // Fill stays visible while the current prompt's cached, processed and
-  // remaining regions advance independently. Progress changes invalidate the
+  // Prefill overlays the previous fill; progress changes invalidate the
   // render cache even if no transcript entry has changed.
   Object.assign(state.session.state, { prefillActive: true, prefillTotal: 16000, prefilledTokens: 6000, prefillCached: 2000, prefillRate: 100, decodeRate: 20 });
   const reading = plain(bar.render(130)[0]);
   assert.match(reading, /8,000 \/ 32,768/);
   assert.match(reading, /prefill 6,000\/16,000/);
   assert.match(reading, /P 100\.0 D 20\.0 tok\/s/);
-  assert.match(reading, /█/);
   assert.match(reading, /▓/);
   state.session.state.prefilledTokens = 9000;
   assert.match(plain(bar.render(130)[0]), /prefill 9,000\/16,000/);
@@ -782,11 +780,38 @@ test("the context bar draws live prefill progress even when the window is unknow
     parts: { system: 1_000, transcript: 500, toolWork: 500 },
   };
   const bar = new TokenBarView(state);
-  const line = plain(bar.render(120)[0]);
+  const styled = bar.render(120)[0];
+  const line = plain(styled);
   assert.match(line, /window unknown/);
   assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
-  assert.match(line, /█/, "cached prefix is visible even before the window is known");
-  assert.match(line, /▓/, "active prefill bar renders even when contextWindow is 0");
+  const barWidth = line.indexOf(" ");
+  assert.equal(styled.split(barTokens.prefilled("▓")).length - 1, Math.round(barWidth * 0.6), "completed includes the cached prefix");
+  assert.equal(styled.split(barTokens.pending("▓")).length - 1, barWidth - Math.round(barWidth * 0.6));
+});
+
+test("the context bar colors occupancy and prefill by status, not content type", () => {
+  const session = { contextWindow: 10_000, lastReportedInput: 8_000, toolWorkAtLastReport: 1_000 };
+  const state = { session: { state: session }, parts: { system: 2_000, transcript: 3_000, toolWork: 1_000 } };
+  const bar = new TokenBarView(state);
+  const idle = bar.render(120)[0];
+  assert.ok(idle.includes(barTokens.fill("█")));
+  assert.ok(!idle.includes(tokens.tool("█")) && !idle.includes(tokens.person("█")), "content types do not color the fill");
+  state.parts = { system: 4_000, transcript: 1_000, toolWork: 1_000 };
+  assert.equal(bar.render(120)[0], idle, "reclassifying context does not change the fill");
+
+  Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefilledTokens: 2_000, prefillCached: 1_000 });
+  const reading = bar.render(120)[0];
+  const width = plain(reading).indexOf(" ");
+  const count = (style, glyph) => reading.split(style(glyph)).length - 1;
+  assert.equal(count(barTokens.prefilled, "▓"), Math.round(width * 0.2), "all processed tokens, including cache, use one color");
+  assert.equal(count(barTokens.pending, "▓"), Math.round(width * 0.6) - Math.round(width * 0.2));
+  assert.equal(count(barTokens.fill, "█"), Math.round(width * 0.8) - Math.round(width * 0.6), "prior fill remains beyond the overlay");
+  assert.equal(visibleWidth(reading), 120);
+
+  session.prefillActive = false;
+  assert.ok(bar.render(120)[0].includes(barTokens.fill("█")), "fill returns when prefill ends");
+  session.serverLost = true;
+  assert.ok(bar.render(120)[0].includes(tokens.faint("█")), "lost server figures are faint");
 });
 
 test("the context bar highlights only live prefill ETA and the current phase's speed", () => {

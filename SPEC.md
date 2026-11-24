@@ -870,12 +870,14 @@ gauge with a budget mark.
 
 It shows three quantities, each in its own colour:
 
-- **Fill** — how much of the context is occupied, as a solid colour. The last
-  known fill remains visible while a new request is prefilling and is restored
-  from the session's last measured response after reopening.
+- **Fill** — how much of the context is occupied, in one colour regardless of
+  content type. It is restored from the session's last measured response after
+  reopening. During a prompt read, the prefill status overlays this fill, which
+  remains visible beyond the prompt's extent.
 - **Prefilled** — during a prompt read, how much has been read so far, including
-  the reused prefix; newly read tokens are distinguished from the solid fill.
-- **To prefill** — during a prompt read, how much is still to read.
+  the reused prefix, in a second colour.
+- **To prefill** — during a prompt read, how much is still to read, in a third
+  colour. With an unknown context window, the progress bar scales to the prompt.
 
 The bar also shows prefill and decode speeds in tokens per second. During an
 active prompt read, the prefill speed and remaining-time estimate are highlighted;
