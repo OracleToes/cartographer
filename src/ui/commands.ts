@@ -38,6 +38,11 @@ export interface Command {
   run(): void;
 }
 
+/** Stop must remain dispatchable even before an autonomous run's watch arrives. */
+export function stopCommand(run: () => void): Command {
+  return { id: "stop", group: "the run", label: "stop the run", key: "ctrl+x", run, available: () => true };
+}
+
 /**
  * Every key a command claims. `matchesKey` is the only matcher used, so the
  * footer, `f1` and the input router cannot disagree about what a key is.

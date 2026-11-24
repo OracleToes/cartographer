@@ -80,7 +80,8 @@ import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
-import { Registry, type Command } from "./commands.js";
+import { Registry, stopCommand, type Command } from "./commands.js";
+import { RunActivity } from "./run-activity.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
 import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
@@ -121,11 +122,11 @@ interface TuiState {
   view: ViewMode;
   /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
   layer: Layer;
-  /** True while at least one submission is in flight; drives the header and the footer's live hint. */
-  running: boolean;
+  /** Submissions and observed Pi runs, including autonomous ones. */
+  activity: RunActivity;
+  readonly running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
   pending: PendingItem[];
-  inFlight: number;
   collapsing: boolean;
   /** Why the agent stopped collapsing by itself; shown in the transcript until the person speaks. */
   notes: string[];
@@ -347,9 +348,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sendMode: "steer",
     view: "chat",
     layer: "context",
-    running: false,
+    activity: new RunActivity(),
+    get running() { return this.activity.running; },
     pending: [],
-    inFlight: 0,
     collapsing: false,
     notes: [],
     collapseEpoch: 0,
@@ -1741,6 +1742,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       return;
     }
     state.liveWatch = watch;
+    const observeRun = (value: typeof watch.value) => {
+      if (session !== state.session) return;
+      const live = value.docs[LiveDoc.definition.kind] as LiveState | undefined;
+      state.activity.observeRun(live?.run !== undefined);
+      headerState.running = state.running;
+      tui.requestRender();
+    };
+    // The run may already be active before the new watch is acquired.
+    observeRun(watch.value);
     const entryStream = new ConversationTranscript((query, limit, ctx) =>
       session.conversation.entries(query, limit, undefined, ctx),
     );
@@ -1749,6 +1759,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     let hadLive = false;
     watch.start(async (call) => {
       if (call.kind !== "value" || session !== state.session) return;
+      observeRun(call.value);
       const merged = entryStream.merge(call.value);
       const entriesChanged = merged.items !== lastItems;
       lastItems = merged.items;
@@ -1758,6 +1769,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const landedEntries = (await sessionTranscript(session).catch(() => [])) as unknown as ContextEntryLike[];
         cachedPromptItems = promptItemsOf(landedEntries, session.generation);
       }
+      if (session !== state.session) return;
       const live = (call.value.docs[LiveDoc.definition.kind] as LiveState | undefined) ?? LiveDoc.definition.initial();
       // The partial continues the prompt's numbering rather than starting a
       // second one: a card in flight is the next item after everything the
@@ -1849,6 +1861,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       state.collapseEpoch += 1;
       state.session = outcome.session;
+      state.activity.observeRun(false);
+      headerState.running = state.running;
       headerState.session = outcome.session;
       barState.session = outcome.session;
       bindTelemetry(outcome.session);
@@ -1875,6 +1889,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         await closeLiveSession(state.session).catch(() => undefined);
         const recovered = await openLiveSession(sessionOptions());
         state.session = recovered;
+        state.activity.observeRun(false);
+        headerState.running = state.running;
         headerState.session = recovered;
         barState.session = recovered;
         bindTelemetry(recovered);
@@ -1887,8 +1903,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
     } finally {
       state.collapsing = false;
-      state.inFlight = Math.max(0, state.inFlight);
-      state.running = state.inFlight > 0;
       headerState.running = state.running;
       await rebuildTranscript();
       tui.requestRender();
@@ -1927,9 +1941,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // as soon as the new session exists.
     const epoch = state.collapseEpoch;
     state.notes = [];
-    state.inFlight += 1;
-    state.running = true;
-    headerState.running = true;
+    state.activity.beginSubmission();
+    headerState.running = state.running;
     tui.requestRender();
     try {
       const whenBusy = state.sendMode === "after run" ? "followUp" : "steer";
@@ -1947,8 +1960,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     } catch (error) {
       if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
     }
-    state.inFlight = Math.max(0, state.inFlight - 1);
-    state.running = state.inFlight > 0;
+    state.activity.endSubmission();
     headerState.running = state.running;
     // The run settled after the person left: the session is closed, and every
     // read below would raise against a harness that is already gone.
@@ -2066,9 +2078,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
       if (outcome.submission === undefined) return;
       state.notes = [];
-      state.inFlight += 1;
-      state.running = true;
-      headerState.running = true;
+      state.activity.beginSubmission();
+      headerState.running = state.running;
       pushStatus(outcome.line);
       tui.requestRender();
       try {
@@ -2080,8 +2091,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       } catch (error) {
         if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
       }
-      state.inFlight = Math.max(0, state.inFlight - 1);
-      state.running = state.inFlight > 0;
+      state.activity.endSubmission();
       headerState.running = state.running;
       if (shutdownRequested) return;
       await rebuildTranscript();
@@ -2318,22 +2328,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       run: () => void shutdown(0),
       available: () => true,
     },
-    {
-      id: "stop",
-      group: "the run",
-      label: "stop the run",
-      key: "ctrl+x",
-      run: () => {
-        void interruptRun(state.session)
-          .then(
-            () => pushStatus("interrupt sent — the run stops"),
-            (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
-          )
-          .then(() => rebuildTranscript())
-          .catch(() => undefined);
-      },
-      available: () => state.running,
-    },
+    stopCommand(() => {
+      // Admissions also serialize collapse: a stop pressed during replacement
+      // targets the newly opened session rather than a closing harness.
+      void admitting(() => interruptRun(state.session))
+        .then(
+          (interrupted) => pushStatus(interrupted ? "interrupt sent — the run stops" : "no run to stop"),
+          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
+        )
+        .then(() => rebuildTranscript())
+        .catch(() => undefined);
+    }),
     {
       id: "resume",
       group: "the run",

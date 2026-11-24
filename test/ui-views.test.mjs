@@ -5,7 +5,8 @@ import { barTokens, padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
-import { Registry } from "../dist/ui/commands.js";
+import { Registry, stopCommand } from "../dist/ui/commands.js";
+import { RunActivity } from "../dist/ui/run-activity.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
 import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, orderTranscript } from "../dist/ui/transcript.js";
 import { projectContext } from "../dist/domain/projection.js";
@@ -22,6 +23,26 @@ import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("run activity includes autonomous work and stop stays dispatchable before its watch arrives", () => {
+  const activity = new RunActivity();
+  let stops = 0;
+  const registry = new Registry([stopCommand(() => { stops += 1; })]);
+  assert.equal(activity.running, false);
+  assert.equal(registry.dispatch("\x18"), true, "Ctrl-X is not gated by stale UI activity");
+  assert.equal(stops, 1);
+  activity.beginSubmission();
+  activity.observeRun(true);
+  activity.endSubmission();
+  assert.equal(activity.running, true, "a resumed or timed-wake run outlives the earlier submission");
+  activity.observeRun(false);
+  assert.equal(activity.running, false);
+  activity.beginSubmission();
+  activity.observeRun(false);
+  assert.equal(activity.running, true, "a pending submission stays active until settled");
+  activity.endSubmission();
+  assert.equal(activity.running, false);
+});
 
 test("padLine pads accurately with and without ANSI escape sequences", () => {
   const plain = "hello";

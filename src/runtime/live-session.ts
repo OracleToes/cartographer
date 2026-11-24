@@ -664,11 +664,16 @@ export async function resumeSession(session: LiveSession): Promise<ResumeOutcome
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
-export async function interruptRun(session: LiveSession): Promise<void> {
+export async function interruptRun(session: LiveSession): Promise<boolean> {
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
-  if (live?.run === undefined) return;
-  await session.harness.abortTask(live.run.taskId, BACKGROUND_CONTEXT);
+  if (live?.run === undefined) return false;
+  // abortTask joins the invocation. A frozen body can be waiting on our gate,
+  // so initiate the abort and release that gate before waiting for the join.
+  const abort = session.harness.abortTask(live.run.taskId, BACKGROUND_CONTEXT);
+  if (session.freeze.frozen()) session.freeze.abandon();
+  const result = await abort;
   await session.harness.waitForTask(live.run.taskId, BACKGROUND_CONTEXT);
+  return result === "marked";
 }
 
 /** The transcript without state-block markers — what a person-facing view may show. */

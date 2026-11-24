@@ -14,6 +14,9 @@ import test, { describe } from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
+import { LiveDoc } from "@earendil-works/pi-durable";
+import { Registry, stopCommand } from "../dist/ui/commands.js";
+import { RunActivity } from "../dist/ui/run-activity.js";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
@@ -21,6 +24,7 @@ import { runHeadless } from "../dist/runtime/headless.js";
 import {
   closeLiveSession,
   collapseLiveSession,
+  interruptRun,
   openLiveSession,
   sessionTranscript,
   submitInput,
@@ -76,6 +80,45 @@ const userTexts = async (session) =>
   (await session.conversation.context(BACKGROUND_CONTEXT)).messages.filter((message) => message.role === "user").map(textOf).filter((text) => !text.includes("<carto-state>"));
 
 describe("automatic collapse", { concurrency: 4 }, () => {
+  test("Ctrl-X can stop an autonomously resumed post-collapse run", async () => {
+    const env = await fixture();
+    const { faux, models, factory, ref } = fauxFor();
+    faux.setResponses([
+      collapseCall(factory),
+      factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "post-collapse-bash" })], { stopReason: "toolUse" })),
+    ]);
+    const opts = options({ ...env, models, ref });
+    const first = await openLiveSession(opts);
+    let next;
+    try {
+      await ask(first, "collapse then work");
+      const verdict = first.reviewCollapseRequest();
+      assert.equal(verdict.kind, "collapse");
+      const outcome = await collapseLiveSession(first, opts, verdict.reason, {}, { automatic: true, trigger: verdict.trigger });
+      next = outcome.session;
+      assert.equal(outcome.resumed, true);
+      let live;
+      for (let i = 0; i < 200; i++) {
+        live = await next.harness.snapshot(LiveDoc, next.conversation.id, BACKGROUND_CONTEXT);
+        if (live?.run !== undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.ok(live?.run, "the new generation has a run without a UI submission");
+      const activity = new RunActivity();
+      activity.observeRun(true);
+      assert.equal(activity.running, true);
+      let stopped;
+      const registry = new Registry([stopCommand(() => { stopped = interruptRun(next); })]);
+      assert.equal(registry.dispatch("\x18"), true);
+      assert.equal(await stopped, true);
+      await waitForRunEnd(next);
+      assert.equal((await next.harness.snapshot(LiveDoc, next.conversation.id, BACKGROUND_CONTEXT))?.run, undefined);
+    } finally {
+      await closeLiveSession(next ?? first).catch(() => undefined);
+      await env.cleanup();
+    }
+  });
+
   test("the block warns at 75 percent of a known window and reports an unknown one honestly", async () => {
     for (const [contextWindow, expect] of [[1000, "warn"], [1_000_000, "fill"], [0, "unknown"]]) {
       const env = await fixture();

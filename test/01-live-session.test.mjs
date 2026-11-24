@@ -706,6 +706,39 @@ const waitUntil = async (predicate, label) => {
   assert.fail(`timed out waiting for ${label}`);
 };
 
+test("interrupting a paused stream releases the gate and stops the run", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const stand = await pausedServer(["started "], ["must not continue"]);
+  const ref = { provider: "llama-swap", modelId: "ByteShape" };
+  const models = configuredModels({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: stand.endpoint }, ref);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  let timer;
+  try {
+    const submission = await submitInput(session, "start then stop");
+    await waitUntil(() => session.freeze.live(), "the response body");
+    assert.equal((await togglePause(session, true)).held, true);
+    stand.release();
+    const interrupted = await Promise.race([
+      interruptRun(session),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("paused interrupt did not settle")), 1500); }),
+    ]);
+    assert.equal(interrupted, true);
+    assert.equal(session.freeze.frozen(), false);
+    const result = await submission.wait(BACKGROUND_CONTEXT);
+    assert.notEqual(result.status, "running");
+    await waitForRunEnd(session);
+    assert.equal(stand.requests(), 1, "the interrupted reply did not resume into another turn");
+    assert.doesNotMatch(JSON.stringify(await sessionTranscript(session)), /must not continue/);
+    assert.equal(await interruptRun(session), false, "stopping an idle session is a no-op");
+  } finally {
+    clearTimeout(timer);
+    stand.release();
+    await closeLiveSession(session).catch(() => undefined);
+    await stand.close();
+    await cleanup();
+  }
+});
+
 test("a pause holds the reply mid-sentence and the same response finishes it: nothing is re-requested", async () => {
   const { root, brain, cleanup } = await fixture();
   const stand = await pausedServer(["The answer is "], ["forty-two."]);
