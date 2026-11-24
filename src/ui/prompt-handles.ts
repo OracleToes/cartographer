@@ -17,12 +17,75 @@
  */
 
 /** One item the prompt holds, in prompt order. */
+import type { PinnedEphemeral } from "../domain/records.js";
+import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
+import { ephemeralItemId } from "../runtime/collapse.js";
+
 export interface PromptItem {
   kind: "person" | "call" | "result" | "reasoning" | "text";
   /** The view's own row id, which is what a handle is looked up by. */
   key: string;
+  /** Stable sweep identity and content, when this is a landed item. */
+  item?: PinnedEphemeral | undefined;
   /** For a result: the tool that produced it. `bash` takes `S`; everything else `R`. */
   tool?: string | undefined;
+}
+
+export interface PromptContextEntry {
+  id?: number | undefined;
+  model?: unknown;
+  partKeys?: readonly string[] | undefined;
+}
+
+const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object";
+
+/** Landed items in prompt order, with the same identities the collapse sweep uses. */
+export function promptItemsOf(entries: readonly PromptContextEntry[], generation: string): PromptItem[] {
+  const calls = new Map<string, { name: string; path?: string | undefined }>();
+  for (const entry of entries) {
+    const message = Array.isArray(entry.model) ? entry.model[0] : undefined;
+    if (!object(message) || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (!object(part) || part.type !== "toolCall" || typeof part.id !== "string" || typeof part.name !== "string") continue;
+      const path = object(part.arguments) && typeof part.arguments.path === "string" ? part.arguments.path : undefined;
+      calls.set(part.id, { name: part.name, path });
+    }
+  }
+  const items: PromptItem[] = [];
+  for (const entry of entries) {
+    const message = Array.isArray(entry.model) ? entry.model[0] : undefined;
+    if (!object(message)) continue;
+    const id = entry.id ?? 0;
+    const createdAt = typeof message.timestamp === "number" ? message.timestamp : 0;
+    const make = (key: string, kind: PinnedEphemeral["kind"], text: string, entity?: PinnedEphemeral["entity"]): PinnedEphemeral => ({
+      id: ephemeralItemId(generation, id, key), kind, text, createdAt, pinned: "agent", ...(entity === undefined ? {} : { entity }),
+    });
+    if (message.role === "user" && typeof message.content === "string") {
+      if (!message.content.trim() || message.content.trim() === STATE_BLOCK_MARKER) continue;
+      items.push({ kind: "person", key: String(id), item: make("x0", "personMessage", message.content) });
+    } else if (message.role === "assistant" && Array.isArray(message.content)) {
+      message.content.forEach((part: unknown, index: number) => {
+        if (!object(part)) return;
+        const stable = entry.partKeys?.[index];
+        const key = `${id}-${index}`;
+        if (part.type === "thinking" && typeof part.thinking === "string") {
+          items.push({ kind: "reasoning", key, ...(stable === undefined ? {} : { item: make(stable, "reasoning", part.thinking) }) });
+        } else if (part.type === "text" && typeof part.text === "string") {
+          items.push({ kind: "text", key, ...(stable === undefined ? {} : { item: make(stable, "plainText", part.text) }) });
+        } else if (part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
+          const text = `${part.name} ${JSON.stringify(part.arguments ?? {})}`;
+          items.push({ kind: "call", key, ...(stable === undefined ? {} : { item: make(stable, "toolCall", text, { callId: part.id, tool: part.name }) }) });
+        }
+      });
+    } else if (message.role === "toolResult") {
+      const callId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+      const call = callId === undefined ? undefined : calls.get(callId);
+      const text = Array.isArray(message.content) ? message.content.flatMap((part: unknown) => object(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : typeof message.content === "string" ? message.content : "";
+      const entity = callId === undefined ? undefined : { callId, tool: call?.name, path: call?.path };
+      items.push({ kind: "result", key: String(id), tool: call?.name, item: make("r", call?.name === "read" ? "readResult" : "toolResult", text, entity) });
+    }
+  }
+  return items;
 }
 
 export interface PromptHandles {
@@ -56,11 +119,11 @@ export function toolRowHandle(handles: PromptHandles, callKey: string, resultKey
   return (resultKey === undefined ? undefined : handles.result(resultKey)) ?? handles.ephemeral(callKey);
 }
 
-export function promptHandles(items: readonly PromptItem[]): PromptHandles {
+export function promptHandles(items: readonly PromptItem[], headEphemera = 0): PromptHandles {
   const ephemeral = new Map<string, string>();
   const person = new Map<string, string>();
   const results = new Map<string, string>();
-  let nextEphemeral = 0;
+  let nextEphemeral = headEphemera;
   let nextPerson = 0;
   let nextResult = 0;
   let nextShell = 0;
@@ -68,17 +131,21 @@ export function promptHandles(items: readonly PromptItem[]): PromptHandles {
     if (item.kind === "person") {
       nextPerson += 1;
       person.set(item.key, `U${nextPerson}`);
+      if (item.item !== undefined) person.set(item.item.id, `U${nextPerson}`);
       continue;
     }
     if (item.kind === "result") {
       const shell = item.tool === "bash";
       if (shell) nextShell += 1;
       else nextResult += 1;
-      results.set(item.key, `${shell ? "S" : "R"}${shell ? nextShell : nextResult}`);
+      const handle = `${shell ? "S" : "R"}${shell ? nextShell : nextResult}`;
+      results.set(item.key, handle);
+      if (item.item !== undefined) results.set(item.item.id, handle);
       continue;
     }
     nextEphemeral += 1;
     ephemeral.set(item.key, `X${nextEphemeral}`);
+    if (item.item !== undefined) ephemeral.set(item.item.id, `X${nextEphemeral}`);
   }
   return {
     ephemeral: (key) => ephemeral.get(key),

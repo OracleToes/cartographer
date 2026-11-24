@@ -40,7 +40,7 @@ export type BrainWrite =
   | { kind: "file.stale"; path: string; stale: boolean }
   /** Pin, unpin, or re-pin one ephemeral item held in the live context (§3.2). Not `pin.set`: ephemera are not Brain records. */
   | { kind: "ephemeral.pin"; item: PinnedEphemeral }
-  | { kind: "ephemeral.unpin"; id: RecordId }
+  | { kind: "ephemeral.unpin"; id: RecordId; author?: Author }
   | { kind: "ephemeral.delete-mark"; id: RecordId; marked: boolean };
 
 export function applyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoBrain {
@@ -59,7 +59,10 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     case "ephemeral.pin": {
       // One entry per item. Pinning again replaces the pin and its author,
       // which is what a pin being "a boolean on an entry" means (§3.2).
-      const exists = brain.ephemera.some((item) => item.id === write.item.id);
+      const existing = brain.ephemera.find((item) => item.id === write.item.id);
+      if (write.item.pinned === "agent" && brain.ephemeralDeletes?.includes(write.item.id)) throw new BrainError("The person marked this item for deletion");
+      if (existing?.pinned === "user" && write.item.pinned === "agent") throw new BrainError("Only the person can remove or replace their pin");
+      const exists = existing !== undefined;
       const ephemera = exists
         ? brain.ephemera.map((item) => (item.id === write.item.id ? write.item : item))
         : [...brain.ephemera, write.item];
@@ -95,6 +98,9 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
 
     case "ephemeral.unpin": {
+      if (write.author === "agent" && brain.ephemera.find((item) => item.id === write.id)?.pinned === "user") {
+        throw new BrainError("Only the person can remove their pin");
+      }
       return { ...brain, ephemera: brain.ephemera.filter((item) => item.id !== write.id) };
     }
 

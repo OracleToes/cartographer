@@ -40,6 +40,7 @@ import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 import type { ModelTelemetry } from "./model-telemetry.js";
 import { summarizeJobs, type JobTable } from "./jobs.js";
+import { promptHandles } from "../ui/prompt-handles.js";
 
 /**
  * The system prompt (§7): the tools describe themselves, so this carries only
@@ -189,8 +190,10 @@ function staleMarksFor(
     items.push({ handle: drift.handle, why: drift.why });
     if (drift.modified) modifiedPins.push(drift.handle);
   }
-  for (const handle of staleReadResultHandles(brain, root)) {
-    items.push({ handle, why: "a pinned reading, and the file has changed since" });
+  for (const id of staleReadResultHandles(brain, root)) {
+    const handle = [...(session.headEphemera ?? new Map()), ...(session.liveEphemera ?? new Map())].find(([, item]) => item.id === id)?.[0]
+      ?? handleOf(brain.handles, "ephemera", id);
+    if (handle !== undefined) items.push({ handle, why: "a pinned reading, and the file has changed since" });
   }
   return { items, modifiedPins };
 }
@@ -360,7 +363,8 @@ export async function renderLiveStateBlock(
   // §5.1), so the block lists them by handle with who kept them.
   for (const item of brain.ephemera) {
     if (item.pinned === undefined) continue;
-    const handle = handleOf(brain.handles, "ephemera", item.id);
+    const handle = [...(options.session.headEphemera ?? new Map()), ...(options.session.liveEphemera ?? new Map())].find(([, candidate]) => candidate.id === item.id)?.[0]
+      ?? handleOf(brain.handles, "ephemera", item.id);
     if (handle !== undefined) pinned.push({ handle, author: item.pinned });
   }
   // A pinned file is a pin like any other and the block lists every pin with
@@ -419,6 +423,7 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
+    ...(options.session.liveEphemera === undefined ? {} : { working: [...options.session.liveEphemera].map(([handle, item]) => ({ handle, kind: item.kind, text: item.text })) }),
     ...(jobs.length === 0 ? {} : { jobs }),
     ...(attention.length === 0 ? {} : { attention }),
     // Atlas notes drift, pinned files gone or modified since freeze drift, and
@@ -499,6 +504,18 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       hook(GenerationTask, {
         beforeRequest: async (request) => {
           const visible = stripStateBlocks(request.messages);
+          await options.session.refreshHeadEphemera?.();
+          if (options.session.loadPromptItems !== undefined) {
+            const items = await options.session.loadPromptItems();
+            const handles = promptHandles(items, options.session.headEphemeraCount ?? 0);
+            const live = new Map<string, import("../domain/records.js").PinnedEphemeral>();
+            for (const item of items) {
+              if (item.item === undefined) continue;
+              const handle = item.kind === "person" ? handles.person(item.key) : item.kind === "result" ? handles.result(item.key) : handles.ephemeral(item.key);
+              if (handle !== undefined) live.set(handle, item.item);
+            }
+            options.session.liveEphemera = live;
+          }
           const block = await renderLiveStateBlock(options, visible, (input) => {
             const work = options.session.work;
             if (work.requests === 0) work.startFill = contextFillPercent(input);

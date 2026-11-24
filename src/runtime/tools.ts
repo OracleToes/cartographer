@@ -18,7 +18,8 @@ import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 
-import type { CartoBrain, Attachment } from "../domain/records.js";
+import type { CartoBrain, Attachment, PinnedEphemeral } from "../domain/records.js";
+import type { PromptItem } from "../ui/prompt-handles.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
@@ -55,6 +56,12 @@ export interface ToolSession {
   readOnly: boolean;
   /** The generation this context belongs to; recorded on context-sourced pins. */
   generation: string;
+  /** The frozen head's X namespace, and the items exposed in the last request. */
+  headEphemeraCount?: number;
+  headEphemera?: Map<string, PinnedEphemeral>;
+  liveEphemera?: Map<string, PinnedEphemeral>;
+  loadPromptItems?: () => Promise<PromptItem[]>;
+  refreshHeadEphemera?: () => Promise<void>;
 }
 
 export interface ToolDeps {
@@ -370,7 +377,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin or unpin a file from the tree by its handle (at least 1 character). Pinned files are re-read fresh into the head at every collapse, so pin the files you are actively building in before collapsing. Only ${them} can remove a pin ${them} placed.`,
+        `Pin or unpin a file or an ephemeral item by its handle (at least 1 character). Use F for files, X for working, U for messages, and R or S for results. Pinned files and read results are re-read at collapse; other pinned items retain their text. Only ${them} can remove a pin ${them} placed.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -382,6 +389,29 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         // a file means "read it again every collapse", which is how the head
         // holds the file rather than a quotation of a read of it.
         const named = normalizeHandle(args.handle);
+        const item = session.headEphemera?.get(named) ?? session.liveEphemera?.get(named);
+        if (item !== undefined) {
+          // A request's handle names the exact item shown in that request, not
+          // whatever happens to take its number after a later edit.
+          if (!session.headEphemera?.has(named) && session.loadPromptItems !== undefined) {
+            const stillVisible = (await session.loadPromptItems()).some((candidate) => candidate.item?.id === item.id);
+            if (!stillVisible) throw new Error(`${named} is no longer in the live context.`);
+          }
+          const held = current.ephemera.find((candidate) => candidate.id === item.id);
+          if (args.action === "pin" && current.ephemeralDeletes?.includes(item.id)) throw new Error(`${named} is marked for deletion; the person must withdraw that mark before it can be kept.`);
+          if (held?.pinned === "user") throw new Error(`${named} carries ${them}'s pin, and only ${them} can remove it.`);
+          if (args.action === "unpin") {
+            if (held !== undefined) await brain.apply({ kind: "ephemeral.unpin", id: item.id, author: "agent" }, api.now());
+            return textOutput(`${named} is unpinned; it will not be carried through the next collapse.`);
+          }
+          // Resolve a read by F handle while the tree still identifies that
+          // path; collapse must reread the file, not a transient F number.
+          const path = item.kind === "readResult" ? item.entity?.path : undefined;
+          const resolved = path === undefined ? undefined : treePathOf(root, current, session, normalizeHandle(path)) ?? path;
+          const pinned: PinnedEphemeral = { ...item, pinned: "agent", ...(item.entity === undefined ? {} : { entity: { ...item.entity, ...(resolved === undefined ? {} : { path: resolved }) } }) };
+          await brain.apply({ kind: "ephemeral.pin", item: pinned }, api.now());
+          return textOutput(`${named} is pinned; it will be carried into the next context.`);
+        }
         const filePath = treePathOf(root, current, session, named);
         if (filePath !== undefined) {
           const held = current.files.find((file) => file.path === filePath);
@@ -404,7 +434,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           );
         }
         throw new Error(
-          `${named} is not a file in the tree. Only a file is pinned: a record of the Brain stays until it is deleted or marked for archive, so there is nothing for a pin to keep.`,
+          `${named} is not a file in the tree or a visible ephemeral item. Brain records stay until marked for archive or deletion.`,
         );
       },
     }),

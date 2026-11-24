@@ -9,7 +9,7 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createModels } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf } from "../dist/domain/handles.js";
@@ -129,6 +129,71 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER));
     assert.match(secondBlock.content, /A1 · written/);
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("the agent pins live ephemera by visible handles and carries them across collapse", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([
+      fauxThinking("a useful thought"), fauxText("a useful note"),
+      fauxToolCall("read", { path: "src/verify-me.ts" }, { id: "read-for-pin" }),
+      fauxToolCall("bash", { command: "printf shell-result" }, { id: "bash-for-pin" }),
+    ], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage(["U1", "X1", "X2", "X3", "R1", "S1"].map((handle) => fauxToolCall("pin", { handle, action: "pin" }, { id: `pin-${handle}` })), { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "sleep-after-pin" })], { stopReason: "toolUse" })),
+  ]);
+  const options = { root, brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  try {
+    const submission = await submitInput(session, "keep this line");
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    const block = blockOf(captured[1]).content;
+    for (const handle of ["U1", "X1", "X2", "X3", "R1", "S1"]) assert.ok(block.includes(`${handle} ·`), `${handle} appears in the state block`);
+    const pins = (await brain.read()).ephemera;
+    assert.deepEqual(pins.map((item) => item.kind).sort(), ["personMessage", "plainText", "readResult", "reasoning", "toolCall", "toolResult"]);
+    assert.ok(pins.every((item) => item.pinned === "agent"));
+    const reading = pins.find((item) => item.kind === "readResult");
+    assert.equal(reading.entity.path, "src/verify-me.ts");
+    const kept = pins.find((item) => item.kind === "reasoning");
+    await brain.apply({ kind: "ephemeral.pin", item: { ...kept, pinned: "user" } }, Date.now());
+    const pinTool = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    for (const action of ["pin", "unpin"]) {
+      await assert.rejects(pinTool.execute({ action, handle: "X1" }, { now: Date.now }, {}), /only OracleToes/i);
+    }
+    await pinTool.execute({ action: "unpin", handle: "X2" }, { now: Date.now }, {});
+    assert.ok(!(await brain.read()).ephemera.some((item) => item.kind === "plainText"));
+    await pinTool.execute({ action: "pin", handle: "X2" }, { now: Date.now }, {});
+    writeFileSync(join(root, "src", "verify-me.ts"), "updated file\n");
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    const outcome = await collapseLiveSession(session, options, "person collapse");
+    session = outcome.session;
+    const after = (await brain.read()).ephemera;
+    assert.equal(after.length, 6);
+    assert.equal(after.find((item) => item.id === reading.id).text, "updated file\n");
+    assert.equal(after.find((item) => item.id === kept.id).pinned, "user");
+    const archivedIds = new Set((await brain.readArchive()).items.map((item) => item.id));
+    assert.ok(after.every((item) => !archivedIds.has(item.id)));
+    assert.equal(session.state.headEphemera.size, 6);
+    assert.equal(session.state.headEphemeraCount, Math.max(...[...session.state.headEphemera.keys()].map((handle) => Number(handle.slice(1)))));
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "sleep-in-new-generation" })], { stopReason: "toolUse" })),
+    ]);
+    const next = await submitInput(session, "new body");
+    assert.equal((await next.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.ok([...session.state.headEphemera.keys()].every((handle) => !session.state.liveEphemera.has(handle)));
+    const [headHandle, headItem] = [...session.state.headEphemera].find(([, item]) => item.pinned === "agent");
+    const headPin = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    await headPin.execute({ action: "unpin", handle: headHandle }, { now: Date.now }, {});
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    const reopenedPin = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    await reopenedPin.execute({ action: "pin", handle: headHandle }, { now: Date.now }, {});
+    assert.ok((await brain.read()).ephemera.some((item) => item.id === headItem.id));
   } finally {
     await closeLiveSession(session);
     await cleanup();

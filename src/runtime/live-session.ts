@@ -11,7 +11,7 @@
  * record carries the mutable present (the tree anchor, the pending list,
  * the last provider report); the Brain carries the durable past.
  */
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -62,6 +62,7 @@ import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
 import { createJobTable, type JobTable } from "./jobs.js";
+import { promptItemsOf } from "../ui/prompt-handles.js";
 
 export interface LiveSessionOptions {
   /**
@@ -154,6 +155,17 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     writeSnapshot(root, generation, projection, stamp.getTime());
   }
   const paths = generationPaths(root, generation);
+  const frozenText = await readFile(paths.markdown, "utf8");
+  const headHandles = new Set([...frozenText.matchAll(/^X(\d+) \[(?:toolCall|reasoning|plainText|readResult|toolResult|personMessage)\]/gm)].map((match) => `X${match[1]}`));
+  const headEphemeraCount = Math.max(0, ...[...headHandles].map((handle) => Number(handle.slice(1))));
+  const openingBrain = await options.brain.read();
+  const headEphemera = new Map(openingBrain.handles.entries.flatMap((entry) => {
+    if (entry.kind !== "ephemera" || !headHandles.has(entry.handle)) return [];
+    const item = openingBrain.ephemera.find((candidate) => candidate.id === entry.id);
+    return item === undefined ? [] : [[entry.handle, item] as const];
+  }));
+  const sidecar = await readFile(paths.sidecar, "utf8").then((text) => JSON.parse(text) as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }).catch(() => ({ ephemeralItems: undefined }));
+  for (const entry of sidecar.ephemeralItems ?? []) if (headHandles.has(entry.handle)) headEphemera.set(entry.handle, entry.item);
 
   const database = await openNodeSqliteDatabase(paths.store);
   await database.exec("PRAGMA secure_delete = ON");
@@ -175,6 +187,8 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     collapseTrigger: null,
     readOnly: false,
     generation,
+    headEphemeraCount,
+    headEphemera,
     lastReportedInput: undefined,
     desiredMaxOutput: options.models.getModel(modelRef.provider, modelRef.modelId)?.maxTokens ?? 0,
     work: newGenerationWork(),
@@ -249,7 +263,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         }
       }
     }
-    harness.resume();
     const session: LiveSession = {
       root,
       generation,
@@ -284,6 +297,16 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         return { kind: "collapse", reason, trigger: resolvedTrigger };
       },
     };
+    state.loadPromptItems = async () => promptItemsOf(await sessionTranscript(session), generation);
+    state.refreshHeadEphemera = async () => {
+      // Apply-now may explicitly re-freeze the head. Adopt its identities at
+      // the next request boundary, never halfway through the preceding call.
+      const snapshot = await readFile(paths.sidecar, "utf8").then((text) => JSON.parse(text) as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }).catch(() => ({ ephemeralItems: undefined }));
+      if (snapshot.ephemeralItems === undefined) return; // legacy or temporarily unreadable sidecar
+      state.headEphemera = new Map(snapshot.ephemeralItems.map(({ handle, item }) => [handle, item]));
+      state.headEphemeraCount = Math.max(0, ...snapshot.ephemeralItems.map(({ handle }) => Number(handle.slice(1)) || 0));
+    };
+    harness.resume();
     // Only restores already committed by a collapse are retried here. Ordinary
     // archive marks still wait for collapse. An active run can defer recovery;
     // its marked source remains safe and will be retried at the next collapse.

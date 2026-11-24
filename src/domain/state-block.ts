@@ -112,6 +112,8 @@ export interface StateBlockInput {
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
   /** Every record carrying a pin marker, as handle + who placed it, in template order. */
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
+  /** Live body items addressable by the pin tool, in prompt order. */
+  working?: Array<{ handle: string; kind: string; text: string }>;
   /** Every entry carrying a mark, with its action and its author (§4.1). */
   marks: MarkLine[];
   /** Persistent piped jobs currently held in host RAM; omitted from the block when empty. */
@@ -251,6 +253,10 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.pinned.length === 0
       ? "pins: none"
       : ["pins:", ...input.pinned.map((item) => `  P ${item.handle} · placed by ${authorName(item.author, input.person)}`)].join("\n");
+  const working = input.working === undefined || input.working.length === 0 ? [] : [
+    "live items:",
+    ...input.working.map((item) => `  ${item.handle} · ${item.kind} · ${item.text.replace(/\s+/g, " ").slice(0, 120)}`),
+  ];
   const marks: string =
     input.marks.length === 0
       ? "marks: none"
@@ -278,6 +284,7 @@ export function renderStateBlock(input: StateBlockInput): string {
     stale,
     ...jobsLines,
     ...treeLines,
+    ...working,
     pinned,
     marks,
     ...flowLines,

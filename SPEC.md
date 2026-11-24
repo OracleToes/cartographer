@@ -529,6 +529,11 @@ so its number comes from where it sits: `X3` is the third ephemeral item in the
 prompt in both views, because a handle is only useful if it names the same thing
 wherever the person reads it.
 
+The state block lists live ephemeral handles with short identifying previews, so
+the agent can select an item without rewriting the cached prompt body. Pinned
+items already in the frozen head keep their `X` handles; live `X` numbering
+starts after those handles.
+
 A tool row in the transcript is one row — the call's arguments and its result —
 so it wears the result's handle, `R` or `S`, which is the text a person quotes
 and the item a pin holds (§5.5). The call keeps its own `X` handle in the Context
@@ -704,7 +709,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `chat` | Writes one Agent Chat record: something declared person-facing. |
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
-| `pin` | Sets or clears the pin on one file from the tree. |
+| `pin` | Sets or clears the pin on one file from the tree or one live ephemeral item by handle; the agent cannot remove the person's pin. |
 | `mark` | Marks one Brain record for archive or delete, or withdraws a mark the agent placed. Applies at the next collapse. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
