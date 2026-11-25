@@ -1,9 +1,10 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -21,6 +22,7 @@ import {
   openLiveSession,
   restoreEphemeral,
   sessionTranscript,
+  setProjectModes,
   submitInput,
   togglePause,
   waitForRunEnd,
@@ -270,6 +272,91 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   // block with the tree it asked for — not the tree it had before.
   assert.equal(validTree.control?.terminate, true, "the tree call ends the turn");
   await cleanup();
+});
+
+test("project modes persist independently through reopening and collapse", async () => {
+  const a = await fixture({ inMemoryBrain: true });
+  const b = await fixture({ inMemoryBrain: true });
+  const { models, ref } = fauxSetup();
+  const options = { root: a.root, brain: a.brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  let other;
+  try {
+    assert.equal(session.state.readOnly, false);
+    assert.equal(session.state.pathScope, "strict");
+    setProjectModes(session, { readOnly: true });
+    setProjectModes(session, { pathScope: "relaxed" });
+    other = await openLiveSession({ ...options, root: b.root, brain: b.brain });
+    assert.equal(other.state.readOnly, false);
+    assert.equal(other.state.pathScope, "strict");
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    session = (await collapseLiveSession(session, options, "person collapse")).session;
+    assert.equal(session.state.readOnly, true);
+    assert.equal(session.state.pathScope, "relaxed");
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.equal(session.state.readOnly, true);
+    assert.equal(session.state.pathScope, "relaxed");
+    setProjectModes(session, { readOnly: false });
+    assert.equal(session.state.pathScope, "relaxed");
+    assert.deepEqual(JSON.parse(readFileSync(join(a.root, ".brain", "settings.json"), "utf8")), { version: 1, readOnly: false, pathScope: "relaxed" });
+    writeFileSync(join(a.root, ".brain", "settings.json"), "invalid");
+    assert.throws(() => setProjectModes(session, { readOnly: true }), /Invalid project settings/);
+    assert.equal(session.state.readOnly, false);
+  } finally {
+    await closeLiveSession(session);
+    if (other) await closeLiveSession(other);
+    await a.cleanup(); await b.cleanup();
+  }
+});
+
+test("a pinned external read refreshes on collapse in relaxed scope", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const outside = mkdtempSync(join(tmpdir(), "carto-read-pin-"));
+  const file = join(outside, "outside file.txt");
+  writeFileSync(file, "fresh external content\n");
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  try {
+    setProjectModes(session, { pathScope: "relaxed" });
+    await brain.apply({ kind: "ephemeral.pin", item: { id: "external-reading", text: "old", kind: "readResult", entity: { callId: "read-outside", tool: "read", path: `@${file}` }, createdAt: Date.now(), pinned: "user" } }, Date.now());
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    session = (await collapseLiveSession(session, options, "person collapse")).session;
+    assert.equal((await brain.read()).ephemera.find((item) => item.id === "external-reading").text, "fresh external content\n");
+    assert.equal(session.state.pathScope, "relaxed");
+  } finally { await closeLiveSession(session); await cleanup(); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("file scope guards normalized and symlinked paths while relaxed read/edit work outside", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const outside = mkdtempSync(join(tmpdir(), "carto-outside-"));
+  const file = join(outside, "other file.txt");
+  writeFileSync(file, "before\n");
+  mkdirSync(join(outside, ".brain"));
+  writeFileSync(join(outside, ".brain", "secret"), "secret");
+  symlinkSync(file, join(root, "external-link"));
+  symlinkSync(join(root, ".brain"), join(root, "brain-link"));
+  symlinkSync(join(outside, "missing"), join(root, "dangling"));
+  const state = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false, pathScope: "strict" };
+  const byName = Object.fromEntries(createTools({ root, brain, session: state }).map((tool) => [tool.name, tool]));
+  const api = { callId: "scope-test", now: Date.now, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const edit = (path) => byName.edit.execute({ path, edits: [{ oldText: "before", newText: "after" }] }, api, {});
+  const read = (path) => byName.read.execute({ path }, api, {});
+  try {
+    for (const path of [file, `@${file}`, pathToFileURL(file).href, "external-link"]) await assert.rejects(read(path), /outside the project root/);
+    await assert.rejects(edit("external-link"), /outside the project root/);
+    await assert.rejects(byName.create.execute({ path: "dangling", content: "no" }, api, {}), /unresolved symlink/);
+    state.pathScope = "relaxed";
+    assert.match(JSON.stringify(await read(`@${file.replace(" ", "\u00a0")}`)), /before/);
+    await edit(pathToFileURL(file).href);
+    assert.equal(readFileSync(file, "utf8"), "after\n");
+    for (const path of ["brain-link/brain.sqlite", join(outside, ".brain", "secret"), `@${join(root, ".brain", "brain.sqlite")}`]) await assert.rejects(read(path), /\.brain/);
+    await assert.rejects(byName.create.execute({ path: join(outside, "new"), content: "no" }, api, {}), /outside the project root/);
+    state.readOnly = true;
+    await assert.rejects(byName.edit.execute({ path: file, edits: [{ oldText: "after", newText: "no" }] }, api, {}), /read only mode/);
+    assert.match(JSON.stringify(await read(file)), /after/);
+  } finally { await cleanup(); rmSync(outside, { recursive: true, force: true }); }
 });
 
 test("the file tools are the package's: read takes offset and limit", async () => {

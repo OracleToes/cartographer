@@ -10,7 +10,7 @@
 import { existsSync, statSync } from "node:fs";
 
 import { arr, bool, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
-import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi, ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
 // the env's cwd, and the two things Carto adds are the `.brain` wall and the
@@ -23,7 +23,7 @@ import type { PromptItem } from "../ui/prompt-handles.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
-import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, type PathScope } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 import {
@@ -56,6 +56,8 @@ export interface ToolSession {
 
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
+  /** Strict keeps file tools in the project; relaxed lets read/edit use outside paths. */
+  pathScope?: PathScope;
   /** The generation this context belongs to; recorded on context-sourced pins. */
   generation: string;
   /** The frozen head's X namespace, and the items exposed in the last request. */
@@ -176,15 +178,39 @@ function treePathOf(root: string, brain: CartoBrain, session: ToolSession, handl
   return undefined;
 }
 
-/**
- * The path a file tool is about to touch, resolved against the project root:
- * `.brain` is refused here, before the package's tool sees it. Paths outside
- * the root are the env's business — its cwd is the root, and its own
- * `absolutePath` refuses what escapes it.
- */
-function guardedPath(root: string, path: string): void {
-  const absolute = lexicalProjectPath(root, path);
-  refuseBrainPath(root, absolute);
+/** Wrap the package environment at the actual filesystem operations, after Pi
+ * has normalized paths and selected read-path variants. Shell is unaffected. */
+function fileToolApi<T extends ToolExecutionApi>(api: T, root: string, scope: PathScope): T {
+  const env = api.env;
+  if (env === undefined) return api;
+  const operations = new Set(["exists", "openBinaryReader", "fileInfo", "readTextFile", "writeFile"]);
+  const scoped = new Proxy(env, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (key === "absolutePath") {
+        return async (...args: unknown[]) => {
+          const result = await Reflect.apply(value, target, args) as { ok: boolean; value?: string };
+          if (result.ok && result.value !== undefined) assertFileScope(root, result.value, scope);
+          return result;
+        };
+      }
+      if (typeof key === "string" && operations.has(key)) {
+        return (path: string, ...args: unknown[]) => {
+          assertFileScope(root, path, scope);
+          return Reflect.apply(value, target, [path, ...args]);
+        };
+      }
+      return value.bind(target);
+    },
+  });
+  return new Proxy(api, {
+    get(target, key) {
+      if (key === "env") return scoped;
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 /** Resolve against what was sent, not a new scan whose numbering may have changed. */
@@ -208,11 +234,10 @@ function scopedRead(root: string, session: ToolSession): ToolRegistration {
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
     // Carto adds is how the file is named and how to keep reads slim.
-    description: `${base.description ?? ""} Name the file by its tree handle or a project path, using \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
+    description: `${base.description ?? ""} Name the file by its tree handle or a path; strict scope stays in the project, relaxed scope permits outside paths. Use \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
       const path = fileToolPath(pathOf(args), session);
-      guardedPath(root, path);
-      return base.execute({ ...args, path }, api, context);
+      return base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
     },
   });
 }
@@ -228,12 +253,11 @@ function scopedEdit(root: string, session: ToolSession, readOnly: () => boolean)
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
     // Carto adds is how the file is named, atomic pacing, and read-only mode.
-    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
+    description: `${base.description ?? ""} Name the file by its tree handle or a path; strict scope stays in the project, relaxed scope permits outside paths (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = fileToolPath(pathOf(args), session);
-      guardedPath(root, path);
-      return base.execute({ ...args, path }, api, context);
+      return base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
     },
   });
 }
@@ -252,14 +276,16 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = pathOf(args);
-      const env = api.env;
+      const scoped = fileToolApi(api, envRoot, "strict");
+      const env = scoped.env;
       if (env === undefined) throw new Error("create needs the project environment");
-      guardedPath(envRoot, path);
-      const absolute = getOrThrow(await env.absolutePath(path, context));
+      // Match the package's path normalization before checking for overwrite.
+      const normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+      const absolute = getOrThrow(await env.absolutePath(normalized, context));
       if (getOrThrow(await env.exists(absolute, context))) {
         throw new Error(`${path} already exists, and creating a file never overwrites one. Change it with \`edit\`, or choose a path that is free.`);
       }
-      return write.execute(args, api, context);
+      return write.execute({ ...args, path: absolute }, scoped, context);
     },
   });
 }

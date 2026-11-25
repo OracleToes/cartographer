@@ -183,6 +183,8 @@ test("state block includes compact mode-aware decision flow and conditional atte
   assert.doesNotMatch(editBlock, /\nattention:\n/);
   assert.doesNotMatch(editBlock.slice(editBlock.indexOf("\nflow:\n")), /—/);
 
+  assert.match(editBlock, /file scope: strict/);
+  assert.match(renderStateBlock(input({ pathScope: "relaxed" })), /file scope: relaxed/);
   const roBlock = renderStateBlock(input({ mode: "read only" }));
   assert.match(roBlock, /Exploring in read only mode\?/);
   assert.doesNotMatch(roBlock, /Reading, editing, or creating files\?/);

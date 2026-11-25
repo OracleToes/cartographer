@@ -613,8 +613,14 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 ## 6. Project files
 
-Carto reads and edits paths that resolve inside the selected project root. A
-symlink that resolves outside the root is rejected.
+File scope is a person-controlled, per-project setting. **Strict** is the default:
+`read`, `edit`, `create`, and the other path tools stay inside the selected
+project root, including resolved symlink targets. **Relaxed** allows `read` and
+`edit` to access paths outside it; `create` and other path tools remain scoped.
+The `.brain` wall still applies in either scope, including through symlinks.
+The workspace palette toggles scope; headless `/mode strict` and `/mode relaxed`
+do the same. The state block reports the current scope to the agent. This is not
+a shell sandbox: `bash` remains trusted.
 
 The agent's ideal edit is small, atomic, and scoped: one function, one value
 changed, one chunk removed, one small file added, or the minimum scaffolding that
@@ -629,7 +635,11 @@ prompt not being trusted (§1).
 ### 6.1 Read only mode and edit mode
 
 Carto is always in one of two modes. A toggle in the workspace switches between
-them. The person sets it; nothing else does.
+them; headless `/mode read-only` and `/mode edit` set them. The person sets it;
+nothing else does. Read-only/edit and strict/relaxed are independent and are
+stored in that project's `.brain/settings.json`, surviving restart and collapse.
+New projects default to edit and strict. A failed settings write leaves the live
+mode unchanged; malformed settings are reported rather than silently discarded.
 
 - **Edit mode** is the default. The harness enforces nothing, and the agent edits
   as it works.
@@ -756,8 +766,8 @@ and `create` takes a path because the file it makes has no handle yet.
 | `sleep` | Waits: forever, or for a number of seconds. |
 
 `read`, `edit`, and `bash` are taken from the durable package. Carto supplies
-their descriptions and scopes them to the project root; it does not write a file
-or command layer beside them.
+their descriptions and scopes file access according to the person’s selected
+mode; it does not write a file or command layer beside them.
 
 - **`read`** takes a file's handle, or its path, and optional `offset` and
   `limit`.

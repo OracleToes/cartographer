@@ -34,7 +34,7 @@ import {
   type StateBlockInput,
 } from "../domain/state-block.js";
 import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
-import { lexicalProjectPath } from "./workspace.js";
+import { lexicalProjectPath, resolveReadReference, type PathScope } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
@@ -194,7 +194,7 @@ function staleMarksFor(
     items.push({ handle: drift.handle, why: drift.why });
     if (drift.modified) modifiedPins.push(drift.handle);
   }
-  for (const id of staleReadResultHandles(brain, root)) {
+  for (const id of staleReadResultHandles(brain, root, session.pathScope ?? "strict")) {
     const handle = [...(session.headEphemera ?? new Map()), ...(session.liveEphemera ?? new Map())].find(([, item]) => item.id === id)?.[0]
       ?? handleOf(brain.handles, "ephemera", id);
     if (handle !== undefined) items.push({ handle, why: "a pinned reading, and the file has changed since" });
@@ -314,14 +314,15 @@ export function deriveStateAttention(params: {
  * a pin on it is a promise about that file, and a file that moved on makes the
  * text a stale quotation. Nothing blocks; the block says which handles are stale.
  */
-function staleReadResultHandles(brain: CartoBrain, root: string): string[] {
+function staleReadResultHandles(brain: CartoBrain, root: string, scope: PathScope): string[] {
   const names: string[] = [];
   for (const item of brain.ephemera) {
     if (item.pinned === undefined) continue;
     if (item.kind !== "readResult") continue;
     const path = item.entity?.path;
     if (path === undefined) continue;
-    const real = lexicalProjectPathSafe(root, path);
+    let real: string | null = null;
+    try { real = resolveReadReference(root, path, scope); } catch { /* inaccessible readings are stale */ }
     const mtime = real === null ? null : statMtimeSafe(real);
     if (mtime !== null && mtime <= item.createdAt) continue;
     // Ephemera have no Brain handle; the state block names them by id, which is
@@ -428,6 +429,7 @@ export async function renderLiveStateBlock(
     stale: stale.items,
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     mode,
+    pathScope: options.session.pathScope ?? "strict",
     projectRoot: options.root,
     tree,
   };

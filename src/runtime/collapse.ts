@@ -33,7 +33,7 @@ import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { lexicalProjectPath } from "./workspace.js";
+import { lexicalProjectPath, readProjectSettings, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -460,8 +460,10 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
  * outside the project, missing, or not a text file this can hold. The head says
  * so in its place, and the pin's stale mark does the same in the state block.
  */
-function readPinnedFile(root: string, path: string): string | undefined {
-  const real = safeResolve(root, path);
+function readPinnedFile(root: string, path: string, readResult = false): string | undefined {
+  let real: string | null;
+  try { real = readResult ? resolveReadReference(root, path, readProjectSettings(root).pathScope) : safeResolve(root, path); }
+  catch { return undefined; }
   if (real === null) return undefined;
   try {
     if (statSync(real).isDirectory()) return undefined;
@@ -641,7 +643,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     if (item.pinned === undefined || deletions.has(item.id)) continue;
     const path = item.kind === "readResult" ? item.entity?.path : undefined;
     if (path === undefined) continue;
-    const text = readPinnedFile(root, path);
+    const text = readPinnedFile(root, path, true);
     if (text === undefined) continue;
     const refreshedItem: PinnedEphemeral = { ...item, text };
     writes.push({ write: { kind: "ephemeral.pin", item: refreshedItem }, now });

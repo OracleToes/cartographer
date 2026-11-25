@@ -47,6 +47,7 @@ import {
   collapseLiveSession,
   interruptRun,
   openLiveSession,
+  setProjectModes,
   resumeSession,
   sessionTranscript,
   submitInput,
@@ -1985,22 +1986,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
-  /**
-   * The person's mode toggle (§6.1). It flips the session flag the tools read,
-   * and the block reports the new mode on the next request. Nothing else knows
-   * the mode — `bash` stays trusted, and no gate is placed anywhere.
-   */
+  /** Person-owned modes are persisted before they take effect. */
   const toggleReadOnly = () => {
-    state.session.state.readOnly = !state.session.state.readOnly;
-    tui.flash(
-      state.session.state.readOnly
-        ? "read only mode — create and edit will refuse"
-        : "edit mode — the agent may change the project",
-      1_800,
-    );
-    tui.requestRender();
+    try {
+      const settings = setProjectModes(state.session, { readOnly: !state.session.state.readOnly });
+      tui.flash(settings.readOnly ? "read only mode — create and edit will refuse" : "edit mode — the agent may change files", 1_800);
+      tui.requestRender();
+    } catch (error) { pushStatus(`mode not changed: ${errorText(error)}`); }
   };
-
+  const togglePathScope = () => {
+    try {
+      const settings = setProjectModes(state.session, { pathScope: state.session.state.pathScope === "relaxed" ? "strict" : "relaxed" });
+      tui.flash(settings.pathScope === "relaxed" ? "relaxed scope — read and edit may access outside the project" : "strict scope — file tools stay inside the project", 1_800);
+      tui.requestRender();
+    } catch (error) { pushStatus(`scope not changed: ${errorText(error)}`); }
+  };
   const copyTranscript = async () => {
     const text = transcript.toPlainText();
     const result = await copyWithFallback(text, "transcript");
@@ -2501,6 +2501,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => true,
     },
     {
+      id: "path-scope",
+      group: "the workspace",
+      label: "strict / relaxed file scope",
+      hint: "relaxed lets read and edit use paths outside the project",
+      run: () => togglePathScope(),
+      available: () => true,
+    },
+    {
       id: "sidebar",
       group: "the workspace",
       label: "sidebar",
@@ -2896,6 +2904,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       group: "the workspace",
       label: state.session.state.readOnly ? "Mode: back to editing" : "Mode: read only",
       run: () => toggleReadOnly(),
+    });
+    list.push({
+      id: "path-scope-name",
+      group: "the workspace",
+      label: state.session.state.pathScope === "relaxed" ? "File scope: strict" : "File scope: relaxed",
+      run: () => togglePathScope(),
     });
     return list;
   };

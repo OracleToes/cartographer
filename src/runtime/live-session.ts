@@ -65,6 +65,7 @@ import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } fr
 import { estimateContextTokens } from "../domain/estimate.js";
 import { createJobTable, type JobTable } from "./jobs.js";
 import { promptItemsOf } from "../ui/prompt-handles.js";
+import { readProjectSettings, writeProjectSettings, type ProjectSettings } from "./workspace.js";
 
 export interface LiveSessionOptions {
   /**
@@ -145,6 +146,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const root = resolve(options.root);
   const now = () => options.now?.() ?? Date.now();
   await mkdir(resolve(root, ".brain/context"), { recursive: true });
+  const projectSettings = readProjectSettings(root);
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
   // or build a new one from the Brain — which is authoritative.
@@ -190,7 +192,8 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     tree: { anchor: root, depth: 2, ...(options.treePageSize === undefined ? {} : { limit: options.treePageSize }) },
     collapseRequested: null,
     collapseTrigger: null,
-    readOnly: false,
+    readOnly: projectSettings.readOnly,
+    pathScope: projectSettings.pathScope,
     generation,
     headEphemeraCount,
     headEphemera,
@@ -568,6 +571,14 @@ export interface PauseOutcome {
  * durable task, so its own timer is what wakes it; nothing here starts work
  * the agent did not ask for.
  */
+/** Persist first so a failed write never silently changes the active mode. */
+export function setProjectModes(session: LiveSession, update: Partial<ProjectSettings>): ProjectSettings {
+  const settings = writeProjectSettings(session.root, update);
+  session.state.readOnly = settings.readOnly;
+  session.state.pathScope = settings.pathScope;
+  return settings;
+}
+
 export async function togglePause(session: LiveSession, to?: boolean): Promise<PauseOutcome> {
   const paused = session.state.paused;
   const want = to ?? !paused;

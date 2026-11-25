@@ -99,6 +99,8 @@ export interface StateBlockInput {
   sizes: { atlas: number; ledger: number; chat: number; ephemera: number };
   /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
   mode: "edit" | "read only";
+  /** Scope of read/edit; independent of edit vs read-only. */
+  pathScope?: "strict" | "relaxed";
   /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
   pending: PendingWrite[];
   /**
@@ -277,6 +279,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   return [
     STATE_BLOCK_OPEN,
     mode,
+    input.pathScope === "relaxed" ? "file scope: relaxed (read/edit may access outside the project; create stays inside)" : "file scope: strict (read/edit/create stay inside the project)",
     fullness,
     ...percentageLine,
     space,

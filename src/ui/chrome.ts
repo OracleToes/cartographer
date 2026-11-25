@@ -28,7 +28,7 @@ export type SendMode = "steer" | "after run" | "now";
 
 export interface HeaderState {
   project: string;
-  readonly session: { generation: string; state: { contextWindow: number; readOnly: boolean; paused: boolean } };
+  readonly session: { generation: string; state: { contextWindow: number; readOnly: boolean; paused: boolean; pathScope?: "strict" | "relaxed" } };
   modelLabel: string;
   view: ViewMode;
   layer: Layer;
@@ -72,6 +72,7 @@ export class HeaderView implements Component {
     const paused = this.state.session.state.paused;
     const middle = [
       this.state.session.state.readOnly ? tokens.warn(tokens.bold("READ ONLY")) : "",
+      this.state.session.state.pathScope === "relaxed" ? tokens.warn(tokens.bold("RELAXED")) : "",
       paused ? tokens.accent(tokens.bold("PAUSED")) : "",
     ].filter((part) => part !== "").join(" ");
     const status = paused

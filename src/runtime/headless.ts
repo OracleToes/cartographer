@@ -36,6 +36,7 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  setProjectModes,
   resumeSession,
   submitInput,
   switchSessionModel,
@@ -72,6 +73,7 @@ const HELP = [
   "  /resume    start or resume the agent with a fresh state block (no message)",
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
+  "  /mode      show modes; /mode edit, read-only, strict or relaxed changes them",
   "  /help      see this",
   "  /quit      end the session",
 ].join("\n");
@@ -284,6 +286,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
             writeLine(output, `${job.handle} "${job.label}" · ${state}`);
           }
         }
+        continue;
+      }
+      if (line === "/mode" || line.startsWith("/mode ")) {
+        const argument = line.slice("/mode".length).trim();
+        try {
+          if (argument === "edit" || argument === "read-only") setProjectModes(session, { readOnly: argument === "read-only" });
+          else if (argument === "strict" || argument === "relaxed") setProjectModes(session, { pathScope: argument });
+          else if (argument !== "") { writeLine(error, "(/mode edit, read-only, strict, or relaxed)"); continue; }
+          writeLine(output, `mode: ${session.state.readOnly ? "read-only" : "edit"} · file scope: ${session.state.pathScope ?? "strict"}`);
+        } catch (err) { writeLine(error, `(mode not changed: ${err instanceof Error ? err.message : String(err)})`); }
         continue;
       }
       if (line === "/pause" || line.startsWith("/pause ")) {

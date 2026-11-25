@@ -6,8 +6,11 @@
  * scoping boundary, not a trust gate (§6.1). The shell cannot be scoped this
  * way; its cwd is the root and the boundary is what the agentic tools enforce.
  */
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export class WorkspaceError extends Error {}
 
@@ -41,4 +44,97 @@ export function lexicalProjectPath(root: string, path: string): string {
   }
   refuseBrainPath(rootReal, candidate);
   return candidate;
+}
+
+
+/** Person-owned project settings live outside the agent's Brain projection. */
+export type PathScope = "strict" | "relaxed";
+export interface ProjectSettings { readOnly: boolean; pathScope: PathScope }
+
+export function readProjectSettings(root: string): ProjectSettings {
+  const path = join(root, ".brain", "settings.json");
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { readOnly: false, pathScope: "strict" };
+    throw error;
+  }
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error(`Invalid project settings at ${path}: not valid JSON.`); }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid project settings at ${path}.`);
+  const data = value as Record<string, unknown>;
+  if (data.version !== 1 || (data.readOnly !== undefined && typeof data.readOnly !== "boolean") ||
+      (data.pathScope !== undefined && data.pathScope !== "strict" && data.pathScope !== "relaxed")) {
+    throw new Error(`Invalid project settings at ${path}: expected version 1, a boolean readOnly, and strict or relaxed pathScope.`);
+  }
+  return { readOnly: data.readOnly === true, pathScope: data.pathScope === "relaxed" ? "relaxed" : "strict" };
+}
+
+/** Merge and atomically replace the settings file before updating live state. */
+export function writeProjectSettings(root: string, update: Partial<ProjectSettings>): ProjectSettings {
+  const next = { ...readProjectSettings(root), ...update };
+  const directory = join(root, ".brain");
+  const path = join(directory, "settings.json");
+  mkdirSync(directory, { recursive: true });
+  const temp = join(directory, `.settings-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temp, `${JSON.stringify({ version: 1, ...next }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    renameSync(temp, path);
+  } finally { rmSync(temp, { force: true }); }
+  return next;
+}
+
+/** Guard the actual path used by a package tool, including existing symlink targets. */
+export function assertFileScope(root: string, path: string, scope: PathScope): void {
+  const named = resolve(root, path);
+  const rootReal = realpathSync(root);
+  const fromRoot = relative(resolve(root), named);
+  const absolute = fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot))
+    ? resolve(rootReal, fromRoot) : named;
+  refuseBrainPath(resolve(sep), absolute);
+  if (scope === "strict") lexicalProjectPath(rootReal, absolute);
+  // For a not-yet-existing create target, resolve its closest existing parent.
+  let ancestor = absolute;
+  while (true) {
+    try {
+      const actual = resolve(realpathSync(ancestor), relative(ancestor, absolute));
+      refuseBrainPath(resolve(sep), actual);
+      if (scope === "strict") lexicalProjectPath(rootReal, actual);
+      return;
+    } catch (error) {
+      if (error instanceof BrainWallError || error instanceof WorkspaceError) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      try {
+        if (lstatSync(ancestor).isSymbolicLink()) throw new WorkspaceError(`Cannot use an unresolved symlink: ${ancestor}`);
+      } catch (statError) {
+        if (statError instanceof WorkspaceError) throw statError;
+        const statCode = (statError as NodeJS.ErrnoException).code;
+        if (statCode !== "ENOENT" && statCode !== "ENOTDIR") throw statError;
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+}
+
+/** Resolve a saved read reference using the same aliases and fallback variants as Pi.
+ * Guard each candidate before inspecting it, just as the live tool does. */
+export function resolveReadReference(root: string, path: string, scope: PathScope): string {
+  let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+  if (normalized === "~") normalized = homedir();
+  else if (normalized.startsWith("~/")) normalized = join(homedir(), normalized.slice(2));
+  else if (normalized.startsWith("file://")) {
+    try { normalized = fileURLToPath(normalized); } catch { /* Pi treats malformed URLs as paths. */ }
+  }
+  const absolute = resolve(root, normalized);
+  const variants = [absolute, absolute.replace(/ (AM|PM)\./gi, "\u202F$1."), absolute.normalize("NFD"),
+    absolute.replace(/'/g, "\u2019"), absolute.normalize("NFD").replace(/'/g, "\u2019")];
+  for (const variant of new Set(variants)) {
+    assertFileScope(root, variant, scope);
+    if (existsSync(variant)) return variant;
+  }
+  return absolute;
 }
