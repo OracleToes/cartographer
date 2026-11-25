@@ -655,9 +655,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
     }
 
+    // Preview the same live identities without changing request-time session state.
+    const promptItems = promptItemsOf(entries, generation);
+    const promptItemHandles = promptHandles(promptItems, state.session.state.headEphemeraCount ?? 0);
+    const previewItems = new Map<string, import("../domain/records.js").PinnedEphemeral>();
+    for (const item of promptItems) {
+      if (item.item === undefined) continue;
+      const handle = item.kind === "person" ? promptItemHandles.person(item.key) : item.kind === "result" ? promptItemHandles.result(item.key) : promptItemHandles.ephemeral(item.key);
+      if (handle !== undefined) previewItems.set(handle, item.item);
+    }
     const stateBlock = await renderLiveStateBlock(
       { root: options.root, brain, session: state.session.state, jobs, markdownPath: state.session.markdownPath },
       messages,
+      undefined,
+      undefined,
+      previewItems,
     );
 
     // A timer refresh may have begun before a mark was written. Read the Brain
@@ -665,7 +677,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     brainState = await brain.read();
     // Numbered by the same function the transcript uses, over the same entries,
     // so a handle means one thing in both views (§5.4).
-    const handles = promptHandles(promptItemsOf(entries, generation), state.session.state.headEphemeraCount ?? 0);
+    const handles = promptItemHandles;
     // A pin the person placed before the collapse is a promise the item stays,
     // so the row says it is pinned rather than waiting to be pinned again.
     for (const item of toolWorkItems) {
@@ -1008,7 +1020,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (held === undefined) {
         assertPinnableFile(options.root, path);
         await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
-        pushStatus(`pinned ${shown} (you): the head holds it, read again at every collapse`);
+        pushStatus(`pinned ${shown} (you): the head reads it at the next collapse`);
       } else {
         await brain.apply({ kind: "file.pin", path: held.path, pinned: null }, Date.now());
         pushStatus(held.pinned === "user" ? `unpinned ${shown}` : `took the agent's pin off ${shown}`);

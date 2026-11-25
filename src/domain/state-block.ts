@@ -5,8 +5,8 @@
  * persisted; the Pi store accumulates only markers, which die with the
  * generation's store at collapse. The model sees exactly one current block,
  * identified by its shape — the same delimiters every time — which the
- * system prompt describes once. Nothing in the block is instructive; it is
- * what things are now, not what to do about it.
+ * system prompt describes once. The block reports current observations and
+ * gives condition-specific guidance; it is not a static workflow checklist.
  *
  * It is also the continuation (§5.7): a run that ends without a tool call ends,
  * and the block arrives as the next turn.
@@ -18,7 +18,7 @@
  *   context: ~12,410 / 32,768 tokens · the provider counted 9,841 input, tool work since +2,569
  *   context fill: ~37%
  *   space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980
- *   since the rebuild:
+ *   session-observed writes (not exhaustive):
  *     A3 · created
  *     C1 · declared to the person
  *   stale:
@@ -35,9 +35,10 @@
  * Every item that names a record names it by handle, and a line adds only what
  * the handle does not already say: no line repeats the kind its letter gives.
  * Empty sections say `none` rather than lying by omission, and nothing is
- * omitted. No section asks for anything; the block reports.
+ * omitted. Guidance is attached only to observations that call for it.
  */
 import { estimateSerialized } from "./estimate.js";
+import { staleGuidance, type StaleKind, type StateCapability } from "./state-engine.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
 export const STATE_BLOCK_CLOSE = "</carto-state>";
@@ -101,7 +102,7 @@ export interface StateBlockInput {
   mode: "edit" | "read only";
   /** Scope of read/edit; independent of edit vs read-only. */
   pathScope?: "strict" | "relaxed";
-  /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
+  /** Selected writes observed in memory, reset at collapse or reopening; not an exhaustive history. */
   pending: PendingWrite[];
   /**
    * Whatever has drifted, each with its own reason: an Atlas note whose file
@@ -109,9 +110,13 @@ export interface StateBlockInput {
    * (§5.5). The reason belongs to the entry, so the block does not put one
    * sentence on three different facts.
    */
-  stale: Array<{ handle: string; why: string }>;
+  stale: Array<{ handle: string; why: string; kind?: StaleKind }>;
+  /** Tools available to this context; absent means the existing direct tool set. */
+  capabilities?: readonly StateCapability[];
   /** Handles for the write-resolution of pending entries (the Brain's table). */
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
+  /** Whether live Brain contains any file pins. */
+  hasFilePins?: boolean;
   /** Every record carrying a pin marker, as handle + who placed it, in template order. */
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
   /** Live body items addressable by the pin tool, in prompt order. */
@@ -127,36 +132,19 @@ export interface StateBlockInput {
   tree: { root: string; depth: number; lines: string[] };
 }
 
-function decisionFlowLines(mode: "edit" | "read only", person: string): string[] {
-  if (mode === "read only") {
-    return [
-      "flow:",
-      `  - Exploring in read only mode? -> use \`read\` and \`tree\` without modifying files; map findings in \`atlas\`/\`ledger\` and answer ${person} via \`chat\`.`,
-      "  - Head bloated or finished exploring? -> `mark` resolved task items, `collapse`, or `sleep` when nothing is left to check.",
-    ];
-  }
-  return [
-    "flow:",
-    "  - Task unmapped or plan stale? -> map goals, steps, and atomic leaves in `atlas`; track your active leaf in `ledger`.",
-    "  - Reading, editing, or creating files? -> use `read`, `edit`, `create` (not `bash` sed/cat/python file edits) and `pin` active files.",
-    "  - Testing or running long-lived processes? -> extend one reusable interactive harness in place (no piling up test scripts); use `proc` for persistent processes.",
-    "  - Changed code or learned something? -> update your `atlas`/`ledger` handle in place now, then verify edge cases through the harness.",
-    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved task leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
-  ];
-}
-
-function formatJobSummary(job: JobSummaryLine): string {
+function formatJobSummary(job: JobSummaryLine, canRead: boolean): string {
   const unread =
     job.unreadLines > 0
       ? `${job.unreadLines} unread line${job.unreadLines === 1 ? "" : "s"}`
       : null;
+  const guidance = unread !== null && canRead ? " · `proc read` to inspect output if relevant" : "";
   if (job.status === "exited") {
     const code = job.exitSignal !== null ? job.exitSignal : job.exitCode === null ? "?" : String(job.exitCode);
-    return `  ${job.handle} "${job.label}" · exited(${code})${unread === null ? "" : ` · ${unread}`}`;
+    return `  ${job.handle} "${job.label}" · exited(${code})${unread === null ? "" : ` · ${unread}`}${guidance}`;
   }
   if (unread !== null) {
     const activity = job.active ? "active" : `quiet ${Math.max(1, Math.round(job.quietMs / 1000))}s`;
-    return `  ${job.handle} "${job.label}" · running · ${unread} (${activity})`;
+    return `  ${job.handle} "${job.label}" · running · ${unread} (${activity})${guidance}`;
   }
   return `  ${job.handle} "${job.label}" · running · idle`;
 }
@@ -221,6 +209,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   const estimated = estimatedContextTokens(input);
   const percentage = contextFillPercent(input);
   const warningPercent = input.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT;
+  const capabilities = new Set<StateCapability>(input.capabilities ?? ["read", "collapse", "proc"]);
   // The provider's own count is the only number here that is not an estimate,
   // and a window nobody advertised is unknown rather than a made-up figure.
   const fullness =
@@ -231,7 +220,7 @@ export function renderStateBlock(input: StateBlockInput): string {
       : reported === undefined
         ? `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · no provider count yet`
         : `context: ~${thousands(estimated)} / ${thousands(input.contextWindow)} tokens · the provider counted ${thousands(reported)} input${output > 0 ? `, ${thousands(output)} output` : ""}, tool work since +${thousands(input.toolWorkSince)}`;
-  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= warningPercent ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : ""}`];
+  const percentageLine = percentage === undefined ? [] : [`context fill: ~${Math.floor(percentage)}%${percentage >= warningPercent ? (capabilities.has("collapse") ? " · [COLLAPSE NEEDED] Write down what you need to continue, mark obsolete records, then collapse." : " · [CONTEXT WARNING] The context is approaching its limit.") : ""}`];
   const space =
     `space: system and tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
@@ -239,18 +228,21 @@ export function renderStateBlock(input: StateBlockInput): string {
     // Only when something is pinned: a cost of zero is not worth a clause, and
     // the line is already the longest in the block.
     (input.sizes.ephemera === 0 ? "" : ` · pinned ~${thousands(input.sizes.ephemera)}`);
-  // One line per write since the rebuild, named by handle. The line says what
+  // One line per write observed in this session, named by handle. The line says what
   // the write was; the letter already says which book holds it.
   const pending: string =
     input.pending.length === 0
-      ? "since the rebuild: nothing written"
-      : ["since the rebuild:", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? write.kind} · ${pendingWord(write, input.person)}`)].join("\n");
+      ? "session-observed writes (not exhaustive): none"
+      : ["session-observed writes (not exhaustive):", ...input.pending.map((write) => `  ${input.resolveHandle(write.kind, write.id) ?? `${write.kind} (handle unavailable)`} · ${pendingWord(write, input.person)}`)].join("\n");
   // Staleness is a fact about the note, not about the file: the file moved on
   // after the note was written.
   const stale: string =
     input.stale.length === 0
       ? "stale: nothing"
-      : ["stale:", ...input.stale.map((item) => `  ${item.handle} · ${item.why}`)].join("\n");
+      : ["stale:", ...input.stale.map((item) => {
+        const guidance = staleGuidance(item.kind, capabilities);
+        return `  ${item.handle} · ${item.why}${guidance === undefined ? "" : `; ${guidance}`}`;
+      })].join("\n");
   const pinned: string =
     input.pinned.length === 0
       ? "pins: none"
@@ -265,9 +257,8 @@ export function renderStateBlock(input: StateBlockInput): string {
       : ["marks:", ...input.marks.map((mark) => `  ${mark.handle} · ${mark.action} at the next collapse · marked by ${authorName(mark.author, input.person)}`)].join("\n");
   const jobsLines: string[] =
     input.jobs !== undefined && input.jobs.length > 0
-      ? ["jobs:", ...input.jobs.map(formatJobSummary)]
+      ? ["jobs:", ...input.jobs.map((job) => formatJobSummary(job, capabilities.has("proc")))]
       : [];
-  const flowLines = decisionFlowLines(input.mode, input.person);
   const attentionLines: string[] =
     input.attention !== undefined && input.attention.length > 0
       ? ["attention:", ...input.attention.map((line) => `  - ${line}`)]
@@ -289,8 +280,8 @@ export function renderStateBlock(input: StateBlockInput): string {
     ...treeLines,
     ...working,
     pinned,
+    ...(input.hasFilePins ? [`file pins: the frozen head may differ from live pins${capabilities.has("collapse") ? "; collapse refreshes it" : ""}`] : []),
     marks,
-    ...flowLines,
     ...attentionLines,
     STATE_BLOCK_CLOSE,
   ].join("\n");
@@ -301,6 +292,8 @@ export { estimateSerialized };
 export interface MessageLike {
   readonly role: string;
   readonly content?: unknown;
+  readonly toolCallId?: string;
+  readonly isError?: boolean;
   readonly sections?: Record<string, string | null>;
   readonly toolsAdded?: readonly unknown[];
   readonly timestamp?: number;

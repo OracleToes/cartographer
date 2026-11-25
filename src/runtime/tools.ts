@@ -4,7 +4,7 @@
  * Plain model text is not Chat. Every tool is scoped and unique; a tool's own
  * description is the authority on what it does and on any bound it carries
  * (§1, §7). A Brain write appears here as the tool's result and as a line in
- * the state block's record of writes since the rebuild — never as a patch to
+ * the state block's list of session-observed writes — never as a patch to
  * the frozen projection (§5.6).
  */
 import { existsSync, statSync } from "node:fs";

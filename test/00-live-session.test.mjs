@@ -144,16 +144,41 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
     const firstBlock = blockOf(captured[0]);
     assert.ok(firstBlock);
     assert.equal(captured[0].at(-1), firstBlock);
-    assert.match(firstBlock.content, /since the rebuild: nothing written/);
+    assert.match(firstBlock.content, /session-observed writes \(not exhaustive\): none/);
     assert.ok(!flatten(captured[0]).includes(STATE_BLOCK_MARKER));
     const secondBlock = blockOf(captured[1]);
     assert.ok(secondBlock);
     assert.match(flatten(captured[1]), /export const answer = 42/);
-    assert.match(secondBlock.content, /since the rebuild:/);
+    assert.match(secondBlock.content, /session-observed writes \(not exhaustive\):/);
     assert.match(secondBlock.content, /C2 · said to OracleToes/);
     assert.equal(captured[1].filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER));
     assert.match(secondBlock.content, /A1 · written/);
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("committed tool errors remain visible with the real result handle until a later completed round", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "missing.txt" }, { id: "failed-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxText("considering the result")], {})),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts" }, { id: "good-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "sleep-after-read" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  try {
+    const submission = await submitInput(session, "inspect the files");
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(captured.length, 4);
+    for (const messages of [captured[1], captured[2]]) {
+      assert.match(blockOf(messages).content, /Last completed tool round: `read` failed \(R1\)/);
+      assert.equal(messages.filter((message) => typeof message.content === "string" && message.content.includes("<carto-state>")).length, 1);
+    }
+    assert.doesNotMatch(blockOf(captured[3]).content, /Last completed tool round/);
   } finally {
     await closeLiveSession(session);
     await cleanup();
@@ -601,12 +626,12 @@ test("drift rides the collapse: the frozen projection carries the marks", async 
       { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },
       [],
     );
-    assert.match(block, /stale:\n  A1 · the file changed after this note/);
+    assert.match(block, /stale:\n  A1 · an attached file is newer, missing, or inaccessible; this note may be stale; inspect the attachment/);
     const fresh = outcome.session;
     faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-3" })], { stopReason: "toolUse" }))]);
     const again = await submitInput(fresh, "and now?");
     await again.wait(BACKGROUND_CONTEXT);
-    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 · the file changed after this note/);
+    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 · an attached file is newer, missing, or inaccessible; this note may be stale; inspect the attachment/);
     await closeLiveSession(fresh);
   } finally {
     await closeLiveSession(session).catch(() => undefined);

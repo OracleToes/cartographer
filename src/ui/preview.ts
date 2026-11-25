@@ -293,7 +293,7 @@ export function previewContext(width = 110): string {
       { id: "6-0", kind: "toolCall", name: "chat", args: "text: Both regions read in the order the model reads them." },
     ],
     stateBlockText:
-      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsince the rebuild: nothing written\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by OracleToes\nmarks: none\n</carto-state>",
+      "<carto-state>\n[EDIT MODE]\ncontext: ~14,220 / 32,768 tokens · no provider count yet\nsession-observed writes (not exhaustive): none\nstale: nothing\nT1 tree: . (depth 2)\n  src/  24K  D1\npins:\n  P X1 · placed by OracleToes\nmarks: none\n</carto-state>",
   };
   const view = new ContextView();
   view.setData(data);

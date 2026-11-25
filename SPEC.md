@@ -450,10 +450,14 @@ dashboard about its Brain and the project, and it reports:
   a percentage.
 - **Space breakdown** — by Brain part (Ledger, Atlas, Chat), separately from
   tool work and from the stable system and tool prompts.
-- **Pending changes** — one line per Brain write since the last collapse, named
-  by handle.
-- **New and stale entries** — Brain records written since the last collapse, and
-  read results whose file changed since the read, named by handle (§5.5).
+- **Session-observed writes** — selected agent tool writes held in memory, named
+  by handle where possible. This is not an exhaustive history: it resets on
+  collapse or reopening, and does not capture every person action or file change.
+- **Stale entries** — live mtime-based indicators for Atlas file attachments,
+  file pins relative to the frozen head, and pinned read results relative to
+  their read time (§5.5). Newer or inaccessible files are signals, not proof of
+  a content change. Guidance distinguishes reading from refreshing the head;
+  file pins in the live Brain need not yet be in the frozen head.
 - **Persistent jobs** — when persistent piped processes exist, one compact
   status line per `J` handle (label, running/exited status, unread line count,
   quiet/active indicator); never scrollback buffers, and omitted when none exist.
@@ -461,14 +465,13 @@ dashboard about its Brain and the project, and it reports:
 - **Pinned entries** — every pinned entry, with its author.
 - **Marks** — every entry carrying a mark, with its action and its author (§4.1).
 - **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
-- **Decision flow & state-reactive attention cues** — a compact mode-aware
-  `flow:` checklist at the tail, plus conditional `attention:` cues derived
-  strictly from live facts (such as `bash` used for file edits, pinned files
-  drifting on disk since collapse, an untouched/flat Brain after several tool
-  calls or persistent jobs with unread output). It does not instruct the agent
-  to archive or delete Chat. Omitted when clean.
-
-A long pending list is the signal to collapse.
+- **Condition-based guidance** — near the relevant facts, suggest inspecting
+  drift or unread job output when appropriate. Report Pi's `isError` results
+  from the latest completed visible tool round, matching call IDs and naming a
+  result handle only when it can be matched reliably. A failure is an
+  observation, not a claim about task failure or whether it is resolved. No
+  count-based Brain scoring, shell-command guessing, or static flow checklist.
+  Conditions remain visible while true; rendering and previews consume nothing.
 
 The block is identified by shape, not by announcement. It uses the same
 delimiters every time, and the system prompt describes that shape once. Nothing
@@ -494,7 +497,9 @@ inventory, so a file the tree does not show has no handle — which is why the t
 is rendered for a whole project and not only for what the agent happens to
 mention.
 
-- Handles are stable within a live generation and are rebuilt at collapse.
+- Brain handles are stable within a live generation and are rebuilt at collapse.
+  Tree file and directory handles refer to the displayed page and request; they
+  can change when the tree anchor, page, or contents change.
 - The agent never sees a database key or a storage-level identifier.
 - A tool parameter that names an item takes a handle. An unknown handle is an
   explicit error.
@@ -607,9 +612,10 @@ delivered as the next turn, and the agent reads the current state and acts.
 - The block is rendered fresh at the tail of every request and is removed after
   use. Because the model never sees prior blocks, it never accumulates and
   every request sees the tail fresh at its attention peak.
-- It guides rather than coerces: its compact `flow:` decision tree and
-  condition-triggered `attention:` cues reflect observed live state so the agent
-  steers itself cleanly without blocking tool calls or imposing rigid phases (§1).
+- It guides rather than coerces: condition-triggered guidance reflects
+  observed live state without blocking tool calls or imposing rigid phases (§1).
+  Available actions are capability-aware; future task roles must supply their
+  own context and warning lifecycle rather than inherit direct Carto's collapse.
 
 ## 6. Project files
 

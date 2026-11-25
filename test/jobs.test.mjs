@@ -144,7 +144,12 @@ test("state block renders compact jobs summary only when jobs exist", () => {
   assert.match(withJobs, /^jobs:\n/m);
   assert.match(withJobs, /J1 "dev server" · running · 5 unread lines \(quiet 4s\)/);
   assert.match(withJobs, /J2 "repl" · running · idle/);
-  assert.match(withJobs, /J3 "build" · exited\(0\) · 1 unread line/);
+  assert.match(withJobs, /J3 "build" · exited\(0\) · 1 unread line · `proc read`/);
+  assert.match(withJobs, /J1 "dev server" · running · 5 unread lines \(quiet 4s\) · `proc read`/);
+  assert.doesNotMatch(withJobs, /J2 "repl" · running · idle · `proc read`|`proc stop`/);
+  const withoutProc = renderStateBlock({ ...base, capabilities: [], jobs: [{ handle: "J1", label: "test", status: "exited", exitCode: 1, exitSignal: null, unreadLines: 1, quietMs: 0, active: false }] });
+  assert.match(withoutProc, /exited\(1\) · 1 unread line/);
+  assert.doesNotMatch(withoutProc, /`proc read`|`proc stop`/);
 });
 
 test("proc tool has clean description and drives persistent jobs", async () => {

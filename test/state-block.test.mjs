@@ -13,6 +13,7 @@ import {
   splitContextMessages,
   stripStateBlocks,
 } from "../dist/domain/state-block.js";
+import { latestToolFailures } from "../dist/domain/state-engine.js";
 import { newGenerationWork, renderLiveStateBlock } from "../dist/runtime/carto-extension.js";
 
 const input = (overrides = {}) => ({
@@ -53,7 +54,7 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.doesNotMatch(block, /\[COLLAPSE NEEDED\]/);
   assert.match(block, /space: system and tools ~5,900 · transcript ~3,800 · tool work ~2,700 · atlas ~1,200 · ledger ~640 · chat ~980/);
   // A pending line adds the write; the handle's letter already says the book.
-  assert.match(block, /since the rebuild:\n  A3 · written\n  C7 · said to OracleToes/);
+  assert.match(block, /session-observed writes \(not exhaustive\):\n  A3 · written\n  C7 · said to OracleToes/);
   // A mark carries its action, when it lands, and its author (§4.1).
   assert.match(block, /marks:\n  A8 · archive at the next collapse · marked by OracleToes\n  C3 · delete at the next collapse · marked by you/);
   // §5.4: a pin is named by its own letter and the handle of what it marks.
@@ -90,7 +91,7 @@ test("live items in the state block contain only their handles and types", () =>
 
 test("empty pending, marks, and stale say none; missing provider report is explicit", () => {
   const block = renderStateBlock(input({ pending: [], stale: [], pinned: [], marks: [], lastReportedInput: undefined }));
-  assert.match(block, /since the rebuild: nothing written/);
+  assert.match(block, /session-observed writes \(not exhaustive\): none/);
   assert.match(block, /marks: none/);
   assert.match(block, /pins: none/);
   assert.match(block, /stale: nothing/);
@@ -174,26 +175,49 @@ test("appendStateBlock strips markers and leaves the block last", () => {
   assert.equal(appended[1].timestamp, 1_700_000_000_000);
 });
 
-test("state block includes compact mode-aware decision flow and conditional attention cues", () => {
-  const editBlock = renderStateBlock(input());
-  assert.match(editBlock, /\nflow:\n/);
-  assert.match(editBlock, /use `read`, `edit`, `create`/);
-  assert.match(editBlock, /`chat` OracleToes/);
-  assert.doesNotMatch(editBlock, /mark` resolved `chat`/i);
-  assert.doesNotMatch(editBlock, /\nattention:\n/);
-  assert.doesNotMatch(editBlock.slice(editBlock.indexOf("\nflow:\n")), /—/);
-
-  assert.match(editBlock, /file scope: strict/);
-  assert.match(renderStateBlock(input({ pathScope: "relaxed" })), /file scope: relaxed/);
-  const roBlock = renderStateBlock(input({ mode: "read only" }));
-  assert.match(roBlock, /Exploring in read only mode\?/);
-  assert.doesNotMatch(roBlock, /Reading, editing, or creating files\?/);
-
-  const withAttention = renderStateBlock(input({ attention: ["Atlas has only 1 node -> map leaves."] }));
-  assert.match(withAttention, /\nattention:\n  - Atlas has only 1 node -> map leaves\.\n<\/carto-state>$/);
+test("state guidance is conditional and capability-aware", () => {
+  const clean = renderStateBlock(input());
+  assert.doesNotMatch(clean, /\nflow:|\nattention:/);
+  assert.match(clean, /file scope: strict/);
+  assert.match(renderStateBlock(input({ pathScope: "relaxed", mode: "read only" })), /file scope: relaxed/);
+  const stale = [
+    { handle: "A1", why: "attachment unavailable", kind: "atlas" },
+    { handle: "F1", why: "file newer", kind: "file-modified" },
+    { handle: "R1", why: "read newer", kind: "read-modified" },
+    { handle: "F2", why: "file unavailable", kind: "file-unavailable" },
+  ];
+  const block = renderStateBlock(input({ stale, hasFilePins: true }));
+  assert.match(block, /A1 · attachment unavailable; inspect the attachment/);
+  assert.match(block, /F1 · file newer; read current content if in scope, or collapse/);
+  assert.match(block, /R1 · read newer; read current content if in scope, or collapse/);
+  assert.match(block, /F2 · file unavailable; check the path and scope/);
+  assert.match(block, /file pins: the frozen head may differ from live pins; collapse refreshes it/);
+  assert.equal(renderStateBlock(input({ stale, hasFilePins: true })), block);
+  const limited = renderStateBlock(input({ stale, capabilities: [], contextWindow: 1000, lastReportedInput: 900, toolWorkSince: 0, hasFilePins: true }));
+  assert.match(limited, /\[CONTEXT WARNING\]/);
+  assert.doesNotMatch(limited, /COLLAPSE NEEDED|collapse refreshes|inspect the attachment|read current content/);
 });
 
-test("renderLiveStateBlock emits state-reactive attention cues and detects modified pinned files", async () => {
+test("only failures in the latest completed visible tool round are reported", () => {
+  const call = (id, name) => ({ type: "toolCall", id, name });
+  const assistant = (...content) => ({ role: "assistant", content });
+  const result = (toolCallId, isError) => ({ role: "toolResult", toolCallId, isError });
+  const round = [assistant(call("a", "read"), call("b", "bash")), result("a", true), result("b", false)];
+  const handles = new Map([["a", "R1"]]);
+  assert.deepEqual(latestToolFailures(round, handles), ["Last completed tool round: `read` failed (R1). Inspect the result before relying on that operation."]);
+  assert.deepEqual(latestToolFailures(round, handles), latestToolFailures(round, handles));
+  assert.deepEqual(latestToolFailures([...round, assistant(call("c", "edit"))], handles), latestToolFailures(round, handles), "an incomplete later round does not replace a completed one");
+  assert.deepEqual(latestToolFailures([...round, assistant(call("c", "edit")), result("c", false)], handles), []);
+  assert.deepEqual(latestToolFailures([assistant(call("a", "read"), call("b", "edit")), result("a", true)]), []);
+  assert.deepEqual(latestToolFailures([assistant(call("a", "read")), result("a", undefined)]), []);
+  assert.deepEqual(latestToolFailures([result("a", true)]), []);
+  assert.deepEqual(latestToolFailures([assistant(call("a", "read"), call("b", "edit")), result("a", true), result("b", true)]).length, 2);
+  assert.deepEqual(latestToolFailures([assistant(call("a", "read"), { type: "toolCall", name: "edit" }), result("a", true)]), []);
+  assert.deepEqual(latestToolFailures([...round, assistant(call("a", "edit")), result("a", true)]), []);
+  assert.deepEqual(latestToolFailures([assistant(call("a", "read")), result("a", true), result("a", false)]), []);
+});
+
+test("live drift guidance stays visible and does not guess from shell commands or Brain counts", async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-flow-"));
   const outside = mkdtempSync(join(tmpdir(), "carto-flow-outside-"));
   try {
@@ -220,6 +244,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
         updatedAt: idx + 1,
       })),
       files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }, { path: "linked.md", pinned: "user", createdAt: 1 }],
+      ephemera: [{ id: "read-pin", kind: "readResult", text: "old", entity: { callId: "read-old", tool: "read", path: "dice.js" }, pinned: "user", createdAt: Date.now() - 10_000 }],
     };
     const session = {
       person: "OracleToes",
@@ -239,7 +264,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       toolWorkAtLastRequest: 77,
       liveEphemera: new Map([
         ["X1", { id: "reasoning", kind: "reasoning", text: "unrepeated reasoning" }],
-        ["R1", { id: "read", kind: "readResult", text: "unrepeated result" }],
+        ["R1", { id: "read-pin", kind: "readResult", text: "unrepeated result" }],
       ]),
     };
 
@@ -256,22 +281,26 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
     assert.equal(session.toolWorkAtLastRequest, 77, "a UI preview must not alter the in-flight request accounting baseline");
     assert.match(block, /live items:\n  X1 · reasoning\n  R1 · readResult\npins:/);
     assert.doesNotMatch(block, /unrepeated reasoning|unrepeated result/);
-    assert.match(block, /linked\.md · pinned copy in head is older than disk; collapse to refresh/);
+    assert.match(block, /linked\.md · pinned copy in head may be older than disk; read current content if in scope, or collapse/);
     assert.doesNotMatch(block, /linked\.md · pinned file is missing/);
-    assert.match(block, /\nattention:\n/);
-    assert.match(block, /Last `bash` call touched files directly/);
-    assert.match(block, /Pinned file\(s\) changed on disk since collapse/);
-    assert.match(block, /Brain has 0 writes after 3 tool calls/);
-    assert.match(block, /Atlas has only 1 node/);
-    assert.match(block, /Ledger is empty/);
-    assert.doesNotMatch(block, /older Chat handles|Head carries 8 Chat records/);
-
-    // Once the latest turn switches back to `edit`, the bash-file-op cue disappears.
-    const recovered = await renderLiveStateBlock(
-      { root, brain: { read: async () => brain }, session, markdownPath: snapPath },
-      [...messages, { role: "assistant", content: [{ type: "toolCall", id: "4", name: "edit", arguments: { path: "dice.js" } }] }],
+    assert.match(block, /R1 · pinned reading may be older than its file; read current content if in scope, or collapse/);
+    assert.doesNotMatch(block, /\nattention:|Last `bash`|Brain has 0 writes|Atlas has only|Ledger is empty/);
+    const repeated = await renderLiveStateBlock(
+      { root, brain: { read: async () => brain }, session, markdownPath: snapPath }, messages,
     );
-    assert.doesNotMatch(recovered, /Last `bash` call touched files directly/);
+    assert.equal(repeated, block, "preview does not consume a condition");
+    utimesSync(filePath, past, past);
+    utimesSync(join(outside, "external.md"), past, past);
+    const cleared = await renderLiveStateBlock(
+      { root, brain: { read: async () => brain }, session, markdownPath: snapPath }, messages,
+    );
+    assert.doesNotMatch(cleared, /pinned copy in head may be older/);
+    rmSync(filePath);
+    const missing = await renderLiveStateBlock(
+      { root, brain: { read: async () => brain }, session, markdownPath: snapPath }, messages,
+    );
+    assert.match(missing, /pinned file is missing or inaccessible; check the path and scope/);
+    assert.match(missing, /R1 · pinned reading’s file is missing or inaccessible; check the path and scope/);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
