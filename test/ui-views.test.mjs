@@ -859,7 +859,10 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
 
   assert.equal(transcript.startSelecting(), true);
   assert.ok(plain(transcript.render(120).join("\n")).split("\n").some((line) => line.startsWith("▌")), "the selected block carries a cursor in the margin");
-  // The cursor starts on the last block that has an item behind it: the card.
+  // A message without a target is copyable; move to the card to pin it.
+  assert.equal(transcript.selectedText(), "boot burst, no record");
+  assert.equal(transcript.selectedPart(), undefined);
+  transcript.handleInput("k");
   transcript.pinSelected();
   assert.deepEqual(acts.pop(), ["pin", "tool-work", "gen:1:r0"], "a card is its result, the item a pin keeps");
   transcript.handleInput("k");
@@ -878,6 +881,7 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
   transcript.markSelected("archive");
   assert.deepEqual(acts.pop(), ["archive", "chat", "c-p", false], "a person's line is a record too");
   transcript.handleInput("G");
+  transcript.handleInput("k");
   transcript.markSelected("archive");
   assert.deepEqual(acts, [], "an ephemeral card asks before it archives");
   transcript.markSelected("archive");
@@ -2512,4 +2516,91 @@ test("PaneScrollView renders a dynamic-size scrollbar when overflowing and stays
   const appSource = readFileSync("src/ui/app.ts", "utf8");
   assert.doesNotMatch(appSource, /new ScrollView\(/, "all views in app.ts mount PaneScrollView");
   assert.match(appSource, /new PaneScrollView\(/);
+});
+
+test("copy selection follows the cursor and copies full unfolded content across views", async () => {
+  const { copySelectionCommand } = await import("../dist/ui/commands.js");
+  const copied = [];
+  let selection;
+  const registry = new Registry([copySelectionCommand(() => selection, (text) => copied.push(text))]);
+  assert.equal(registry.dispatch("y"), false, "no selection leaves the key to the input");
+  selection = "";
+  assert.equal(registry.dispatch("y"), true, "an empty selected item is still copyable");
+  assert.deepEqual(copied, [""]);
+
+  const transcript = new TranscriptView();
+  const long = "first line\n" + "unabridged ".repeat(100);
+  transcript.setEntries([
+    { kind: "person", text: "hello", recordId: "c1" },
+    { kind: "agent", text: "not yet recorded" },
+    { kind: "tool", id: "tool1", name: "read", args: "path", output: long, resultId: "result" },
+  ], [{ text: "queued question", mode: "after run" }]);
+  transcript.setLive([{ kind: "reasoning", id: "live", text: "streaming thought", live: true }]);
+  assert.equal(transcript.selectedText(), undefined);
+  assert.equal(transcript.startSelecting(), true);
+  assert.equal(transcript.selectedText(), "queued question");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "streaming thought");
+  assert.equal(transcript.selectedPart(), undefined, "live cards cannot be marked");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), `tool read\n${long}`, "folded card returns its full result");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "not yet recorded");
+  assert.equal(transcript.selectedPart(), undefined, "unrecorded messages cannot be marked");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "hello");
+  transcript.stopSelecting();
+  assert.equal(transcript.selectedText(), undefined);
+
+  const brain = emptyBrain();
+  brain.atlas.push({ id: "a1", title: "Title", text: long, links: ["a2"], attachments: [{ kind: "file", path: "src/file.ts" }, { kind: "record", id: "l1" }], createdAt: 1, updatedAt: 1 });
+  brain.atlas.push({ id: "a2", title: "Next", text: "second", links: [], attachments: [], createdAt: 2, updatedAt: 2 });
+  brain.ledger.push({ id: "l1", kind: "question", text: long, status: "answered", answer: { text: "the full answer" }, createdAt: 1, updatedAt: 1 });
+  brain.handles.entries.push({ kind: "atlas", id: "a1", handle: "A1", timestamp: 1 }, { kind: "atlas", id: "a2", handle: "A2", timestamp: 2 }, { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 });
+  const atlas = new AtlasView(); atlas.setData(brain, []);
+  assert.match(atlas.selectedText(), /A1 Title/);
+  assert.ok(atlas.selectedText().includes(long));
+  assert.match(atlas.selectedText(), /A2/);
+  assert.match(atlas.selectedText(), /src\/file\.ts/);
+  assert.match(atlas.selectedText(), /L1/);
+  atlas.handleInput("j");
+  assert.match(atlas.selectedText(), /A2 Next/);
+  atlas.handleInput("/"); atlas.handleInput("T"); atlas.handleInput("i"); atlas.handleInput("t"); atlas.handleInput("l"); atlas.handleInput("e"); atlas.handleInput("\r");
+  assert.match(atlas.selectedText(), /A1 Title/, "filter selection uses the filtered list");
+  const ledger = new LedgerView(); ledger.setData(brain);
+  assert.ok(ledger.selectedText().includes(long));
+  assert.match(ledger.selectedText(), /the full answer/);
+  assert.equal(new LedgerView().selectedText(), undefined);
+
+  const context = contextOf();
+  assert.equal(context.selectedText(), "you are carto");
+  context.handleInput("j");
+  assert.match(context.selectedText(), /the frozen words/);
+  context.handleInput("\t");
+  assert.match(context.selectedText(), /^A1 /, "model view copies frozen head bytes");
+  assert.match(context.selectedText(), /the frozen words/);
+
+  const archive = new ArchiveView();
+  archive.setData({ version: 1, items: [{ id: "one", layer: "ephemeral", ephemeral: { kind: "plainText", text: long }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 1 }] });
+  assert.equal(archive.selectedText(), long);
+  archive.setData({ version: 1, items: [{ id: "record", layer: "record", record: { kind: "ledger", value: brain.ledger[0] }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 2 }] });
+  assert.match(archive.selectedText(), /the full answer/);
+
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "carto-copy-"));
+  try {
+    writeFileSync(join(root, "name.txt"), "private file contents");
+    const tree = new TreeView(); tree.setData({ root, anchor: { anchor: root, depth: 1 }, brain: emptyBrain() });
+    assert.equal(tree.selectedText(), "name.txt");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const { JobsView } = await import("../dist/ui/jobs-view.js");
+  const jobs = new JobsView();
+  assert.equal(jobs.selectedText(), undefined);
+  jobs.setData([{ handle: "J1", label: "worker", command: "echo hi", status: "running", pid: 1, exitCode: null, exitSignal: null, startedAt: 1, exitedAt: undefined, unreadLines: 0, lines: [{ seq: 1, kind: "stdout", text: long, at: 1 }], pendingPartial: "last partial" }]);
+  assert.ok(jobs.selectedText().includes(long));
+  assert.ok(jobs.selectedText().endsWith("last partial"));
 });

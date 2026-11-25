@@ -910,8 +910,19 @@ In Chat, `escape` leaves the prompt and selects a block (the last one); `j`/`k`
 card) do what they do everywhere else, through the same handlers as the Context view's rows: a Chat block
 is its Brain record, a card is the ephemeral item it renders (a tool row is its
 result), and an ephemeral card asks before it archives. `escape` or `enter` returns
-to the prompt. A card still streaming is not an item anything holds and cannot be
-selected. A click folds a card; it never pins or marks.
+to the prompt. A streaming card or a message without a durable identity may be
+selected for copying, but cannot be pinned or marked until it has a target. A
+click folds a card; it never pins or marks.
+
+`y` copies the selected item in Chat, Context, Atlas, Ledger, Tree, Jobs, or the
+archive. Chat selection starts with `escape`; elsewhere the cursor selects a
+row. The complete item is copied even when folded or offscreen; Context uses
+its current human/model display mode, Tree copies the selected project-relative
+path without reading the file, and Jobs copies its retained output. Archive
+records include their stored fields. When a filter or job input is taking text,
+`y` remains a letter. Copy uses the same system clipboard and temporary-file
+fallback as transcript copying, and reports the fallback path. `ctrl+y` still
+copies the complete transcript, and `/copy-session` still copies the dump.
 
 **The open book follows the Brain.** The drain that rebuilds the transcript, on
 every run boundary, on a throttled live-watch tick and on a slow timer, also

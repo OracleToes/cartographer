@@ -58,7 +58,7 @@ import { RecordControls, type RecordAction } from "./record-controls.js";
 export type BlockTarget = { part: "chat" | "tool-work" | "ephemera"; id: string };
 
 /** A block the keys can select: where it was drawn, and what it is. */
-type Selectable = { key: string; target: BlockTarget; start: number; end: number };
+type Selectable = { key: string; target?: BlockTarget; text: string; start: number; end: number };
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
@@ -385,9 +385,16 @@ export class TranscriptView implements Component, Focusable {
     if (block !== undefined) this.onReveal?.(block.start, block.end);
   }
 
+  /** Copy the entire selected block, independent of folding or viewport size. */
+  selectedText(): string | undefined {
+    if (!this.selecting) return undefined;
+    this.render(this.lastWidth);
+    return this.selectedBlock()?.text;
+  }
+
   /** Which kind of thing is selected: only a card (an ephemeral item) can be pinned. */
   selectedPart(): BlockTarget["part"] | undefined {
-    return this.selecting ? this.selectedBlock()?.target.part : undefined;
+    return this.selecting ? this.selectedBlock()?.target?.part : undefined;
   }
 
   /** Pin or unpin the selected card, the act `p` performs; the palette calls this. */
@@ -755,12 +762,13 @@ export class TranscriptView implements Component, Focusable {
       const drawn = this.renderCard(card, width, start);
       lines.push(...drawn.lines);
       this.ranges.push(drawn.range);
-      // A card in flight is not an item anything holds yet; a landed one is the
-      // ephemeral item its source id names (the result's, for a tool row).
+      // Streaming cards can be copied, but only landed cards have a mark target.
       const id = card.live === true ? undefined : (card.resultId ?? card.sourceId);
-      if (id !== undefined) this.selectables.push({ key: `card:${card.id}`, target: { part: card.headItem === true ? "ephemera" : "tool-work", id }, start, end: lines.length });
+      const target: BlockTarget | undefined = id === undefined ? undefined : { part: card.headItem === true ? "ephemera" : "tool-work", id };
+      const text = card.kind === "tool" ? `tool ${card.name}\n${card.output ?? card.args}` : card.text;
+      this.selectables.push({ key: `card:${card.id}`, ...(target === undefined ? {} : { target }), text, start, end: lines.length });
     };
-    for (const entry of this.items) {
+    for (const [index, entry] of this.items.entries()) {
       if (isCard(entry)) {
         pushCard(entry);
         continue;
@@ -777,18 +785,21 @@ export class TranscriptView implements Component, Focusable {
             lines.push(`  ${tokens.warn(line)}`);
           }
         }
-        if (entry.recordId !== undefined) {
-          this.selectables.push({ key: `chat:${entry.recordId}`, target: { part: "chat", id: entry.recordId }, start, end: lines.length });
-        } else if ((entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined) {
-          this.selectables.push({ key: `${entry.kind}:${entry.sourceId}`, target: { part: "tool-work", id: entry.sourceId }, start, end: lines.length });
-        }
+        const target: BlockTarget | undefined = entry.recordId !== undefined
+          ? { part: "chat", id: entry.recordId }
+          : (entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined
+            ? { part: "tool-work", id: entry.sourceId } : undefined;
+        const key = entry.recordId !== undefined ? `chat:${entry.recordId}`
+          : (entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined
+            ? `${entry.kind}:${entry.sourceId}` : `message:${index}`;
+        this.selectables.push({ key, ...(target === undefined ? {} : { target }), text: entry.text, start, end: lines.length });
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);
         for (const line of wrapTextWithAnsi(`${text}`, width - 3)) lines.push(`  ${line}`);
       }
     }
     for (const card of this.liveCards) pushCard(card);
-    for (const item of this.queued) {
+    for (const [index, item] of this.queued.entries()) {
       gap();
       const start = lines.length;
       headers.add(start);
@@ -798,6 +809,7 @@ export class TranscriptView implements Component, Focusable {
       for (const line of wrapTextWithAnsi(item.text, body)) {
         lines.push(`  ${tokens.faint(tokens.italic(line))}`);
       }
+      this.selectables.push({ key: `queued:${index}`, text: item.text, start, end: lines.length });
     }
     this.cacheWidth = width;
     this.cacheLines = this.inset(lines, width, this.cursorLines(), headers);

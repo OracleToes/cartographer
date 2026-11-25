@@ -251,6 +251,13 @@ export class TreeView implements Component, Focusable {
     return fuzzyFilter(rows, query, (row) => row.entry.name);
   }
 
+  /** Tree selection copies the project path, never reads the file as a side effect. */
+  selectedText(): string | undefined {
+    const row = this.selectedRow();
+    if (row === undefined || this.data === undefined) return undefined;
+    return relative(this.data.root, row.entry.path) || ".";
+  }
+
   private selectedRow(): Row | undefined {
     return this.visibleRows()[this.selectedIndex];
   }

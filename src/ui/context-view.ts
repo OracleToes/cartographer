@@ -698,6 +698,12 @@ export class ContextView implements Component, Focusable {
     for (const node of nodes) this.folded.set(node.id, !anyOpen);
   }
 
+  /** Full selected entry in the current human/model display mode, even when folded. */
+  selectedText(): string | undefined {
+    const node = this.selectedNode();
+    return node === undefined ? undefined : this.showReal && node.real !== undefined ? node.real : node.body;
+  }
+
   /** Pin or unpin the row under the cursor, the same act `p` performs. The palette calls this. */
   pinSelected(): void {
     const target = this.selectedNode()?.target;

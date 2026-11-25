@@ -83,7 +83,7 @@ import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
-import { Registry, stopCommand, type Command } from "./commands.js";
+import { Registry, copySelectionCommand, stopCommand, type Command } from "./commands.js";
 import { RunActivity } from "./run-activity.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
@@ -2311,6 +2311,28 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   /** A book is open and not taking a `/` filter, so its command keys are commands. */
   const bookIsOpen = () => state.layer === "context" && bookOf() !== undefined && bookOf()?.isFiltering() === false;
 
+  /** The active view owns selection; text entry and filters must keep their keys. */
+  const selectedText = (): string | undefined => {
+    if (state.layer === "archive") return archiveView.isFiltering() ? undefined : archiveView.selectedText();
+    switch (state.view) {
+      case "chat": return transcript.selectedText();
+      case "context": return contextView.selectedText();
+      case "atlas": return atlasView.isFiltering() ? undefined : atlasView.selectedText();
+      case "ledger": return ledgerView.isFiltering() ? undefined : ledgerView.selectedText();
+      case "tree": return treeView.isFiltering() ? undefined : treeView.selectedText();
+      case "jobs": return jobsView.isTyping() ? undefined : jobsView.selectedText();
+    }
+  };
+
+  const copySelected = async (text: string) => {
+    try {
+      const result = await copyWithFallback(text, "selection");
+      pushStatus(`selection — ${result.where}; saved to ${result.fallbackPath}`);
+    } catch (error) {
+      pushStatus(`selection copy failed: ${errorText(error)}`);
+    }
+  };
+
   const commands = new Registry([
     {
       id: "help",
@@ -2468,7 +2490,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       id: "block-select",
       group: "the transcript",
       label: "select a block",
-      hint: "walk the Chat and the cards with j/k, then pin, mark or withdraw as in any other view",
+      hint: "walk the Chat and cards with j/k; y copies, and eligible items can be pinned or marked",
       key: "escape",
       run: () => enterBlockSelection(),
       // Escape closes the prompt's completion list first.
@@ -2498,7 +2520,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "the next collapse moves it to the archive; `!` first applies it now",
       key: "a",
       run: () => transcript.markSelected("archive"),
-      available: () => inChat() && transcript.isSelecting(),
+      available: () => inChat() && transcript.selectedPart() !== undefined,
     },
     {
       id: "block-mark-delete",
@@ -2507,7 +2529,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "the next collapse removes it for good; `!` first applies it now",
       key: "d",
       run: () => transcript.markSelected("delete"),
-      available: () => inChat() && transcript.isSelecting(),
+      available: () => inChat() && transcript.selectedPart() !== undefined,
     },
     {
       id: "block-apply-now",
@@ -2851,6 +2873,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       run: () => void switchToView("context"),
       available: () => !inView("context"),
     },
+    copySelectionCommand(selectedText, (text) => void copySelected(text)),
     {
       id: "copy",
       group: "the record",

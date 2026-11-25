@@ -166,6 +166,14 @@ export class JobsView implements Component, Focusable {
     return found ?? this.jobs[0];
   }
 
+  /** The selected job and its retained output, including an unfinished line. */
+  selectedText(): string | undefined {
+    const job = this.selectedJob();
+    if (job === undefined) return undefined;
+    const output = job.lines.map((line) => line.text).join("\n");
+    return `${job.handle} ${job.label} (${job.status})\n$ ${job.command}\n${output}${output.length > 0 && job.pendingPartial.length > 0 ? "\n" : ""}${job.pendingPartial}`;
+  }
+
   selectedHandleName(): string | undefined {
     return this.selectedJob()?.handle;
   }

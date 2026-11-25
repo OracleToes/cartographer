@@ -124,6 +124,14 @@ export class ArchiveView implements Component, Focusable {
     return this.items[this.selectedIndex];
   }
 
+  /** Copy the full archived content, not the collapsed preview. */
+  selectedText(): string | undefined {
+    const item = this.selectedItem();
+    if (item?.ephemeral !== undefined) return item.ephemeral.text;
+    if (item?.record !== undefined) return JSON.stringify(item.record.value, null, 2);
+    return undefined;
+  }
+
   /**
    * The one `d`: the first press marks the item for delete, the second applies
    * that mark now. Says which happened, so the caller can tell the person.
