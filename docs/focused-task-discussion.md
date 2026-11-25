@@ -5,6 +5,36 @@ records the direction being explored and questions still to settle. `SPEC.md`
 remains the current specification; nothing here changes it or authorizes an
 implementation. “Focus” and “task” are working names, not a choice of name.
 
+## Decisions since these initial notes
+
+The discussion below records the earlier exploration; where it calls these
+points open, the following later decisions take precedence:
+
+- Keep the existing direct behavior and add orchestration as a separate mode.
+  One model works at a time; the main agent is an orchestrator and bookkeeper.
+- The focused task may directly update shared Atlas and Ledger; main Carto
+  remains responsible for the overall map and reconciles it before more work.
+- Main Carto may optionally include any context entry in a task call, including
+  ephemera, Chat, Ledger and relevant files; task selection need not modify main
+  persistent pins.
+- Every return causes a full **main** collapse, with its normal pin refresh,
+  sweep, pending marks and archive grace. The person explicitly accepts that
+  rapid task returns can expire unpinned archive items at the next collapse.
+  Brain entries and Chat survive unless marked; unpinned main ephemera do not.
+- At the warning, give the task a turn to write Atlas/Ledger, then force its
+  report. On overflow, tell main Carto via a system message to investigate how
+  much was done and where continuation belongs. Do not claim a report exists.
+- The person retains normal controls, can access the archive while the task
+  runs, and sees a clear task indicator and a task view. Task pins and
+  person-triggered task collapses are local to that task. A separate task
+  session store is the person's proposed direction.
+- Task Chat is not preserved on return. The required return chat message is
+  recorded permanently in **main** Chat, subject to normal manual pruning.
+  What happens to task Chat during its own local collapse still needs definition.
+
+A proposed implementation plan is in `docs/orchestration-plan.md`. It separates
+these decisions from remaining questions and technical feasibility checks.
+
 ## The direction being explored
 
 Carto would work as a main agent and one temporary, focused worker, **not as
