@@ -43,6 +43,13 @@ export function stopCommand(run: () => void): Command {
   return { id: "stop", group: "the run", label: "stop the run", key: "ctrl+x", run, available: () => true };
 }
 
+/** The documented copy slash commands are local actions, not messages to the agent. */
+export function copySlashCommand(message: string): "transcript" | "session" | undefined {
+  if (message === "/copy") return "transcript";
+  if (message === "/copy-session") return "session";
+  return undefined;
+}
+
 /** Copy a semantic selection, leaving text entry and empty views to their own keys. */
 export function copySelectionCommand(selection: () => string | undefined, copy: (text: string) => void): Command {
   return {

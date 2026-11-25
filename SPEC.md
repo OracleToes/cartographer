@@ -923,6 +923,15 @@ records include their stored fields. When a filter or job input is taking text,
 `y` remains a letter. Copy uses the same system clipboard and temporary-file
 fallback as transcript copying, and reports the fallback path. `ctrl+y` still
 copies the complete transcript, and `/copy-session` still copies the dump.
+`/copy` copies the transcript too. Mouse selection uses the same copy backend.
+Inside tmux every copy also loads its paste buffer and, on tmux 3.2 or newer,
+requests forwarding to the attached terminal's clipboard. A loaded tmux buffer
+is not proof that the terminal accepted it: the status says forwarding was
+requested, not that it succeeded. With older tmux the buffer is still usable
+with the tmux paste command. Terminal clipboard forwarding needs compatible tmux
+and terminal configuration; native clipboard tools are also tried. A temporary
+file is left as a fallback and its path is reported when the clipboard cannot
+be verified.
 
 **The open book follows the Brain.** The drain that rebuilds the transcript, on
 every run boundary, on a throttled live-watch tick and on a slow timer, also

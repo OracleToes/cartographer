@@ -2604,3 +2604,65 @@ test("copy selection follows the cursor and copies full unfolded content across 
   assert.ok(jobs.selectedText().includes(long));
   assert.ok(jobs.selectedText().endsWith("last partial"));
 });
+
+test("all copy paths preserve text and report tmux buffer and clipboard outcomes honestly", async () => {
+  const { writeClipboard, describeClipboard, copyWithFallback, createSelectionCopier } = await import("../dist/ui/clipboard.js");
+  const { copySlashCommand } = await import("../dist/ui/commands.js");
+  const { readFile, rm } = await import("node:fs/promises");
+  const { stat } = await import("node:fs/promises");
+  const text = "unicode π \u001b[31m\n" + "large item ".repeat(10000) + "\n";
+  const calls = [];
+  const tmuxOnly = { env: { TMUX: "/tmp/socket,1,0" }, run(command, args, input) {
+    calls.push({ command, args, input });
+    if (command !== "tmux") throw new Error("unavailable");
+  } };
+  const forwarded = writeClipboard(text, tmuxOnly);
+  assert.deepEqual(forwarded, { tmux: "forward" });
+  assert.deepEqual(calls[0], { command: "tmux", args: ["load-buffer", "-w", "-"], input: text });
+  assert.match(describeClipboard(forwarded), /tmux buffer saved/);
+  assert.match(describeClipboard(forwarded), /forwarding requested \(not verified\)/);
+  assert.equal(calls.filter((call) => call.command === "tmux").length, 1);
+
+  const legacyCalls = [];
+  const legacy = writeClipboard(text, { env: { TMUX: "1" }, run(command, args, input) {
+    legacyCalls.push({ command, args, input });
+    if (command !== "tmux" || args.includes("-w")) throw new Error("unavailable");
+  } });
+  assert.equal(legacy.tmux, "buffer");
+  assert.deepEqual(legacyCalls.slice(0, 2).map((call) => call.args), [["load-buffer", "-w", "-"], ["load-buffer", "-"]]);
+  assert.equal(legacyCalls[1].input, text);
+  assert.match(describeClipboard(legacy), /not forwarded/);
+
+  const both = writeClipboard(text, { env: { TMUX: "1" }, run(command) {
+    if (command !== "tmux" && command !== "xclip") throw new Error("unavailable");
+  } });
+  assert.deepEqual(both, { tmux: "forward", native: "xclip" });
+  assert.match(describeClipboard(both), /system clipboard via xclip/);
+  const local = writeClipboard(text, { env: {}, run(command) { if (command !== "pbcopy") throw new Error("unavailable"); } });
+  assert.deepEqual(local, { native: "pbcopy" });
+  const failed = writeClipboard(text, { env: { TMUX: "1" }, run() { throw new Error("unavailable"); } });
+  assert.equal(failed.tmux, undefined);
+  assert.match(describeClipboard(failed), /tmux buffer unavailable/);
+  const emptyCalls = [];
+  const empty = writeClipboard("", { env: { TMUX: "1" }, run(command) { emptyCalls.push(command); throw new Error("unavailable"); } });
+  assert.match(describeClipboard(empty), /cannot store an empty buffer/);
+  assert.ok(!emptyCalls.includes("tmux"), "tmux silently ignores empty input");
+
+  const result = await copyWithFallback(text, "test", tmuxOnly);
+  try {
+    assert.equal(await readFile(result.fallbackPath, "utf8"), text);
+    assert.equal(result.bytes, Buffer.byteLength(text));
+    assert.equal((await stat(result.fallbackPath)).mode & 0o077, 0);
+  } finally { await rm(result.fallbackPath); }
+  const mouse = await createSelectionCopier(tmuxOnly)(text);
+  assert.equal(typeof mouse, "string", "pi-tui must not report a verified clipboard when only tmux accepted the buffer");
+  assert.match(mouse, /tmux buffer saved/);
+  const path = mouse.match(/saved to (.*)$/)?.[1];
+  assert.ok(path);
+  try { assert.equal(await readFile(path, "utf8"), text); } finally { await rm(path); }
+  const confirmed = await createSelectionCopier({ env: {}, run(command) { if (command !== "pbcopy") throw new Error("unavailable"); } })("mouse text");
+  assert.equal(confirmed, true);
+  assert.equal(copySlashCommand("/copy"), "transcript");
+  assert.equal(copySlashCommand("/copy-session"), "session");
+  assert.equal(copySlashCommand("/copy other"), undefined);
+});

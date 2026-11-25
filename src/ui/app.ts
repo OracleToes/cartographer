@@ -83,10 +83,10 @@ import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
-import { Registry, copySelectionCommand, stopCommand, type Command } from "./commands.js";
+import { Registry, copySelectionCommand, copySlashCommand, stopCommand, type Command } from "./commands.js";
 import { RunActivity } from "./run-activity.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
-import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
+import { copyWithFallback, createSelectionCopier, describeFallback } from "./clipboard.js";
 import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
@@ -2030,7 +2030,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const copyTranscript = async () => {
     const text = transcript.toPlainText();
     const result = await copyWithFallback(text, "transcript");
-    pushStatus(`transcript copied — ${result.where} (${text.split("\n").length} lines)`);
+    pushStatus(`transcript: ${result.where}; ${describeFallback(result)} (${text.split("\n").length} lines)`);
     return result;
   };
 
@@ -2069,7 +2069,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     lines.push("", "## archive (waiting out grace)", formatArchiveSummary(archiveState));
     const text = lines.join("\n");
     const result = await copyWithFallback(text, "session");
-    pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);
+    pushStatus(`session: ${result.where}; ${describeFallback(result)} (${text.split("\n").length} lines)`);
     return result;
   };
 
@@ -2214,6 +2214,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    const copy = copySlashCommand(message);
+    if (copy !== undefined) {
+      void (copy === "transcript" ? copyTranscript() : copySession()).catch((error: unknown) => {
+        if (!shutdownRequested) pushStatus(`copy failed: ${errorText(error)}`);
+      });
+      return;
+    }
     if (message === "/wipe") {
       showWipeConfirmation();
       return;
@@ -2327,7 +2334,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const copySelected = async (text: string) => {
     try {
       const result = await copyWithFallback(text, "selection");
-      pushStatus(`selection — ${result.where}; saved to ${result.fallbackPath}`);
+      pushStatus(`selection — ${result.where}; ${describeFallback(result)}`);
     } catch (error) {
       pushStatus(`selection copy failed: ${errorText(error)}`);
     }
@@ -2879,14 +2886,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       group: "the record",
       label: "copy the transcript",
       key: "ctrl+y",
-      run: () => void copyTranscript(),
+      run: () => void copyTranscript().catch((error: unknown) => pushStatus(`copy failed: ${errorText(error)}`)),
       available: () => true,
     },
     {
       id: "copy-session",
       group: "the record",
       label: "copy a full session dump",
-      run: () => void copySession(),
+      run: () => void copySession().catch((error: unknown) => pushStatus(`copy failed: ${errorText(error)}`)),
       available: () => true,
     },
     {

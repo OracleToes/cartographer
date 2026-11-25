@@ -1,16 +1,12 @@
 /**
- * The clipboard path (the person's `/copy` work, 2026-11-20).
- *
- * pi-tui already has the mechanism: TuiAltScreen takes an injectable
- * `copySelection` — its own built-in fallback is a bare OSC 52 write, which
- * "can show 'Copied!' while leaving the system clipboard untouched" (tmux
- * without `set-clipboard on`, macOS Terminal.app). Carto injects a verified
- * native path into the TUI — mouse selection copies get it too — and uses
- * the same path for `/copy` and `/copy-session`. Platform tools, fixed
- * order, first success wins. If none succeeds the honest result is an error
- * string; the caller still writes the /tmp fallback file and names it.
+ * Every copy path shares this backend, including pi-tui's mouse selection.
+ * Native clipboard tools can reach a local display; inside tmux we also load
+ * the tmux paste buffer and ask tmux to forward it to the attached terminal.
+ * A successful tmux command cannot verify the terminal's clipboard, so its
+ * status must distinguish the buffer from the forwarding request.
  */
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,45 +19,109 @@ const TOOLS: ReadonlyArray<{ name: string; command: string; args: string[] }> = 
   { name: "clip.exe", command: "clip.exe", args: [] },
 ];
 
-export type ClipboardOutcome = { ok: true; tool: string } | { ok: false; error: string };
+export interface ClipboardOutcome {
+  /** A successfully invoked native clipboard tool, if any. */
+  native?: string;
+  /** `forward` means tmux accepted -w, not that the terminal accepted OSC 52. */
+  tmux?: "forward" | "buffer";
+  error?: string;
+}
 
-/** Write `text` to the system clipboard via the first tool that works. */
-export function writeClipboard(text: string): ClipboardOutcome {
-  let last = "no clipboard tool found (tried wl-copy, xclip, xsel, pbcopy, clip.exe)";
-  for (const tool of TOOLS) {
-    try {
-      execFileSync(tool.command, tool.args, { input: text, timeout: 2_000, stdio: ["pipe", "ignore", "ignore"] });
-      return { ok: true, tool: tool.name };
-    } catch (error) {
-      last = `${tool.name}: ${error instanceof Error ? error.message : String(error)}`;
+/** Injection keeps the actual program and its stdin testable without a desktop or tmux server. */
+export interface ClipboardOptions {
+  env?: NodeJS.ProcessEnv;
+  run?: (command: string, args: string[], text: string) => void;
+}
+
+const runProgram = (command: string, args: string[], text: string): void => {
+  execFileSync(command, args, { input: text, timeout: 2_000, stdio: ["pipe", "ignore", "ignore"] });
+};
+
+/** Try tmux and the native clipboard independently; neither implies the other. */
+export function writeClipboard(text: string, options: ClipboardOptions = {}): ClipboardOutcome {
+  const run = options.run ?? runProgram;
+  const env = options.env ?? process.env;
+  const outcome: ClipboardOutcome = {};
+  if (env.TMUX) {
+    // tmux's load-buffer silently ignores an empty stdin, even with -w. Do not
+    // claim the old buffer was replaced in that case.
+    if (text.length === 0) outcome.error = "tmux cannot store an empty buffer";
+    else {
+      try {
+        run("tmux", ["load-buffer", "-w", "-"], text);
+        outcome.tmux = "forward";
+      } catch {
+        // -w arrived in tmux 3.2. Older versions can still paste the buffer.
+        try {
+          run("tmux", ["load-buffer", "-"], text);
+          outcome.tmux = "buffer";
+        } catch {
+          outcome.error = "tmux buffer unavailable";
+        }
+      }
     }
   }
-  return { ok: false, error: last };
+  for (const tool of TOOLS) {
+    try {
+      run(tool.command, tool.args, text);
+      outcome.native = tool.name;
+      break;
+    } catch { /* Try the next platform tool. */ }
+  }
+  if (outcome.native === undefined && outcome.tmux === undefined && outcome.error === undefined) {
+    outcome.error = "no clipboard tool available";
+  }
+  return outcome;
+}
+
+/** Describe only what is known: tmux's terminal clipboard has no acknowledgement. */
+export function describeClipboard(result: ClipboardOutcome): string {
+  const parts: string[] = [];
+  if (result.native !== undefined) parts.push(`system clipboard via ${result.native}`);
+  if (result.tmux === "forward") parts.push("tmux buffer saved; terminal clipboard forwarding requested (not verified)");
+  if (result.tmux === "buffer") parts.push("tmux buffer saved; terminal clipboard not forwarded (tmux -w unavailable)");
+  if (result.error !== undefined) parts.push(result.error);
+  return parts.join("; ");
 }
 
 export interface CopyOutcome {
-  /** Human phrase for a status line, e.g. "copied via xclip" or "clipboard unavailable (…)". */
   where: string;
-  fallbackPath: string;
+  fallbackPath: string | undefined;
+  fallbackError: string | undefined;
   bytes: number;
+  clipboard: ClipboardOutcome;
 }
 
-/** Copy + always leave a /tmp fallback; used by /copy and /copy-session. */
-export async function copyWithFallback(text: string, stem: string): Promise<CopyOutcome> {
-  const fallbackPath = join(tmpdir(), `carto-${stem}-${Date.now()}.txt`);
-  await writeFile(fallbackPath, text, "utf8");
-  const result = writeClipboard(text);
-  return {
-    where: result.ok ? `copied via ${result.tool}` : `clipboard unavailable (${result.error})`,
-    fallbackPath,
-    bytes: Buffer.byteLength(text, "utf8"),
-  };
+async function saveFallback(text: string, stem: string): Promise<string> {
+  const path = join(tmpdir(), `carto-${stem}-${randomUUID()}.txt`);
+  await writeFile(path, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return path;
 }
 
-/** The injectable shape TuiAltScreenOptions.copySelection wants: true on verified success, a flash-able error otherwise. */
-export function createSelectionCopier(): (text: string) => Promise<true | string> {
+/** Copy even if the temporary fallback cannot be written. */
+export async function copyWithFallback(text: string, stem: string, options: ClipboardOptions = {}): Promise<CopyOutcome> {
+  const clipboard = writeClipboard(text, options);
+  let fallbackPath: string | undefined;
+  let fallbackError: string | undefined;
+  try { fallbackPath = await saveFallback(text, stem); }
+  catch (error) { fallbackError = error instanceof Error ? error.message : String(error); }
+  return { where: describeClipboard(clipboard), fallbackPath, fallbackError, bytes: Buffer.byteLength(text, "utf8"), clipboard };
+}
+
+export function describeFallback(result: Pick<CopyOutcome, "fallbackPath" | "fallbackError">): string {
+  return result.fallbackPath === undefined ? `fallback unavailable (${result.fallbackError ?? "unknown error"})` : `saved to ${result.fallbackPath}`;
+}
+
+/** pi-tui uses true for a confirmed native copy; a message can describe a tmux-only result honestly. */
+export function createSelectionCopier(options: ClipboardOptions = {}): (text: string) => Promise<true | string> {
   return async (text: string) => {
-    const result = writeClipboard(text);
-    return result.ok ? true : `clipboard unavailable (${result.error})`;
+    const clipboard = writeClipboard(text, options);
+    if (clipboard.native !== undefined) return true;
+    try {
+      const path = await saveFallback(text, "selection");
+      return `${describeClipboard(clipboard)}; saved to ${path}`;
+    } catch (error) {
+      return `${describeClipboard(clipboard)}; fallback unavailable (${error instanceof Error ? error.message : String(error)})`;
+    }
   };
 }
