@@ -103,6 +103,7 @@ import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
 import { Column, Fill, Inset, margin, PaneScrollView, Row, type Viewport } from "./frame.js";
 import { promptHandles, promptItemsOf, toolRowHandle, type PromptHandles, type PromptItem } from "./prompt-handles.js";
+import { enablePromptPathCompletion } from "./prompt-completion.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
@@ -433,6 +434,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const editorTheme = { borderColor: (line: string) => tokens.rule(line), selectList: selectTheme };
   const editor = new PromptEditor(tui, editorTheme, { paddingX: 2 });
+  enablePromptPathCompletion(editor, options.root);
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();

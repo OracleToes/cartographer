@@ -1,6 +1,9 @@
 import "./agent-reminder.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Editor } from "@earendil-works/pi-tui";
+import { enablePromptPathCompletion } from "../dist/ui/prompt-completion.js";
+import { selectTheme } from "../dist/ui/palette.js";
 import { barTokens, padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
@@ -23,6 +26,57 @@ import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("prompt path completion uses the project root and keeps the editor controls", async () => {
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "carto-completion-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "alpha.ts"), "");
+    writeFileSync(join(root, "src", "alpine.ts"), "");
+    writeFileSync(join(root, "src", "one file.ts"), "");
+    const editor = new Editor({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s) => s, selectList: selectTheme });
+    enablePromptPathCompletion(editor, root);
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    editor.setText("read ./sr");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), "read ./src/");
+
+    editor.setText("read ./src/al");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.isShowingAutocomplete(), true);
+    assert.match(editor.render(80).join("\n"), /alpha\.ts/);
+    editor.handleInput("\x1b[B");
+    editor.handleInput("\t");
+    assert.equal(editor.getText(), "read ./src/alpine.ts");
+    assert.equal(editor.isShowingAutocomplete(), false);
+
+    editor.setText("read ./src/on");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), 'read "./src/one file.ts"');
+
+    editor.setText("read ./src/al");
+    editor.handleInput("\t");
+    await settle();
+    editor.handleInput("\x1b");
+    assert.equal(editor.isShowingAutocomplete(), false);
+    assert.equal(editor.getText(), "read ./src/al");
+
+    editor.setText("/wipe");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), "/wipe");
+    assert.equal(editor.isShowingAutocomplete(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("run activity includes autonomous work and stop stays dispatchable before its watch arrives", () => {
   const activity = new RunActivity();

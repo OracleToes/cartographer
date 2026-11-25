@@ -891,6 +891,12 @@ Atlas, Ledger, and the Tree, where the marks are applied. While `/` takes a
 filter, every one of these keys is a letter of it. A file carries a pin and no
 mark: the `mark` tool is for Brain records. These keys are commands in the same
 list as everything else, so the footer, `f1`, and the palette show them.
+In the Chat prompt, `tab` completes a file or directory path relative to the
+project root using pi-tui; arrow keys select a suggestion, `tab` accepts it,
+and `escape` dismisses it. Completion inserts text only, not file contents.
+Pi-tui treats a leading `/` as a slash command, so an absolute path at the
+start of a line needs preceding text or a relative alternative.
+
 In Chat, `escape` leaves the prompt and selects a block (the last one); `j`/`k`
 (or the arrows) walk the Chat blocks, the person's and the agent's, and the cards;
 `g` and `G` go to the first and last; and `a`, `d`, `u` and `!` (and `p`, on a
