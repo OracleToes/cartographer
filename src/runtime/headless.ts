@@ -46,7 +46,6 @@ import {
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
-import { WIPE_REQUESTED } from "./paths.js";
 import type { ModelRef } from "./config.js";
 import { formatModelRef, indexModels, resolveIndexedModel } from "./model-catalog.js";
 import { createJobTable, formatExit, stopAllJobs, summarizeJobs } from "./jobs.js";
@@ -66,6 +65,8 @@ export interface HeadlessOptions extends LiveSessionOptions {
   refreshCapacity?: boolean;
   /** Called after `/model` switches models so the host can persist or track the selection. */
   onModelChange?: (model: ModelRef) => Promise<void> | void;
+  /** The host closes, wipes and replaces its Brain after the session is closed. */
+  resetProjectBrain?: () => Promise<{ brain: LiveSessionOptions["brain"]; error?: string }>;
 }
 
 const HELP = [
@@ -76,7 +77,7 @@ const HELP = [
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /mode      show modes; /mode edit, read-only, strict or relaxed changes them",
-  "  /wipe      permanently delete this project’s .brain after confirmation, then exit",
+  "  /wipe      permanently delete this project’s .brain after confirmation and start fresh",
   "  /help      see this",
   "  /quit      end the session",
 ].join("\n");
@@ -151,8 +152,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
   let activeModel: ModelRef = { ...options.model };
-  const jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
-  const sessionOptions = (): HeadlessOptions => ({ ...options, model: activeModel, jobs });
+  let brain = options.brain;
+  let jobs = options.jobs ?? createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+  const sessionOptions = (): HeadlessOptions => ({ ...options, brain, model: activeModel, jobs });
   const refresh = async () => {
     // Silent on failure: an unreachable server leaves the last known window standing.
     await options.models.refresh({ providers: [activeModel.provider] }).catch(() => undefined);
@@ -180,12 +182,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   };
   bindResponseRefresh(session);
   const seenChat = new Set<string>(
-    (await options.brain.read()).chat
+    (await brain.read()).chat
       .filter((record) => record.author === "agent" || record.author === "system")
       .map((record) => record.id),
   );
   const printVisibleChat = async (): Promise<void> => {
-    for (const item of await drainVisibleChat(options.brain, seenChat)) {
+    for (const item of await drainVisibleChat(brain, seenChat)) {
       writeLine(output, `${item.author === "system" ? "system" : "carto"}: ${item.text}`);
     }
   };
@@ -200,8 +202,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const rl = createInterface({ input: options.input, terminal: inputIsTTY });
   let linesSeen = 0;
   let wipeArmed = false;
-  let wipeRequested = false;
   let closing = false;
+  let sessionClosed = false;
 
   // Everything that touches the session runs one at a time: a line, and the
   // collapse a run ended in. A line that arrives during a collapse waits in the
@@ -220,6 +222,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
    * more is asked or the bound on automatic collapse says stop.
    */
   const settle = async (): Promise<void> => {
+    if (closing) return;
     for (;;) {
       await waitForRunEnd(session);
       if (closing) break;
@@ -239,9 +242,10 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
         writeLine(error, `(the collapse failed: ${err instanceof Error ? err.message : String(err)})`);
         break;
       }
+      if (closing) break;
       await watchSession();
     }
-    if (options.refreshCapacity === true) {
+    if (!closing && options.refreshCapacity === true) {
       await refreshWindow();
     }
   };
@@ -249,10 +253,16 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   // The agent also runs without a line: a timed rest wakes it. Watching the
   // live run is how its chat is heard and its collapse is carried out then.
   let watch: { stop(): Promise<unknown> } | undefined;
+  const stopWatch = async (): Promise<void> => {
+    const current = watch;
+    watch = undefined;
+    await current?.stop().catch(() => undefined);
+  };
   const watchSession = async (): Promise<void> => {
     const previous = watch;
     watch = undefined;
     await previous?.stop().catch(() => undefined);
+    if (closing) return;
     const mine = session;
     bindResponseRefresh(mine);
     const next = await mine.harness.watchDoc(LiveDoc, mine.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
@@ -268,6 +278,39 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   };
   await watchSession();
 
+  const wipeSession = async (): Promise<void> => {
+    if (options.resetProjectBrain === undefined) {
+      writeLine(error, "(wipe unavailable: this host cannot replace the project Brain)");
+      return;
+    }
+    // Prevent wake/watch callbacks from scheduling another collapse while we
+    // interrupt and drain any work already admitted against the old session.
+    closing = true;
+    await stopWatch();
+    await interruptRun(session);
+    await queue;
+    // A watch already being installed when reset began must also be stopped.
+    await stopWatch();
+    await interruptRun(session);
+    await capacityRefreshFlight?.catch(() => undefined);
+    await stopAllJobs(jobs);
+    await closeLiveSession(session, true);
+    sessionClosed = true;
+    const result = await options.resetProjectBrain();
+    brain = result.brain;
+    jobs = createJobTable({ root: options.root, ...(options.now === undefined ? {} : { now: options.now }) });
+    session = await openLiveSession(sessionOptions());
+    sessionClosed = false;
+    seenChat.clear();
+    for (const record of (await brain.read()).chat) {
+      if (record.author === "agent" || record.author === "system") seenChat.add(record.id);
+    }
+    closing = false;
+    await watchSession();
+    if (result.error !== undefined) writeLine(error, `(wipe failed: ${result.error}; reopened the remaining project state)`);
+    else writeLine(output, `carto: wiped ${options.root}/.brain; fresh session ready.`);
+  };
+
   try {
     for await (const raw of rl) {
       linesSeen += 1;
@@ -275,13 +318,14 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       if (line === "") continue;
       if (line === "/wipe") {
         wipeArmed = true;
-        writeLine(output, `Wipe ${options.root}/.brain? This permanently deletes the Brain, archive, history and project settings; project files and global config remain. Close other Carto instances for this project first. Type /wipe confirm to delete and exit; any other line cancels.`);
+        writeLine(output, `Wipe ${options.root}/.brain? This permanently deletes the Brain, archive, history and project settings; project files and global config remain. Close other Carto instances for this project first. Type /wipe confirm to delete and start fresh; any other line cancels.`);
         continue;
       }
       if (line === "/wipe confirm") {
         if (!wipeArmed) { writeLine(error, "(run /wipe first; confirmation was not armed)"); continue; }
-        wipeRequested = true;
-        break;
+        wipeArmed = false;
+        await wipeSession();
+        continue;
       }
       if (wipeArmed) { wipeArmed = false; writeLine(output, "(wipe cancelled)"); }
       if (line === "/quit" || line === "/exit") break;
@@ -429,13 +473,12 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   } finally {
     closing = true;
     await watch?.stop().catch(() => undefined);
-    if (wipeRequested) await interruptRun(session);
     await queue;
     await stopAllJobs(jobs);
-    await closeLiveSession(session, wipeRequested);
+    if (!sessionClosed) await closeLiveSession(session);
   }
   if (linesSeen === 0 && !inputIsTTY) {
     writeLine(error, "(nothing arrived on stdin and there was no terminal to type into. Pipe the person's messages in, or run carto in a terminal.)");
   }
-  return wipeRequested ? WIPE_REQUESTED : 0;
+  return 0;
 }

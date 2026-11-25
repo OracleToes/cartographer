@@ -172,7 +172,7 @@ export class WipeConfirmation implements Component, Focusable {
       paint(tokens.danger("Permanently wipe this project's Carto session?")),
       paint(`Project: ${this.project}`),
       paint("Deletes all .brain data: Brain, archive, history and project settings."),
-      paint("Project files and global config stay. Carto exits after wiping."),
+      paint("Project files and global config stay. A fresh session opens."),
       paint("Close other Carto instances for this project first."),
       paint("Cannot be undone. Type WIPE and press enter; esc cancels."),
       paint(this.input.render(Math.max(1, width - 4)).join("")),

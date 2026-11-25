@@ -2297,6 +2297,8 @@ test("wipe confirmation requires WIPE and can be cancelled", async () => {
   const lines = dialog.render(78);
   assert.ok(lines.every((line) => visibleWidth(line) === 78));
   assert.match(plain(lines.join("\n")), /Brain, archive, history and project settings/);
+  assert.match(plain(lines.join("\n")), /fresh session opens/);
+  assert.doesNotMatch(plain(lines.join("\n")), /Carto exits/);
   dialog.handleInput("\r");
   assert.equal(confirmed, 0);
   assert.match(plain(dialog.render(78).join("\n")), /Type WIPE exactly/);

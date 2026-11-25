@@ -641,8 +641,9 @@ line. Cancelling or an unarmed confirmation does nothing. The warning names
 `.brain`, the scope of deletion, and asks the person to close any other Carto
 instances on the same project first. The live run, jobs, generation store and
 Brain are closed before the host removes the project's entire `.brain` directory,
-including the Brain, archive, all generations and project settings. Carto exits
-afterward; reopening starts fresh with default project modes. Project files and
+including the Brain, archive, all generations and project settings. Carto stays
+open and starts a fresh session with default project modes. No old conversation,
+archive, queued input, job or transient UI state is carried across. Project files and
 global configuration outside `.brain` are not touched. A symlink or non-directory
 `.brain` is refused, and failures are reported rather than reported as success.
 Deletion is not a guarantee of secure erasure from backups or storage media.

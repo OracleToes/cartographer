@@ -263,6 +263,36 @@ test("stdin that is not a terminal and carries no lines announces itself instead
   }
 });
 
+test("a wipe keeps headless open and the next message reaches a genuinely fresh session", async () => {
+  const root = tempDir();
+  mkdirSync(join(root, ".brain"));
+  let brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  const { faux, models, ref } = fauxFor();
+  const out = captureStream();
+  const contexts = [];
+  await brain.apply({ kind: "chat.record", record: { id: "old", author: "user", text: "OLD_SECRET_MESSAGE", createdAt: 1, updatedAt: 1 } }, 1);
+  await brain.archiveEphemeral({ id: "old-archive", layer: "ephemeral", ephemeral: { kind: "plainText", text: "old archive" } }, "gen-old", 1);
+  faux.setResponses([
+    (context) => { contexts.push(JSON.stringify(context.messages)); return fauxAssistantMessage([fauxToolCall("chat", { text: "fresh answer" }, { id: "fresh-chat" })], { stopReason: "toolUse" }); },
+    () => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "fresh-sleep" })], { stopReason: "toolUse" }),
+  ]);
+  try {
+    const code = await runHeadless({
+      root, brain, models, model: ref, input: inputFrom(["/mode read-only", "/mode relaxed", "/wipe", "/wipe confirm", "/mode", "new question", "/quit"]), output: out.stream,
+      resetProjectBrain: async () => { await brain.close(); await wipeProjectBrain(root); brain = await openBrain(join(root, ".brain", "brain.sqlite")); return { brain }; },
+    });
+    assert.equal(code, 0);
+    assert.match(out.text(), /fresh session ready/);
+    assert.match(out.text(), /mode: edit · file scope: strict/);
+    assert.match(out.text(), /carto: fresh answer/);
+    assert.ok(contexts.length > 0);
+    assert.doesNotMatch(contexts[0], /OLD_SECRET_MESSAGE/);
+    assert.match(contexts[0], /new question/);
+    assert.deepEqual((await brain.read()).chat.map((entry) => entry.text), ["new question", "fresh answer"]);
+    assert.equal((await brain.readArchive()).items.length, 0);
+  } finally { await brain.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("headless waits for consecutive tree continuations and prints their chat", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
@@ -609,12 +639,13 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       assert.match(cancelled, /wipe cancelled/);
       assert.ok(existsSync(join(brainDir, "brain.sqlite")));
       assert.ok(existsSync(join(brainDir, "settings.json")));
-      const done = await runCli(args, { home, input: "/wipe\n/wipe confirm\n" });
-      assert.match(done, /wiped .*\.brain/);
-      assert.equal(existsSync(brainDir), false);
+      const done = await runCli(args, { home, input: "/wipe\n/wipe confirm\n/mode\n/mode read-only\n/quit\n" });
+      assert.match(done, /wiped .*\.brain; fresh session ready/);
+      assert.match(done, /mode: edit · file scope: strict/);
+      assert.match(done, /mode: read-only · file scope: strict/);
+      assert.equal(existsSync(brainDir), true, "a fresh session is open before quit");
       assert.equal(readFileSync(join(root, "src", "keep"), "utf8"), "project file");
       assert.ok(existsSync(join(home, "config.json")));
-      mkdirSync(brainDir);
       const fresh = await openBrain(join(brainDir, "brain.sqlite"));
       try {
         assert.equal((await fresh.read()).chat.length, 0);

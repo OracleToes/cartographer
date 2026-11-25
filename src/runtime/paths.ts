@@ -31,7 +31,7 @@ export function cartoConfigPath(home: string = cartoHome()): string {
   return join(home, "config.json");
 }
 
-/** Private host return value: the CLI wipes only after all session stores close. */
+/** Private TUI handoff: the CLI wipes only after all session stores close. */
 export const WIPE_REQUESTED = 42;
 
 /** Remove this project's storage, never the project or a symlink target. */

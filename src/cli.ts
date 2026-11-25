@@ -56,7 +56,7 @@ function usage(): string {
     "",
     "Line driver commands:",
     "  /collapse   collapse the context now — the Brain rebuilds it",
-    "  /wipe       confirm permanent deletion of this project's Carto data, then exit",
+    "  /wipe       confirm permanent deletion of this project's Carto data and start fresh",
     "  /help       the commands · /quit  end the session",
     "",
     STATUS,
@@ -121,7 +121,7 @@ try {
   // providers, or terminal UI. Load those only once a session is requested.
   const { openBrain } = await import("./runtime/brain-store.js");
   const root = resolveProjectRoot(values.root);
-  const brain = await openBrain(brainDatabasePath(root));
+  let brain = await openBrain(brainDatabasePath(root));
   if (created) {
     process.stderr.write(`carto: wrote ${configPath} (model ${config.model})\n`);
   }
@@ -135,41 +135,42 @@ try {
     await updateConfigModel(`${next.provider}/${next.modelId}`, dirname(configPath));
   };
 
+  // Both hosts hand off only after their live generation and jobs are closed.
+  // Keep the active Brain owned here, replacing it before any new session opens.
+  const resetProjectBrain = async () => {
+    await brain.close();
+    let error: string | undefined;
+    try { await wipeProjectBrain(root); }
+    catch (err) { error = err instanceof Error ? err.message : String(err); }
+    brain = await openBrain(brainDatabasePath(root));
+    return { brain, ...(error === undefined ? {} : { error }) };
+  };
+  const common = () => ({
+    root, brain, models, model: activeModel, person, onModelChange,
+    ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
+    ...(config.treePageSize === undefined ? {} : { treePageSize: config.treePageSize }),
+    ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
+  });
   const stdinIsTty = (process.stdin as { isTTY?: boolean }).isTTY === true;
-  const code = values.headless === true || !stdinIsTty
-    ? await (await import("./runtime/headless.js")).runHeadless({
-        root,
-        brain,
-        models,
-        model,
-        input: process.stdin,
-        output: process.stdout,
-        error: process.stderr,
-        person,
-        onModelChange,
-        ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
-        ...(config.treePageSize === undefined ? {} : { treePageSize: config.treePageSize }),
-        ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
-      })
-    : await (await import("./ui/app.js")).runTui({
-        root,
-        brain,
-        models,
-        model,
-        person,
-        onModelChange,
-        ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
-        ...(config.treePageSize === undefined ? {} : { treePageSize: config.treePageSize }),
-        ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
-      });
-  await brain.close();
-  if (code === WIPE_REQUESTED) {
-    await wipeProjectBrain(root);
-    process.stdout.write(`carto: wiped ${root}/.brain. Project files and global config were not changed. Start Carto again for a fresh session.\n`);
-    process.exitCode = 0;
+  let code: number;
+  if (values.headless === true || !stdinIsTty) {
+    code = await (await import("./runtime/headless.js")).runHeadless({
+      ...common(), input: process.stdin, output: process.stdout, error: process.stderr, resetProjectBrain,
+    });
   } else {
-    process.exitCode = code;
+    const { runTui } = await import("./ui/app.js");
+    let startupNotice: string | undefined;
+    for (;;) {
+      code = await runTui({ ...common(), ...(startupNotice === undefined ? {} : { startupNotice }) });
+      if (code !== WIPE_REQUESTED) break;
+      const result = await resetProjectBrain();
+      startupNotice = result.error === undefined
+        ? "project session wiped — fresh session ready"
+        : `wipe failed: ${result.error} — reopened remaining project state`;
+    }
   }
+  await brain.close();
+  process.exitCode = code;
 } catch (error) {
   if (error instanceof ConfigError) {
     process.stderr.write(`carto: ${error.message}\n`);

@@ -109,6 +109,8 @@ export interface CartoTuiOptions extends LiveSessionOptions {
   refreshCapacity?: boolean;
   /** Called after the person switches models in the UI so the host can persist or track the selection. */
   onModelChange?: (model: ModelRef) => Promise<void> | void;
+  /** Host notice shown when a wiped workspace reopens. */
+  startupNotice?: string;
 }
 
 interface PendingItem {
@@ -1476,6 +1478,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         // A queued admission/collapse must finish before closing its session.
         await admission;
         await interruptRun(state.session);
+        await contextActionQueue;
+        await transcriptRebuild?.catch(() => undefined);
+        await capacityRefreshFlight?.catch(() => undefined);
       }
       await stopAllJobs(jobs);
       await closeLiveSession(state.session, code === WIPE_REQUESTED);
@@ -1759,7 +1764,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const session = state.session;
     const watch = await session.conversation.watch(BACKGROUND_CONTEXT).catch(() => undefined);
     if (watch === undefined) return;
-    if (session !== state.session) {
+    if (shutdownRequested || session !== state.session) {
       await watch.stop().catch(() => undefined);
       return;
     }
@@ -1780,7 +1785,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     let cachedPromptItems: PromptItem[] | undefined;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value" || session !== state.session) return;
+      if (shutdownRequested || call.kind !== "value" || session !== state.session) return;
       observeRun(call.value);
       const merged = entryStream.merge(call.value);
       const entriesChanged = merged.items !== lastItems;
@@ -1791,7 +1796,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const landedEntries = (await sessionTranscript(session).catch(() => [])) as unknown as ContextEntryLike[];
         cachedPromptItems = promptItemsOf(landedEntries, session.generation);
       }
-      if (session !== state.session) return;
+      if (shutdownRequested || session !== state.session) return;
       const live = (call.value.docs[LiveDoc.definition.kind] as LiveState | undefined) ?? LiveDoc.definition.initial();
       // The partial continues the prompt's numbering rather than starting a
       // second one: a card in flight is the next item after everything the
@@ -2356,7 +2361,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     {
       id: "wipe",
       group: "the workspace",
-      label: "wipe project session and quit",
+      label: "wipe project session and start fresh",
       hint: "permanently delete .brain; confirmation required",
       run: () => showWipeConfirmation(),
       available: () => true,
@@ -3042,5 +3047,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   void startLiveWatch();
   await rebuildTranscript();
+  if (options.startupNotice !== undefined) tui.flash(options.startupNotice, 6_000);
   return runDone;
 }
