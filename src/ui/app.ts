@@ -405,7 +405,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
-  const sidebar = new Sidebar(() => Math.max(0, terminal.rows - 3
+  const sidebar = new Sidebar(() => Math.max(0, terminal.rows - 4
     - (terminal.rows >= 20 ? 2 : 0) - (terminal.rows >= 26 ? 2 : 0)));
   const transcriptScroll = new PaneScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
   /**
@@ -1425,7 +1425,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { ...chrome(2), visible: margin.wide },
     { ...chrome(1), visible: margin.narrow },
   ]);
-  // The single-row bands take the same margin.
+  // The header and bottom bands take the same horizontal margin.
   const framed = (inner: Component) =>
     new Row([
       { ...chrome(2), visible: margin.wide },
@@ -1440,7 +1440,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     chrome(1, margin.gap),
     { component: panes, basis: 0, grow: 1, minSize: 6 },
     chrome(1, margin.gap),
-    { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
+    { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 2 }])), basis: 3 },
     chrome(1, margin.edge),
   ]);
 

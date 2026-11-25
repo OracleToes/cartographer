@@ -933,7 +933,9 @@ Chat and swept work disappear, while Chat and pinned work in the new head remain
 Session notifications are transient UI notices, not transcript messages.
 
 **The context bar spans the whole bottom of the application and is always
-visible.** Its width is the server's own context capacity: the total the server
+visible.** Usage, progress and speeds occupy a separate status row above the
+full-width track, so the figures never take space from the track or shift it.
+The track's width is the server's own context capacity: the total the server
 reports for its `-c` setting. Filling it is a picture of the context, not a
 gauge with a budget mark.
 

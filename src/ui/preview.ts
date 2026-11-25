@@ -424,8 +424,12 @@ export function previewTree(width = 110): string {
     { key: "/", label: "filter" },
   ]);
   const rows = workspace(header, sidebar.render(sidebarWidth), (mainWidth) => view.render(mainWidth), width);
+  const barState: ContextBarState = {
+    session: { state: { contextWindow: 32_768, lastReportedInput: 13_100, toolWorkAtLastReport: 0 } },
+    parts: { system: 7_200, transcript: 3_400, toolWork: 2_600 },
+  };
   rmSync(root, { recursive: true, force: true });
-  return [...rows, frame(footer.render(width), width)].join("\n");
+  return [...rows, frame(footer.render(width), width), frame(new TokenBarView(barState).render(width), width)].join("\n");
 }
 
 export function previewHelp(width = 88): string {

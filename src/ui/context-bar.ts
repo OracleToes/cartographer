@@ -1,5 +1,5 @@
 /**
- * The context bar (§8): one row, always visible, spanning the whole bottom.
+ * The context bar (§8): a full-width track and a separate status row, always visible.
  *
  * Its width is the server's own capacity — the total llama.cpp reports for its
  * `-c` setting — and filling it is a picture of the context, not a gauge against
@@ -134,7 +134,7 @@ export class TokenBarView implements Component {
     ].join("|");
     if (this.cacheWidth === width && this.cacheKey === key) return this.cacheLines;
 
-    // The figure on the right; the bar takes everything else it can have.
+    // Status has its own row; it never takes columns from the track.
     const shown = unknown ? `${thousands(used)} · window unknown` : `${thousands(used)} / ${thousands(contextWindow)}`;
     const qualifier = measured && toolWorkSince === 0 ? "" : "~";
     const rate = (value: number | undefined) => value === undefined ? "—" : value.toFixed(1);
@@ -143,16 +143,15 @@ export class TokenBarView implements Component {
       : { full: "", compact: "", eta: "" };
     const rates = ` · P ${rate(prefillRate)} D ${rate(decodeRate)} tok/s`;
     const base = `${qualifier}${shown}`;
-    // Reserve a stable label area based only on terminal width. Progress, ETA,
-    // and rates change length as they update; none may resize the token bar or
-    // move its cached prefix. On narrow terminals the label yields to the bar.
-    const labelWidth = Math.min(78, Math.max(0, Math.floor(width * 0.7)));
+    // Prefer complete status, then shorter progress on narrow terminals. The
+    // separate track always has the full width, regardless of status length.
+    const labelWidth = Math.max(0, width);
     const label = visibleWidth(base + prefillText.full + rates) <= labelWidth ? base + prefillText.full + rates
       : visibleWidth(base + prefillText.full) <= labelWidth ? base + prefillText.full
       : visibleWidth(base + prefillText.compact + rates) <= labelWidth ? base + prefillText.compact + rates
       : visibleWidth(base + prefillText.compact) <= labelWidth ? base + prefillText.compact
       : base;
-    const barWidth = Math.max(0, width - labelWidth - 1);
+    const barWidth = Math.max(0, width);
     const ratio = unknown ? 0 : clamp01(used / window);
     const filled = Math.round(ratio * barWidth);
 
@@ -191,9 +190,10 @@ export class TokenBarView implements Component {
         ? tint(" · ") + prefillTint(`P ${rate(prefillRate)}`) + tint(" ")
           + decodeTint(`D ${rate(decodeRate)}`) + tint(" tok/s")
         : "");
-    const gap = Math.max(1, width - barWidth - visibleWidth(right));
-    const line = chromeLine(truncateToWidth(`${cells.join("")}${" ".repeat(gap)}${right}`, width, ""), width);
-    this.cacheLines = [line];
+    const gap = Math.max(0, width - visibleWidth(right));
+    const status = chromeLine(truncateToWidth(`${" ".repeat(gap)}${right}`, width, ""), width);
+    const trackLine = chromeLine(cells.join(""), width);
+    this.cacheLines = [status, trackLine];
     this.cacheWidth = width;
     this.cacheKey = key;
     return this.cacheLines;

@@ -844,18 +844,22 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   };
   const bar = new TokenBarView(state);
   const lines = bar.render(60);
-  assert.equal(lines.length, 1, "the bar is one row");
+  assert.equal(lines.length, 2, "status and track have separate rows");
+  assert.equal(visibleWidth(lines[1]), 60, "the track spans the whole width");
+  assert.match(plain(lines[1]), /^[█░]{60}$/, "every track column is used");
+  assert.doesNotMatch(plain(lines[0]), /[█░▓]/, "the status does not share the track");
   assert.equal(visibleWidth(lines[0]), 60, "it spans the whole width");
   assert.match(plain(lines[0]), /8,000 \/ 32,768/);
 
   // Prefill overlays the previous fill; progress changes invalidate the
   // render cache even if no transcript entry has changed.
   Object.assign(state.session.state, { prefillActive: true, prefillTotal: 16000, prefilledTokens: 6000, prefillCached: 2000, prefillRate: 100, decodeRate: 20 });
-  const reading = plain(bar.render(130)[0]);
+  const [status, track] = bar.render(130);
+  const reading = plain(status);
   assert.match(reading, /8,000 \/ 32,768/);
   assert.match(reading, /prefill 6,000\/16,000/);
   assert.match(reading, /P 100\.0 D 20\.0 tok\/s/);
-  assert.match(reading, /▓/);
+  assert.match(plain(track), /▓/);
   state.session.state.prefilledTokens = 9000;
   assert.match(plain(bar.render(130)[0]), /prefill 9,000\/16,000/);
   state.session.state.prefillTotal = undefined;
@@ -891,11 +895,11 @@ test("the context bar draws live prefill progress even when the window is unknow
     parts: { system: 1_000, transcript: 500, toolWork: 500 },
   };
   const bar = new TokenBarView(state);
-  const styled = bar.render(120)[0];
-  const line = plain(styled);
+  const [status, styled] = bar.render(120);
+  const line = plain(status);
   assert.match(line, /window unknown/);
   assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
-  const barWidth = line.indexOf(" ");
+  const barWidth = 120;
   assert.equal(styled.split(barTokens.fill("█")).length - 1, Math.round(barWidth * 0.2), "the cached prefix uses the normal fill color");
   assert.equal(styled.split(barTokens.prefilled("▓")).length - 1, Math.round(barWidth * 0.6) - Math.round(barWidth * 0.2), "only newly processed tokens are colored as prefill");
   assert.equal(styled.split(barTokens.pending("▓")).length - 1, barWidth - Math.round(barWidth * 0.6));
@@ -905,15 +909,15 @@ test("the context bar colors occupancy and prefill by status, not content type",
   const session = { contextWindow: 10_000, lastReportedInput: 8_000, toolWorkAtLastReport: 1_000 };
   const state = { session: { state: session }, parts: { system: 2_000, transcript: 3_000, toolWork: 1_000 } };
   const bar = new TokenBarView(state);
-  const idle = bar.render(120)[0];
+  const idle = bar.render(120)[1];
   assert.ok(idle.includes(barTokens.fill("█")));
   assert.ok(!idle.includes(tokens.tool("█")) && !idle.includes(tokens.person("█")), "content types do not color the fill");
   state.parts = { system: 4_000, transcript: 1_000, toolWork: 1_000 };
-  assert.equal(bar.render(120)[0], idle, "reclassifying context does not change the fill");
+  assert.equal(bar.render(120)[1], idle, "reclassifying context does not change the fill");
 
   Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefilledTokens: 2_000, prefillCached: 1_000 });
-  const reading = bar.render(120)[0];
-  const width = plain(reading).indexOf(" ");
+  const reading = bar.render(120)[1];
+  const width = 120;
   const count = (style, glyph) => reading.split(style(glyph)).length - 1;
   assert.equal(count(barTokens.prefilled, "▓"), Math.round(width * 0.2) - Math.round(width * 0.1), "only the uncached processed tail changes color");
   assert.equal(count(barTokens.pending, "▓"), Math.round(width * 0.6) - Math.round(width * 0.2));
@@ -921,9 +925,9 @@ test("the context bar colors occupancy and prefill by status, not content type",
   assert.equal(visibleWidth(reading), 120);
 
   session.prefillActive = false;
-  assert.ok(bar.render(120)[0].includes(barTokens.fill("█")), "fill returns when prefill ends");
+  assert.ok(bar.render(120)[1].includes(barTokens.fill("█")), "fill returns when prefill ends");
   session.serverLost = true;
-  assert.ok(bar.render(120)[0].includes(tokens.faint("█")), "lost server figures are faint");
+  assert.ok(bar.render(120)[1].includes(tokens.faint("█")), "lost server figures are faint");
 });
 
 test("prefill changes only the uncached tail without resizing or moving the rest of the bar", () => {
@@ -935,9 +939,10 @@ test("prefill changes only the uncached tail without resizing or moving the rest
     .replaceAll(barTokens.pending("▓"), "P")).match(/^[FCP░]*/)[0];
   for (const width of [60, 100, 130]) {
     session.prefillActive = false;
-    const idle = cells(bar.render(width)[0]);
+    const idle = cells(bar.render(width)[1]);
+    assert.equal(idle.length, width, "the track uses every available column");
     Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefillCached: 1_000, prefilledTokens: 1_000, prefillRate: 10 });
-    const start = cells(bar.render(width)[0]);
+    const start = cells(bar.render(width)[1]);
     const cached = Math.round(idle.length * 0.1);
     const total = Math.round(idle.length * 0.6);
     assert.equal(start.length, idle.length, "prefill status cannot change the bar width");
@@ -946,7 +951,7 @@ test("prefill changes only the uncached tail without resizing or moving the rest
     assert.equal(start.slice(cached, total), "P".repeat(total - cached));
     session.prefilledTokens = 4_000;
     session.prefillRate = 1000;
-    const during = cells(bar.render(width)[0]);
+    const during = cells(bar.render(width)[1]);
     const processed = Math.round(idle.length * 0.4);
     assert.equal(during.length, idle.length, "changing counts, ETA and rate never shifts the bar");
     assert.equal(during.slice(0, cached), idle.slice(0, cached));
@@ -954,17 +959,17 @@ test("prefill changes only the uncached tail without resizing or moving the rest
     assert.equal(during.slice(processed, total), "P".repeat(total - processed));
     assert.equal(during.slice(total), idle.slice(total));
     session.prefilledTokens = 6_000;
-    const done = cells(bar.render(width)[0]);
+    const done = cells(bar.render(width)[1]);
     assert.equal(done.slice(0, cached), idle.slice(0, cached));
     assert.equal(done.slice(cached, total), "C".repeat(total - cached));
     assert.equal(done.slice(total), idle.slice(total));
     session.prefillTotal = undefined;
-    assert.equal(cells(bar.render(width)[0]), idle, "unknown progress does not invent an overlay");
+    assert.equal(cells(bar.render(width)[1]), idle, "unknown progress does not invent an overlay");
     Object.assign(session, { prefillTotal: 6_000, prefillCached: 6_000, prefilledTokens: 6_000 });
-    const allCached = cells(bar.render(width)[0]);
+    const allCached = cells(bar.render(width)[1]);
     assert.equal(allCached, idle, "an entirely cached prompt does not recolor anything");
     Object.assign(session, { prefillCached: 0, prefilledTokens: 0 });
-    const uncached = cells(bar.render(width)[0]);
+    const uncached = cells(bar.render(width)[1]);
     assert.equal(uncached.slice(0, total), "P".repeat(total), "a fully invalidated prompt starts prefill at the beginning");
     assert.equal(uncached.slice(total), idle.slice(total));
   }
@@ -1003,7 +1008,9 @@ test("the context bar highlights only live prefill ETA and the current phase's s
   telemetry.end(lostId, true);
   line = bar.render(100)[0];
   assert.ok(line.includes(tokens.faint("D 42.0")), "lost server remains faint");
-  assert.equal(visibleWidth(bar.render(20)[0]), 20, "narrow rendering still fits");
+  const narrow = bar.render(20);
+  assert.ok(narrow.every((row) => visibleWidth(row) === 20), "both narrow rows fit");
+  assert.match(plain(narrow[1]), /^[█░▓]{20}$/, "narrow track still uses the whole row");
 
   const currentId = telemetry.start();
   telemetry.end(lostId, true);
@@ -1140,6 +1147,9 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
     for (const line of frame.split("\n")) {
       assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
     }
+    const lines = frame.split("\n").map(plain);
+    assert.match(lines.at(-2), /\/ 32,768/, `${name}: status has its own row`);
+    assert.match(lines.at(-1), new RegExp(`^[█░▓]{${width}}$`), `${name}: track fills its own row`);
   }
 
   const shown = plain(transcript);
@@ -2124,6 +2134,24 @@ test("the frame's stacks are laid out once per frame: a long pane is not re-rend
   const frame = renderLayoutFrame(new Column([{ component: inner, basis: 0, grow: 1 }]), 80, 24, () => {});
   assert.equal(spy.calls, 1, "rendered once, by the layout pass");
   assert.equal(frame.lines.length, 24);
+});
+
+test("the footer layout leaves two separate visible rows for status and the full track", async () => {
+  const { Column } = await import("../dist/ui/frame.js");
+  const { renderLayoutFrame } = await import("../node_modules/@earendil-works/pi-tui/dist/layout.js");
+  const bar = new TokenBarView({ session: { state: { contextWindow: 1000, lastReportedInput: 500 } }, parts: { system: 0, transcript: 0, toolWork: 0 } });
+  const filler = { render: (width) => ["work".padEnd(width)] };
+  const footer = { render: (width) => ["keys".padEnd(width)] };
+  const layout = new Column([
+    { component: filler, basis: 0, grow: 1 },
+    { component: new Column([{ component: footer, basis: 1 }, { component: bar, basis: 2 }]), basis: 3 },
+  ]);
+  for (const [width, height] of [[80, 24], [36, 12]]) {
+    const rows = renderLayoutFrame(layout, width, height, () => {}).lines.map(plain);
+    assert.match(rows.at(-3), /^keys/);
+    assert.match(rows.at(-2), /500 \/ 1,000/);
+    assert.match(rows.at(-1), new RegExp(`^[█░]{${width}}$`));
+  }
 });
 
 test("a pane's margin, floor and seam are one box, and a click lands on the row it meant", async () => {
