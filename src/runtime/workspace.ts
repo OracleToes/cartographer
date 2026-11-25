@@ -6,7 +6,7 @@
  * scoping boundary, not a trust gate (§6.1). The shell cannot be scoped this
  * way; its cwd is the root and the boundary is what the agentic tools enforce.
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -35,9 +35,12 @@ export function refuseBrainPath(rootReal: string, real: string): void {
 /** Lexically resolve a path inside the root, without requiring it to exist. Throws WorkspaceError. */
 export function lexicalProjectPath(root: string, path: string): string {
   const rootReal = realpathSync(root);
-  const candidate = resolve(rootReal, path);
+  const named = resolve(root, path);
+  const fromRoot = relative(resolve(root), named);
+  const candidate = fromRoot === "" || (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+    ? resolve(rootReal, fromRoot) : named;
   const rel = relative(rootReal, candidate);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new WorkspaceError(
       `that path resolves outside the project root (${candidate}), and everything you touch is inside it. Name a path relative to the root.`,
     );
@@ -117,6 +120,20 @@ export function assertFileScope(root: string, path: string, scope: PathScope): v
       if (parent === ancestor) throw error;
       ancestor = parent;
     }
+  }
+}
+
+/** A file pin is always project-scoped, even when ordinary reads are relaxed. */
+export function assertPinnableFile(root: string, path: string): void {
+  assertFileScope(root, path, "strict");
+  const resolved = lexicalProjectPath(root, path);
+  try {
+    if (!statSync(resolved).isFile()) throw new WorkspaceError(`Cannot pin ${path}: it is not a regular file.`);
+    // Check readability now as well as again at collapse; the file may change later.
+    accessSync(resolved, constants.R_OK);
+  } catch (error) {
+    if (error instanceof WorkspaceError) throw error;
+    throw new WorkspaceError(`Cannot pin ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

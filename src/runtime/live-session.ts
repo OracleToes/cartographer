@@ -44,6 +44,7 @@ import {
   generationPaths,
   ephemeralItemId,
   newGenerationId,
+  pinnedFileTexts,
   reconcileGenerations,
   removedPartKeys,
   stablePartKeys,
@@ -157,7 +158,8 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   } else {
     const stamp = new Date(now());
     generation = newGenerationId(stamp);
-    const projection = projectContext(await options.brain.read());
+    const brain = await options.brain.read();
+    const projection = projectContext(brain, pinnedFileTexts(root, brain), options.person ?? personName());
     writeSnapshot(root, generation, projection, stamp.getTime());
   }
   const paths = generationPaths(root, generation);

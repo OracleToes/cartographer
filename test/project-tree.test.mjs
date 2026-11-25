@@ -133,6 +133,28 @@ test("a symlinked directory renders as a leaf and is never followed", () => {
   }
 });
 
+test("tree accepts a symlinked project root but rejects anchors through escaping or hidden links", () => {
+  const root = makeProject();
+  const outside = mkdtempSync(join(tmpdir(), "carto-tree-outside-"));
+  const alias = `${root}-alias`;
+  try {
+    symlinkSync(root, alias, "dir");
+    mkdirSync(join(outside, "child"));
+    symlinkSync(outside, join(root, "external"), "dir");
+    symlinkSync(join(root, ".brain"), join(root, "hidden"), "dir");
+    symlinkSync(join(root, "src"), join(root, "inside"), "dir");
+    const block = projectTreeBlock(alias, alias, 1, emptyBrain());
+    assert.ok(block.lines.some((line) => line.includes("MINI.md")));
+    assert.throws(() => scanTree(alias, join(alias, "external", "child")), AnchorError);
+    assert.throws(() => scanTree(alias, join(alias, "hidden", "context")), AnchorError);
+    assert.ok(scanTree(alias, join(alias, "inside", "domain")).children.some((child) => child.name === "records.ts"));
+  } finally {
+    rmSync(alias, { force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("`.brain` and `.git` are never listed and never in the aggregated sizes", () => {
   const root = makeProject();
   try {

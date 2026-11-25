@@ -34,7 +34,7 @@ import {
   type StateBlockInput,
 } from "../domain/state-block.js";
 import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
-import { lexicalProjectPath, resolveReadReference, type PathScope } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, resolveReadReference, type PathScope } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
@@ -132,9 +132,10 @@ export interface CartoExtensionOptions {
 
 const estimatePart = estimateSerialized;
 
-/** Lexical resolve; returns null instead of throwing (a path outside the root is a stale reference, not a crash). */
+/** Inaccessible or out-of-scope references are stale, not a crash. */
 function lexicalProjectPathSafe(root: string, path: string): string | null {
   try {
+    assertFileScope(root, path, "strict");
     return lexicalProjectPath(root, path);
   } catch {
     return null;
@@ -223,7 +224,7 @@ function staleFileHandles(
     for (const [path, named] of treeHandles) if (path === file.path) handle = named;
     const label = handle ?? file.path;
     if (mtime === null) {
-      drifted.push({ handle: label, why: "pinned, and the file is gone", modified: false });
+      drifted.push({ handle: label, why: "pinned file is missing, inaccessible, or outside its scope", modified: false });
     } else if (snapshotMtime !== null && mtime > snapshotMtime + 50) {
       drifted.push({ handle: label, why: "pinned copy in head is older than disk; collapse to refresh", modified: true });
     }

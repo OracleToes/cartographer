@@ -618,6 +618,11 @@ File scope is a person-controlled, per-project setting. **Strict** is the defaul
 project root, including resolved symlink targets. **Relaxed** allows `read` and
 `edit` to access paths outside it; `create` and other path tools remain scoped.
 The `.brain` wall still applies in either scope, including through symlinks.
+File pins remain project-scoped in both modes: a pin checks that the resolved
+target is a readable regular file when placed, and checks scope again whenever
+it is read into a new head. A missing, inaccessible or out-of-scope target is
+retained as a stale pin rather than read through the boundary. A
+symlinked project root is treated as the same project as its real directory.
 The workspace palette toggles scope; headless `/mode strict` and `/mode relaxed`
 do the same. The state block reports the current scope to the agent. This is not
 a shell sandbox: `bash` remains trusted.
@@ -694,7 +699,8 @@ it is not a permission gate. Direct access would fill the agent's context with
 duplicated or stale copies of its own state.
 
 `.brain` never renders. It is skipped in every listing, excluded from aggregated
-sizes, and rejected as a tree anchor at any depth.
+sizes, and rejected as a tree anchor at any depth, including through symlinked
+ancestors. Tree symlink entries are leaves; they are not traversed as directories.
 
 ### 6.3 The project tree
 

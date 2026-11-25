@@ -18,7 +18,7 @@
  * The `tree` tool sets anchor and depth in session state for the state block;
  * the state block renders the tree at the tail of every request.
  */
-import { lstatSync, opendirSync, realpathSync } from "node:fs";
+import { lstatSync, opendirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { handleOf } from "../domain/handles.js";
@@ -49,7 +49,7 @@ export function containedAnchor(root: string, anchor: string): string {
   const r = resolve(root);
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));
   const rel = relative(r, resolved);
-  if (resolved !== r && (rel === "" || rel.startsWith("..") || isAbsolute(rel))) {
+  if (resolved !== r && (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))) {
     throw new AnchorError(`an anchor stays inside the project root; ${anchor} resolves outside it.`);
   }
   if (rel !== "") {
@@ -74,8 +74,8 @@ export const TREE_MAX_DEPTH = 64;
 const TREE_CACHE_MS = 1000;
 const cache = new Map<string, { at: number; entry: TreeEntry }>();
 
-function scan(absolute: string, name: string, chain: IgnoreChain, levels: number, budget: { left: number }): TreeEntry {
-  const stat = lstatSync(absolute);
+function scan(absolute: string, name: string, chain: IgnoreChain, levels: number, budget: { left: number }, followRoot = false): TreeEntry {
+  const stat = followRoot ? statSync(absolute) : lstatSync(absolute);
   if (!stat.isDirectory()) return { name, path: absolute, directory: false, size: stat.size };
   // Do not read a directory beyond the displayed depth, even to check if empty.
   if (levels === 0) return { name, path: absolute, directory: true, size: 0, incomplete: true };
@@ -122,12 +122,14 @@ export function scanTree(root: string, anchor: string, depth: number = TREE_MAX_
   let target: string;
   try {
     target = containedAnchor(root, anchor);
-    realpathSync(target);
+    const actual = realpathSync(target);
+    containedAnchor(realpathSync(root), actual);
   } catch (error) {
     if (error instanceof AnchorError) throw error;
     throw new AnchorError(`the anchor \`${anchor}\` cannot be read; pick a directory that exists inside the project.`);
   }
-  const stat = lstatSync(target);
+  const isRoot = target === resolve(root);
+  const stat = isRoot ? statSync(target) : lstatSync(target);
   if (!stat.isDirectory()) {
     throw new AnchorError(`an anchor is a directory, and \`${anchor}\` is a file. Anchor at the directory that holds it, or read the file.`);
   }
@@ -142,7 +144,7 @@ export function scanTree(root: string, anchor: string, depth: number = TREE_MAX_
   }
   const levels = Number.isFinite(depth) ? Math.min(TREE_MAX_DEPTH, Math.max(1, Math.trunc(depth))) : 1;
   const budget = Number.isFinite(entryBudget) ? Math.max(0, Math.trunc(entryBudget)) : TREE_ENTRY_BUDGET;
-  return scan(target, target.split(sep).pop() ?? ".", chain, levels, { left: budget });
+  return scan(target, target.split(sep).pop() ?? ".", chain, levels, { left: budget }, isRoot);
 }
 
 /** Reuse the bounded filesystem result briefly; Brain annotations are projected fresh. */

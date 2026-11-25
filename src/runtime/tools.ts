@@ -23,7 +23,7 @@ import type { PromptItem } from "../ui/prompt-handles.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
-import { assertFileScope, lexicalProjectPath, type PathScope } from "./workspace.js";
+import { assertFileScope, assertPinnableFile, lexicalProjectPath, type PathScope } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 import {
@@ -150,6 +150,7 @@ function resolveAttachment(
 ): Attachment {
   if (attachment.kind === "file") {
     lexicalProjectPath(root, attachment.path);
+    assertFileScope(root, attachment.path, "strict");
     return { kind: "file", path: attachment.path };
   }
   const found = findByHandle(current.handles, normalizeHandle(attachment.handle));
@@ -459,6 +460,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               `${named} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
             );
           }
+          if (args.action === "pin") assertPinnableFile(root, filePath);
           await brain.apply(
             { kind: "file.pin", path: filePath, pinned: args.action === "pin" ? "agent" : null },
             api.now(),

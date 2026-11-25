@@ -2,7 +2,7 @@
 import "./agent-reminder.mjs";
 import "./fast-suite.mjs";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -960,6 +960,54 @@ test("a pinned file is read again at the collapse, so the head holds the file an
     assert.match(markdown, /notes\.md · pinned by OracleToes/, "the pin says who placed it");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pins from a symlinked project root read markdown but never follow escaping or Brain links", async () => {
+  const root = tempRoot();
+  const outside = tempRoot();
+  const alias = `${root}-alias`;
+  let store;
+  try {
+    symlinkSync(root, alias, "dir");
+    writeFileSync(join(root, "notes.md"), "linked project markdown\n");
+    writeFileSync(join(outside, "private.md"), "outside secret\n");
+    symlinkSync(join(root, "notes.md"), join(root, "inside.md"));
+    symlinkSync(join(root, "notes.md"), join(root, "retargeted.md"));
+    symlinkSync(join(outside, "private.md"), join(root, "outside.md"));
+    fakeGeneration(alias, "gen-20261116T020000Z-link01", 1_700_000_100);
+    writeFileSync(join(root, ".brain", "secret.md"), "brain secret\n");
+    symlinkSync(join(root, ".brain", "secret.md"), join(root, "brain.md"));
+    store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const state = { pending: [], tree: { anchor: alias, depth: 1 }, collapseRequested: null, generation: "gen-link", person: "OracleToes", readOnly: false };
+    const pin = createTools({ root: alias, brain: store, session: state }).find((tool) => tool.name === "pin");
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const handles = projectTreeBlock(alias, alias, 1, await store.read()).handles;
+    const api = { now: Date.now };
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "notes.md")) }, api, {});
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "inside.md")) }, api, {});
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "retargeted.md")) }, api, {});
+    rmSync(join(root, "retargeted.md"));
+    symlinkSync(join(outside, "private.md"), join(root, "retargeted.md"));
+    await assert.rejects(pin.execute({ action: "pin", handle: handles.get(join(alias, "outside.md")) }, api, {}), /outside the project root/);
+    await assert.rejects(pin.execute({ action: "pin", handle: handles.get(join(alias, "brain.md")) }, api, {}), /\.brain/);
+    // Older pins can already point through links; they must not be read at collapse.
+    await store.apply({ kind: "file.pin", path: join(alias, "outside.md"), pinned: "user" }, at(1));
+    await store.apply({ kind: "file.pin", path: join(alias, "brain.md"), pinned: "user" }, at(1));
+    const report = await collapse(alias, store);
+    const markdown = readFileSync(generationPaths(alias, report.generation).markdown, "utf8");
+    assert.equal((markdown.match(/linked project markdown/g) ?? []).length, 2);
+    assert.doesNotMatch(markdown, /outside secret|brain secret/);
+    assert.equal((markdown.match(/this file could not be read at the collapse/g) ?? []).length, 3);
+    const files = (await store.read()).files;
+    assert.equal(files.find((file) => file.path === join(alias, "inside.md")).stale, undefined);
+    assert.equal(files.find((file) => file.path === join(alias, "outside.md")).stale, true);
+    assert.equal(files.find((file) => file.path === join(alias, "retargeted.md")).stale, true);
+  } finally {
+    await store?.close();
+    rmSync(alias, { force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

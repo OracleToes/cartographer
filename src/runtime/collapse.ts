@@ -33,7 +33,7 @@ import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { lexicalProjectPath, readProjectSettings, resolveReadReference } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, readProjectSettings, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -473,13 +473,19 @@ function readPinnedFile(root: string, path: string, readResult = false): string 
   }
 }
 
-/** Lexical resolve; returns null instead of throwing. */
+/** Resolve project paths and their symlink targets, returning null when inaccessible. */
 function safeResolve(root: string, path: string): string | null {
   try {
+    assertFileScope(root, path, "strict");
     return lexicalProjectPath(root, path);
   } catch {
     return null;
   }
+}
+
+/** Read current file pins for a newly frozen projection. */
+export function pinnedFileTexts(root: string, brain: CartoBrain): Map<string, string | undefined> {
+  return new Map(brain.files.map((file) => [file.path, readPinnedFile(root, file.path)]));
 }
 
 function mtimeOf(root: string, path: string): number | null {
@@ -631,10 +637,9 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // becomes what the file holds now, and if the file is gone it keeps its text
   // and is marked stale, because a pin that silently kept the old bytes would
   // be the stale quotation the pin exists to prevent.
-  const fileTexts = new Map<string, string | undefined>();
+  const fileTexts = pinnedFileTexts(root, refreshed);
   for (const file of refreshed.files) {
-    const text = readPinnedFile(root, file.path);
-    fileTexts.set(file.path, text);
+    const text = fileTexts.get(file.path);
     const stale = text === undefined;
     const already = file.stale === true;
     if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
@@ -735,8 +740,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
  * and no grace is spent, because this is not a collapse.
  */
 export function rewriteHeadSnapshot(root: string, generation: string, brain: CartoBrain, person: string, now: number): void {
-  const fileTexts = new Map<string, string | undefined>();
-  for (const file of brain.files) fileTexts.set(file.path, readPinnedFile(root, file.path));
+  const fileTexts = pinnedFileTexts(root, brain);
   // Chat said since the freeze is in the body, and a rebuilt head keeps to the
   // records the frozen one held: the head gathers in new Chat at a collapse,
   // not before, or the model would read the same words twice (§2.3). A

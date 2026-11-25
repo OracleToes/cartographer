@@ -26,6 +26,7 @@ import { personChatBindings, userText } from "../domain/chat-identity.js";
 import { readFile } from "node:fs/promises";
 import { snapshotPaths } from "../runtime/projection-files.js";
 import { WIPE_REQUESTED } from "../runtime/paths.js";
+import { assertPinnableFile } from "../runtime/workspace.js";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { basename, relative, resolve } from "node:path";
@@ -1005,6 +1006,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const held = brainState.files.find((file) => resolve(options.root, file.path) === path);
       const shown = relative(options.root, path);
       if (held === undefined) {
+        assertPinnableFile(options.root, path);
         await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
         pushStatus(`pinned ${shown} (you): the head holds it, read again at every collapse`);
       } else {
@@ -1078,6 +1080,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const path = String(itemId);
         const held = brainState.files.find((file) => file.path === path);
         if (held === undefined) {
+          try { assertPinnableFile(options.root, path); }
+          catch (error) {
+            pushStatus(`pin failed: ${errorText(error)}`);
+            tui.requestRender();
+            return;
+          }
           await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
           pushStatus(`pinned ${path} (you): the head keeps it, read again at every collapse`);
         } else {

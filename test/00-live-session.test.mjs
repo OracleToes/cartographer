@@ -60,6 +60,23 @@ const flatten = (messages) => JSON.stringify(messages);
 // Every case owns its own temp project, Brain, harness and faux provider.
 // Running the independent cases concurrently avoids a long serial tail.
 test.describe("live session", { concurrency: 4 }, () => {
+test("a new generation reads existing file pins rather than reporting them unreadable", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { models, ref } = fauxSetup();
+  writeFileSync(join(root, "notes.md"), "a readable markdown pin\n");
+  await brain.apply({ kind: "file.pin", path: join(root, "notes.md"), pinned: "user" }, Date.now());
+  let session;
+  try {
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    const snapshot = readFileSync(session.markdownPath, "utf8");
+    assert.match(snapshot, /a readable markdown pin/);
+    assert.doesNotMatch(snapshot, /could not be read/);
+  } finally {
+    if (session) await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
 test("the continuation loop: a text-only answer is continued with a marker, stripped on the next request", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
