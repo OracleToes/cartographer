@@ -46,7 +46,7 @@ export interface ToolSession {
   /** Pending Brain writes since the last rebuild; ephemeral, cleared at collapse. */
   pending: PendingWrite[];
   /** Where the state block renders the tree. */
-  tree: { anchor: string; depth: number };
+  tree: { anchor: string; depth: number; limit?: number; offset?: number };
   /** Handles in the last state block actually sent to the agent. */
   requestTreeHandles?: TreeHandles;
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
@@ -171,7 +171,7 @@ const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "
  * a file the agent can see, and nothing here will pretend it is.
  */
 function treePathOf(root: string, brain: CartoBrain, session: ToolSession, handle: string): string | undefined {
-  const handles = session.requestTreeHandles ?? projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain).handles;
+  const handles = session.requestTreeHandles ?? projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain, session.tree).handles;
   for (const [path, named] of handles) if (named === handle) return path;
   return undefined;
 }
@@ -496,11 +496,12 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. The scan stops at depth 64 or 2000 encountered entries; >= sizes are partial and omitted entries are marked. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
+        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. The scan stops at depth 64 or 2000 encountered entries; >= sizes are partial. The state block pages the scanned entries: use offset from its next-page notice, or anchor at a directory. Pages may change as the filesystem changes. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str()),
         depth: opt(int({ description: "How many levels below the anchor to render. One is the anchor's own contents, and less than one renders the same as one." })),
+        offset: opt(int({ description: "A non-negative, zero-based offset into the scanned entries; use the next offset in the state block to see another page." })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -517,8 +518,11 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         }
         const anchor = anchoredByHandle ?? args.anchor ?? session.tree.anchor;
         const depth = args.depth ?? session.tree.depth;
-        const block = projectTreeBlock(root, anchor, depth, await brain.read());
-        session.tree = { anchor: block.root, depth: block.depth };
+        const offset = args.offset ?? (args.handle !== undefined || args.anchor !== undefined || args.depth !== undefined ? 0 : (session.tree.offset ?? 0));
+        if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("tree offset must be a non-negative integer.");
+        const block = projectTreeBlock(root, anchor, depth, await brain.read(), { ...session.tree, offset });
+        session.tree = { anchor: block.root, depth: block.depth, offset: block.page.offset,
+          ...(session.tree.limit === undefined ? {} : { limit: session.tree.limit }) };
         // The tree itself is not the result (§6.3): it ends the turn, and the
         // state block — rendered at this anchor — is the next turn. So the agent
         // sees the tree it just asked for instead of acting on the last one.
@@ -528,7 +532,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           output: [
             {
               type: "text" as const,
-              text: `Anchored at ${block.root}, depth ${block.depth}. This turn ends here, and the tree is in your state block as your next turn.`,
+              text: `Anchored at ${block.root}, depth ${block.depth}, offset ${block.page.offset}. This turn ends here, and the tree is in your state block as your next turn.`,
             },
           ],
           control: { terminate: true },

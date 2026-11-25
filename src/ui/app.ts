@@ -154,7 +154,7 @@ function countSidebar(
   root: string,
   contextTokens: number = 0,
   archive?: { total: number; pinned: number },
-  tree?: { anchor: string; depth: number },
+  tree?: { anchor: string; depth: number; limit?: number; offset?: number },
   jobs?: { total: number; unread: number },
 ): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
@@ -173,7 +173,7 @@ function countSidebar(
   let treeDirs = 0;
   let treeFiles = 0;
   if (tree !== undefined) {
-    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState);
+    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState, tree);
     const walk = (entry: TreeEntry, level: number): void => {
       if (level > projection.depth) return;
       for (const child of entry.children ?? []) {
@@ -690,7 +690,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   /** The tree the person is looking at, from the session's anchor and depth. */
   const treeOf = (brainState: Awaited<ReturnType<BrainStore["read"]>>) =>
-    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState);
+    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState, state.session.state.tree);
 
   /** Focus follows the view: Posting's rule, and the reason the footer can be honest. */
   const focusCurrent = () => {
@@ -797,6 +797,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   });
   contextView.onBack = () => void switchToView("chat");
   treeView.onBack = () => void switchToView("chat");
+  treeView.onPage = (offset) => {
+    state.session.state.tree = { ...state.session.state.tree, offset };
+    void (async () => {
+      const fresh = await brain.read();
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
+      await syncContextView(fresh);
+      await refreshSidebar();
+      tui.requestRender();
+    })().catch((error: unknown) => pushStatus(`tree page failed: ${errorText(error)}`));
+  };
   contextView.onCollapse = () => void runCollapse("context surgery");
   // Keep the cursor on screen as it walks: the view knows which rendered lines
   // its row occupies, and the pane is the only thing that can scroll to them.

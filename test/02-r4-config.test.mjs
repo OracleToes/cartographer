@@ -18,7 +18,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
+import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig, updateConfigModel } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
 import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
@@ -65,6 +65,23 @@ test("parseConfig rejects a bad version, model, endpoint, context window, and co
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 1 }).collapseWarningPercent, 1);
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 60 }).collapseWarningPercent, 60);
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 100 }).collapseWarningPercent, 100);
+});
+
+test("the tree page size is validated and survives config loading and model changes", async () => {
+  const home = tempDir();
+  try {
+    const base = { version: 1, model: "llama-swap/x" };
+    assert.equal(parseConfig(base).treePageSize, undefined);
+    for (const value of [0, -1, 1.5, 2001, "100", null]) {
+      assert.throws(() => parseConfig({ ...base, treePageSize: value }), /treePageSize must be an integer/);
+    }
+    assert.equal(parseConfig({ ...base, treePageSize: 1 }).treePageSize, 1);
+    assert.equal(parseConfig({ ...base, treePageSize: 2000 }).treePageSize, 2000);
+    await saveGlobalConfig({ ...base, treePageSize: 37 }, home);
+    assert.equal((await loadGlobalConfig({ home, contextWindowOverride: 4096 })).config.treePageSize, 37);
+    await updateConfigModel("llama-swap/y", home);
+    assert.equal(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).treePageSize, 37);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {

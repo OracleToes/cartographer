@@ -249,3 +249,43 @@ test("shared scans refresh on the next access after their short reuse window", (
     assert.ok(refreshed.lines.some((line) => line.includes("new.txt")));
   } finally { Date.now = realNow; rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test("tree pages cap addressable entries and retain unaddressable ancestor context", () => {
+  const root = makeProject();
+  try {
+    const brain = emptyBrain();
+    const first = projectTreeBlock(root, root, 2, brain, { limit: 2 });
+    assert.deepEqual(first.page, { offset: 0, end: 2, total: 6, limit: 2, scanIncomplete: false });
+    assert.deepEqual([...first.handles.keys()], [join(root, "empty"), join(root, "src")]);
+    assert.match(first.lines.join("\n"), /0 before, 4 after; next: tree offset 2/);
+    const next = projectTreeBlock(root, root, 2, brain, { limit: 2, offset: 2 });
+    assert.deepEqual([...next.handles.keys()], [join(root, "src/domain"), join(root, "src/cli.ts")]);
+    assert.match(next.lines.join("\n"), /src\/  >=512B  \(context\)/);
+    assert.equal(next.handles.has(join(root, "src")), false);
+    assert.match(next.lines.join("\n"), /2 before, 2 after; next: tree offset 4/);
+    const view = projectTreeView(root, root, 2, brain, { limit: 2, offset: 2 });
+    assert.deepEqual([...view.handles], [...next.handles]);
+    const last = projectTreeBlock(root, root, 2, brain, { limit: 2, offset: 4 });
+    assert.equal(last.handles.size, 2);
+    assert.match(last.lines.join("\n"), /4 before, 0 after/);
+    assert.doesNotMatch(last.lines.join("\n"), /next: tree offset/);
+    const beyond = projectTreeBlock(root, root, 2, brain, { limit: 2, offset: 999 });
+    assert.equal(beyond.handles.size, 0);
+    assert.match(beyond.lines.join("\n"), /empty at offset 6/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the default page caps a wide directory independently of the scan budget", () => {
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-pages-"));
+  try {
+    for (let i = 0; i < 125; i++) writeFileSync(join(root, `file-${String(i).padStart(3, "0")}`), "x");
+    const page = projectTreeBlock(root, root, 1, emptyBrain());
+    assert.equal(page.handles.size, 100);
+    assert.equal(page.page.total, 125);
+    assert.match(page.lines.join("\n"), /25 after; next: tree offset 100/);
+    const tail = projectTreeBlock(root, root, 1, emptyBrain(), { offset: 100 });
+    assert.equal(tail.handles.size, 25);
+    assert.equal(tail.page.end, 125);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

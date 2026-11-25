@@ -38,6 +38,7 @@ function usage(): string {
     "                              [COLLAPSE NEEDED] in the state block (config: \"collapseWarningPercent\").",
     "  --user <name>               What the agent calls you. Default: the account that launched",
     "                              Carto (config: \"userName\").",
+    "  config: treePageSize         Tree entries per state-block page (1–2000; default 100).",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
     "  --headless                  Run the line driver instead of the workspace.",
     "  -h, --help                  Show this help.",
@@ -146,6 +147,7 @@ try {
         person,
         onModelChange,
         ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
+        ...(config.treePageSize === undefined ? {} : { treePageSize: config.treePageSize }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       })
     : await (await import("./ui/app.js")).runTui({
@@ -156,6 +158,7 @@ try {
         person,
         onModelChange,
         ...(config.collapseWarningPercent === undefined ? {} : { collapseWarningPercent: config.collapseWarningPercent }),
+        ...(config.treePageSize === undefined ? {} : { treePageSize: config.treePageSize }),
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });
   await brain.close();

@@ -347,7 +347,7 @@ export async function renderLiveStateBlock(
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
   let tree: { root: string; depth: number; lines: string[]; handles: TreeHandles };
   try {
-    tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
+    tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain, options.session.tree);
   } catch (error) {
     tree = {
       root: options.session.tree.anchor,

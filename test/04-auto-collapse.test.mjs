@@ -154,17 +154,19 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "did a step" }, { id: "chat-step" })], { stopReason: "toolUse" })),
       collapseCall(factory),
     ]);
-    const opts = options({ ...env, models, ref }, { collapseWarningPercent: 10 });
+    const opts = options({ ...env, models, ref }, { collapseWarningPercent: 10, treePageSize: 7 });
     const first = await openLiveSession(opts);
     let second;
     try {
       assert.equal(first.state.collapseWarningPercent, 10);
+      assert.equal(first.state.tree.limit, 7);
       await ask(first, "check the lower threshold");
       assert.match(blockOf(captured[0]).content, /context fill: ~\d+% · \[COLLAPSE NEEDED\]/, "warns at the configured 10% threshold, well below 75%");
       // After automatic collapse, the new generation starts above the configured 10% warning fill,
       // so even after doing a step, asking to collapse again is caught by the stall bound.
       second = (await carryOut(first, opts)).session;
       assert.equal(second.state.collapseWarningPercent, 10, "the configured threshold survives collapse");
+      assert.equal(second.state.tree.limit, 7, "the configured tree page size survives collapse");
       assert.equal(second.reviewCollapseRequest().kind, "stop");
     } finally {
       await closeLiveSession(second ?? first).catch(() => undefined);

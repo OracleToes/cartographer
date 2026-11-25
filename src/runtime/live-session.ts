@@ -91,6 +91,8 @@ export interface LiveSessionOptions {
    * state block. Default: 75 (COLLAPSE_WARNING_PERCENT).
    */
   collapseWarningPercent?: number;
+  /** Maximum entries in each state-block tree page. */
+  treePageSize?: number;
   /** Persistent piped jobs owned by the host; preserved across context collapses. */
   jobs?: JobTable;
   now?: () => number;
@@ -185,7 +187,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
     paused: false,
     pending: [],
-    tree: { anchor: root, depth: 2 },
+    tree: { anchor: root, depth: 2, ...(options.treePageSize === undefined ? {} : { limit: options.treePageSize }) },
     collapseRequested: null,
     collapseTrigger: null,
     readOnly: false,

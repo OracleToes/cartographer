@@ -223,6 +223,30 @@ test("successive tree calls continue automatically with the freshly anchored sta
   }
 });
 
+test("configured tree pages reach the agent and the next page's handles read the right file", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  writeFileSync(join(root, "src", "a.ts"), "page payload\n");
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { offset: 1 }, { id: "page-next" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "F1" }, { id: "page-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "page-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, treePageSize: 1, person: "OracleToes" });
+  try {
+    await (await submitInput(session, "page through the tree")).wait(BACKGROUND_CONTEXT);
+    await waitForRunEnd(session);
+    assert.equal(captured.length, 3);
+    assert.match(blockOf(captured[0]).content, /next: tree offset 1/);
+    assert.doesNotMatch(blockOf(captured[0]).content, /a\.ts/);
+    assert.match(blockOf(captured[1]).content, /src\/.*\(context\)/);
+    assert.match(blockOf(captured[1]).content, /a\.ts.*F1/);
+    assert.match(flatten(captured[2]), /page payload/);
+    assert.equal(session.state.tree.limit, 1);
+    assert.equal(session.state.tree.offset, 1);
+  } finally { await closeLiveSession(session); await cleanup(); }
+});
+
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
@@ -240,7 +264,7 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
   await assert.rejects(treeGit, /the tree does not show/);
   const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
-  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1\./);
+  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1, offset 0\./);
   assert.doesNotMatch(validTree.output[0].text, /\n/);
   // §6.3: tree ends the turn, so the very next thing the agent reads is the
   // block with the tree it asked for — not the tree it had before.

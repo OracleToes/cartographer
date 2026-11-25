@@ -489,7 +489,7 @@ handle. The handles are also why the context can be talked about at all: a handl
 is how one item refers to another.
 
 **Files are handled by the tree.** The project tree gives a handle to every file
-and directory it shows. A file's handle comes from the tree, not from a separate
+and directory on its current page. Ancestors repeated only for context have no handle. A file's handle comes from the tree, not from a separate
 inventory, so a file the tree does not show has no handle — which is why the tree
 is rendered for a whole project and not only for what the agent happens to
 mention.
@@ -678,7 +678,7 @@ attached to, so the tree is a map of what the agent understands rather than a
 listing.
 
 The tree is anchored at the project root by default, at a depth of two. The `tree`
-tool sets the anchor and the depth, both optional: the anchor defaults to the
+tool sets the anchor, depth, and page offset, all optional: the anchor defaults to the
 project root, and the depth defaults to two. A depth of one is the anchor and its
 immediate contents; anything below one renders the same as one, because there is
 no useful rendering of an anchor with nothing under it. The tool does not return the tree:
@@ -688,6 +688,16 @@ result is only that the block will be rendered at the new anchor.
 **`tree` ends the turn immediately.** The state block renders as the next turn, so
 the agent sets where it is attending and sees the tree it just asked for at once,
 rather than reading a second rendering of it in a tool result.
+
+The state block displays at most `treePageSize` scanned entries per page,
+configured in `~/.carto/config.json` (integer 1–2,000; default 100). This is an
+entry limit, not an exact tokenizer limit. The block states the number of scanned
+entries before and after the page and the next zero-based `tree` offset. Pages
+follow depth-first tree order; ancestors needed for context are repeated without
+handles. Changing anchor or depth resets the offset unless one is supplied. The
+Tree view shows the same page and uses `[` and `]` to move between pages. Only
+entries on the page receive handles; agent tools continue to resolve against the
+last state block sent. Counts do not claim to include entries the scan never saw.
 
 The scan itself stops at the requested display depth (at most 64 levels) and
 a budget of 2,000 encountered entries, including ignored entries. Directories
@@ -741,7 +751,7 @@ and `create` takes a path because the file it makes has no handle yet.
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
 | `proc` | Starts, drives, reads, and stops persistent piped processes (`J` handles) that live in host memory, survive collapse, and are shared live in the `jobs` view. |
-| `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
+| `tree` | Sets the project tree's anchor, depth, and page offset. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain, recording a required Chat `message` to the person. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 

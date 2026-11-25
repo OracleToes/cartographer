@@ -37,6 +37,8 @@ export interface TreeEntry {
   incomplete?: boolean;
   /** This directory listing was cut short or could not be read. */
   listingIncomplete?: boolean;
+  /** Ancestor retained only to explain the current page; it has no handle. */
+  contextOnly?: boolean;
   children?: TreeEntry[];
 }
 
@@ -66,6 +68,8 @@ const entryOrder = (a: TreeEntry, b: TreeEntry): number =>
 
 /** Every encountered directory entry counts, including ignored entries. */
 export const TREE_ENTRY_BUDGET = 2000;
+/** Maximum entries rendered per page unless the person configures another limit. */
+export const DEFAULT_TREE_PAGE_SIZE = 100;
 export const TREE_MAX_DEPTH = 64;
 const TREE_CACHE_MS = 1000;
 const cache = new Map<string, { at: number; entry: TreeEntry }>();
@@ -211,8 +215,10 @@ export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
   const walk = (node: TreeEntry, level: number): void => {
     if (level > depth) return;
     for (const child of node.children ?? []) {
-      const handle = child.directory ? `D${++directories}` : `F${++files}`;
-      handles.set(child.path, handle);
+      if (!child.contextOnly) {
+        const handle = child.directory ? `D${++directories}` : `F${++files}`;
+        handles.set(child.path, handle);
+      }
       walk(child, level + 1);
     }
   };
@@ -254,7 +260,7 @@ export function renderTreeLines(
       const marks = child.directory ? [] : (attached.get(child.path) ?? []);
       const handle = handles.get(child.path);
       lines.push(
-        `${indent}${name}  ${formatTreeSize(child)}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
+        `${indent}${name}  ${formatTreeSize(child)}${child.contextOnly ? "  (context)" : ""}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
       );
       walk(child, level + 1);
     }
@@ -262,6 +268,45 @@ export function renderTreeLines(
   };
   walk(entry, 1);
   return lines;
+}
+
+/** A page is a contiguous slice of the scan's depth-first rendering order. */
+export interface TreePageOptions {
+  limit?: number;
+  offset?: number;
+}
+
+function pageTree(entry: TreeEntry, depth: number, options: TreePageOptions): {
+  entry: TreeEntry; offset: number; end: number; total: number; limit: number; scanIncomplete: boolean;
+} {
+  const entries: TreeEntry[] = [];
+  let scanIncomplete = false;
+  const collect = (node: TreeEntry, level: number): void => {
+    if (node.listingIncomplete) scanIncomplete = true;
+    if (level > depth) return;
+    for (const child of node.children ?? []) {
+      entries.push(child);
+      collect(child, level + 1);
+    }
+  };
+  collect(entry, 1);
+  const requestedLimit = options.limit ?? DEFAULT_TREE_PAGE_SIZE;
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(TREE_ENTRY_BUDGET, Math.trunc(requestedLimit))) : DEFAULT_TREE_PAGE_SIZE;
+  const requestedOffset = options.offset ?? 0;
+  const offset = Number.isFinite(requestedOffset) ? Math.min(entries.length, Math.max(0, Math.trunc(requestedOffset))) : 0;
+  const end = Math.min(entries.length, offset + limit);
+  if (offset === 0 && end === entries.length) return { entry, offset, end, total: entries.length, limit, scanIncomplete };
+  const selected = new Set(entries.slice(offset, end).map((node) => node.path));
+  const prune = (node: TreeEntry): TreeEntry | undefined => {
+    const children = (node.children ?? []).flatMap((child) => {
+      const kept = prune(child);
+      return kept === undefined ? [] : [kept];
+    });
+    if (node !== entry && !selected.has(node.path) && children.length === 0) return undefined;
+    return { ...node, ...(node !== entry && !selected.has(node.path) ? { contextOnly: true } : {}),
+      ...(node.children === undefined ? {} : { children }) };
+  };
+  return { entry: prune(entry)!, offset, end, total: entries.length, limit, scanIncomplete };
 }
 
 /**
@@ -276,6 +321,8 @@ export interface TreeProjection {
   /** The depth actually rendered, after the same floor the block applies. */
   depth: number;
   entry: TreeEntry;
+  /** Entries before and after this page refer only to the bounded scan. */
+  page: { offset: number; end: number; total: number; limit: number; scanIncomplete: boolean };
   handles: TreeHandles;
   /** Subtree bytes by path, for every entry the depth shows. */
   sizes: ReadonlyMap<string, number>;
@@ -283,14 +330,16 @@ export interface TreeProjection {
   attached: ReadonlyMap<string, readonly string[]>;
 }
 
-export function projectTreeView(root: string, anchor: string, depth: number, brain: CartoBrain): TreeProjection {
+export function projectTreeView(root: string, anchor: string, depth: number, brain: CartoBrain, options: TreePageOptions = {}): TreeProjection {
   const shown = Number.isFinite(depth) ? Math.min(TREE_MAX_DEPTH, Math.max(1, Math.trunc(depth))) : 1;
   const target = containedAnchor(root, anchor);
-  const entry = sharedScan(root, target, shown);
+  const scanned = sharedScan(root, target, shown);
+  const { entry, ...page } = pageTree(scanned, shown, options);
   return {
     anchor: target,
     depth: shown,
     entry,
+    page,
     handles: treeHandles(entry, shown),
     sizes: subtreeSizes(entry, shown),
     attached: atlasAttachedPaths(brain, root),
@@ -303,13 +352,21 @@ export function projectTreeBlock(
   anchor: string,
   depth: number,
   brain: CartoBrain,
-): { root: string; depth: number; lines: string[]; handles: TreeHandles } {
+  options: TreePageOptions = {},
+): { root: string; depth: number; lines: string[]; handles: TreeHandles; page: TreeProjection["page"] } {
   // Depth 1 is the anchor and its immediate contents; there is no rendering
   // below that, so anything under 1 renders as 1 (§6.3). Nothing is refused:
   // a depth below 1 is not an error, it is the same tree.
-  const projection = projectTreeView(root, anchor, depth, brain);
+  const projection = projectTreeView(root, anchor, depth, brain, options);
   const { entry, handles } = projection;
   const lines = renderTreeLines(entry, projection.depth, projection.attached, handles);
+  const { page } = projection;
+  if (page.offset > 0 || page.end < page.total) {
+    const next = page.end < page.total ? `; next: tree offset ${page.end}` : "";
+    const shown = page.end === page.offset ? `empty at offset ${page.offset}` : `${page.offset + 1}-${page.end}`;
+    lines.push(`  (page ${shown} of ${page.total} scanned entries; ${page.offset} before, ${page.total - page.end} after${next})`);
+  }
+  if (page.scanIncomplete) lines.push("  (scan incomplete: more entries may exist beyond the scan budget or be unreadable; re-anchor to explore)");
   if (entry.incomplete) lines.push("  (>= sizes are partial; depth, entry limit, or unreadable entries)");
-  return { root: projection.anchor, depth: projection.depth, lines, handles };
+  return { root: projection.anchor, depth: projection.depth, lines, handles, page };
 }

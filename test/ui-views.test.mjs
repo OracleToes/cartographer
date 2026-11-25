@@ -1644,6 +1644,31 @@ test("the tree pins the file under the cursor with p, and a directory or a filte
   assert.equal(asked.length, 2);
 });
 
+test("tree page controls track the same page and never mint a handle for context ancestors", async () => {
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-pages-ui-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "a"), "a");
+    writeFileSync(join(root, "src", "b"), "b");
+    const view = new TreeView();
+    const offsets = [];
+    view.onPage = (offset) => offsets.push(offset);
+    view.setData({ root, anchor: { anchor: root, depth: 2, limit: 1 }, brain: emptyBrain() });
+    view.handleInput("]");
+    assert.deepEqual(offsets, [1]);
+    view.setData({ root, anchor: { anchor: root, depth: 2, limit: 1, offset: 1 }, brain: emptyBrain() });
+    const shown = plain(view.render(120).join("\n"));
+    assert.match(shown, /ancestor shown for context; no handle on this page/);
+    assert.match(shown, /F1/);
+    view.handleInput("[");
+    assert.deepEqual(offsets, [1, 0]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("Atlas and Ledger mark, withdraw and apply now from the list and from the detail pane", () => {
   for (const [name, View, seed] of [
     ["atlas", AtlasView, (brain) => brain.atlas.push({ id: "n1", title: "node", text: "t", links: [], attachments: [], createdAt: 1, updatedAt: 1 })],
