@@ -63,17 +63,23 @@ test.describe("live session", { concurrency: 4 }, () => {
 test("a new generation reads existing file pins rather than reporting them unreadable", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { models, ref } = fauxSetup();
+  const outside = mkdtempSync(join(tmpdir(), "carto-pin-outside-"));
   writeFileSync(join(root, "notes.md"), "a readable markdown pin\n");
+  writeFileSync(join(outside, "external.md"), "a readable external pin\n");
+  symlinkSync(join(outside, "external.md"), join(root, "external.md"));
   await brain.apply({ kind: "file.pin", path: join(root, "notes.md"), pinned: "user" }, Date.now());
+  await brain.apply({ kind: "file.pin", path: join(root, "external.md"), pinned: "user" }, Date.now());
   let session;
   try {
     session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
     const snapshot = readFileSync(session.markdownPath, "utf8");
     assert.match(snapshot, /a readable markdown pin/);
+    assert.match(snapshot, /a readable external pin/);
     assert.doesNotMatch(snapshot, /could not be read/);
   } finally {
     if (session) await closeLiveSession(session);
     await cleanup();
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

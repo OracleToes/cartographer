@@ -1,6 +1,6 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -195,10 +195,13 @@ test("state block includes compact mode-aware decision flow and conditional atte
 
 test("renderLiveStateBlock emits state-reactive attention cues and detects modified pinned files", async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-flow-"));
+  const outside = mkdtempSync(join(tmpdir(), "carto-flow-outside-"));
   try {
     const filePath = join(root, "dice.js");
     const snapPath = join(root, "snapshot.md");
     writeFileSync(filePath, "const x = 1;\n");
+    writeFileSync(join(outside, "external.md"), "external\n");
+    symlinkSync(join(outside, "external.md"), join(root, "linked.md"));
     writeFileSync(snapPath, "# frozen\n");
     // Ensure snapshot is older than the modified pinned file on disk.
     const past = new Date(Date.now() - 5_000);
@@ -216,7 +219,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
         createdAt: idx + 1,
         updatedAt: idx + 1,
       })),
-      files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }],
+      files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }, { path: "linked.md", pinned: "user", createdAt: 1 }],
     };
     const session = {
       person: "OracleToes",
@@ -253,7 +256,8 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
     assert.equal(session.toolWorkAtLastRequest, 77, "a UI preview must not alter the in-flight request accounting baseline");
     assert.match(block, /live items:\n  X1 · reasoning\n  R1 · readResult\npins:/);
     assert.doesNotMatch(block, /unrepeated reasoning|unrepeated result/);
-    assert.match(block, /pinned copy in head is older than disk; collapse to refresh/);
+    assert.match(block, /linked\.md · pinned copy in head is older than disk; collapse to refresh/);
+    assert.doesNotMatch(block, /linked\.md · pinned file is missing/);
     assert.match(block, /\nattention:\n/);
     assert.match(block, /Last `bash` call touched files directly/);
     assert.match(block, /Pinned file\(s\) changed on disk since collapse/);
@@ -270,5 +274,6 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
     assert.doesNotMatch(recovered, /Last `bash` call touched files directly/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

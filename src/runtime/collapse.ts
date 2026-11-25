@@ -33,7 +33,7 @@ import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { assertFileScope, lexicalProjectPath, readProjectSettings, resolveReadReference } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -457,16 +457,16 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
 
 /**
  * A pinned file's text as it stands, or `undefined` when it cannot be read:
- * outside the project, missing, or not a text file this can hold. The head says
+ * missing, inaccessible, or not a regular file. The head says
  * so in its place, and the pin's stale mark does the same in the state block.
  */
 function readPinnedFile(root: string, path: string, readResult = false): string | undefined {
   let real: string | null;
-  try { real = readResult ? resolveReadReference(root, path, readProjectSettings(root).pathScope) : safeResolve(root, path); }
+  try { real = readResult ? resolveReadReference(root, path, readProjectSettings(root).pathScope) : resolvePinnedFile(root, path); }
   catch { return undefined; }
   if (real === null) return undefined;
   try {
-    if (statSync(real).isDirectory()) return undefined;
+    if (!statSync(real).isFile()) return undefined;
     return readFileSync(real, "utf8");
   } catch {
     return undefined;

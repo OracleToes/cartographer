@@ -123,10 +123,16 @@ export function assertFileScope(root: string, path: string, scope: PathScope): v
   }
 }
 
-/** A file pin is always project-scoped, even when ordinary reads are relaxed. */
-export function assertPinnableFile(root: string, path: string): void {
-  assertFileScope(root, path, "strict");
+/** The pin names a project entry; its symlink target may be outside the project. */
+export function resolvePinnedFile(root: string, path: string): string {
   const resolved = lexicalProjectPath(root, path);
+  assertFileScope(root, resolved, "relaxed");
+  return resolved;
+}
+
+/** Verify a pin is readable now; it will be checked again when the head is rebuilt. */
+export function assertPinnableFile(root: string, path: string): void {
+  const resolved = resolvePinnedFile(root, path);
   try {
     if (!statSync(resolved).isFile()) throw new WorkspaceError(`Cannot pin ${path}: it is not a regular file.`);
     // Check readability now as well as again at collapse; the file may change later.

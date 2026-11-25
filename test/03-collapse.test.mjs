@@ -12,6 +12,7 @@ import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { createTools } from "../dist/runtime/tools.js";
+import { assertPinnableFile } from "../dist/runtime/workspace.js";
 import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths, rewriteHeadSnapshot } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -963,7 +964,7 @@ test("a pinned file is read again at the collapse, so the head holds the file an
   }
 });
 
-test("pins from a symlinked project root read markdown but never follow escaping or Brain links", async () => {
+test("pins follow project symlinks outside the project and refresh at collapse, but never read Brain links", async () => {
   const root = tempRoot();
   const outside = tempRoot();
   const alias = `${root}-alias`;
@@ -989,20 +990,31 @@ test("pins from a symlinked project root read markdown but never follow escaping
     await pin.execute({ action: "pin", handle: handles.get(join(alias, "retargeted.md")) }, api, {});
     rmSync(join(root, "retargeted.md"));
     symlinkSync(join(outside, "private.md"), join(root, "retargeted.md"));
-    await assert.rejects(pin.execute({ action: "pin", handle: handles.get(join(alias, "outside.md")) }, api, {}), /outside the project root/);
+    assert.doesNotThrow(() => assertPinnableFile(alias, join(alias, "outside.md")), "the Tree view can pin this link too");
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "outside.md")) }, api, {});
     await assert.rejects(pin.execute({ action: "pin", handle: handles.get(join(alias, "brain.md")) }, api, {}), /\.brain/);
-    // Older pins can already point through links; they must not be read at collapse.
-    await store.apply({ kind: "file.pin", path: join(alias, "outside.md"), pinned: "user" }, at(1));
+    // A pre-existing forbidden pin is retained as stale, not read.
     await store.apply({ kind: "file.pin", path: join(alias, "brain.md"), pinned: "user" }, at(1));
     const report = await collapse(alias, store);
     const markdown = readFileSync(generationPaths(alias, report.generation).markdown, "utf8");
     assert.equal((markdown.match(/linked project markdown/g) ?? []).length, 2);
-    assert.doesNotMatch(markdown, /outside secret|brain secret/);
-    assert.equal((markdown.match(/this file could not be read at the collapse/g) ?? []).length, 3);
+    assert.equal((markdown.match(/outside secret/g) ?? []).length, 2);
+    assert.doesNotMatch(markdown, /brain secret/);
+    assert.equal((markdown.match(/this file could not be read at the collapse/g) ?? []).length, 1);
     const files = (await store.read()).files;
     assert.equal(files.find((file) => file.path === join(alias, "inside.md")).stale, undefined);
-    assert.equal(files.find((file) => file.path === join(alias, "outside.md")).stale, true);
-    assert.equal(files.find((file) => file.path === join(alias, "retargeted.md")).stale, true);
+    assert.equal(files.find((file) => file.path === join(alias, "outside.md")).stale, undefined);
+    assert.equal(files.find((file) => file.path === join(alias, "retargeted.md")).stale, undefined);
+    writeFileSync(join(outside, "private.md"), "outside updated\n");
+    const next = await collapse(alias, store);
+    const updated = readFileSync(generationPaths(alias, next.generation).markdown, "utf8");
+    assert.equal((updated.match(/outside updated/g) ?? []).length, 2);
+    assert.doesNotMatch(updated, /outside secret|brain secret/);
+    rmSync(join(outside, "private.md"));
+    const missing = await collapse(alias, store);
+    const afterRemoval = readFileSync(generationPaths(alias, missing.generation).markdown, "utf8");
+    assert.equal((afterRemoval.match(/this file could not be read at the collapse/g) ?? []).length, 3);
+    assert.equal((await store.read()).files.find((file) => file.path === join(alias, "outside.md")).stale, true);
   } finally {
     await store?.close();
     rmSync(alias, { force: true });

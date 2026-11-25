@@ -34,7 +34,7 @@ import {
   type StateBlockInput,
 } from "../domain/state-block.js";
 import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
-import { assertFileScope, lexicalProjectPath, resolveReadReference, type PathScope } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, resolvePinnedFile, resolveReadReference, type PathScope } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
@@ -218,7 +218,8 @@ function staleFileHandles(
   const snapshotMtime = statMtimeSafe(markdownPath);
   const drifted: Array<{ handle: string; why: string; modified: boolean }> = [];
   for (const file of brain.files) {
-    const real = lexicalProjectPathSafe(root, file.path);
+    let real: string | null = null;
+    try { real = resolvePinnedFile(root, file.path); } catch { /* inaccessible pins are stale */ }
     const mtime = real === null ? null : statMtimeSafe(real);
     let handle: string | undefined;
     for (const [path, named] of treeHandles) if (path === file.path) handle = named;
