@@ -6,7 +6,7 @@
  * scoping boundary, not a trust gate (§6.1). The shell cannot be scoped this
  * way; its cwd is the root and the boundary is what the agentic tools enforce.
  */
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -130,6 +130,21 @@ export function resolvePinnedFile(root: string, path: string): string {
   return resolved;
 }
 
+/** Recognize the image families Pi reads. File contents, not extensions, decide. */
+export function isImageFile(path: string): boolean {
+  const fd = openSync(path, "r");
+  try {
+    const bytes = Buffer.alloc(16);
+    const length = readSync(fd, bytes, 0, bytes.length, 0);
+    const head = bytes.subarray(0, length);
+    return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ||
+      (length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) ||
+      (length >= 6 && (head.toString("ascii", 0, 6) === "GIF87a" || head.toString("ascii", 0, 6) === "GIF89a")) ||
+      (length >= 12 && head.toString("ascii", 0, 4) === "RIFF" && head.toString("ascii", 8, 12) === "WEBP") ||
+      (length >= 2 && head.toString("ascii", 0, 2) === "BM");
+  } finally { closeSync(fd); }
+}
+
 /** Verify a pin is readable now; it will be checked again when the head is rebuilt. */
 export function assertPinnableFile(root: string, path: string): void {
   const resolved = resolvePinnedFile(root, path);
@@ -137,6 +152,7 @@ export function assertPinnableFile(root: string, path: string): void {
     if (!statSync(resolved).isFile()) throw new WorkspaceError(`Cannot pin ${path}: it is not a regular file.`);
     // Check readability now as well as again at collapse; the file may change later.
     accessSync(resolved, constants.R_OK);
+    if (isImageFile(resolved)) throw new WorkspaceError(`Cannot pin ${path}: image pins are not supported yet.`);
   } catch (error) {
     if (error instanceof WorkspaceError) throw error;
     throw new WorkspaceError(`Cannot pin ${path}: ${error instanceof Error ? error.message : String(error)}`);

@@ -349,6 +349,7 @@ export async function renderLiveStateBlock(
   const attention = latestToolFailures(visibleMessages, resultHandles);
   const input: StateBlockInput = {
     person: options.session.person,
+    vision: options.session.modelSupportsImages?.(),
     contextWindow: options.session.contextWindow,
     collapseWarningPercent: options.session.collapseWarningPercent,
     lastReportedInput: options.session.lastReportedInput,

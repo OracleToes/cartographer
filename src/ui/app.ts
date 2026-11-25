@@ -632,7 +632,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         // One result is one item: its text parts are one message to the model.
         const texts = content.flatMap((part) => (isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []));
         {
-          const toolText = texts.join("\n");
+          const hasImage = content.some((part) => isRecord(part) && part.type === "image");
+          const toolText = [...texts, ...(hasImage ? ["[image]"] : [])].join("\n");
           // A result names the call it answers, and the call names the tool
           // and what it was pointed at: that is how the sweep, and a pin, know
           // a result is a `read`'s and of what file (§5.5).
@@ -1055,6 +1056,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // live view of it (§5.5).
     const frozen = [...(await frozenItemsOf()).values()].find((item) => item.id === rowId);
     if (frozen !== undefined) {
+      if (frozen.containsImage) { pushStatus("image results cannot be pinned yet"); return; }
       await brain.apply({ kind: "ephemeral.pin", item: { ...frozen, pinned: "user" } }, Date.now());
       pushStatus("pinned an item in the frozen head");
       await refreshSidebar();
@@ -1068,6 +1070,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus("that item is no longer in the live context");
       return;
     }
+    if (live.containsImage) { pushStatus("image results cannot be pinned yet"); return; }
     await brain.apply({ kind: "ephemeral.pin", item: { ...live, pinned: "user" } }, Date.now());
     pushStatus("pinned an item in the live context");
     await refreshSidebar();
@@ -1567,6 +1570,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             if (Array.isArray(message.content)) {
               for (const p of message.content) {
                 if (isRecord(p) && typeof p.text === "string") out += p.text;
+                else if (isRecord(p) && p.type === "image") out += `${out ? "\n" : ""}[image]`;
               }
             } else if (typeof message.content === "string") {
               out = message.content;

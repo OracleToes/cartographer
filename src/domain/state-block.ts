@@ -100,6 +100,8 @@ export interface StateBlockInput {
   sizes: { atlas: number; ledger: number; chat: number; ephemera: number };
   /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
   mode: "edit" | "read only";
+  /** Whether the active model is configured for image input, or unknown if unavailable. */
+  vision?: boolean | undefined;
   /** Scope of read/edit; independent of edit vs read-only. */
   pathScope?: "strict" | "relaxed";
   /** Selected writes observed in memory, reset at collapse or reopening; not an exhaustive history. */
@@ -270,6 +272,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   return [
     STATE_BLOCK_OPEN,
     mode,
+    input.vision === undefined ? "vision: unknown (model unavailable)" : input.vision ? "vision: enabled for this model; use `read` to see images" : "vision: not enabled for this model; image reads cannot be seen",
     input.pathScope === "relaxed" ? "file scope: relaxed (read/edit may access outside the project; create stays inside)" : "file scope: strict (read/edit/create stay inside the project)",
     fullness,
     ...percentageLine,

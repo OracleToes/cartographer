@@ -186,6 +186,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
     activeModel: { ...modelRef },
+    modelSupportsImages: () => options.models.getModel(state.activeModel.provider, state.activeModel.modelId)?.input.includes("image"),
     person: options.person ?? personName(),
     contextWindow,
     collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,

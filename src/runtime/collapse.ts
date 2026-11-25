@@ -33,7 +33,7 @@ import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { assertFileScope, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
+import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -437,7 +437,9 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
   for (const [index, value] of thinking.entries()) parts.push({ key: `t${index}`, value: { kind: "reasoning", text: value } });
 
   if (role === "toolResult") {
-    const result = text.join("\n");
+    const content = entry.model?.[0]?.content;
+    const containsImage = Array.isArray(content) && content.some((part) => part !== null && typeof part === "object" && (part as { type?: unknown }).type === "image");
+    const result = [...text, ...(containsImage ? ["[image]"] : [])].join("\n");
     if (result.trim().length === 0) return parts;
     // A read's result is its own kind, because that is the one a restore has to
     // make true again rather than merely put back (§5.5).
@@ -466,7 +468,7 @@ function readPinnedFile(root: string, path: string, readResult = false): string 
   catch { return undefined; }
   if (real === null) return undefined;
   try {
-    if (!statSync(real).isFile()) return undefined;
+    if (!statSync(real).isFile() || isImageFile(real)) return undefined;
     return readFileSync(real, "utf8");
   } catch {
     return undefined;

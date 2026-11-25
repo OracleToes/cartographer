@@ -131,7 +131,7 @@ async function fetchPropsCapacity(fetchImpl: FetchLike, base: string, modelId: s
  * id. The window is the configured pin when the person set one, else the
  * advertised capacity, else 0 (unknown).
  */
-export function catalogModel(entry: unknown, configured: number | undefined, endpoint: string): Model<"openai-completions"> | undefined {
+export function catalogModel(entry: unknown, configured: number | undefined, endpoint: string, visionModels: readonly string[] = []): Model<"openai-completions"> | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const record = entry as Record<string, unknown>;
   if (typeof record.id !== "string" || record.id.trim() === "") return undefined;
@@ -145,7 +145,7 @@ export function catalogModel(entry: unknown, configured: number | undefined, end
     baseUrl: endpoint,
     contextWindow,
     maxTokens: maxTokensFor(contextWindow),
-    input: ["text"],
+    input: visionModels.includes(record.id) ? ["text", "image"] : ["text"],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: { ...LLAMA_SWAP_COMPAT },
@@ -181,7 +181,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
     // the window is unknown, pi sends this as-is — the sentinel). No
     // artificial cap of Carto's.
     maxTokens: maxTokensFor(baselineWindow),
-    input: ["text" as const],
+    input: config.visionModels?.includes(model.modelId) ? ["text" as const, "image" as const] : ["text" as const],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: { ...LLAMA_SWAP_COMPAT },
@@ -218,7 +218,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
         throw new Error("llama-swap /models did not return a data array");
       }
       const models = data
-        .map((entry) => catalogModel(entry, configured, endpoint))
+        .map((entry) => catalogModel(entry, configured, endpoint, config.visionModels))
         .filter((candidate): candidate is Model<"openai-completions"> => candidate !== undefined);
       // A bare llama-server reports its GGUF filename in /v1/models while
       // answering requests for the configured route name; mirror its advertised
@@ -228,7 +228,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
       if (target === undefined && data.length === 1) {
         const lone = data[0];
         if (typeof lone === "object" && lone !== null && (lone as Record<string, unknown>).owned_by === "llamacpp") {
-          const mirrored = catalogModel({ ...(lone as Record<string, unknown>), id: activeId }, configured, endpoint);
+          const mirrored = catalogModel({ ...(lone as Record<string, unknown>), id: activeId }, configured, endpoint, config.visionModels);
           if (mirrored !== undefined) {
             models.push(mirrored);
             target = mirrored;
@@ -240,7 +240,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
       if (baselineWindow === 0 && (target === undefined || target.contextWindow === 0)) {
         const propsCapacity = await fetchPropsCapacity(fetchImpl, base, activeId, context.signal);
         if (propsCapacity !== undefined) {
-          const entry = catalogModel({ id: activeId, context_length: propsCapacity }, configured, endpoint);
+          const entry = catalogModel({ id: activeId, context_length: propsCapacity }, configured, endpoint, config.visionModels);
           if (entry !== undefined) {
             if (target !== undefined) {
               models[models.indexOf(target)] = entry;

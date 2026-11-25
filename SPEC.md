@@ -465,6 +465,9 @@ dashboard about its Brain and the project, and it reports:
 - **Pinned entries** — every pinned entry, with its author.
 - **Marks** — every entry carrying a mark, with its action and its author (§4.1).
 - **The mode** — `[READ ONLY MODE]` or `[EDIT MODE]` (§6.1).
+- **Vision** — whether image input is enabled for the active model, or unknown
+  when its model is unavailable. This is configuration, not a guarantee that
+  the server/model is actually capable.
 - **Condition-based guidance** — near the relevant facts, suggest inspecting
   drift or unread job output when appropriate. Report Pi's `isError` results
   from the latest completed visible tool round, matching call IDs and naming a
@@ -643,6 +646,28 @@ Atomic here is an intention (§7). Nothing refuses a large change, and nothing
 counts lines. What keeps changes small is the prompt and the agent's willingness
 to stop. That is deliberate: a mechanism that refused large changes would be the
 prompt not being trusted (§1).
+
+### Image reads
+
+Pi's `read` accepts image files by path or tree handle, using the same scope and
+`.brain` wall as text reads. Image input is enabled per llama-swap model by
+listing its exact model ID (not `llama-swap/` prefix) in `visionModels` in
+`~/.carto/config.json`, for example `"visionModels": ["my-vision-model"]`.
+Models not listed are treated as text-only; this is not proof they lack vision.
+The person is responsible for selecting a vision-capable model and configuring
+its server correctly. Model switches, catalog refreshes, and restarts preserve
+this mapping. The state block reports the current model's enabled/disabled
+status. A text-only model gets a clear error rather than a fake image reading.
+
+Pi handles PNG, JPEG, GIF and WebP up to its default dimension and encoded-byte
+limits; no image processor is configured, so images above those limits are
+refused rather than resized. An image consumes model-dependent context and the
+reported estimate is approximate. Image results live in Pi's current context;
+the Context and transcript views label them without rendering their bytes.
+The sweep archives the original image result and its paired call, subject to
+normal archive grace. Image files and image results cannot be pinned into the
+text-only frozen head. If an existing pinned text file becomes an image, it is
+not decoded as text into a future head.
 
 ### Wiping a project session
 

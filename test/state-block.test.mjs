@@ -77,6 +77,12 @@ test("the block carries the confirmed contents and the delimiters", () => {
   assert.match(renderStateBlock(input({ mode: "read only" })), /^<carto-state>\n\[READ ONLY MODE\]\n/);
 });
 
+test("the state block reports enabled, disabled, and unknown model vision", () => {
+  assert.match(renderStateBlock(input({ vision: true })), /vision: enabled for this model; use `read` to see images/);
+  assert.match(renderStateBlock(input({ vision: false })), /vision: not enabled for this model/);
+  assert.match(renderStateBlock(input()), /vision: unknown \(model unavailable\)/);
+});
+
 test("live items in the state block contain only their handles and types", () => {
   const working = [
     { handle: "X15", kind: "plainText", text: "a private preview" },

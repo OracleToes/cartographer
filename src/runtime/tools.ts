@@ -43,6 +43,8 @@ export interface ToolSession {
    * launched Carto. Every string a tool shows the agent names this person.
    */
   person: string;
+  /** Active Pi model image-input capability, looked up at use time. */
+  modelSupportsImages?: () => boolean | undefined;
   /** Pending Brain writes since the last rebuild; ephemeral, cleared at collapse. */
   pending: PendingWrite[];
   /** Where the state block renders the tree. */
@@ -238,7 +240,15 @@ function scopedRead(root: string, session: ToolSession): ToolRegistration {
     description: `${base.description ?? ""} Name the file by its tree handle or a path; strict scope stays in the project, relaxed scope permits outside paths. Use \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
       const path = fileToolPath(pathOf(args), session);
-      return base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
+      const result = await base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
+      if (result.output?.some((part) => part.type === "image")) {
+        const ref = (await api.agent(context)).model;
+        const model = ref === undefined ? undefined : api.models.getModel(ref.provider, ref.modelId);
+        if (model?.input.includes("image") !== true) {
+          return errorOutput("This is an image, but vision is not enabled for the current model. Configure a vision-capable model before reading it.");
+        }
+      }
+      return result;
     },
   });
 }
@@ -417,7 +427,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin or unpin a file or an ephemeral item by its handle (at least 1 character). Use F for files, X for working, U for messages, and R or S for results. Pinned files and read results are re-read at collapse; other pinned items retain their text. Only ${them} can remove a pin ${them} placed.`,
+        `Pin or unpin a file or an ephemeral item by its handle (at least 1 character). Use F for files, X for working, U for messages, and R or S for results. Image files and image results cannot be pinned yet. Pinned files and read results are re-read at collapse; other pinned items retain their text. Only ${them} can remove a pin ${them} placed.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -448,6 +458,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           // path; collapse must reread the file, not a transient F number.
           const path = item.kind === "readResult" ? item.entity?.path : undefined;
           const resolved = path === undefined ? undefined : treePathOf(root, current, session, normalizeHandle(path)) ?? path;
+          if (item.containsImage) throw new Error(`${named} contains an image; image results cannot be pinned yet.`);
           const pinned: PinnedEphemeral = { ...item, pinned: "agent", ...(item.entity === undefined ? {} : { entity: { ...item.entity, ...(resolved === undefined ? {} : { path: resolved }) } }) };
           await brain.apply({ kind: "ephemeral.pin", item: pinned }, api.now());
           return textOutput(`${named} is pinned; it will be carried into the next context.`);

@@ -39,6 +39,7 @@ function usage(): string {
     "  --user <name>               What the agent calls you. Default: the account that launched",
     "                              Carto (config: \"userName\").",
     "  config: treePageSize         Tree entries per state-block page (1–2000; default 100).",
+    "  config: visionModels         Array of exact llama-swap model IDs that support images.",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
     "  --headless                  Run the line driver instead of the workspace.",
     "  -h, --help                  Show this help.",

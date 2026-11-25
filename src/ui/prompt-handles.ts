@@ -84,7 +84,9 @@ export function promptItemsOf(entries: readonly PromptContextEntry[], generation
       const call = callId === undefined ? undefined : calls.get(callId);
       const text = Array.isArray(message.content) ? message.content.flatMap((part: unknown) => object(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : typeof message.content === "string" ? message.content : "";
       const entity = callId === undefined ? undefined : { callId, tool: call?.name, path: call?.path };
-      items.push({ kind: "result", key: String(id), tool: call?.name, item: make("r", call?.name === "read" ? "readResult" : "toolResult", text, entity) });
+      const containsImage = Array.isArray(message.content) && message.content.some((part: unknown) => object(part) && part.type === "image");
+      const item = make("r", call?.name === "read" ? "readResult" : "toolResult", containsImage ? [text, "[image]"].filter(Boolean).join("\n") : text, entity);
+      items.push({ kind: "result", key: String(id), tool: call?.name, item: containsImage ? { ...item, containsImage: true } : item });
     }
   }
   return items;

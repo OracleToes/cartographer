@@ -85,6 +85,32 @@ test("the tree page size is validated and survives config loading and model chan
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+test("vision model IDs are validated, preserved, and applied on every catalog path", async () => {
+  const home = tempDir();
+  try {
+    const config = { version: 1, model: "llama-swap/vision/model", llamaSwapEndpoint: "http://localhost:8888/v1", visionModels: ["vision/model"] };
+    for (const visionModels of [null, "vision/model", [""], [" padded "], [2]]) {
+      assert.throws(() => parseConfig({ ...config, visionModels }), /visionModels must be/);
+    }
+    await saveGlobalConfig(config, home);
+    assert.deepEqual((await loadGlobalConfig({ home, modelOverride: "llama-swap/text" })).config.visionModels, ["vision/model"]);
+    await updateConfigModel("llama-swap/text", home);
+    assert.deepEqual(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).visionModels, ["vision/model"]);
+    const models = configuredModels(config, { provider: "llama-swap", modelId: "vision/model" }, {
+      fetchImpl: fakeFetch({ data: [{ id: "vision/model", context_length: 4096 }, { id: "text", context_length: 4096 }] }),
+    });
+    assert.deepEqual(models.getModel("llama-swap", "vision/model").input, ["text", "image"]);
+    await models.refresh({ providers: ["llama-swap"] });
+    assert.deepEqual(models.getModel("llama-swap", "vision/model").input, ["text", "image"]);
+    assert.deepEqual(models.getModel("llama-swap", "text").input, ["text"]);
+    const noCapacity = configuredModels(config, { provider: "llama-swap", modelId: "vision/model" }, {
+      fetchImpl: async (url) => ({ ok: true, json: async () => url.includes("/props?") ? { n_ctx: 4096 } : { data: [{ id: "vision/model" }] } }),
+    });
+    await noCapacity.refresh({ providers: ["llama-swap"] });
+    assert.deepEqual(noCapacity.getModel("llama-swap", "vision/model").input, ["text", "image"]);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 test("a missing config without --model fails with the one-liner that creates it", async () => {
   const home = tempDir();
   try {

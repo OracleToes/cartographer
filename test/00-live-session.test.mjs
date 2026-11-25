@@ -18,6 +18,8 @@ import {
   applyOmitNow,
   applyRecordActionNow,
   closeLiveSession,
+  collapseLiveSession,
+  switchSessionModel,
   interruptRun,
   openLiveSession,
   restoreEphemeral,
@@ -28,7 +30,7 @@ import {
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
+import { ephemeralItemId, generationPaths, pinnedFileTexts, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
@@ -181,6 +183,121 @@ test("committed tool errors remain visible with the real result handle until a l
     assert.doesNotMatch(blockOf(captured[3]).content, /Last completed tool round/);
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("vision reads survive the request and archive, while image pins are refused and switching updates vision", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aN8AAAAASUVORK5CYII=", "base64");
+  writeFileSync(join(root, "pixel.dat"), png);
+  const faux = fauxProvider({ provider: "faux-vision", models: [
+    { id: "vision", contextWindow: 100_000, input: ["text", "image"] },
+    { id: "text", contextWindow: 100_000, input: ["text"] },
+  ] });
+  const models = createModels(); models.setProvider(faux.provider);
+  const captured = [];
+  const factory = (build) => (context) => { captured.push(structuredClone(context.messages)); return build(context); };
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "pixel.dat" }, { id: "image-read" })], { stopReason: "toolUse" })),
+    factory((ctx) => {
+      const tree = blockOf(ctx.messages).content;
+      const file = tree.split("\n").find((line) => line.includes("pixel.dat"));
+      const handle = file?.match(/\bF\d+\b/)?.[0];
+      assert.ok(handle);
+      return fauxAssistantMessage([
+        fauxToolCall("pin", { action: "pin", handle: "R1" }, { id: "pin-image-result" }),
+        fauxToolCall("pin", { action: "pin", handle }, { id: "pin-image-file" }),
+      ], { stopReason: "toolUse" });
+    }),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "vision-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const options = { root, brain, models, model: { provider: "faux-vision", modelId: "vision" }, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  try {
+    assert.equal((await (await submitInput(session, "inspect pixel")).wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.match(blockOf(captured[0]).content, /vision: enabled/);
+    const image = captured[1].find((m) => m.role === "toolResult" && m.toolCallId === "image-read");
+    assert.equal(image.content[0].type, "image");
+    assert.equal(image.content[0].data, png.toString("base64"));
+    assert.match(flatten(captured[2]), /image results cannot be pinned yet/);
+    assert.match(flatten(captured[2]), /image pins are not supported yet/);
+    assert.equal((await brain.read()).files.length, 0);
+    assert.equal((await brain.read()).ephemera.length, 0);
+    const outcome = await collapseLiveSession(session, options, "verify image archive");
+    session = outcome.session;
+    const archived = (await brain.readArchive()).items.find((item) => item.ephemeral?.model?.some((message) => message.role === "toolResult" && message.content.some((part) => part.type === "image")));
+    assert.ok(archived);
+    assert.match(archived.ephemeral.text, /\[image\]/);
+    assert.equal(archived.ephemeral.model[1].content.find((part) => part.type === "image").data, png.toString("base64"));
+    assert.equal(await restoreEphemeral(session, archived), true);
+    assert.ok((await sessionTranscript(session)).some((entry) => entry.model?.[0]?.content?.some?.((part) => part.type === "image")));
+    await switchSessionModel(session, models, { provider: "faux-vision", modelId: "text" });
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "pixel.dat" }, { id: "text-image-read" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "text-sleep" })], { stopReason: "toolUse" })),
+    ]);
+    assert.equal((await (await submitInput(session, "try without vision")).wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.match(blockOf(captured[3]).content, /vision: not enabled/);
+    const denied = captured[4].find((m) => m.role === "toolResult" && m.toolCallId === "text-image-read");
+    assert.equal(denied.isError, true);
+    assert.match(JSON.stringify(denied.content), /vision is not enabled/);
+  } finally { await closeLiveSession(session); await cleanup(); }
+});
+
+test("image file pins are refused by content, including symlinks, and old text pins never decode image bytes", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const outside = mkdtempSync(join(tmpdir(), "carto-image-outside-"));
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aN8AAAAASUVORK5CYII=", "base64");
+  const { assertPinnableFile } = await import("../dist/runtime/workspace.js");
+  try {
+    const file = join(root, "file.txt");
+    writeFileSync(file, "ordinary text");
+    assert.doesNotThrow(() => assertPinnableFile(root, file));
+    await brain.apply({ kind: "file.pin", path: file, pinned: "user" }, Date.now());
+    writeFileSync(file, png);
+    assert.throws(() => assertPinnableFile(root, file), /image pins are not supported/);
+    assert.equal(pinnedFileTexts(root, await brain.read()).get(file), undefined);
+    writeFileSync(join(outside, "picture"), png);
+    symlinkSync(join(outside, "picture"), join(root, "external"));
+    assert.throws(() => assertPinnableFile(root, join(root, "external")), /image pins are not supported/);
+  } finally { rmSync(outside, { recursive: true, force: true }); await cleanup(); }
+});
+
+test("llama-swap wire payload carries read images as data URLs", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aN8AAAAASUVORK5CYII=", "base64");
+  writeFileSync(join(root, "pixel.png"), png);
+  const requests = [];
+  const server = createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/chat/completions") { res.writeHead(404); res.end(); return; }
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      requests.push(JSON.parse(raw));
+      const name = requests.length === 1 ? "read" : "sleep";
+      const args = name === "read" ? '{"path":"pixel.png"}' : '{}';
+      const delta = { role: "assistant", tool_calls: [{ index: 0, id: `call-${name}`, type: "function", function: { name, arguments: args } }] };
+      const frame = (value) => `data: ${JSON.stringify({ choices: [{ index: 0, delta: value, finish_reason: value === delta ? null : "tool_calls" }] })}\n\n`;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`${frame(delta)}${frame({})}data: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+  const ref = { provider: "llama-swap", modelId: "vision" };
+  const models = configuredModels({ version: 1, model: "llama-swap/vision", llamaSwapEndpoint: endpoint, contextWindow: 100_000, visionModels: ["vision"] }, ref);
+  let session;
+  try {
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    assert.equal((await (await submitInput(session, "read the image")).wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(requests.length, 2);
+    const parts = requests[1].messages.flatMap((message) => Array.isArray(message.content) ? message.content : []);
+    assert.ok(parts.some((part) => part.type === "image_url" && part.image_url.url === `data:image/png;base64,${png.toString("base64")}`));
+    assert.ok(requests[1].messages.some((message) => typeof message.content === "string" && message.content.includes("vision: enabled")));
+  } finally {
+    if (session) await closeLiveSession(session);
+    await new Promise((resolve) => server.close(resolve));
     await cleanup();
   }
 });

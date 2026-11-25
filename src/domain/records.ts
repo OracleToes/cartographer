@@ -139,6 +139,8 @@ export interface PinnedEphemeral {
    * again (§5.5).
    */
   entity?: { callId: string; tool?: string | undefined; path?: string | undefined } | undefined;
+  /** Live result contains image data; text-only pins cannot carry it. */
+  containsImage?: boolean;
   createdAt: number;
   /** Who keeps this item here. Only the person can unpin a pin they placed. */
   pinned: Author;

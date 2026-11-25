@@ -28,6 +28,8 @@ export interface GlobalConfig {
   contextWindow?: number;
   /** Context fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the state block. Unset: 75. */
   collapseWarningPercent?: number;
+  /** Exact llama-swap model IDs explicitly configured for image input. */
+  visionModels?: string[];
   /** Maximum scanned tree entries shown per state-block page (default 100). */
   treePageSize?: number;
   /**
@@ -128,6 +130,10 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
   const collapseWarningPercent = parseCollapseWarningPercent(record.collapseWarningPercent, where);
   const userName = parseUserName(record.userName, where);
   const treePageSize = parseTreePageSize(record.treePageSize, where);
+  const visionModels = record.visionModels;
+  if (visionModels !== undefined && (!Array.isArray(visionModels) || visionModels.some((id) => typeof id !== "string" || id.trim() === "" || id !== id.trim()))) {
+    throw new ConfigError(`${where}: visionModels must be an array of exact, non-empty llama-swap model IDs.`);
+  }
   return {
     version: 1,
     model: record.model,
@@ -136,6 +142,7 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
     ...(collapseWarningPercent === undefined ? {} : { collapseWarningPercent }),
     ...(userName === undefined ? {} : { userName }),
     ...(treePageSize === undefined ? {} : { treePageSize }),
+    ...(visionModels === undefined ? {} : { visionModels: visionModels as string[] }),
   };
 }
 
@@ -230,6 +237,7 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
   if (effectiveWindow !== undefined) merged.contextWindow = effectiveWindow;
   if (effectiveCollapseWarning !== undefined) merged.collapseWarningPercent = effectiveCollapseWarning;
   if (config.treePageSize !== undefined) merged.treePageSize = config.treePageSize;
+  if (config.visionModels !== undefined) merged.visionModels = config.visionModels;
   const effectiveName = userName ?? config.userName;
   if (effectiveName !== undefined) merged.userName = effectiveName;
   return { config: merged, path, created: false };
