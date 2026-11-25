@@ -8,6 +8,7 @@
  * scripts, side-by-side installs); nothing else is configurable globally.
  */
 import { mkdirSync } from "node:fs";
+import { lstat, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -28,4 +29,22 @@ export function cartoHome(environment: NodeJS.ProcessEnv = process.env): string 
 
 export function cartoConfigPath(home: string = cartoHome()): string {
   return join(home, "config.json");
+}
+
+/** Private host return value: the CLI wipes only after all session stores close. */
+export const WIPE_REQUESTED = 42;
+
+/** Remove this project's storage, never the project or a symlink target. */
+export async function wipeProjectBrain(root: string): Promise<void> {
+  const path = resolve(root, ".brain");
+  let stat;
+  try { stat = await lstat(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`Cannot wipe ${path}: .brain must be a real directory, not a symlink or file.`);
+  }
+  await rm(path, { recursive: true, force: false });
 }

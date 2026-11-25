@@ -36,6 +36,7 @@ import {
   closeLiveSession,
   collapseLiveSession,
   openLiveSession,
+  interruptRun,
   setProjectModes,
   resumeSession,
   submitInput,
@@ -45,6 +46,7 @@ import {
   type LiveSession,
   type LiveSessionOptions,
 } from "./live-session.js";
+import { WIPE_REQUESTED } from "./paths.js";
 import type { ModelRef } from "./config.js";
 import { formatModelRef, indexModels, resolveIndexedModel } from "./model-catalog.js";
 import { createJobTable, formatExit, stopAllJobs, summarizeJobs } from "./jobs.js";
@@ -74,6 +76,7 @@ const HELP = [
   "  /collapse  collapse the context now — the Brain rebuilds it",
   "  /pause     hold the run where it is (/pause off lets it go on)",
   "  /mode      show modes; /mode edit, read-only, strict or relaxed changes them",
+  "  /wipe      permanently delete this project’s .brain after confirmation, then exit",
   "  /help      see this",
   "  /quit      end the session",
 ].join("\n");
@@ -196,6 +199,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   // to type. Piped use stays non-terminal.
   const rl = createInterface({ input: options.input, terminal: inputIsTTY });
   let linesSeen = 0;
+  let wipeArmed = false;
+  let wipeRequested = false;
+  let closing = false;
 
   // Everything that touches the session runs one at a time: a line, and the
   // collapse a run ended in. A line that arrives during a collapse waits in the
@@ -216,6 +222,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const settle = async (): Promise<void> => {
     for (;;) {
       await waitForRunEnd(session);
+      if (closing) break;
       // Silence is a real answer: an agent with nothing to say ends its turn
       // without a chat call, and that needs no remark from the driver.
       await printVisibleChat();
@@ -252,7 +259,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     if (next === undefined) return;
     watch = next;
     next.start(async (call) => {
-      if (call.kind !== "value" || call.value.run !== undefined) return;
+      if (closing || call.kind !== "value" || call.value.run !== undefined) return;
       // Only an idle moment: a line in progress settles its own runs.
       void exclusive(async () => {
         if (mine === session) await settle();
@@ -266,6 +273,17 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       linesSeen += 1;
       const line = raw.trim();
       if (line === "") continue;
+      if (line === "/wipe") {
+        wipeArmed = true;
+        writeLine(output, `Wipe ${options.root}/.brain? This permanently deletes the Brain, archive, history and project settings; project files and global config remain. Close other Carto instances for this project first. Type /wipe confirm to delete and exit; any other line cancels.`);
+        continue;
+      }
+      if (line === "/wipe confirm") {
+        if (!wipeArmed) { writeLine(error, "(run /wipe first; confirmation was not armed)"); continue; }
+        wipeRequested = true;
+        break;
+      }
+      if (wipeArmed) { wipeArmed = false; writeLine(output, "(wipe cancelled)"); }
       if (line === "/quit" || line === "/exit") break;
       if (line === "/help") {
         writeLine(output, HELP);
@@ -409,13 +427,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       });
     }
   } finally {
-    await queue;
+    closing = true;
     await watch?.stop().catch(() => undefined);
-    await stopAllJobs(jobs).catch(() => undefined);
-    await closeLiveSession(session);
+    if (wipeRequested) await interruptRun(session);
+    await queue;
+    await stopAllJobs(jobs);
+    await closeLiveSession(session, wipeRequested);
   }
   if (linesSeen === 0 && !inputIsTTY) {
     writeLine(error, "(nothing arrived on stdin and there was no terminal to type into. Pipe the person's messages in, or run carto in a terminal.)");
   }
-  return 0;
+  return wipeRequested ? WIPE_REQUESTED : 0;
 }

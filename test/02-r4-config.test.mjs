@@ -7,7 +7,7 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -21,6 +21,7 @@ import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig, updateConfigModel } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
+import { wipeProjectBrain } from "../dist/runtime/paths.js";
 import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
 
@@ -590,6 +591,46 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       rmSync(home, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("wipe requires confirmation, closes storage, removes all project state, and leaves files and global config", async () => {
+    const home = tempDir(), root = projectRoot();
+    const brainDir = join(root, ".brain");
+    mkdirSync(brainDir);
+    writeFileSync(join(root, "src", "keep"), "project file");
+    writeFileSync(join(brainDir, "settings.json"), JSON.stringify({ version: 1, readOnly: true, pathScope: "relaxed" }));
+    const brain = await openBrain(join(brainDir, "brain.sqlite"));
+    await brain.apply({ kind: "chat.record", record: { id: "old-chat", author: "user", text: "old session", createdAt: 1, updatedAt: 1 } }, 1);
+    await brain.archiveEphemeral({ id: "old-archive", layer: "ephemeral", ephemeral: { kind: "plainText", text: "old archive" } }, "gen-old", 1);
+    await brain.close();
+    const args = ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--root", root, "--headless"];
+    try {
+      const cancelled = await runCli(args, { home, input: "/wipe confirm\n/wipe\n/help\n/wipe confirm\n/quit\n" });
+      assert.match(cancelled, /wipe cancelled/);
+      assert.ok(existsSync(join(brainDir, "brain.sqlite")));
+      assert.ok(existsSync(join(brainDir, "settings.json")));
+      const done = await runCli(args, { home, input: "/wipe\n/wipe confirm\n" });
+      assert.match(done, /wiped .*\.brain/);
+      assert.equal(existsSync(brainDir), false);
+      assert.equal(readFileSync(join(root, "src", "keep"), "utf8"), "project file");
+      assert.ok(existsSync(join(home, "config.json")));
+      mkdirSync(brainDir);
+      const fresh = await openBrain(join(brainDir, "brain.sqlite"));
+      try {
+        assert.equal((await fresh.read()).chat.length, 0);
+        assert.equal((await fresh.readArchive()).items.length, 0);
+      } finally { await fresh.close(); }
+    } finally { rmSync(home, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("wipe refuses a symlinked .brain without touching its target", async () => {
+    const root = tempDir(), elsewhere = tempDir();
+    try {
+      writeFileSync(join(elsewhere, "keep"), "safe");
+      symlinkSync(elsewhere, join(root, ".brain"));
+      await assert.rejects(wipeProjectBrain(root), /real directory/);
+      assert.equal(readFileSync(join(elsewhere, "keep"), "utf8"), "safe");
+    } finally { rmSync(root, { recursive: true, force: true }); rmSync(elsewhere, { recursive: true, force: true }); }
   });
 
   test("an unsupported provider fails plainly, before any request is made", async () => {

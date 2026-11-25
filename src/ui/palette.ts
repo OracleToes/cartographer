@@ -141,3 +141,42 @@ export class Palette implements Component, Focusable {
     return lines;
   }
 }
+
+
+/** A destructive action requires an explicit typed word, not a selected default. */
+export class WipeConfirmation implements Component, Focusable {
+  focused = false;
+  onClose?: () => void;
+  onConfirm?: () => void;
+  private readonly input = new Input({ prompt: "> ", placeholder: "type WIPE to confirm" });
+  private invalid = false;
+
+  constructor(private readonly project: string) {
+    this.input.onEscape = () => this.onClose?.();
+    this.input.onSubmit = (value) => {
+      if (value === "WIPE") this.onConfirm?.();
+      else this.invalid = true;
+    };
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "ctrl+c")) { this.onClose?.(); return; }
+    this.input.focused = this.focused;
+    this.input.handleInput(data);
+  }
+  invalidate(): void { this.input.invalidate(); }
+  render(width: number): string[] {
+    this.input.focused = this.focused;
+    const paint = (line: string) => tokens.panel(padLine(`  ${line}`, width));
+    return [
+      paint(tokens.danger("Permanently wipe this project's Carto session?")),
+      paint(`Project: ${this.project}`),
+      paint("Deletes all .brain data: Brain, archive, history and project settings."),
+      paint("Project files and global config stay. Carto exits after wiping."),
+      paint("Close other Carto instances for this project first."),
+      paint("Cannot be undone. Type WIPE and press enter; esc cancels."),
+      paint(this.input.render(Math.max(1, width - 4)).join("")),
+      ...(this.invalid ? [paint(tokens.danger("Type WIPE exactly, or press esc to cancel."))] : []),
+    ];
+  }
+}

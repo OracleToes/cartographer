@@ -775,9 +775,10 @@ export async function sessionTranscript(session: LiveSession) {
   });
 }
 
-export async function closeLiveSession(session: LiveSession): Promise<void> {
+export async function closeLiveSession(session: LiveSession, requireCleanClose = false): Promise<void> {
   await session.harness.close(BACKGROUND_CONTEXT);
-  await session.database.close().catch(() => undefined);
+  if (requireCleanClose) await session.database.close();
+  else await session.database.close().catch(() => undefined);
 }
 
 export interface CollapseOutcome {

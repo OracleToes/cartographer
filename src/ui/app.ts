@@ -25,6 +25,7 @@ import { personChatBindings, userText } from "../domain/chat-identity.js";
  */
 import { readFile } from "node:fs/promises";
 import { snapshotPaths } from "../runtime/projection-files.js";
+import { WIPE_REQUESTED } from "../runtime/paths.js";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { basename, relative, resolve } from "node:path";
@@ -90,7 +91,7 @@ import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { ModelPicker } from "./model-picker.js";
-import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
+import { Palette, WipeConfirmation, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
 import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, isCard, orderTranscript, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
@@ -1470,9 +1471,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.stop();
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
-    await stopAllJobs(jobs).catch(() => undefined);
-    await closeLiveSession(state.session);
-    resolveRun?.(code);
+    try {
+      if (code === WIPE_REQUESTED) {
+        // A queued admission/collapse must finish before closing its session.
+        await admission;
+        await interruptRun(state.session);
+      }
+      await stopAllJobs(jobs);
+      await closeLiveSession(state.session, code === WIPE_REQUESTED);
+      resolveRun?.(code);
+    } catch (error) {
+      process.stderr.write(`Carto could not close cleanly; no wipe was attempted: ${errorText(error)}\n`);
+      resolveRun?.(1);
+    }
   };
 
   /**
@@ -2188,6 +2199,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    if (message === "/wipe") {
+      showWipeConfirmation();
+      return;
+    }
     if (message === "/resume") {
       void runResume();
       return;
@@ -2336,6 +2351,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // No key of its own: ^c twice is how a person leaves, and a separate
       // binding that also quit would be a second way to lose a run by accident.
       run: () => void shutdown(0),
+      available: () => true,
+    },
+    {
+      id: "wipe",
+      group: "the workspace",
+      label: "wipe project session and quit",
+      hint: "permanently delete .brain; confirmation required",
+      run: () => showWipeConfirmation(),
       available: () => true,
     },
     stopCommand(() => {
@@ -2852,6 +2875,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { group: "type it", key: "/help", label: "the command list in the transcript" },
     { group: "type it", key: "/model", label: "pick or switch the model (/model <name>)" },
     { group: "type it", key: "/resume", label: "start or resume the agent with a fresh state block" },
+    { group: "type it", key: "/wipe", label: "confirm permanent deletion of this project's Carto state" },
     { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 
@@ -2921,6 +2945,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     palette.onClose = closeOverlay;
     state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
+    tui.requestRender();
+  };
+
+  const showWipeConfirmation = () => {
+    if (state.overlayOpen || shutdownRequested) return;
+    state.overlayOpen = true;
+    const dialog = new WipeConfirmation(options.root);
+    dialog.onClose = closeOverlay;
+    dialog.onConfirm = () => { closeOverlay(); void shutdown(WIPE_REQUESTED); };
+    state.overlayHandle = tui.showOverlay(dialog, { width: 78, anchor: "center" });
+    tui.setFocus(dialog);
     tui.requestRender();
   };
 

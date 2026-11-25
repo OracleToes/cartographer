@@ -9,7 +9,7 @@
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
-import { brainDatabasePath, resolveProjectRoot } from "./runtime/paths.js";
+import { brainDatabasePath, resolveProjectRoot, wipeProjectBrain, WIPE_REQUESTED } from "./runtime/paths.js";
 import { ConfigError, loadGlobalConfig, parseModelRef, updateConfigModel, type ModelRef } from "./runtime/config.js";
 import { personName } from "./domain/person.js";
 import { COLLAPSE_WARNING_PERCENT } from "./domain/state-block.js";
@@ -56,6 +56,7 @@ function usage(): string {
     "",
     "Line driver commands:",
     "  /collapse   collapse the context now — the Brain rebuilds it",
+    "  /wipe       confirm permanent deletion of this project's Carto data, then exit",
     "  /help       the commands · /quit  end the session",
     "",
     STATUS,
@@ -162,7 +163,13 @@ try {
         ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
       });
   await brain.close();
-  process.exitCode = code;
+  if (code === WIPE_REQUESTED) {
+    await wipeProjectBrain(root);
+    process.stdout.write(`carto: wiped ${root}/.brain. Project files and global config were not changed. Start Carto again for a fresh session.\n`);
+    process.exitCode = 0;
+  } else {
+    process.exitCode = code;
+  }
 } catch (error) {
   if (error instanceof ConfigError) {
     process.stderr.write(`carto: ${error.message}\n`);

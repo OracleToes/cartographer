@@ -2287,6 +2287,26 @@ test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList
   assert.deepEqual(ran, ["b", "a"]);
 });
 
+test("wipe confirmation requires WIPE and can be cancelled", async () => {
+  const { WipeConfirmation } = await import("../dist/ui/palette.js");
+  const dialog = new WipeConfirmation("/my/project");
+  let confirmed = 0, closed = 0;
+  dialog.onConfirm = () => { confirmed += 1; };
+  dialog.onClose = () => { closed += 1; };
+  dialog.focused = true;
+  const lines = dialog.render(78);
+  assert.ok(lines.every((line) => visibleWidth(line) === 78));
+  assert.match(plain(lines.join("\n")), /Brain, archive, history and project settings/);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 0);
+  assert.match(plain(dialog.render(78).join("\n")), /Type WIPE exactly/);
+  for (const ch of "WIPE") dialog.handleInput(ch);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 1);
+  dialog.handleInput("\x1b");
+  assert.equal(closed, 1);
+});
+
 test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", async () => {
   const transcript = new TranscriptView();
   const entries = [

@@ -632,6 +632,21 @@ counts lines. What keeps changes small is the prompt and the agent's willingness
 to stop. That is deliberate: a mechanism that refused large changes would be the
 prompt not being trusted (§1).
 
+### Wiping a project session
+
+The person may permanently wipe all Carto state for this project using the
+workspace palette or `/wipe`, or `/wipe` in headless mode. The workspace asks
+them to type `WIPE`; headless asks for `/wipe confirm` as the next nonempty
+line. Cancelling or an unarmed confirmation does nothing. The warning names
+`.brain`, the scope of deletion, and asks the person to close any other Carto
+instances on the same project first. The live run, jobs, generation store and
+Brain are closed before the host removes the project's entire `.brain` directory,
+including the Brain, archive, all generations and project settings. Carto exits
+afterward; reopening starts fresh with default project modes. Project files and
+global configuration outside `.brain` are not touched. A symlink or non-directory
+`.brain` is refused, and failures are reported rather than reported as success.
+Deletion is not a guarantee of secure erasure from backups or storage media.
+
 ### 6.1 Read only mode and edit mode
 
 Carto is always in one of two modes. A toggle in the workspace switches between
