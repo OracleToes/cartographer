@@ -6,19 +6,19 @@
  * links to — a map of what the agent understands, not a listing. The agent
  * moves the anchor and the depth; the anchor stays inside the project.
  *
- * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` and
+ * Sizes aggregate the scanned subtree (lstat, symlinks are leaves). `.brain` and
  * `.git` are never shown: they are skipped everywhere they would appear, and
  * they may not be an anchor — the agent does not see the Brain or repository
  * internals (§2.3, §7). Gitignored paths are skipped the same way (the
  * project's own `.gitignore` chain — root file, `.git/info/exclude`, nested
  * files below the anchor): no line, no bytes in any aggregate, and ignored
- * directories are pruned, not merely hidden. Rendering is display-bounded by
- * depth; aggregation is not.
+ * directories are pruned, not merely hidden. Depth and an entry budget bound
+ * the walk; incomplete aggregates and omitted listings are marked explicitly.
  *
  * The `tree` tool sets anchor and depth in session state for the state block;
  * the state block renders the tree at the tail of every request.
  */
-import { lstatSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, opendirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { handleOf } from "../domain/handles.js";
@@ -31,8 +31,12 @@ export interface TreeEntry {
   /** Absolute path of this entry. */
   path: string;
   directory: boolean;
-  /** Files: their own size. Directories: the aggregated size of the whole subtree. */
+  /** Files: their own size. Directories: bytes found within the scan bounds. */
   size: number;
+  /** Some subtree bytes may not have been counted. */
+  incomplete?: boolean;
+  /** This directory listing was cut short or could not be read. */
+  listingIncomplete?: boolean;
   children?: TreeEntry[];
 }
 
@@ -60,44 +64,57 @@ export function containedAnchor(root: string, anchor: string): string {
 const entryOrder = (a: TreeEntry, b: TreeEntry): number =>
   Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name, "en", { sensitivity: "base" });
 
-function scan(absolute: string, name: string, chain: IgnoreChain): TreeEntry {
+/** Every encountered directory entry counts, including ignored entries. */
+export const TREE_ENTRY_BUDGET = 2000;
+export const TREE_MAX_DEPTH = 64;
+const TREE_CACHE_MS = 1000;
+const cache = new Map<string, { at: number; entry: TreeEntry }>();
+
+function scan(absolute: string, name: string, chain: IgnoreChain, levels: number, budget: { left: number }): TreeEntry {
   const stat = lstatSync(absolute);
-  if (!stat.isDirectory()) {
-    return { name, path: absolute, directory: false, size: stat.size };
-  }
-  let children: TreeEntry[] = [];
+  if (!stat.isDirectory()) return { name, path: absolute, directory: false, size: stat.size };
+  // Do not read a directory beyond the displayed depth, even to check if empty.
+  if (levels === 0) return { name, path: absolute, directory: true, size: 0, incomplete: true };
+  const children: TreeEntry[] = [];
   let total = 0;
+  let incomplete = false;
+  let listingIncomplete = false;
   try {
-    const entries = readdirSync(absolute, { withFileTypes: true });
-    // A `.gitignore` inside this directory governs its contents (git
-    // semantics); it was already listed, so no extra syscall is made.
-    const childChain = deeperIgnoreChain(chain, absolute, entries.map((entry) => entry.name));
-    for (const child of entries) {
-      // The agent does not see the Brain or git repository internals:
-      // skip them wholesale — no line, and no bytes in any aggregate.
-      if (child.name === ".brain" || child.name === ".git") continue;
-      const childPath = `${absolute}${sep}${child.name}`;
-      // Gitignored paths contribute nothing — not a line, not a byte — and
-      // ignored directories are pruned here, so their subtrees are never
-      // walked. Symlinks are leaves (lstat verdict, like the scan itself).
-      if (isIgnored(childChain, childPath, child.name, child.isDirectory())) continue;
-      try {
-        const scanned = scan(childPath, child.name, childChain);
-        children.push(scanned);
-        total += scanned.size;
-      } catch {
-        // An unreadable entry contributes nothing rather than failing the map.
+    // Loading the ignore file directly is necessary even if the entry budget
+    // stops before the directory iterator reaches its name.
+    const childChain = deeperIgnoreChain(chain, absolute);
+    const dir = opendirSync(absolute);
+    try {
+      while (true) {
+        // One extra read detects truncation without processing another entry.
+        const child = dir.readSync();
+        if (child === null) break;
+        if (budget.left === 0) { listingIncomplete = incomplete = true; break; }
+        budget.left--;
+        if (child.name === ".brain" || child.name === ".git") continue;
+        const childPath = join(absolute, child.name);
+        if (isIgnored(childChain, childPath, child.name, child.isDirectory())) continue;
+        try {
+          const scanned = scan(childPath, child.name, childChain, levels - 1, budget);
+          children.push(scanned);
+          total += scanned.size;
+          if (scanned.incomplete) incomplete = true;
+        } catch {
+          listingIncomplete = incomplete = true;
+        }
       }
-    }
+    } finally { dir.closeSync(); }
   } catch {
-    // An unreadable directory renders as an empty directory rather than failing the map.
+    listingIncomplete = incomplete = true;
   }
-  children = children.sort(entryOrder);
-  return { name, path: absolute, directory: true, size: total, children };
+  children.sort(entryOrder);
+  return { name, path: absolute, directory: true, size: total, children,
+    ...(incomplete ? { incomplete: true } : {}),
+    ...(listingIncomplete ? { listingIncomplete: true } : {}) };
 }
 
-/** Walk the anchor fully so directory sizes are honest aggregates. */
-export function scanTree(root: string, anchor: string): TreeEntry {
+/** Walk only the requested levels and a fixed number of entries. */
+export function scanTree(root: string, anchor: string, depth: number = TREE_MAX_DEPTH, entryBudget: number = TREE_ENTRY_BUDGET): TreeEntry {
   let target: string;
   try {
     target = containedAnchor(root, anchor);
@@ -110,8 +127,6 @@ export function scanTree(root: string, anchor: string): TreeEntry {
   if (!stat.isDirectory()) {
     throw new AnchorError(`an anchor is a directory, and \`${anchor}\` is a file. Anchor at the directory that holds it, or read the file.`);
   }
-  // The chain starts at the project root, not the anchor: a `.gitignore`
-  // above the anchor still governs the anchor's contents.
   let chain = baseIgnoreChain(resolve(root));
   const anchorRel = relative(resolve(root), target);
   if (anchorRel !== "") {
@@ -121,7 +136,21 @@ export function scanTree(root: string, anchor: string): TreeEntry {
       chain = deeperIgnoreChain(chain, current);
     }
   }
-  return scan(target, target.split(sep).pop() ?? ".", chain);
+  const levels = Number.isFinite(depth) ? Math.min(TREE_MAX_DEPTH, Math.max(1, Math.trunc(depth))) : 1;
+  const budget = Number.isFinite(entryBudget) ? Math.max(0, Math.trunc(entryBudget)) : TREE_ENTRY_BUDGET;
+  return scan(target, target.split(sep).pop() ?? ".", chain, levels, { left: budget });
+}
+
+/** Reuse the bounded filesystem result briefly; Brain annotations are projected fresh. */
+function sharedScan(root: string, anchor: string, depth: number): TreeEntry {
+  const key = JSON.stringify([resolve(root), anchor, depth]);
+  const found = cache.get(key);
+  const now = Date.now();
+  if (found !== undefined && now - found.at < TREE_CACHE_MS && now >= found.at) return found.entry;
+  const entry = scanTree(root, anchor, depth);
+  if (cache.size >= 8) cache.delete(cache.keys().next().value!);
+  cache.set(key, { at: now, entry });
+  return entry;
 }
 
 /** Human-readable size: bytes, then K/M/G (integer, e.g. `3K`). */
@@ -132,6 +161,11 @@ export function formatSize(bytes: number): string {
   if (value >= 1024) { value /= 1024; unit = "M"; }
   if (value >= 1024) { value /= 1024; unit = "G"; }
   return `${Math.round(value)}${unit}`;
+}
+
+/** A lower bound is not an exact directory size. */
+export function formatTreeSize(entry: TreeEntry): string {
+  return entry.incomplete ? `>=${entry.size}B` : formatSize(entry.size);
 }
 
 /**
@@ -187,8 +221,7 @@ export function treeHandles(entry: TreeEntry, depth: number): TreeHandles {
 }
 
 /**
- * The size of the subtree under one path, in bytes: what a directory actually
- * costs. The scan already aggregates it, so this is a lookup, not a walk — the
+ * The bytes found in the subtree under one path. The scan already aggregates it, so this is a lookup, not a walk — the
  * Tree view shows the per-directory figure beside a files-only aggregate
  * without walking the disk a second time.
  */
@@ -209,7 +242,7 @@ function subtreeSizes(entry: TreeEntry, depth: number): Map<string, number> {
 export function renderTreeLines(
   entry: TreeEntry,
   depth: number,
-  attached: Map<string, string[]>,
+  attached: ReadonlyMap<string, readonly string[]>,
   handles: TreeHandles = new Map(),
 ): string[] {
   const lines: string[] = [];
@@ -221,10 +254,11 @@ export function renderTreeLines(
       const marks = child.directory ? [] : (attached.get(child.path) ?? []);
       const handle = handles.get(child.path);
       lines.push(
-        `${indent}${name}  ${formatSize(child.size)}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
+        `${indent}${name}  ${formatTreeSize(child)}${handle === undefined ? "" : `  ${handle}`}${marks.length > 0 ? `  ${marks.join(" ")}` : ""}`,
       );
       walk(child, level + 1);
     }
+    if (node.listingIncomplete) lines.push(`${"  ".repeat(level)}(entries omitted or unreadable)`);
   };
   walk(entry, 1);
   return lines;
@@ -250,9 +284,9 @@ export interface TreeProjection {
 }
 
 export function projectTreeView(root: string, anchor: string, depth: number, brain: CartoBrain): TreeProjection {
-  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
+  const shown = Number.isFinite(depth) ? Math.min(TREE_MAX_DEPTH, Math.max(1, Math.trunc(depth))) : 1;
   const target = containedAnchor(root, anchor);
-  const entry = scanTree(root, target);
+  const entry = sharedScan(root, target, shown);
   return {
     anchor: target,
     depth: shown,
@@ -273,10 +307,9 @@ export function projectTreeBlock(
   // Depth 1 is the anchor and its immediate contents; there is no rendering
   // below that, so anything under 1 renders as 1 (§6.3). Nothing is refused:
   // a depth below 1 is not an error, it is the same tree.
-  const shown = Number.isFinite(depth) ? Math.max(1, Math.trunc(depth)) : 1;
-  const target = containedAnchor(root, anchor);
-  const entry = scanTree(root, target);
-  const handles = treeHandles(entry, shown);
-  const lines = renderTreeLines(entry, shown, atlasAttachedPaths(brain, root), handles);
-  return { root: target, depth: shown, lines, handles };
+  const projection = projectTreeView(root, anchor, depth, brain);
+  const { entry, handles } = projection;
+  const lines = renderTreeLines(entry, projection.depth, projection.attached, handles);
+  if (entry.incomplete) lines.push("  (>= sizes are partial; depth, entry limit, or unreadable entries)");
+  return { root: projection.anchor, depth: projection.depth, lines, handles };
 }

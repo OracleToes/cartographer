@@ -132,6 +132,29 @@ test("the tree is addressable: a directory handle anchors it, a file handle does
   }
 });
 
+test("tree tools use the handles actually sent even if a later scan renumbers files", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false };
+  const tools = Object.fromEntries(createTools({ root, brain, session }).map((tool) => [tool.name, tool]));
+  const api = { callId: "call-snapshot", now: Date.now, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  try {
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const before = projectTreeBlock(root, root, 2, await brain.read());
+    session.requestTreeHandles = before.handles;
+    const file = join(root, "src", "verify-me.ts");
+    const handle = before.handles.get(file);
+    writeFileSync(join(root, "src", "aaa.ts"), "different content");
+    const after = projectTreeBlock(root, root, 3, await brain.read());
+    assert.notEqual(after.handles.get(file), handle);
+    const read = await tools.read.execute({ path: handle }, api, {});
+    assert.match(read.output.map((part) => part.text).join(""), /answer = 42/);
+    await assert.rejects(tools.read.execute({ path: "F999" }, api, {}), /not a file handle/);
+    const dir = before.handles.get(join(root, "src"));
+    await tools.tree.execute({ handle: dir }, api, {});
+    assert.equal(session.tree.anchor, join(root, "src"));
+  } finally { await cleanup(); }
+});
+
 test("no product tool carries a bound its own description does not state", async () => {
   const { root, brain, cleanup } = await fixture();
   try {

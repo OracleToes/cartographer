@@ -689,6 +689,18 @@ result is only that the block will be rendered at the new anchor.
 the agent sets where it is attending and sees the tree it just asked for at once,
 rather than reading a second rendering of it in a tool result.
 
+The scan itself stops at the requested display depth (at most 64 levels) and
+a budget of 2,000 encountered entries, including ignored entries. Directories
+at the depth boundary are not opened. A directory size prefixed `>=` is the
+exact count of bytes found, a lower bound rather than a full subtree size;
+ancestors inherit incompleteness. A listing cut short by the budget or an
+unreadable entry says entries were omitted. The tree view signals partial data
+as well. Ignored entries, `.brain`, and `.git` never contribute to sizes.
+The filesystem result is shared briefly across the sidebar, view, and block,
+and is eligible for refresh after one second; Brain annotations are projected afresh. Tree
+handles used by agent tools resolve against the last block sent to the agent,
+not a later scan that might have renumbered them.
+
 The anchor stays inside the project.
 
 ## 7. Tools

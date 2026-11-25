@@ -1611,8 +1611,8 @@ test("the tree view shows the harness's own facts: handles, attached notes, pins
   assert.match(shown, /read F\d/, "the pane names the call the file's handle is for");
   assert.match(shown, /tree D\d+ depth \d+/, "and the call that moves the anchor");
 
-  // A directory's size counts its whole subtree: it is a cost, not a listing.
-  assert.match(shown, /\d+(\.\d+)?[KMG]?\s+src/, "directories carry a deep size");
+  // A directory shows its scanned size, with a lower-bound marker when partial.
+  assert.match(shown, /(?:>=)?\d+(\.\d+)?[BKMG]?\s+src/, "directories carry a deep size");
 });
 
 test("the tree pins the file under the cursor with p, and a directory or a filter never does", async () => {

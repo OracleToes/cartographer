@@ -33,7 +33,7 @@ import {
   type MarkLine,
   type StateBlockInput,
 } from "../domain/state-block.js";
-import { projectTreeBlock } from "./project-tree.js";
+import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
 import { lexicalProjectPath } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
@@ -182,12 +182,13 @@ function staleMarksFor(
   root: string,
   session: CartoExtensionOptions["session"],
   markdownPath: string,
+  treeHandles: TreeHandles,
 ): { items: Array<{ handle: string; why: string }>; modifiedPins: string[] } {
   const items: Array<{ handle: string; why: string }> = [];
   for (const mark of liveStaleMarks(brain, root)) {
     items.push({ handle: mark.label, why: "the file changed after this note" });
   }
-  const pinDrift = staleFileHandles(brain, root, session, markdownPath);
+  const pinDrift = staleFileHandles(brain, root, markdownPath, treeHandles);
   const modifiedPins: string[] = [];
   for (const drift of pinDrift) {
     items.push({ handle: drift.handle, why: drift.why });
@@ -209,18 +210,17 @@ function staleMarksFor(
 function staleFileHandles(
   brain: CartoBrain,
   root: string,
-  session: CartoExtensionOptions["session"],
   markdownPath: string,
+  treeHandles: TreeHandles,
 ): Array<{ handle: string; why: string; modified: boolean }> {
   if (brain.files.length === 0) return [];
-  const tree = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
   const snapshotMtime = statMtimeSafe(markdownPath);
   const drifted: Array<{ handle: string; why: string; modified: boolean }> = [];
   for (const file of brain.files) {
     const real = lexicalProjectPathSafe(root, file.path);
     const mtime = real === null ? null : statMtimeSafe(real);
     let handle: string | undefined;
-    for (const [path, named] of tree.handles) if (path === file.path) handle = named;
+    for (const [path, named] of treeHandles) if (path === file.path) handle = named;
     const label = handle ?? file.path;
     if (mtime === null) {
       drifted.push({ handle: label, why: "pinned, and the file is gone", modified: false });
@@ -341,10 +341,11 @@ export async function renderLiveStateBlock(
   options: CartoExtensionOptions,
   visibleMessages: readonly import("../domain/state-block.js").MessageLike[],
   observe?: (input: StateBlockInput) => void,
+  observeTree?: (handles: TreeHandles) => void,
 ): Promise<string> {
   const brain = await options.brain.read();
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
-  let tree: { root: string; depth: number; lines: string[] };
+  let tree: { root: string; depth: number; lines: string[]; handles: TreeHandles };
   try {
     tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
   } catch (error) {
@@ -352,6 +353,7 @@ export async function renderLiveStateBlock(
       root: options.session.tree.anchor,
       depth: options.session.tree.depth,
       lines: [`(tree unavailable: ${error instanceof Error ? error.message : String(error)})`],
+      handles: new Map(),
     };
   }
   const pinned: Array<{ handle: string; author: "user" | "agent" }> = [];
@@ -369,10 +371,9 @@ export async function renderLiveStateBlock(
   if (brain.files.length > 0) {
     // The tree is rendered from the same anchor and depth the block shows, so
     // the handle a pin is listed under is the one the tree drew for that file.
-    const block = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
     for (const file of brain.files) {
       let handle: string | undefined;
-      for (const [path, named] of block.handles) if (path === file.path) handle = named;
+      for (const [path, named] of tree.handles) if (path === file.path) handle = named;
       pinned.push({ handle: handle ?? file.path, author: file.pinned });
     }
   }
@@ -390,7 +391,7 @@ export async function renderLiveStateBlock(
   collectMarks("chat", brain.chat);
   const mode: "edit" | "read only" = options.session.readOnly ? "read only" : "edit";
   const jobs = options.jobs === undefined ? [] : summarizeJobs(options.jobs);
-  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath);
+  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath, tree.handles);
   const activity = inspectToolActivity(visibleMessages);
   const attention = deriveStateAttention({
     brain,
@@ -431,6 +432,7 @@ export async function renderLiveStateBlock(
     tree,
   };
   observe?.(input);
+  observeTree?.(tree.handles);
   return renderStateBlock(input);
 }
 
@@ -519,7 +521,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             const work = options.session.work;
             if (work.requests === 0) work.startFill = contextFillPercent(input);
             work.requests += 1;
-          });
+          }, (handles) => { options.session.requestTreeHandles = handles; });
           options.session.lastStateBlock = block;
           return { messages: asPiMessages(appendStateBlock(visible, block, now())) };
         },

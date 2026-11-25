@@ -10,7 +10,7 @@
  * broot gives the tree itself: branches drawn down from the anchor rather than
  * space-indented, a fold per directory so a deep hierarchy stays one screen,
  * and sizes that are honest about what they count — a directory's figure is its
- * whole subtree, because that is what it costs.
+ * scanned subtree, marked when it is only a lower bound.
  *
  * The details are the ones the harness *uses*, and nothing else. A handle is
  * here because a tool takes one. An attached node is here because the collapse
@@ -38,7 +38,7 @@ import {
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain } from "../domain/records.js";
 import { liveStaleMarks } from "../runtime/carto-extension.js";
-import { formatSize, projectTreeView, type TreeEntry, type TreeProjection } from "../runtime/project-tree.js";
+import { formatTreeSize, projectTreeView, type TreeEntry, type TreeProjection } from "../runtime/project-tree.js";
 import { padLine, tokens } from "./tokens.js";
 
 /** Where the agent is looking, and how much it can see: the `tree` tool's own arguments. */
@@ -450,7 +450,7 @@ export class TreeView implements Component, Focusable {
 
     // The figures are right-aligned in their own column, so a column of sizes is
     // read down rather than scanned along — the sidebar's rule, applied here.
-    const size = tokens.muted(formatSize(row.entry.size).padStart(6));
+    const size = tokens.muted(formatTreeSize(row.entry).padStart(6));
     const left = ` ${cursor} ${tokens.faint(branch)}${tokens.faint(glyph)} ${tokens.muted(handleText)}${painted}`;
     const head = truncateToWidth(left, Math.max(8, width - 10), "…");
     const tail = `${marks.length > 0 ? `${marks.join(" ")} ` : ""}${size}`;
@@ -463,11 +463,10 @@ export class TreeView implements Component, Focusable {
     const lines: string[] = [];
     const handle = this.projection?.handles.get(entry.path) ?? "—";
     const rel = this.data === undefined ? entry.path : relative(resolve(this.data.root), entry.path);
-    const size = this.projection?.sizes.get(entry.path) ?? entry.size;
     const mtime = this.mtimeOf(entry.path);
 
     lines.push(padLine(` ${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.bold(entry.directory ? `${rel}/` : rel)}`, width));
-    lines.push(padLine(` ${tokens.faint(`${entry.directory ? "directory" : "file"} · ${formatSize(size)}${mtime === undefined ? "" : ` · ${new Date(mtime).toISOString()}`}`)}`, width));
+    lines.push(padLine(` ${tokens.faint(`${entry.directory ? "directory" : "file"} · ${formatTreeSize(entry)}${mtime === undefined ? "" : ` · ${new Date(mtime).toISOString()}`}`)}`, width));
 
     // A pinned file is the one fact worth a sentence: the head is holding a copy
     // of it, and that copy is what the agent reads rather than the file (§5.1).
@@ -556,8 +555,9 @@ export class TreeView implements Component, Focusable {
     } else if (query.length > 0) {
       filter = ` ${tokens.accent(`/${query}`)}`;
     }
+    const partial = this.projection?.entry.incomplete ? ` ${tokens.warn("· partial (>= sizes; entries may be omitted)")}` : "";
     const pinnedOnly = this.showPinnedOnly ? ` ${tokens.pin("· pinned only")}` : "";
-    const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${filter}${pinnedOnly}`;
+    const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${partial}${filter}${pinnedOnly}`;
     const right = `${tokens.faint("j/k move · h/l fold · p pin · t note · f pinned · / filter ")}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(`${left}${" ".repeat(gap)}${right}`, width)));

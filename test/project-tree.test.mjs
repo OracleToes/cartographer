@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
-import { AnchorError, atlasAttachedPaths, formatSize, projectTreeBlock, scanTree } from "../dist/runtime/project-tree.js";
+import { AnchorError, atlasAttachedPaths, formatSize, projectTreeBlock, projectTreeView, renderTreeLines, scanTree } from "../dist/runtime/project-tree.js";
 
 const at = (iso) => Date.parse(iso);
 const fileAttachment = (path) => ({ kind: "file", path });
@@ -41,11 +41,12 @@ test("the tree renders directories first, with honest aggregated sizes", () => {
     // numbered as they render, and so are directories, each in its own run.
     assert.deepEqual(block.lines, [
       "  empty/  0B  D1",
-      "  src/  2K  D2",
-      "    domain/  2K  D3",
+      "  src/  >=512B  D2",
+      "    domain/  >=0B  D3",
       "    cli.ts  512B  F1",
       `  linked-dir  ${formatSize(linkSize)}  F2`,
       "  MINI.md  2K  F3",
+      "  (>= sizes are partial; depth, entry limit, or unreadable entries)",
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -58,8 +59,9 @@ test("depth bounds the display; depth 1 is the anchor's contents", () => {
     const brain = emptyBrain();
     assert.deepEqual(projectTreeBlock(root, root, 1, brain).lines, projectTreeBlock(root, root, 0, brain).lines);
     assert.deepEqual(projectTreeBlock(root, join(root, "src"), 1, brain).lines, [
-      "  domain/  2K  D1",
+      "  domain/  >=0B  D1",
       "  cli.ts  512B  F1",
+      "  (>= sizes are partial; depth, entry limit, or unreadable entries)",
     ]);
     assert.equal(projectTreeBlock(root, join(root, "src"), 1, brain).root, join(root, "src"));
   } finally {
@@ -191,4 +193,59 @@ test("every file and directory the tree shows carries the handle the block draws
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("bounded scans mark omitted entries and propagate partial sizes without mislabeling bytes", () => {
+  const root = mkdtempSync(join(tmpdir(), "carto-budget-"));
+  try {
+    mkdirSync(join(root, "nested"));
+    for (let i = 0; i < 12; i++) writeFileSync(join(root, "nested", `file${i}`), Buffer.alloc(300));
+    const shallow = scanTree(root, root, 1, 100);
+    assert.equal(shallow.children[0].incomplete, true);
+    assert.equal(shallow.children[0].children, undefined, "the depth boundary is not opened");
+    const limited = scanTree(root, root, 4, 5);
+    const folder = limited.children.find((child) => child.name === "nested");
+    assert.equal(folder.children.length, 4);
+    assert.equal(folder.size, 1200);
+    assert.equal(folder.listingIncomplete, true);
+    assert.equal(limited.incomplete, true);
+    const lines = renderTreeLines(limited, 4, new Map());
+    assert.ok(lines.some((line) => line.includes("nested/  >=1200B")));
+    assert.ok(lines.some((line) => line.includes("entries omitted or unreadable")));
+    const full = scanTree(root, root, 4, 100);
+    assert.equal(full.incomplete, undefined);
+    assert.equal(full.size, 3600);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("view and block share a bounded scan while annotations are projected freshly", () => {
+  const root = makeProject();
+  try {
+    const brain = emptyBrain();
+    const view = projectTreeView(root, root, 2, brain);
+    const again = projectTreeView(root, root, 2, brain);
+    const block = projectTreeBlock(root, root, 2, brain);
+    assert.equal(view.entry, again.entry);
+    assert.deepEqual([...view.handles], [...block.handles]);
+    const changed = applyWrite(brain, { kind: "atlas.upsert", node: atlasNode("fresh", [fileAttachment("src/cli.ts")]) }, Date.now());
+    const annotated = projectTreeBlock(root, root, 2, changed);
+    assert.ok(annotated.lines.some((line) => line.includes("cli.ts") && line.includes("A1")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("shared scans refresh on the next access after their short reuse window", () => {
+  const root = makeProject();
+  const realNow = Date.now;
+  try {
+    let now = realNow();
+    Date.now = () => now;
+    const first = projectTreeView(root, root, 2, emptyBrain());
+    writeFileSync(join(root, "new.txt"), "new");
+    assert.equal(projectTreeView(root, root, 2, emptyBrain()).entry, first.entry);
+    now += 1001;
+    const refreshed = projectTreeBlock(root, root, 2, emptyBrain());
+    assert.ok(refreshed.lines.some((line) => line.includes("new.txt")));
+  } finally { Date.now = realNow; rmSync(root, { recursive: true, force: true }); }
 });

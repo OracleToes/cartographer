@@ -21,7 +21,7 @@ import { getOrThrow } from "@earendil-works/pi-durable/env";
 import type { CartoBrain, Attachment, PinnedEphemeral } from "../domain/records.js";
 import type { PromptItem } from "../ui/prompt-handles.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
-import { projectTreeBlock } from "./project-tree.js";
+import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
@@ -47,6 +47,8 @@ export interface ToolSession {
   pending: PendingWrite[];
   /** Where the state block renders the tree. */
   tree: { anchor: string; depth: number };
+  /** Handles in the last state block actually sent to the agent. */
+  requestTreeHandles?: TreeHandles;
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
   /** Who triggered the pending collapse request (`agent` tool call vs forced `automatic` limit). */
@@ -169,8 +171,8 @@ const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "
  * a file the agent can see, and nothing here will pretend it is.
  */
 function treePathOf(root: string, brain: CartoBrain, session: ToolSession, handle: string): string | undefined {
-  const block = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
-  for (const [path, named] of block.handles) if (named === handle) return path;
+  const handles = session.requestTreeHandles ?? projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain).handles;
+  for (const [path, named] of handles) if (named === handle) return path;
   return undefined;
 }
 
@@ -185,13 +187,22 @@ function guardedPath(root: string, path: string): void {
   refuseBrainPath(root, absolute);
 }
 
+/** Resolve against what was sent, not a new scan whose numbering may have changed. */
+function fileToolPath(path: string, session: ToolSession): string {
+  if (!/^F\d+$/i.test(path) || session.requestTreeHandles === undefined) return path;
+  for (const [candidate, handle] of session.requestTreeHandles) {
+    if (handle === path.toUpperCase()) return candidate;
+  }
+  throw new Error(`${path} is not a file handle in the last state block.`);
+}
+
 /**
  * `read`, from the package, with Carto's `.brain` wall in front of it. The
  * arguments are the package's — a path, an offset, and a limit — and the
  * package's own bounds are the tool's bounds (§1). `wrapTool` keeps the
  * package tool's types, so nothing here restates its schema.
  */
-function scopedRead(root: string): ToolRegistration {
+function scopedRead(root: string, session: ToolSession): ToolRegistration {
   const base = createReadTool();
   return defineTool({
     ...base,
@@ -199,8 +210,9 @@ function scopedRead(root: string): ToolRegistration {
     // Carto adds is how the file is named and how to keep reads slim.
     description: `${base.description ?? ""} Name the file by its tree handle or a project path, using \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
-      guardedPath(root, pathOf(args));
-      return base.execute(args, api, context);
+      const path = fileToolPath(pathOf(args), session);
+      guardedPath(root, path);
+      return base.execute({ ...args, path }, api, context);
     },
   });
 }
@@ -210,7 +222,7 @@ function scopedRead(root: string): ToolRegistration {
  * file, all or nothing, and a path that must be an existing file. Creating is
  * `create`'s job, so the package tool's behaviour is the spec's (§7).
  */
-function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
+function scopedEdit(root: string, session: ToolSession, readOnly: () => boolean): ToolRegistration {
   const base = createEditTool();
   return defineTool({
     ...base,
@@ -219,8 +231,9 @@ function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
     description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
-      guardedPath(root, pathOf(args));
-      return base.execute(args, api, context);
+      const path = fileToolPath(pathOf(args), session);
+      guardedPath(root, path);
+      return base.execute({ ...args, path }, api, context);
     },
   });
 }
@@ -474,16 +487,16 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       },
     }),
 
-    scopedRead(root),
+    scopedRead(root, session),
 
-    scopedEdit(root, () => session.readOnly),
+    scopedEdit(root, session, () => session.readOnly),
 
     createFile(root, () => session.readOnly),
 
     defineTool({
       name: "tree",
       description:
-        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
+        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. The scan stops at depth 64 or 2000 encountered entries; >= sizes are partial and omitted entries are marked. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str()),
