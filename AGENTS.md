@@ -67,6 +67,7 @@ Rules:
 ### Model references
 
 - [nokeepai Inkling-2-Mini-Unbound GGUF](https://huggingface.co/bartowski/nokeepai_Inkling-2-Mini-Unbound-GGUF) — person; model under investigation for a llama.cpp grammar-stack error. This is a reference, not a project dependency.
+- [Mythos-nano](https://huggingface.co/squ11z1/Mythos-nano) — person; model for discussion of tool-free reasoning alongside Carto. This is a reference, not a project dependency.
 
 ## 3. Glossary
 
