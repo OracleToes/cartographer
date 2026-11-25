@@ -116,7 +116,7 @@ export interface HandleTable {
  * an audit trail (§2.2).
  */
 /**
- * An ephemeral item the person pinned in the live context (§3.1, §3.2).
+ * An ephemeral item the person or the agent pinned in the live context (§3.1, §3.2).
  *
  * A pin is the one thing that keeps an ephemeral item through a collapse: the
  * store is deleted whole (§3.4), so an unpinned item goes to the archive and

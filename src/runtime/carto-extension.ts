@@ -16,6 +16,7 @@ import { statSync } from "node:fs";
 import { CompactionTask, GenerationTask, defineExtension, defineTool, hook, runEndTask, section, type ToolRegistration } from "@earendil-works/pi-durable";
 import { createBashTool } from "@earendil-works/pi-durable/tools";
 import type { Message } from "@earendil-works/pi-ai";
+import type { ModelRef } from "@earendil-works/pi-durable";
 import { isContextOverflow, isRecoverableLength } from "@earendil-works/pi-ai/utils/overflow";
 
 import { handleOf } from "../domain/handles.js";
@@ -32,15 +33,15 @@ import {
   type MarkLine,
   type StateBlockInput,
 } from "../domain/state-block.js";
-import { projectContext } from "../domain/projection.js";
-import { projectTreeBlock } from "./project-tree.js";
-import { lexicalProjectPath } from "./workspace.js";
+import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
+import { assertFileScope, lexicalProjectPath, resolvePinnedFile, resolveReadReference, type PathScope } from "./workspace.js";
 import { SleepTask } from "./sleep-task.js";
 import { TreeReadTask } from "./tree-read-task.js";
 import { createTools, type ToolSession } from "./tools.js";
 import type { BrainStore } from "./brain-store.js";
 import type { ModelTelemetry } from "./model-telemetry.js";
 import { summarizeJobs, type JobTable } from "./jobs.js";
+import { promptHandles } from "../ui/prompt-handles.js";
 
 /**
  * The system prompt (§7): the tools describe themselves, so this carries only
@@ -61,6 +62,8 @@ export function cartoInstructions(person: string): string {
 }
 
 export interface LiveSessionState extends ToolSession, ModelTelemetry {
+  /** The person's current model selection, including across recovered requests. */
+  activeModel: ModelRef;
   /** What the agent calls the person: the configured name, or the launching account. */
   person: string;
   /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
@@ -129,9 +132,10 @@ export interface CartoExtensionOptions {
 
 const estimatePart = estimateSerialized;
 
-/** Lexical resolve; returns null instead of throwing (a path outside the root is a stale reference, not a crash). */
+/** Inaccessible or out-of-scope references are stale, not a crash. */
 function lexicalProjectPathSafe(root: string, path: string): string | null {
   try {
+    assertFileScope(root, path, "strict");
     return lexicalProjectPath(root, path);
   } catch {
     return null;
@@ -179,19 +183,22 @@ function staleMarksFor(
   root: string,
   session: CartoExtensionOptions["session"],
   markdownPath: string,
+  treeHandles: TreeHandles,
 ): { items: Array<{ handle: string; why: string }>; modifiedPins: string[] } {
   const items: Array<{ handle: string; why: string }> = [];
   for (const mark of liveStaleMarks(brain, root)) {
     items.push({ handle: mark.label, why: "the file changed after this note" });
   }
-  const pinDrift = staleFileHandles(brain, root, session, markdownPath);
+  const pinDrift = staleFileHandles(brain, root, markdownPath, treeHandles);
   const modifiedPins: string[] = [];
   for (const drift of pinDrift) {
     items.push({ handle: drift.handle, why: drift.why });
     if (drift.modified) modifiedPins.push(drift.handle);
   }
-  for (const handle of staleReadResultHandles(brain, root)) {
-    items.push({ handle, why: "a pinned reading, and the file has changed since" });
+  for (const id of staleReadResultHandles(brain, root, session.pathScope ?? "strict")) {
+    const handle = [...(session.headEphemera ?? new Map()), ...(session.liveEphemera ?? new Map())].find(([, item]) => item.id === id)?.[0]
+      ?? handleOf(brain.handles, "ephemera", id);
+    if (handle !== undefined) items.push({ handle, why: "a pinned reading, and the file has changed since" });
   }
   return { items, modifiedPins };
 }
@@ -204,21 +211,21 @@ function staleMarksFor(
 function staleFileHandles(
   brain: CartoBrain,
   root: string,
-  session: CartoExtensionOptions["session"],
   markdownPath: string,
+  treeHandles: TreeHandles,
 ): Array<{ handle: string; why: string; modified: boolean }> {
   if (brain.files.length === 0) return [];
-  const tree = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
   const snapshotMtime = statMtimeSafe(markdownPath);
   const drifted: Array<{ handle: string; why: string; modified: boolean }> = [];
   for (const file of brain.files) {
-    const real = lexicalProjectPathSafe(root, file.path);
+    let real: string | null = null;
+    try { real = resolvePinnedFile(root, file.path); } catch { /* inaccessible pins are stale */ }
     const mtime = real === null ? null : statMtimeSafe(real);
     let handle: string | undefined;
-    for (const [path, named] of tree.handles) if (path === file.path) handle = named;
+    for (const [path, named] of treeHandles) if (path === file.path) handle = named;
     const label = handle ?? file.path;
     if (mtime === null) {
-      drifted.push({ handle: label, why: "pinned, and the file is gone", modified: false });
+      drifted.push({ handle: label, why: "pinned file is missing, inaccessible, or outside its scope", modified: false });
     } else if (snapshotMtime !== null && mtime > snapshotMtime + 50) {
       drifted.push({ handle: label, why: "pinned copy in head is older than disk; collapse to refresh", modified: true });
     }
@@ -293,12 +300,6 @@ export function deriveStateAttention(params: {
   if (activeWork && params.brain.ledger.length === 0) {
     cues.push("Ledger is empty -> track your active leaf, open questions, and current progress in `ledger`.");
   }
-  const markedChatCount = params.brain.chat.filter((record) => record.mark !== undefined).length;
-  if (params.brain.chat.length >= 8 && markedChatCount < 2) {
-    cues.push(
-      `Head carries ${params.brain.chat.length} Chat records -> \`mark\` resolved older Chat handles for archive before your next \`collapse\`.`,
-    );
-  }
   const needyJobs = params.jobs.filter((job) => job.unreadLines > 0 || job.status === "exited");
   if (needyJobs.length > 0) {
     cues.push(
@@ -315,14 +316,15 @@ export function deriveStateAttention(params: {
  * a pin on it is a promise about that file, and a file that moved on makes the
  * text a stale quotation. Nothing blocks; the block says which handles are stale.
  */
-function staleReadResultHandles(brain: CartoBrain, root: string): string[] {
+function staleReadResultHandles(brain: CartoBrain, root: string, scope: PathScope): string[] {
   const names: string[] = [];
   for (const item of brain.ephemera) {
     if (item.pinned === undefined) continue;
     if (item.kind !== "readResult") continue;
     const path = item.entity?.path;
     if (path === undefined) continue;
-    const real = lexicalProjectPathSafe(root, path);
+    let real: string | null = null;
+    try { real = resolveReadReference(root, path, scope); } catch { /* inaccessible readings are stale */ }
     const mtime = real === null ? null : statMtimeSafe(real);
     if (mtime !== null && mtime <= item.createdAt) continue;
     // Ephemera have no Brain handle; the state block names them by id, which is
@@ -342,18 +344,19 @@ export async function renderLiveStateBlock(
   options: CartoExtensionOptions,
   visibleMessages: readonly import("../domain/state-block.js").MessageLike[],
   observe?: (input: StateBlockInput) => void,
+  observeTree?: (handles: TreeHandles) => void,
 ): Promise<string> {
   const brain = await options.brain.read();
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
-  options.session.toolWorkAtLastRequest = toolWorkTokens;
-  let tree: { root: string; depth: number; lines: string[] };
+  let tree: { root: string; depth: number; lines: string[]; handles: TreeHandles };
   try {
-    tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
+    tree = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain, options.session.tree);
   } catch (error) {
     tree = {
       root: options.session.tree.anchor,
       depth: options.session.tree.depth,
       lines: [`(tree unavailable: ${error instanceof Error ? error.message : String(error)})`],
+      handles: new Map(),
     };
   }
   const pinned: Array<{ handle: string; author: "user" | "agent" }> = [];
@@ -361,7 +364,8 @@ export async function renderLiveStateBlock(
   // §5.1), so the block lists them by handle with who kept them.
   for (const item of brain.ephemera) {
     if (item.pinned === undefined) continue;
-    const handle = handleOf(brain.handles, "ephemera", item.id);
+    const handle = [...(options.session.headEphemera ?? new Map()), ...(options.session.liveEphemera ?? new Map())].find(([, candidate]) => candidate.id === item.id)?.[0]
+      ?? handleOf(brain.handles, "ephemera", item.id);
     if (handle !== undefined) pinned.push({ handle, author: item.pinned });
   }
   // A pinned file is a pin like any other and the block lists every pin with
@@ -370,10 +374,9 @@ export async function renderLiveStateBlock(
   if (brain.files.length > 0) {
     // The tree is rendered from the same anchor and depth the block shows, so
     // the handle a pin is listed under is the one the tree drew for that file.
-    const block = projectTreeBlock(options.root, options.session.tree.anchor, options.session.tree.depth, brain);
     for (const file of brain.files) {
       let handle: string | undefined;
-      for (const [path, named] of block.handles) if (path === file.path) handle = named;
+      for (const [path, named] of tree.handles) if (path === file.path) handle = named;
       pinned.push({ handle: handle ?? file.path, author: file.pinned });
     }
   }
@@ -391,7 +394,7 @@ export async function renderLiveStateBlock(
   collectMarks("chat", brain.chat);
   const mode: "edit" | "read only" = options.session.readOnly ? "read only" : "edit";
   const jobs = options.jobs === undefined ? [] : summarizeJobs(options.jobs);
-  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath);
+  const stale = staleMarksFor(brain, options.root, options.session, options.markdownPath, tree.handles);
   const activity = inspectToolActivity(visibleMessages);
   const attention = deriveStateAttention({
     brain,
@@ -420,6 +423,7 @@ export async function renderLiveStateBlock(
     pending: options.session.pending,
     pinned,
     marks,
+    ...(options.session.liveEphemera === undefined ? {} : { working: [...options.session.liveEphemera].map(([handle, item]) => ({ handle, kind: item.kind })) }),
     ...(jobs.length === 0 ? {} : { jobs }),
     ...(attention.length === 0 ? {} : { attention }),
     // Atlas notes drift, pinned files gone or modified since freeze drift, and
@@ -427,10 +431,12 @@ export async function renderLiveStateBlock(
     stale: stale.items,
     resolveHandle: (kind, id) => handleOf(brain.handles, kind, id),
     mode,
+    pathScope: options.session.pathScope ?? "strict",
     projectRoot: options.root,
     tree,
   };
   observe?.(input);
+  observeTree?.(tree.handles);
   return renderStateBlock(input);
 }
 
@@ -470,10 +476,17 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        * The frozen projection for this generation: written once at creation,
        * read verbatim ever since, so the prompt prefix stays byte-stable
        * between collapses. A crash reopens the identical bytes.
+       *
+       * No fallback when the read fails. A live re-projection from the Brain
+       * would drift as the agent writes, breaking the head from a transient
+       * error; instead the read throws and pi keeps the section's shown text,
+       * so the head stays byte-identical. The file is sealed read-only and
+       * written atomically, so a failure here is a real problem, not a state
+       * to paper over by changing the prompt.
        */
       section(
         "carto-context",
-        async () => readFile(options.markdownPath, "utf8").catch(async () => projectContext(await options.brain.read(), new Map(), options.session.person).text),
+        async () => readFile(options.markdownPath, "utf8"),
         { tag: false },
       ),
     ],
@@ -493,11 +506,26 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       hook(GenerationTask, {
         beforeRequest: async (request) => {
           const visible = stripStateBlocks(request.messages);
+          await options.session.refreshHeadEphemera?.();
+          if (options.session.loadPromptItems !== undefined) {
+            const items = await options.session.loadPromptItems();
+            const handles = promptHandles(items, options.session.headEphemeraCount ?? 0);
+            const live = new Map<string, import("../domain/records.js").PinnedEphemeral>();
+            for (const item of items) {
+              if (item.item === undefined) continue;
+              const handle = item.kind === "person" ? handles.person(item.key) : item.kind === "result" ? handles.result(item.key) : handles.ephemeral(item.key);
+              if (handle !== undefined) live.set(handle, item.item);
+            }
+            options.session.liveEphemera = live;
+          }
+          // Only an actual request sets the accounting baseline. UI previews
+          // also render the state block and must not change an in-flight one.
+          options.session.toolWorkAtLastRequest = splitContextMessages(visible).toolWorkTokens;
           const block = await renderLiveStateBlock(options, visible, (input) => {
             const work = options.session.work;
             if (work.requests === 0) work.startFill = contextFillPercent(input);
             work.requests += 1;
-          });
+          }, (handles) => { options.session.requestTreeHandles = handles; });
           options.session.lastStateBlock = block;
           return { messages: asPiMessages(appendStateBlock(visible, block, now())) };
         },

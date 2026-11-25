@@ -1,6 +1,9 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -134,6 +137,155 @@ test("reopening an existing generation store with a changed model updates pi.age
   } finally {
     await closeLiveSession(second);
     await cleanup();
+  }
+});
+
+test("config model on restart is the model sent over HTTP, not the old generation's model", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carto-model-config-"));
+  const root = mkdtempSync(join(tmpdir(), "carto-model-project-"));
+  const requests = [];
+  const propsRequests = [];
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: "Swift" }, { id: "DaisyRose" }] }));
+    } else if (req.method === "GET" && req.url?.startsWith("/props")) {
+      propsRequests.push(req.url);
+      res.writeHead(409);
+      res.end();
+    } else if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      let raw = "";
+      req.on("data", (part) => { raw += part; });
+      req.on("end", () => {
+        requests.push(JSON.parse(raw));
+        const frame = (delta, finish) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(frame({ role: "assistant", tool_calls: [{ index: 0, id: `sleep-${requests.length}`, type: "function", function: { name: "sleep", arguments: "{}" } }] }, null));
+        res.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+      });
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+  const run = () => new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, ["bin/carto.mjs", "--headless", "--root", root], {
+      cwd: process.cwd(), env: { ...process.env, CARTO_HOME: home }, encoding: "utf8",
+    }, (error, stdout, stderr) => error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(stdout));
+    child.stdin.end("hello\n");
+  });
+  try {
+    await saveGlobalConfig({ version: 1, model: "llama-swap/Swift", llamaSwapEndpoint: endpoint }, home);
+    assert.match(await run(), /llama-swap\/Swift/);
+    await saveGlobalConfig({ version: 1, model: "llama-swap/DaisyRose", llamaSwapEndpoint: endpoint }, home);
+    assert.match(await run(), /llama-swap\/DaisyRose/);
+    assert.deepEqual(requests.map((request) => request.model), ["Swift", "DaisyRose"], "the actual HTTP model follows the config after reopening the same project");
+    assert.ok(propsRequests.includes("/props?model=Swift&autoload=false"));
+    assert.ok(propsRequests.includes("/props?model=DaisyRose&autoload=false"));
+    assert.ok(propsRequests.every((url) => url.includes("autoload=false")), "window discovery never requests another model to load");
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a prepared old-model request recovered from the Brain uses the configured model", async () => {
+  const home = mkdtempSync(join(tmpdir(), "carto-recover-model-home-"));
+  const root = mkdtempSync(join(tmpdir(), "carto-recover-model-project-"));
+  const seen = [];
+  let firstArrived;
+  let secondArrived;
+  const firstRequest = new Promise((resolve) => { firstArrived = resolve; });
+  const secondRequest = new Promise((resolve) => { secondArrived = resolve; });
+  let restarted = false;
+  const server = createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [{ id: restarted ? "DaisyRose" : "Swift", context_length: 32000 }] }));
+    } else if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      let raw = "";
+      req.on("data", (part) => { raw += part; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        seen.push(body.model);
+        if (!restarted) {
+          firstArrived(); // Leave the request in flight so its checkpoint is durable.
+          return;
+        }
+        const frame = (delta, finish) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(frame({ role: "assistant", tool_calls: [{ index: 0, id: "sleep-recovered", type: "function", function: { name: "sleep", arguments: "{}" } }] }, null));
+        res.end(`${frame({}, "tool_calls")}data: [DONE]\n\n`);
+        secondArrived();
+      });
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+  const start = () => {
+    const child = spawn(process.execPath, ["bin/carto.mjs", "--headless", "--root", root], {
+      cwd: process.cwd(), env: { ...process.env, CARTO_HOME: home }, stdio: ["pipe", "ignore", "pipe"],
+    });
+    let errors = "";
+    child.stderr.on("data", (part) => { errors += part; });
+    const exited = new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", (code, signal) => resolve({ code, signal, errors }));
+    });
+    return { child, exited };
+  };
+  let first;
+  let second;
+  try {
+    await saveGlobalConfig({ version: 1, model: "llama-swap/Swift", llamaSwapEndpoint: endpoint }, home);
+    first = start();
+    first.child.stdin.write("keep the same conversation\n");
+    await firstRequest;
+    first.child.kill("SIGKILL");
+    assert.equal((await first.exited).signal, "SIGKILL");
+
+    // Recreate the exact durable boundary after prepare committed its request
+    // checkpoint, before the scheduler reserved it. Do not modify any Brain
+    // records or the checkpoint's model, cutoff, settings, or conversation.
+    const context = join(root, ".brain", "context");
+    const stores = readdirSync(context).filter((file) => file.endsWith(".sqlite"));
+    assert.equal(stores.length, 1);
+    const db = new DatabaseSync(join(context, stores[0]));
+    try {
+      const row = db.prepare("SELECT id, record FROM live_tasks WHERE kind = ? AND status = 'running'").get(JSON.stringify("pi.generation"));
+      assert.ok(row, "generation checkpoint exists");
+      const record = JSON.parse(row.record);
+      assert.equal(record.state.checkpoint.phase, "request");
+      assert.deepEqual(record.state.checkpoint.model, { provider: "llama-swap", modelId: "Swift" });
+      record.state.status = "pending";
+      delete record.restarts;
+      db.prepare("UPDATE live_tasks SET status = 'pending', record = ? WHERE id = ?").run(JSON.stringify(record), row.id);
+    } finally {
+      db.close();
+    }
+    await saveGlobalConfig({ version: 1, model: "llama-swap/DaisyRose", llamaSwapEndpoint: endpoint }, home);
+    restarted = true;
+    second = start();
+    await secondRequest;
+    second.child.stdin.end();
+    const outcome = await second.exited;
+    assert.equal(outcome.code, 0, outcome.errors);
+    assert.deepEqual(seen, ["Swift", "DaisyRose"], "the resumed request must not send the stale checkpoint's model");
+    assert.deepEqual(readdirSync(context).filter((file) => file.endsWith(".sqlite")), stores, "the existing generation was preserved, not collapsed");
+  } finally {
+    first?.child.kill("SIGKILL");
+    second?.child.kill("SIGKILL");
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -94,6 +94,17 @@ export class AtlasView implements Component, Focusable {
     return this.getFilteredNodes()[this.selectedIndex]?.id;
   }
 
+  /** Full selected node, including links and attachments, without terminal styling. */
+  selectedText(): string | undefined {
+    const node = this.getFilteredNodes()[this.selectedIndex];
+    if (node === undefined) return undefined;
+    const handle = this.brain === undefined ? undefined : handleOf(this.brain.handles, "atlas", node.id);
+    const reference = (id: string) => this.brain?.handles.entries.find((entry) => entry.id === id)?.handle ?? "(gone)";
+    return [`${handle ?? "A?"} ${node.title}`, node.text, "", "Links:",
+      ...(node.links.length === 0 ? ["(none)"] : node.links.map(reference)), "", "Attachments:",
+      ...(node.attachments.length === 0 ? ["(none)"] : node.attachments.map((item) => item.kind === "file" ? item.path : reference(item.id)))].join("\n");
+  }
+
   private revealListRow(): void {
     const scroll = this.listScroll;
     if (scroll === undefined) return;

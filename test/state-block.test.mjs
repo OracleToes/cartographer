@@ -1,6 +1,6 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -74,6 +74,18 @@ test("the block carries the confirmed contents and the delimiters", () => {
   // The mode is stated in the block's own words (§6.1).
   assert.match(block, /^<carto-state>\n\[EDIT MODE\]\n/);
   assert.match(renderStateBlock(input({ mode: "read only" })), /^<carto-state>\n\[READ ONLY MODE\]\n/);
+});
+
+test("live items in the state block contain only their handles and types", () => {
+  const working = [
+    { handle: "X15", kind: "plainText", text: "a private preview" },
+    { handle: "X16", kind: "toolCall", text: '{"path":"physics.js"}' },
+    { handle: "R6", kind: "readResult", text: "the file contents" },
+  ];
+  const block = renderStateBlock(input({ working }));
+  assert.match(block, /live items:\n  X15 · plainText\n  X16 · toolCall\n  R6 · readResult\npins:/);
+  assert.doesNotMatch(block, /a private preview|physics\.js|the file contents/);
+  assert.doesNotMatch(renderStateBlock(input({ working: [] })), /live items:/);
 });
 
 test("empty pending, marks, and stale say none; missing provider report is explicit", () => {
@@ -167,9 +179,12 @@ test("state block includes compact mode-aware decision flow and conditional atte
   assert.match(editBlock, /\nflow:\n/);
   assert.match(editBlock, /use `read`, `edit`, `create`/);
   assert.match(editBlock, /`chat` OracleToes/);
+  assert.doesNotMatch(editBlock, /mark` resolved `chat`/i);
   assert.doesNotMatch(editBlock, /\nattention:\n/);
   assert.doesNotMatch(editBlock.slice(editBlock.indexOf("\nflow:\n")), /—/);
 
+  assert.match(editBlock, /file scope: strict/);
+  assert.match(renderStateBlock(input({ pathScope: "relaxed" })), /file scope: relaxed/);
   const roBlock = renderStateBlock(input({ mode: "read only" }));
   assert.match(roBlock, /Exploring in read only mode\?/);
   assert.doesNotMatch(roBlock, /Reading, editing, or creating files\?/);
@@ -180,10 +195,13 @@ test("state block includes compact mode-aware decision flow and conditional atte
 
 test("renderLiveStateBlock emits state-reactive attention cues and detects modified pinned files", async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-flow-"));
+  const outside = mkdtempSync(join(tmpdir(), "carto-flow-outside-"));
   try {
     const filePath = join(root, "dice.js");
     const snapPath = join(root, "snapshot.md");
     writeFileSync(filePath, "const x = 1;\n");
+    writeFileSync(join(outside, "external.md"), "external\n");
+    symlinkSync(join(outside, "external.md"), join(root, "linked.md"));
     writeFileSync(snapPath, "# frozen\n");
     // Ensure snapshot is older than the modified pinned file on disk.
     const past = new Date(Date.now() - 5_000);
@@ -201,7 +219,7 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
         createdAt: idx + 1,
         updatedAt: idx + 1,
       })),
-      files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }],
+      files: [{ path: "dice.js", pinned: "agent", createdAt: 1 }, { path: "linked.md", pinned: "user", createdAt: 1 }],
     };
     const session = {
       person: "OracleToes",
@@ -218,7 +236,11 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       work: newGenerationWork(),
       rebuiltAutomatically: false,
       toolWorkAtLastReport: 0,
-      toolWorkAtLastRequest: 0,
+      toolWorkAtLastRequest: 77,
+      liveEphemera: new Map([
+        ["X1", { id: "reasoning", kind: "reasoning", text: "unrepeated reasoning" }],
+        ["R1", { id: "read", kind: "readResult", text: "unrepeated result" }],
+      ]),
     };
 
     const messages = [
@@ -231,14 +253,18 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
       { root, brain: { read: async () => brain }, session, markdownPath: snapPath },
       messages,
     );
-    assert.match(block, /pinned copy in head is older than disk; collapse to refresh/);
+    assert.equal(session.toolWorkAtLastRequest, 77, "a UI preview must not alter the in-flight request accounting baseline");
+    assert.match(block, /live items:\n  X1 · reasoning\n  R1 · readResult\npins:/);
+    assert.doesNotMatch(block, /unrepeated reasoning|unrepeated result/);
+    assert.match(block, /linked\.md · pinned copy in head is older than disk; collapse to refresh/);
+    assert.doesNotMatch(block, /linked\.md · pinned file is missing/);
     assert.match(block, /\nattention:\n/);
     assert.match(block, /Last `bash` call touched files directly/);
     assert.match(block, /Pinned file\(s\) changed on disk since collapse/);
     assert.match(block, /Brain has 0 writes after 3 tool calls/);
     assert.match(block, /Atlas has only 1 node/);
     assert.match(block, /Ledger is empty/);
-    assert.match(block, /Head carries 8 Chat records/);
+    assert.doesNotMatch(block, /older Chat handles|Head carries 8 Chat records/);
 
     // Once the latest turn switches back to `edit`, the bash-file-op cue disappears.
     const recovered = await renderLiveStateBlock(
@@ -248,5 +274,6 @@ test("renderLiveStateBlock emits state-reactive attention cues and detects modif
     assert.doesNotMatch(recovered, /Last `bash` call touched files directly/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

@@ -101,10 +101,14 @@ export function advertisedCapacityOf(entry: unknown): { capacity: number; source
 }
 
 /** Best-effort read of llama.cpp's `/props` (`default_generation_settings.n_ctx`) when `/models` omits capacity. */
-async function fetchPropsCapacity(fetchImpl: FetchLike, base: string, signal?: AbortSignal): Promise<number | undefined> {
+async function fetchPropsCapacity(fetchImpl: FetchLike, base: string, modelId: string, signal?: AbortSignal): Promise<number | undefined> {
   try {
     const root = base.replace(/\/v1$/, "");
-    const response = await fetchImpl(`${root}/props`, signal === undefined ? undefined : { signal });
+    // A proxy can route /props to a model and may load it as a side effect.
+    // Name the selected model and forbid autoload: capacity discovery must
+    // never swap models, especially while another request is streaming.
+    const query = new URLSearchParams({ model: modelId, autoload: "false" });
+    const response = await fetchImpl(`${root}/props?${query}`, signal === undefined ? undefined : { signal });
     if (!response.ok) return undefined;
     const body: unknown = await response.json();
     if (typeof body !== "object" || body === null) return undefined;
@@ -234,7 +238,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
       // When no pin is set and /v1/models omits capacity for the active model,
       // check llama.cpp's passive /props endpoint as a best-effort fallback.
       if (baselineWindow === 0 && (target === undefined || target.contextWindow === 0)) {
-        const propsCapacity = await fetchPropsCapacity(fetchImpl, base, context.signal);
+        const propsCapacity = await fetchPropsCapacity(fetchImpl, base, activeId, context.signal);
         if (propsCapacity !== undefined) {
           const entry = catalogModel({ id: activeId, context_length: propsCapacity }, configured, endpoint);
           if (entry !== undefined) {

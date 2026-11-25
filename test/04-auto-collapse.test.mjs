@@ -6,7 +6,7 @@
  */
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -14,6 +14,9 @@ import test, { describe } from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
+import { LiveDoc } from "@earendil-works/pi-durable";
+import { Registry, stopCommand } from "../dist/ui/commands.js";
+import { RunActivity } from "../dist/ui/run-activity.js";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
@@ -21,7 +24,9 @@ import { runHeadless } from "../dist/runtime/headless.js";
 import {
   closeLiveSession,
   collapseLiveSession,
+  interruptRun,
   openLiveSession,
+  sessionTranscript,
   submitInput,
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
@@ -75,6 +80,45 @@ const userTexts = async (session) =>
   (await session.conversation.context(BACKGROUND_CONTEXT)).messages.filter((message) => message.role === "user").map(textOf).filter((text) => !text.includes("<carto-state>"));
 
 describe("automatic collapse", { concurrency: 4 }, () => {
+  test("Ctrl-X can stop an autonomously resumed post-collapse run", async () => {
+    const env = await fixture();
+    const { faux, models, factory, ref } = fauxFor();
+    faux.setResponses([
+      collapseCall(factory),
+      factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "post-collapse-bash" })], { stopReason: "toolUse" })),
+    ]);
+    const opts = options({ ...env, models, ref });
+    const first = await openLiveSession(opts);
+    let next;
+    try {
+      await ask(first, "collapse then work");
+      const verdict = first.reviewCollapseRequest();
+      assert.equal(verdict.kind, "collapse");
+      const outcome = await collapseLiveSession(first, opts, verdict.reason, {}, { automatic: true, trigger: verdict.trigger });
+      next = outcome.session;
+      assert.equal(outcome.resumed, true);
+      let live;
+      for (let i = 0; i < 200; i++) {
+        live = await next.harness.snapshot(LiveDoc, next.conversation.id, BACKGROUND_CONTEXT);
+        if (live?.run !== undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.ok(live?.run, "the new generation has a run without a UI submission");
+      const activity = new RunActivity();
+      activity.observeRun(true);
+      assert.equal(activity.running, true);
+      let stopped;
+      const registry = new Registry([stopCommand(() => { stopped = interruptRun(next); })]);
+      assert.equal(registry.dispatch("\x18"), true);
+      assert.equal(await stopped, true);
+      await waitForRunEnd(next);
+      assert.equal((await next.harness.snapshot(LiveDoc, next.conversation.id, BACKGROUND_CONTEXT))?.run, undefined);
+    } finally {
+      await closeLiveSession(next ?? first).catch(() => undefined);
+      await env.cleanup();
+    }
+  });
+
   test("the block warns at 75 percent of a known window and reports an unknown one honestly", async () => {
     for (const [contextWindow, expect] of [[1000, "warn"], [1_000_000, "fill"], [0, "unknown"]]) {
       const env = await fixture();
@@ -110,17 +154,19 @@ describe("automatic collapse", { concurrency: 4 }, () => {
       factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "did a step" }, { id: "chat-step" })], { stopReason: "toolUse" })),
       collapseCall(factory),
     ]);
-    const opts = options({ ...env, models, ref }, { collapseWarningPercent: 10 });
+    const opts = options({ ...env, models, ref }, { collapseWarningPercent: 10, treePageSize: 7 });
     const first = await openLiveSession(opts);
     let second;
     try {
       assert.equal(first.state.collapseWarningPercent, 10);
+      assert.equal(first.state.tree.limit, 7);
       await ask(first, "check the lower threshold");
       assert.match(blockOf(captured[0]).content, /context fill: ~\d+% · \[COLLAPSE NEEDED\]/, "warns at the configured 10% threshold, well below 75%");
       // After automatic collapse, the new generation starts above the configured 10% warning fill,
       // so even after doing a step, asking to collapse again is caught by the stall bound.
       second = (await carryOut(first, opts)).session;
       assert.equal(second.state.collapseWarningPercent, 10, "the configured threshold survives collapse");
+      assert.equal(second.state.tree.limit, 7, "the configured tree page size survives collapse");
       assert.equal(second.reviewCollapseRequest().kind, "stop");
     } finally {
       await closeLiveSession(second ?? first).catch(() => undefined);
@@ -296,6 +342,11 @@ describe("automatic collapse", { concurrency: 4 }, () => {
         (await userTexts(next)).filter((text) => /first|second/.test(text)),
         ["first, the one that failed", "second, queued while it failed"],
       );
+      const records = (await env.brain.read()).chat.filter((record) => record.author === "user");
+      const identities = (await sessionTranscript(next)).filter((entry) => entry.kind === "carto.user").map((entry) => entry.data.chatRecordId);
+      assert.deepEqual(identities, records.map((record) => record.id), "failed and queued inputs retain their original identities");
+      const sidecar = JSON.parse(readFileSync(next.markdownPath.replace(/\.md$/, ".json"), "utf8"));
+      assert.ok(records.every((record) => !sidecar.chat.includes(record.id)), "carried records are in the body, not duplicated in the head");
     } finally {
       await closeLiveSession(next ?? session).catch(() => undefined);
       await env.cleanup();

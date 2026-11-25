@@ -1,15 +1,16 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createModels } from "@earendil-works/pi-ai";
-import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf } from "../dist/domain/handles.js";
@@ -21,6 +22,7 @@ import {
   openLiveSession,
   restoreEphemeral,
   sessionTranscript,
+  setProjectModes,
   submitInput,
   togglePause,
   waitForRunEnd,
@@ -58,6 +60,29 @@ const flatten = (messages) => JSON.stringify(messages);
 // Every case owns its own temp project, Brain, harness and faux provider.
 // Running the independent cases concurrently avoids a long serial tail.
 test.describe("live session", { concurrency: 4 }, () => {
+test("a new generation reads existing file pins rather than reporting them unreadable", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { models, ref } = fauxSetup();
+  const outside = mkdtempSync(join(tmpdir(), "carto-pin-outside-"));
+  writeFileSync(join(root, "notes.md"), "a readable markdown pin\n");
+  writeFileSync(join(outside, "external.md"), "a readable external pin\n");
+  symlinkSync(join(outside, "external.md"), join(root, "external.md"));
+  await brain.apply({ kind: "file.pin", path: join(root, "notes.md"), pinned: "user" }, Date.now());
+  await brain.apply({ kind: "file.pin", path: join(root, "external.md"), pinned: "user" }, Date.now());
+  let session;
+  try {
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    const snapshot = readFileSync(session.markdownPath, "utf8");
+    assert.match(snapshot, /a readable markdown pin/);
+    assert.match(snapshot, /a readable external pin/);
+    assert.doesNotMatch(snapshot, /could not be read/);
+  } finally {
+    if (session) await closeLiveSession(session);
+    await cleanup();
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("the continuation loop: a text-only answer is continued with a marker, stripped on the next request", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
@@ -135,6 +160,71 @@ test("a turn records chat, reads, and writes Atlas with marker-free trailing sta
   }
 });
 
+test("the agent pins live ephemera by visible handles and carries them across collapse", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([
+      fauxThinking("a useful thought"), fauxText("a useful note"),
+      fauxToolCall("read", { path: "src/verify-me.ts" }, { id: "read-for-pin" }),
+      fauxToolCall("bash", { command: "printf shell-result" }, { id: "bash-for-pin" }),
+    ], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage(["U1", "X1", "X2", "X3", "R1", "S1"].map((handle) => fauxToolCall("pin", { handle, action: "pin" }, { id: `pin-${handle}` })), { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "sleep-after-pin" })], { stopReason: "toolUse" })),
+  ]);
+  const options = { root, brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  try {
+    const submission = await submitInput(session, "keep this line");
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    const block = blockOf(captured[1]).content;
+    for (const handle of ["U1", "X1", "X2", "X3", "R1", "S1"]) assert.ok(block.includes(`${handle} ·`), `${handle} appears in the state block`);
+    const pins = (await brain.read()).ephemera;
+    assert.deepEqual(pins.map((item) => item.kind).sort(), ["personMessage", "plainText", "readResult", "reasoning", "toolCall", "toolResult"]);
+    assert.ok(pins.every((item) => item.pinned === "agent"));
+    const reading = pins.find((item) => item.kind === "readResult");
+    assert.equal(reading.entity.path, "src/verify-me.ts");
+    const kept = pins.find((item) => item.kind === "reasoning");
+    await brain.apply({ kind: "ephemeral.pin", item: { ...kept, pinned: "user" } }, Date.now());
+    const pinTool = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    for (const action of ["pin", "unpin"]) {
+      await assert.rejects(pinTool.execute({ action, handle: "X1" }, { now: Date.now }, {}), /only OracleToes/i);
+    }
+    await pinTool.execute({ action: "unpin", handle: "X2" }, { now: Date.now }, {});
+    assert.ok(!(await brain.read()).ephemera.some((item) => item.kind === "plainText"));
+    await pinTool.execute({ action: "pin", handle: "X2" }, { now: Date.now }, {});
+    writeFileSync(join(root, "src", "verify-me.ts"), "updated file\n");
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    const outcome = await collapseLiveSession(session, options, "person collapse");
+    session = outcome.session;
+    const after = (await brain.read()).ephemera;
+    assert.equal(after.length, 6);
+    assert.equal(after.find((item) => item.id === reading.id).text, "updated file\n");
+    assert.equal(after.find((item) => item.id === kept.id).pinned, "user");
+    const archivedIds = new Set((await brain.readArchive()).items.map((item) => item.id));
+    assert.ok(after.every((item) => !archivedIds.has(item.id)));
+    assert.equal(session.state.headEphemera.size, 6);
+    assert.equal(session.state.headEphemeraCount, Math.max(...[...session.state.headEphemera.keys()].map((handle) => Number(handle.slice(1)))));
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "sleep-in-new-generation" })], { stopReason: "toolUse" })),
+    ]);
+    const next = await submitInput(session, "new body");
+    assert.equal((await next.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.ok([...session.state.headEphemera.keys()].every((handle) => !session.state.liveEphemera.has(handle)));
+    const [headHandle, headItem] = [...session.state.headEphemera].find(([, item]) => item.pinned === "agent");
+    const headPin = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    await headPin.execute({ action: "unpin", handle: headHandle }, { now: Date.now }, {});
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    const reopenedPin = createTools({ root, brain, session: session.state }).find((tool) => tool.name === "pin");
+    await reopenedPin.execute({ action: "pin", handle: headHandle }, { now: Date.now }, {});
+    assert.ok((await brain.read()).ephemera.some((item) => item.id === headItem.id));
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
 test("successive tree calls continue automatically with the freshly anchored state block", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const { faux, models, captured, factory, ref } = fauxSetup();
@@ -158,6 +248,30 @@ test("successive tree calls continue automatically with the freshly anchored sta
   }
 });
 
+test("configured tree pages reach the agent and the next page's handles read the right file", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  writeFileSync(join(root, "src", "a.ts"), "page payload\n");
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("tree", { offset: 1 }, { id: "page-next" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "F1" }, { id: "page-read" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "page-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, treePageSize: 1, person: "OracleToes" });
+  try {
+    await (await submitInput(session, "page through the tree")).wait(BACKGROUND_CONTEXT);
+    await waitForRunEnd(session);
+    assert.equal(captured.length, 3);
+    assert.match(blockOf(captured[0]).content, /next: tree offset 1/);
+    assert.doesNotMatch(blockOf(captured[0]).content, /a\.ts/);
+    assert.match(blockOf(captured[1]).content, /src\/.*\(context\)/);
+    assert.match(blockOf(captured[1]).content, /a\.ts.*F1/);
+    assert.match(flatten(captured[2]), /page payload/);
+    assert.equal(session.state.tree.limit, 1);
+    assert.equal(session.state.tree.offset, 1);
+  } finally { await closeLiveSession(session); await cleanup(); }
+});
+
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
   const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false } });
@@ -175,12 +289,97 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
   await assert.rejects(treeGit, /the tree does not show/);
   const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
-  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1\./);
+  assert.match(validTree.output[0].text, /^Anchored at .*, depth 1, offset 0\./);
   assert.doesNotMatch(validTree.output[0].text, /\n/);
   // §6.3: tree ends the turn, so the very next thing the agent reads is the
   // block with the tree it asked for — not the tree it had before.
   assert.equal(validTree.control?.terminate, true, "the tree call ends the turn");
   await cleanup();
+});
+
+test("project modes persist independently through reopening and collapse", async () => {
+  const a = await fixture({ inMemoryBrain: true });
+  const b = await fixture({ inMemoryBrain: true });
+  const { models, ref } = fauxSetup();
+  const options = { root: a.root, brain: a.brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  let other;
+  try {
+    assert.equal(session.state.readOnly, false);
+    assert.equal(session.state.pathScope, "strict");
+    setProjectModes(session, { readOnly: true });
+    setProjectModes(session, { pathScope: "relaxed" });
+    other = await openLiveSession({ ...options, root: b.root, brain: b.brain });
+    assert.equal(other.state.readOnly, false);
+    assert.equal(other.state.pathScope, "strict");
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    session = (await collapseLiveSession(session, options, "person collapse")).session;
+    assert.equal(session.state.readOnly, true);
+    assert.equal(session.state.pathScope, "relaxed");
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.equal(session.state.readOnly, true);
+    assert.equal(session.state.pathScope, "relaxed");
+    setProjectModes(session, { readOnly: false });
+    assert.equal(session.state.pathScope, "relaxed");
+    assert.deepEqual(JSON.parse(readFileSync(join(a.root, ".brain", "settings.json"), "utf8")), { version: 1, readOnly: false, pathScope: "relaxed" });
+    writeFileSync(join(a.root, ".brain", "settings.json"), "invalid");
+    assert.throws(() => setProjectModes(session, { readOnly: true }), /Invalid project settings/);
+    assert.equal(session.state.readOnly, false);
+  } finally {
+    await closeLiveSession(session);
+    if (other) await closeLiveSession(other);
+    await a.cleanup(); await b.cleanup();
+  }
+});
+
+test("a pinned external read refreshes on collapse in relaxed scope", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const outside = mkdtempSync(join(tmpdir(), "carto-read-pin-"));
+  const file = join(outside, "outside file.txt");
+  writeFileSync(file, "fresh external content\n");
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref, person: "OracleToes" };
+  let session = await openLiveSession(options);
+  try {
+    setProjectModes(session, { pathScope: "relaxed" });
+    await brain.apply({ kind: "ephemeral.pin", item: { id: "external-reading", text: "old", kind: "readResult", entity: { callId: "read-outside", tool: "read", path: `@${file}` }, createdAt: Date.now(), pinned: "user" } }, Date.now());
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    session = (await collapseLiveSession(session, options, "person collapse")).session;
+    assert.equal((await brain.read()).ephemera.find((item) => item.id === "external-reading").text, "fresh external content\n");
+    assert.equal(session.state.pathScope, "relaxed");
+  } finally { await closeLiveSession(session); await cleanup(); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("file scope guards normalized and symlinked paths while relaxed read/edit work outside", async () => {
+  const { root, brain, cleanup } = await fixture({ inMemoryBrain: true });
+  const outside = mkdtempSync(join(tmpdir(), "carto-outside-"));
+  const file = join(outside, "other file.txt");
+  writeFileSync(file, "before\n");
+  mkdirSync(join(outside, ".brain"));
+  writeFileSync(join(outside, ".brain", "secret"), "secret");
+  symlinkSync(file, join(root, "external-link"));
+  symlinkSync(join(root, ".brain"), join(root, "brain-link"));
+  symlinkSync(join(outside, "missing"), join(root, "dangling"));
+  const state = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false, pathScope: "strict" };
+  const byName = Object.fromEntries(createTools({ root, brain, session: state }).map((tool) => [tool.name, tool]));
+  const api = { callId: "scope-test", now: Date.now, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  const edit = (path) => byName.edit.execute({ path, edits: [{ oldText: "before", newText: "after" }] }, api, {});
+  const read = (path) => byName.read.execute({ path }, api, {});
+  try {
+    for (const path of [file, `@${file}`, pathToFileURL(file).href, "external-link"]) await assert.rejects(read(path), /outside the project root/);
+    await assert.rejects(edit("external-link"), /outside the project root/);
+    await assert.rejects(byName.create.execute({ path: "dangling", content: "no" }, api, {}), /unresolved symlink/);
+    state.pathScope = "relaxed";
+    assert.match(JSON.stringify(await read(`@${file.replace(" ", "\u00a0")}`)), /before/);
+    await edit(pathToFileURL(file).href);
+    assert.equal(readFileSync(file, "utf8"), "after\n");
+    for (const path of ["brain-link/brain.sqlite", join(outside, ".brain", "secret"), `@${join(root, ".brain", "brain.sqlite")}`]) await assert.rejects(read(path), /\.brain/);
+    await assert.rejects(byName.create.execute({ path: join(outside, "new"), content: "no" }, api, {}), /outside the project root/);
+    state.readOnly = true;
+    await assert.rejects(byName.edit.execute({ path: file, edits: [{ oldText: "after", newText: "no" }] }, api, {}), /read only mode/);
+    assert.match(JSON.stringify(await read(file)), /after/);
+  } finally { await cleanup(); rmSync(outside, { recursive: true, force: true }); }
 });
 
 test("the file tools are the package's: read takes offset and limit", async () => {

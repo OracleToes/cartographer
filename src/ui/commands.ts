@@ -38,6 +38,28 @@ export interface Command {
   run(): void;
 }
 
+/** Stop must remain dispatchable even before an autonomous run's watch arrives. */
+export function stopCommand(run: () => void): Command {
+  return { id: "stop", group: "the run", label: "stop the run", key: "ctrl+x", run, available: () => true };
+}
+
+/** The documented copy slash commands are local actions, not messages to the agent. */
+export function copySlashCommand(message: string): "transcript" | "session" | undefined {
+  if (message === "/copy") return "transcript";
+  if (message === "/copy-session") return "session";
+  return undefined;
+}
+
+/** Copy a semantic selection, leaving text entry and empty views to their own keys. */
+export function copySelectionCommand(selection: () => string | undefined, copy: (text: string) => void): Command {
+  return {
+    id: "copy-selection", group: "the record", label: "copy selected item",
+    hint: "full selected item, even when folded; tree copies its path", key: "y",
+    available: () => selection() !== undefined,
+    run: () => { const text = selection(); if (text !== undefined) copy(text); },
+  };
+}
+
 /**
  * Every key a command claims. `matchesKey` is the only matcher used, so the
  * footer, `f1` and the input router cannot disagree about what a key is.

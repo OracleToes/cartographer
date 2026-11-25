@@ -1,5 +1,7 @@
 /** Per-session observations from llama.cpp's OpenAI-compatible stream. */
 export interface ModelTelemetry {
+  /** A model request is in progress, including both prefill and decoding. */
+  requestActive?: boolean | undefined;
   prefillActive?: boolean | undefined;
   prefillTotal?: number | undefined;
   prefilledTokens?: number | undefined;
@@ -54,6 +56,7 @@ export function createModelTelemetry(state: ModelTelemetry) {
       const id = ++current;
       prevComputed = 0;
       prevTimeMs = 0;
+      state.requestActive = true;
       state.prefillActive = true;
       state.prefillTotal = undefined;
       state.prefilledTokens = undefined;
@@ -108,6 +111,7 @@ export function createModelTelemetry(state: ModelTelemetry) {
     },
     end(id: number, failed: boolean) {
       if (id !== current) return;
+      state.requestActive = false;
       state.prefillActive = false;
       state.serverLost = failed;
       state.onTelemetry?.();

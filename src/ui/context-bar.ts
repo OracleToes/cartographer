@@ -1,23 +1,21 @@
 /**
- * The context bar (§8): one row, always visible, spanning the whole bottom.
+ * The context bar (§8): a full-width track and a separate status row, always visible.
  *
  * Its width is the server's own capacity — the total llama.cpp reports for its
  * `-c` setting — and filling it is a picture of the context, not a gauge against
  * a budget. It reports three quantities, each in its own colour:
  *
- * - **fill**, solid, in three parts: the stable system and tool prefix, the
- *   transcript, and tool work;
- * - **prefilled** and **to prefill**, during a prompt read, so the slow half of a
- *   long context is visible as it is paid for.
+ * - **fill**, occupied context in one colour;
+ * - **prefilled** and **to prefill**, during a prompt read, each in its own
+ *   colour over only the uncached tail. The cached prefix keeps the fill colour.
  *
- * All three figures come from llama.cpp, never from a provider's headers. Before
- * the first measured request the bar says so in its own glyph and colour rather
- * than inventing a number; when a server that was reporting goes quiet the last
- * values stay, greyed, so the person can still see where the context stood.
+ * Occupancy uses reported usage when available and estimates otherwise. The
+ * progress comes from llama.cpp, never from a provider's headers. When a server
+ * that was reporting goes quiet the last values stay, greyed.
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { chromeLine, partTokens, rawPalette, tokens } from "./tokens.js";
+import { barTokens, chromeLine, rawPalette, tokens } from "./tokens.js";
 
 /** What the bar knows. The app mutates it in place and rebinds `session` at collapse. */
 export interface ContextBarState {
@@ -30,7 +28,11 @@ export interface ContextBarState {
       lastReportedOutput?: number | undefined;
       /** Estimated tool-work tokens as of the last response; the bar adds only what came after. */
       toolWorkAtLastReport?: number | undefined;
-      /** True while a request is being sent and no response has come back yet: llama.cpp is reading the prompt. */
+      /** True while a model request is prefilling or generating. */
+      requestActive?: boolean | undefined;
+      /** A held stream is not making progress. */
+      paused?: boolean | undefined;
+      /** True while llama.cpp is reading the prompt. */
       prefillActive?: boolean | undefined;
       /** Tokens of the current prompt already read, when the server is reporting progress. */
       prefilledTokens?: number | undefined;
@@ -66,9 +68,9 @@ const formatPrefill = (
   total: number | undefined,
   cached: number | undefined,
   rate: number | undefined,
-): { full: string; compact: string } => {
+): { full: string; compact: string; eta: string } => {
   if (processed === undefined || total === undefined) {
-    return { full: " · prefill ?", compact: " · prefill ?" };
+    return { full: " · prefill ?", compact: " · prefill ?", eta: "" };
   }
   const compact = ` · prefill ${thousands(processed)}/${thousands(total)}`;
   const cache = Math.min(cached ?? 0, total);
@@ -77,7 +79,7 @@ const formatPrefill = (
   const pct = uncachedTotal > 0 ? Math.round(clamp01(computed / uncachedTotal) * 100) : 100;
   const remaining = Math.max(0, total - processed);
   const eta = rate !== undefined && rate > 0 && remaining > 0 ? ` ${formatEta(remaining / rate)}` : "";
-  return { full: `${compact} ${pct}%${eta}`, compact };
+  return { full: `${compact} ${pct}%${eta}`, compact, eta };
 };
 
 /** Half-block cells: a bar that reads as a continuous surface rather than a row of boxes. */
@@ -104,6 +106,8 @@ export class TokenBarView implements Component {
     const { contextWindow, lastReportedInput, lastReportedOutput, toolWorkAtLastReport,
       prefillTotal, prefilledTokens, prefillCached, prefillRate, decodeRate } = this.state.session.state;
     const prefillActive = this.state.session.state.prefillActive === true;
+    const requestActive = this.state.session.state.requestActive === true;
+    const paused = this.state.session.state.paused === true;
     const serverLost = this.state.session.state.serverLost === true;
     const { system, transcript, toolWork } = this.state.parts;
     const unknown = contextWindow <= 0;
@@ -123,77 +127,73 @@ export class TokenBarView implements Component {
       Math.round(toolWork),
       measured ? "measured" : "estimated",
       prefillActive ? "prefill" : "",
+      requestActive ? "active" : "", paused ? "paused" : "",
       prefillTotal ?? "?", prefilledTokens ?? "?", prefillCached ?? "?",
       prefillRate ?? "?", decodeRate ?? "?",
       serverLost ? "lost" : "",
     ].join("|");
     if (this.cacheWidth === width && this.cacheKey === key) return this.cacheLines;
 
-    // The figure on the right; the bar takes everything else it can have.
+    // Status has its own row; it never takes columns from the track.
     const shown = unknown ? `${thousands(used)} · window unknown` : `${thousands(used)} / ${thousands(contextWindow)}`;
     const qualifier = measured && toolWorkSince === 0 ? "" : "~";
     const rate = (value: number | undefined) => value === undefined ? "—" : value.toFixed(1);
     const prefillText = prefillActive
       ? formatPrefill(prefilledTokens, prefillTotal, prefillCached, prefillRate)
-      : { full: "", compact: "" };
+      : { full: "", compact: "", eta: "" };
     const rates = ` · P ${rate(prefillRate)} D ${rate(decodeRate)} tok/s`;
     const base = `${qualifier}${shown}`;
-    // Keep some bar on narrow terminals; show progress before speed if both
-    // will not fit. A missing value is shown as unknown, never zero progress.
-    const label = width >= visibleWidth(base + prefillText.full + rates) + 8 ? base + prefillText.full + rates
-      : width >= visibleWidth(base + prefillText.compact + rates) + 8 ? base + prefillText.compact + rates
-      : width >= visibleWidth(base + prefillText.full) + 8 ? base + prefillText.full
-      : width >= visibleWidth(base + prefillText.compact) + 8 ? base + prefillText.compact
+    // Prefer complete status, then shorter progress on narrow terminals. The
+    // separate track always has the full width, regardless of status length.
+    const labelWidth = Math.max(0, width);
+    const label = visibleWidth(base + prefillText.full + rates) <= labelWidth ? base + prefillText.full + rates
+      : visibleWidth(base + prefillText.full) <= labelWidth ? base + prefillText.full
+      : visibleWidth(base + prefillText.compact + rates) <= labelWidth ? base + prefillText.compact + rates
+      : visibleWidth(base + prefillText.compact) <= labelWidth ? base + prefillText.compact
       : base;
-    const barWidth = Math.max(0, width - visibleWidth(label) - 1);
+    const barWidth = Math.max(0, width);
     const ratio = unknown ? 0 : clamp01(used / window);
     const filled = Math.round(ratio * barWidth);
 
-    // Three parts of the fill, in the parts' own hues, cumulative-rounded so they add up.
-    const shares: Array<[number, (text: string) => string]> = estimate > 0
-      ? [
-          [Math.max(0, system) / estimate, partTokens.system],
-          [Math.max(0, transcript) / estimate, partTokens.transcript],
-          [Math.max(0, toolWork) / estimate, partTokens.toolWork],
-        ]
-      : [[1, partTokens.toolWork]];
-
     const track = serverLost ? tokens.faint(TRACK) : tokens.rule(TRACK);
     const cells: string[] = new Array(barWidth).fill(track);
-    // Always draw the last known occupied context first, even while a new
-    // prompt is being read. Prefill is an overlay, not a replacement for fill.
-    let cursor = 0;
-    let cumulative = 0;
-    for (const [share, tint] of shares) {
-      cumulative += share * filled;
-      const end = Math.min(barWidth, Math.round(cumulative));
-      for (let cell = cursor; cell < end; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : tint(FULL);
-      cursor = end;
-    }
-    for (let cell = cursor; cell < filled; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.toolWork(FULL);
+    // One colour for occupied context, regardless of its contents. A live
+    // prompt overlays only its uncached tail; the rest stays as it was.
+    for (let cell = 0; cell < filled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.fill)(FULL);
     if (prefillActive && prefillTotal !== undefined && prefillTotal > 0 && prefilledTokens !== undefined) {
+      // Without a window, show progress against the prompt's own length.
       const denom = unknown ? prefillTotal : window;
       const scale = (n: number) => Math.min(barWidth, Math.max(0, Math.round(n / denom * barWidth)));
-      const cached = scale(prefillCached ?? 0);
-      const prefilled = scale(prefilledTokens);
+      const cached = scale(Math.min(prefillCached ?? 0, prefillTotal));
+      const prefilled = Math.max(cached, scale(Math.min(prefilledTokens, prefillTotal)));
       const total = scale(prefillTotal);
-      if (unknown) {
-        // When the server has not yet advertised a context window, scale the
-        // live prefill bar against the prompt being read so prefill is visible.
-        for (let cell = 0; cell < cached; cell += 1) cells[cell] = serverLost ? tokens.faint(FULL) : partTokens.system(FULL);
-        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = serverLost ? tokens.faint(PREFILL) : tokens.warn(PREFILL);
-        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = tokens.rule(PREFILL);
-      } else {
-        for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (cell < filled ? tokens.prefillOnFill : tokens.warn)(PREFILL);
-        for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (cell < filled ? tokens.prefillPendingOnFill : tokens.rule)(PREFILL);
-      }
+      // The reported cached prefix is already occupied, even when the previous
+      // usage is unavailable. It is never painted as prefill progress.
+      for (let cell = 0; cell < cached; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.fill)(FULL);
+      for (let cell = cached; cell < prefilled; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.prefilled)(PREFILL);
+      for (let cell = prefilled; cell < total; cell += 1) cells[cell] = (serverLost ? tokens.faint : barTokens.pending)(PREFILL);
     }
 
     const tint = serverLost ? tokens.faint : unknown ? tokens.muted : measured ? tokens.muted : tokens.faint;
-    const right = tint(label);
-    const gap = Math.max(1, width - barWidth - visibleWidth(right));
-    const line = chromeLine(truncateToWidth(`${cells.join("")}${" ".repeat(gap)}${right}`, width, ""), width);
-    this.cacheLines = [line];
+    // Only the current phase's figures are live. Keep stale figures and a lost
+    // server quiet, and don't suggest progress while a stream is held paused.
+    const active = requestActive && !paused && !serverLost;
+    const prefillTint = active && prefillActive ? tokens.warn : tint;
+    const decodeTint = active && !prefillActive ? tokens.accent : tint;
+    const hasRates = label.endsWith(rates);
+    const progress = label.slice(base.length, hasRates ? -rates.length : undefined);
+    const eta = prefillText.eta && progress.endsWith(prefillText.eta) ? prefillText.eta : "";
+    const right = tint(base)
+      + tint(eta ? progress.slice(0, -eta.length) : progress)
+      + (eta ? prefillTint(eta) : "")
+      + (hasRates
+        ? tint(" · ") + prefillTint(`P ${rate(prefillRate)}`) + tint(" ")
+          + decodeTint(`D ${rate(decodeRate)}`) + tint(" tok/s")
+        : "");
+    const gap = Math.max(0, width - visibleWidth(right));
+    const status = chromeLine(truncateToWidth(`${" ".repeat(gap)}${right}`, width, ""), width);
+    const trackLine = chromeLine(cells.join(""), width);
+    this.cacheLines = [status, trackLine];
     this.cacheWidth = width;
     this.cacheKey = key;
     return this.cacheLines;

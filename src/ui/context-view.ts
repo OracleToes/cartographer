@@ -43,7 +43,7 @@ import {
 
 import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import { handleOf } from "../domain/handles.js";
-import type { CartoBrain, ChatRecord, Mark } from "../domain/records.js";
+import type { CartoBrain, ChatRecord, Mark, PinnedEphemeral } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { canvasLine, padLine, surfaceLine, tokens } from "./tokens.js";
 import type { PromptHandles } from "./prompt-handles.js";
@@ -58,6 +58,8 @@ export interface ContextDialogueMessage {
   id: string | number;
   /** Generation-scoped sweep identity for a live person message. */
   targetId?: string | undefined;
+  /** Exact Chat identity, or null when the live entry cannot be safely matched. */
+  recordId?: string | null | undefined;
   /**
    * The context entry this message is, and where it sits in the body. A message
    * id can be a composite (`"7-0"` for a chat call's part), so the order comes
@@ -101,6 +103,8 @@ export interface ContextViewData {
   systemPrompt: string;
   /** The frozen projection's exact bytes — the carto-context section the model reads. */
   projectionText?: string | undefined;
+  /** Frozen head identities, including items unpinned since the freeze. */
+  headEphemera?: ReadonlyMap<string, PinnedEphemeral> | undefined;
   tools: ContextToolItem[];
   transcriptMessages: ContextDialogueMessage[];
   toolWorkItems: ContextWorkItem[];
@@ -131,7 +135,7 @@ export type MarkTarget = {
   id: string | number;
 };
 
-type NodeKind =
+export type NodeKind =
   | "system"
   | "tool"
   | "atlas"
@@ -178,7 +182,7 @@ export interface PromptSection {
   nodes: PromptNode[];
 }
 
-const KIND_INK: Record<NodeKind, (text: string) => string> = {
+export const contextKindInk: Record<NodeKind, (text: string) => string> = {
   system: tokens.muted,
   tool: tokens.tool,
   atlas: tokens.atlas,
@@ -206,7 +210,7 @@ const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 const formatTokenCost = (count: number): string => `~${count.toLocaleString("en-US")} tok`;
 
 /** One entry of the frozen head, as the bytes the model reads. */
-interface FrozenEntry {
+export interface FrozenEntry {
   /** `A3`, `L1`, `C2`, `X1` for a record; the path for a pinned file. */
   key: string;
   kind: "atlas" | "ledger" | "chat" | "ephemera" | "files";
@@ -221,7 +225,7 @@ interface FrozenEntry {
  * are found by their handle; a pinned file by its header line, since every line
  * of a file's text is indented and only its header is not.
  */
-function parseProjection(text: string): FrozenEntry[] {
+export function parseProjection(text: string): FrozenEntry[] {
   const entries: FrozenEntry[] = [];
   let region: FrozenEntry["kind"] | undefined;
   let current: FrozenEntry | undefined;
@@ -345,6 +349,11 @@ export class ContextView implements Component, Focusable {
     this.cursor = held >= 0 ? held : this.firstEntry();
   }
 
+  /** The ordered prompt used by both the full view and the sidebar map. */
+  promptSections(): readonly PromptSection[] {
+    return this.sections;
+  }
+
   /** Estimated size of everything the model reads, for the header. */
   private totalTokens(): number {
     if (this.data === undefined) return 0;
@@ -417,6 +426,13 @@ export class ContextView implements Component, Focusable {
 
     type Located = { id: string; mark?: Mark | undefined; label?: string; pinned?: "user" | "agent" | undefined } | undefined;
     const locate = (kind: "atlas" | "ledger" | "chat" | "ephemera", handle: string): Located => {
+      if (kind === "ephemera") {
+        const frozen = data.headEphemera?.get(handle);
+        if (frozen !== undefined) {
+          const held = data.brain.ephemera.find((candidate) => candidate.id === frozen.id);
+          return { id: frozen.id, label: frozen.kind, pinned: held?.pinned };
+        }
+      }
       const id = handles.entries.find((entry) => entry.kind === kind && entry.handle === handle)?.id;
       if (id === undefined) return undefined;
       if (kind === "atlas") return data.brain.atlas.find((node) => node.id === id) === undefined ? undefined : { id, mark: data.brain.atlas.find((node) => node.id === id)?.mark };
@@ -463,7 +479,8 @@ export class ContextView implements Component, Focusable {
       const handle = handleOf(handles, "chat", chat.id);
       if (chat.author !== "user" || (handle !== undefined && frozenKeys.has(handle))) continue;
       // The live line it was recorded as, matched in the order said.
-      const line = liveSaid.findIndex((message, at) => message.text === chat.text && !recordOfLine.has(at));
+      const line = liveSaid.findIndex((message, at) => !recordOfLine.has(at) &&
+        (message.recordId === chat.id || (message.recordId === undefined && message.text === chat.text)));
       if (line !== -1) recordOfLine.set(line, chat);
     }
     // Pinned files come before pinned ephemera in the head (§5.1). The head
@@ -679,6 +696,12 @@ export class ContextView implements Component, Focusable {
     if (nodes.length === 0) return;
     const anyOpen = nodes.some((node) => this.isOpen(node));
     for (const node of nodes) this.folded.set(node.id, !anyOpen);
+  }
+
+  /** Full selected entry in the current human/model display mode, even when folded. */
+  selectedText(): string | undefined {
+    const node = this.selectedNode();
+    return node === undefined ? undefined : this.showReal && node.real !== undefined ? node.real : node.body;
   }
 
   /** Pin or unpin the row under the cursor, the same act `p` performs. The palette calls this. */
@@ -927,7 +950,7 @@ export class ContextView implements Component, Focusable {
     const who = this.data?.person ?? "you";
     const open = this.isOpen(node);
     const confirmed = node.target !== undefined && this.archiveConfirmation === `${node.target.part}:${String(node.target.id)}`;
-    const ink = confirmed ? tokens.danger : KIND_INK[node.kind];
+    const ink = confirmed ? tokens.danger : contextKindInk[node.kind];
     const cursor = selected ? (confirmed ? tokens.danger("▌") : tokens.accent("▌")) : " ";
     const glyph = open ? "▾" : "▸";
     const handle = ink(node.handle.padEnd(3));

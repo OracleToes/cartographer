@@ -1,3 +1,4 @@
+import { personChatBindings, userText } from "../domain/chat-identity.js";
 /**
  * The workspace (§8).
  *
@@ -24,6 +25,8 @@
  */
 import { readFile } from "node:fs/promises";
 import { snapshotPaths } from "../runtime/projection-files.js";
+import { WIPE_REQUESTED } from "../runtime/paths.js";
+import { assertPinnableFile } from "../runtime/workspace.js";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
 import { basename, relative, resolve } from "node:path";
@@ -46,6 +49,7 @@ import {
   collapseLiveSession,
   interruptRun,
   openLiveSession,
+  setProjectModes,
   resumeSession,
   sessionTranscript,
   submitInput,
@@ -79,17 +83,18 @@ import type { BrainStore } from "../runtime/brain-store.js";
 import { handleOf } from "../domain/handles.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type Layer, type SendMode, type ViewMode } from "./chrome.js";
-import { Registry, type Command } from "./commands.js";
+import { Registry, copySelectionCommand, copySlashCommand, stopCommand, type Command } from "./commands.js";
+import { RunActivity } from "./run-activity.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
-import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
+import { copyWithFallback, createSelectionCopier, describeFallback } from "./clipboard.js";
 import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { ModelPicker } from "./model-picker.js";
-import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
+import { Palette, WipeConfirmation, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, isCard, retainAfterCollapse, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, isCard, orderTranscript, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { JobsView } from "./jobs-view.js";
@@ -98,13 +103,16 @@ import { ArchiveView } from "./archive-view.js";
 import { TreeView } from "./tree-view.js";
 import { rawPalette, surfaceLine, tokens } from "./tokens.js";
 import { Column, Fill, Inset, margin, PaneScrollView, Row, type Viewport } from "./frame.js";
-import { promptHandles, type PromptHandles, type PromptItem } from "./prompt-handles.js";
+import { promptHandles, promptItemsOf, toolRowHandle, type PromptHandles, type PromptItem } from "./prompt-handles.js";
+import { enablePromptPathCompletion } from "./prompt-completion.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
   /** When true, the provider catalog is re-discovered before boot and after every settled run (llama-swap advertises capacity once the model has loaded). */
   refreshCapacity?: boolean;
   /** Called after the person switches models in the UI so the host can persist or track the selection. */
   onModelChange?: (model: ModelRef) => Promise<void> | void;
+  /** Host notice shown when a wiped workspace reopens. */
+  startupNotice?: string;
 }
 
 interface PendingItem {
@@ -120,13 +128,11 @@ interface TuiState {
   view: ViewMode;
   /** The layer over the working area. `archive` is the person's, and only the person's (§3.3). */
   layer: Layer;
-  /** True while at least one submission is in flight; drives the header and the footer's live hint. */
-  running: boolean;
+  /** Submissions and observed Pi runs, including autonomous ones. */
+  activity: RunActivity;
+  readonly running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
   pending: PendingItem[];
-  /** Historical dialogue and still-pinned work, before the current generation. */
-  sealed: TranscriptEntry[];
-  inFlight: number;
   collapsing: boolean;
   /** Why the agent stopped collapsing by itself; shown in the transcript until the person speaks. */
   notes: string[];
@@ -154,7 +160,7 @@ function countSidebar(
   root: string,
   contextTokens: number = 0,
   archive?: { total: number; pinned: number },
-  tree?: { anchor: string; depth: number },
+  tree?: { anchor: string; depth: number; limit?: number; offset?: number },
   jobs?: { total: number; unread: number },
 ): SidebarCounts {
   const marks = liveStaleMarks(brainState, root);
@@ -173,7 +179,7 @@ function countSidebar(
   let treeDirs = 0;
   let treeFiles = 0;
   if (tree !== undefined) {
-    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState);
+    const projection = projectTreeView(root, tree.anchor, tree.depth, brainState, tree);
     const walk = (entry: TreeEntry, level: number): void => {
       if (level > projection.depth) return;
       for (const child of entry.children ?? []) {
@@ -204,6 +210,7 @@ function countSidebar(
 interface ContextEntryLike {
   id?: number;
   kind?: string;
+  data?: unknown;
   model?: unknown;
   partKeys?: readonly string[] | undefined;
 }
@@ -243,55 +250,6 @@ function prettyArgs(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-/**
- * The prompt's ephemeral items in prompt order (§5.4): a person's message, then
- * the agent's reasoning, text and tool calls as the model produced them. One
- * definition, used by the transcript's numbering and by the Context view's, so
- * a handle names the same item in both. A result is an item of its own — the
- * prefill carries it as its own message, and pinning it pins the result (§5.5).
- */
-function promptItemsOf(entries: readonly ContextEntryLike[]): PromptItem[] {
-  const items: PromptItem[] = [];
-  // Call id → tool name, so a result knows whether it is a shell result (`S`)
-  // or any other tool's (`R`) without a second pass.
-  const tools = new Map<string, string>();
-  for (const entry of entries) {
-    const message = messageOf(entry);
-    if (message === undefined || !Array.isArray(message.content)) continue;
-    for (const part of message.content as unknown[]) {
-      if (isRecord(part) && part.type === "toolCall" && typeof part.id === "string" && typeof part.name === "string") {
-        tools.set(part.id, part.name);
-      }
-    }
-  }
-  for (const entry of entries) {
-    const message = messageOf(entry);
-    if (message === undefined) continue;
-    const id = typeof entry.id === "number" ? entry.id : 0;
-    const role = typeof message.role === "string" ? message.role : "";
-    if (role === "user" && typeof message.content === "string") {
-      if (message.content.trim() === STATE_BLOCK_MARKER || message.content.trim().length === 0) continue;
-      items.push({ kind: "person", key: String(id) });
-    } else if (role === "assistant" && Array.isArray(message.content)) {
-      (message.content as unknown[]).forEach((part, partIndex) => {
-        if (!isRecord(part)) return;
-        if (part.type === "thinking") items.push({ kind: "reasoning", key: `${id}-${partIndex}` });
-        else if (part.type === "text") items.push({ kind: "text", key: `${id}-${partIndex}` });
-        else if (part.type === "toolCall" && typeof part.id === "string") {
-          items.push({ kind: "call", key: `${id}-${partIndex}` });
-        }
-      });
-    } else if (role === "toolResult") {
-      const callId = (message as Record<string, unknown>).toolCallId;
-      // The tool is on the call the result answers; the result's own message
-      // carries only the call's id.
-      const tool = tools.get(typeof callId === "string" ? callId : "");
-      items.push({ kind: "result", key: String(id), ...(tool === undefined ? {} : { tool }) });
-    }
-  }
-  return items;
 }
 
 /**
@@ -356,8 +314,8 @@ function liveCardsOf(live: LiveState | undefined, handles: PromptHandles): CardE
  * flight therefore takes the next handle rather than restarting at `X1`, which
  * is what the person sees in the two views at the same moment.
  */
-function generationHandles(live: LiveState | undefined, landed: readonly PromptItem[]): PromptHandles {
-  if (live === undefined) return promptHandles(landed);
+function generationHandles(live: LiveState | undefined, landed: readonly PromptItem[], headEphemera: number): PromptHandles {
+  if (live === undefined) return promptHandles(landed, headEphemera);
   const partial: PromptItem[] = [];
   const content = (live.generation?.message as { content?: unknown } | undefined)?.content;
   if (Array.isArray(content)) {
@@ -377,7 +335,7 @@ function generationHandles(live: LiveState | undefined, landed: readonly PromptI
     if (streamed.has(slot.callId)) continue;
     partial.push({ kind: "call", key: slot.callId });
   }
-  return promptHandles([...landed, ...partial]);
+  return promptHandles([...landed, ...partial], headEphemera);
 }
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
@@ -396,10 +354,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sendMode: "steer",
     view: "chat",
     layer: "context",
-    running: false,
+    activity: new RunActivity(),
+    get running() { return this.activity.running; },
     pending: [],
-    sealed: [],
-    inFlight: 0,
     collapsing: false,
     notes: [],
     collapseEpoch: 0,
@@ -450,7 +407,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
   bindTelemetry(state.session);
   const transcript = new TranscriptView({ project });
-  const sidebar = new Sidebar();
+  const sidebar = new Sidebar(() => Math.max(0, terminal.rows - 4
+    - (terminal.rows >= 20 ? 2 : 0) - (terminal.rows >= 26 ? 2 : 0)));
   const transcriptScroll = new PaneScrollView(transcript, { follow: "end", primary: true, overscroll: "chain" });
   /**
    * The prompt's frame: Posting puts the name of the thing at the top of it, so
@@ -477,6 +435,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const editorTheme = { borderColor: (line: string) => tokens.rule(line), selectList: selectTheme };
   const editor = new PromptEditor(tui, editorTheme, { paddingX: 2 });
+  enablePromptPathCompletion(editor, options.root);
 
   const atlasView = new AtlasView();
   const ledgerView = new LedgerView();
@@ -520,13 +479,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     else if (line >= top + viewport - 1) treeScroll.scrollTo(line - (viewport - 2));
   };
   const archiveScroll = new PaneScrollView(archiveView, { primary: false, overscroll: "contain" });
+  archiveView.onFocus = () => tui.setFocus(archiveView);
+  archiveView.onReveal = (line) => {
+    const height = archiveScroll.viewportHeight;
+    if (height <= 0) return;
+    const top = archiveScroll.scrollTop;
+    if (line < top + 1) archiveScroll.scrollTo(Math.max(0, line - 1));
+    else if (line >= top + height - 1) archiveScroll.scrollTo(Math.max(0, line - height + 2));
+  };
 
   sidebar.onSelect = (book) => void switchToView(book);
   sidebar.onToggleLayer = (layer) => void switchLayer(layer);
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
-    const archive = await brain.readArchive().catch(() => ({ items: [] as Array<{ pinned?: "user" | "agent" }> }));
+    const archive = await brain.readArchiveCounts().catch(() => ({ total: 0, pinned: 0 }));
     const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
     const jobSummaries = summarizeJobs(jobs);
     sidebar.setCounts(
@@ -534,10 +501,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         brainState,
         options.root,
         contextTokens,
-        {
-          total: archive.items.length,
-          pinned: archive.items.filter((item) => item.pinned !== undefined).length,
-        },
+        archive,
         // The same anchor and depth the `tree` tool last set: the sidebar counts
         // what the view shows, not a second tree of its own.
         state.session.state.tree,
@@ -558,7 +522,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // display; repeated keypresses do not create a pile of identical flashes.
   const pushStatus = createStatusNotifier((text, duration) => tui.flash(text, duration));
 
+  const frozenItemsOf = async (): Promise<ReadonlyMap<string, import("../domain/records.js").PinnedEphemeral>> => {
+    const sidecar = await readFile(snapshotPaths(options.root, state.session.generation).sidecar, "utf8")
+      .then((text) => JSON.parse(text) as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> })
+      .catch(() => ({} as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }));
+    return sidecar.ephemeralItems === undefined ? state.session.state.headEphemera ?? new Map() : new Map(sidecar.ephemeralItems.map(({ handle, item }) => [handle, item]));
+  };
+
   const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    const session = state.session;
     // The generation whose store these entries are in: an item's pin id is built
     // from it, so the pin names the item the sweep will name (§3.1).
     const generation = state.session.generation;
@@ -589,6 +561,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         .map(messageOf)
         .filter((message): message is MessageLike => message !== undefined) as unknown as BlockMessageLike[],
     );
+    const headIdsForContext = await readFile(snapshotPaths(options.root, generation).sidecar, "utf8")
+      .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? brainState.chat.map((record) => record.id))
+      .catch(() => brainState.chat.map((record) => record.id));
+    const personBindings = personChatBindings(entries, brainState.chat, new Set(headIdsForContext));
     const transcriptMessages: ContextDialogueMessage[] = [];
     const toolWorkItems: ContextWorkItem[] = [];
 
@@ -618,11 +594,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const id = entry.id ?? i;
       const ts = message.timestamp;
       if (role === "user") {
-        const textContent = typeof message.content === "string" ? message.content : undefined;
+        const textContent = userText(message.content);
         if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
           // The entry number is the order; the id may be composite for other
           // kinds, so the view is told where the body sits rather than guessing.
-          transcriptMessages.push({ id, targetId: ephemeralItemId(generation, id, "x0"), entry: i, order: -1, role, text: textContent, timestamp: ts });
+          transcriptMessages.push({ id, targetId: ephemeralItemId(generation, id, "x0"), entry: i, order: -1, role, text: textContent, timestamp: ts, recordId: personBindings.get(id) ?? null });
         }
       } else if (role === "assistant") {
         const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
@@ -689,7 +665,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     brainState = await brain.read();
     // Numbered by the same function the transcript uses, over the same entries,
     // so a handle means one thing in both views (§5.4).
-    const handles = promptHandles(promptItemsOf(entries));
+    const handles = promptHandles(promptItemsOf(entries, generation), state.session.state.headEphemeraCount ?? 0);
     // A pin the person placed before the collapse is a promise the item stays,
     // so the row says it is pinned rather than waiting to be pinned again.
     for (const item of toolWorkItems) {
@@ -697,14 +673,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (held === undefined) continue;
       item.pinned = held.pinned;
     }
+    const headEphemera = await frozenItemsOf();
+    if (session !== state.session || state.collapsing) return;
     contextView.setData({
       brain: brainState,
       systemPrompt: cartoInstructions(state.session.state.person),
       person: state.session.state.person,
-      // The frozen bytes the carto-context section renders; a missing file
-      // falls back to re-rendering the Brain, the same fallback pi itself
-      // uses — the view never fabricates a projection.
-      ...(projectionText === undefined ? {} : { projectionText }),
+      // Never replace a missing frozen snapshot with today's mutable Brain.
+      // Keep the last snapshot of this generation if one was read already.
+      projectionText: projectionText ?? (lastFrozen?.generation === generation ? lastFrozen.text : ""),
+      headEphemera,
       tools: allTools,
       transcriptMessages,
       toolWorkItems,
@@ -714,11 +692,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // handle the tree shows it under (§5.4) and not by a second count.
       treeHandles: Object.fromEntries(treeOf(brainState).handles),
     });
+    if (sidebar.setContextSections(contextView.promptSections())) tui.requestRender();
   };
 
   /** The tree the person is looking at, from the session's anchor and depth. */
   const treeOf = (brainState: Awaited<ReturnType<BrainStore["read"]>>) =>
-    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState);
+    projectTreeBlock(options.root, state.session.state.tree.anchor, state.session.state.tree.depth, brainState, state.session.state.tree);
 
   /** Focus follows the view: Posting's rule, and the reason the footer can be honest. */
   const focusCurrent = () => {
@@ -825,6 +804,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   });
   contextView.onBack = () => void switchToView("chat");
   treeView.onBack = () => void switchToView("chat");
+  treeView.onPage = (offset) => {
+    state.session.state.tree = { ...state.session.state.tree, offset };
+    void (async () => {
+      const fresh = await brain.read();
+      treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: fresh });
+      await syncContextView(fresh);
+      await refreshSidebar();
+      tui.requestRender();
+    })().catch((error: unknown) => pushStatus(`tree page failed: ${errorText(error)}`));
+  };
   contextView.onCollapse = () => void runCollapse("context surgery");
   // Keep the cursor on screen as it walks: the view knows which rendered lines
   // its row occupies, and the pane is the only thing that can scroll to them.
@@ -840,8 +829,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * and no handle that names an archived item: the agent does not know the
    * archive exists.
    */
+  // Serialize the person's actions, including the two presses of delete. A
+  // fast second press must not race the mark or an older refresh.
+  let archiveActionQueue: Promise<void> = Promise.resolve();
+  const queueArchiveAction = (action: () => Promise<void>) => {
+    archiveActionQueue = archiveActionQueue.then(action).catch((error: unknown) => {
+      pushStatus(`archive action failed: ${errorText(error)}`);
+      tui.requestRender();
+    });
+  };
   archiveView.onTogglePin = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const archive = await brain.readArchive();
       const item = archive.items.find((candidate) => candidate.id === id);
       if (item === undefined) return;
@@ -849,11 +847,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus(`${item.pinned === undefined ? "pinned" : "unpinned"} an archived item`);
       await refreshArchive();
       await refreshSidebar();
-    })();
+    });
   };
   /** Mark one archived item for restore, applied by the next collapse (§4.1). */
   archiveView.onRestore = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
       pushStatus(
         result.refused
@@ -862,7 +860,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
   /**
    * Apply an archive mark now (§4.1).
@@ -873,8 +871,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
    * status line says so rather than pretending the head was untouched.
    */
   archiveView.onApplyNow = (id, action) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       if (action === "delete") {
+        const marked = (await brain.readArchive()).items.find((item) => item.id === id);
+        if (marked?.mark?.action !== "delete" || marked.mark.author !== "user") {
+          pushStatus("delete was not marked; the item remains in the archive");
+          return;
+        }
         await brain.applyArchive({ kind: "drop", id });
         pushStatus("an archived item is deleted for good");
         await refreshArchive();
@@ -903,20 +906,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (state.view === "tree") treeView.setData({ root: options.root, anchor: state.session.state.tree, brain: await brain.read() });
       if (state.view === "context") await syncContextView(await brain.read());
       tui.requestRender();
-    })();
+    });
   };
   /** Withdraw the mark on an archived item: the item stays where it is (§4.1). */
   archiveView.onWithdrawMark = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: null, author: "user" });
       pushStatus(result.refused ? "that mark is the agent's, and it stays until the agent withdraws it" : "mark withdrawn");
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
   /** Mark one archived item for delete; the next collapse is what deletes it (§4.1). */
   archiveView.onDelete = (id) => {
-    void (async () => {
+    queueArchiveAction(async () => {
       const result = await brain.applyArchive({ kind: "mark", id, action: "delete", author: "user" });
       pushStatus(
         result.refused
@@ -925,7 +928,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       await refreshArchive();
       tui.requestRender();
-    })();
+    });
   };
 
   // Block selection in the transcript acts through the Context view's own
@@ -933,9 +936,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // a pin or a mark means the same thing here as on that view's row (§3.2, §4.1).
   // A card's id names an item in the live store until it is pinned and carried,
   // and then the Brain's copy.
-  const blockPart = async (part: "chat" | "tool-work", id: string): Promise<"chat" | "tool-work" | "ephemera"> =>
-    part === "chat" || !(await brain.read()).ephemera.some((item) => item.id === id) ? part : "ephemera";
-  const onBlock = (act: (part: "chat" | "tool-work" | "ephemera") => void, part: "chat" | "tool-work", id: string) =>
+  const blockPart = async (part: "chat" | "tool-work" | "ephemera", id: string): Promise<"chat" | "tool-work" | "ephemera"> =>
+    part !== "tool-work" || !(await brain.read()).ephemera.some((item) => item.id === id) ? part : "ephemera";
+  const onBlock = (act: (part: "chat" | "tool-work" | "ephemera") => void, part: "chat" | "tool-work" | "ephemera", id: string) =>
     void blockPart(part, id)
       .then(act)
       .catch((error: unknown) => {
@@ -1003,6 +1006,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const held = brainState.files.find((file) => resolve(options.root, file.path) === path);
       const shown = relative(options.root, path);
       if (held === undefined) {
+        assertPinnableFile(options.root, path);
         await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
         pushStatus(`pinned ${shown} (you): the head holds it, read again at every collapse`);
       } else {
@@ -1025,11 +1029,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const toggleEphemeralPin = async (brainState: Awaited<ReturnType<BrainStore["read"]>>, rowId: string) => {
     const held = brainState.ephemera.find((item) => item.id === rowId);
     if (held !== undefined) {
-      // Pinning again is how the person takes a pin over: an agent's pin
-      // becomes theirs, and their own unpins.
-      const next = held.pinned === "user" ? null : "user";
-      await brain.apply(next === null ? { kind: "ephemeral.unpin", id: held.id } : { kind: "ephemeral.pin", item: { ...held, pinned: "user" } }, Date.now());
-      pushStatus(next === null ? "unpinned an item in the live context" : "pinned an item in the live context");
+      // The person may remove either author's pin.
+      await brain.apply({ kind: "ephemeral.unpin", id: held.id }, Date.now());
+      pushStatus("unpinned an item in the live context");
       await refreshSidebar();
       if (state.view === "context") await syncContextView(await brain.read());
       tui.requestRender();
@@ -1039,25 +1041,22 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // context the way the Context view drew it and keep that text, because the
     // store it came from is about to be gone and pinning keeps the text, not a
     // live view of it (§5.5).
-    const drawn = contextView.nodeFor("tool-work", rowId);
-    if (drawn === undefined) return;
-    await brain.apply(
-      {
-        kind: "ephemeral.pin",
-        item: {
-          id: rowId,
-          text: drawn.body,
-          kind: drawn.kind === "reasoning" ? "reasoning" : drawn.kind === "call" ? "toolCall" : "toolResult",
-          createdAt: Date.now(),
-          pinned: "user",
-          // A pinned result that came from a `read` is a promise about that
-          // file: the collapse reads it again (§5.5), so the path has to ride
-          // with the pin. Without one the item is text, and stays text.
-          ...(drawn.payload === undefined ? {} : { entity: drawn.payload }),
-        },
-      },
-      Date.now(),
-    );
+    const frozen = [...(await frozenItemsOf()).values()].find((item) => item.id === rowId);
+    if (frozen !== undefined) {
+      await brain.apply({ kind: "ephemeral.pin", item: { ...frozen, pinned: "user" } }, Date.now());
+      pushStatus("pinned an item in the frozen head");
+      await refreshSidebar();
+      if (state.view === "context") await syncContextView(await brain.read());
+      tui.requestRender();
+      return;
+    }
+    const live = promptItemsOf(await sessionTranscript(state.session) as unknown as ContextEntryLike[], state.session.generation)
+      .find((candidate) => candidate.item?.id === rowId)?.item;
+    if (live === undefined) {
+      pushStatus("that item is no longer in the live context");
+      return;
+    }
+    await brain.apply({ kind: "ephemeral.pin", item: { ...live, pinned: "user" } }, Date.now());
     pushStatus("pinned an item in the live context");
     await refreshSidebar();
     if (state.view === "context") await syncContextView(await brain.read());
@@ -1081,6 +1080,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const path = String(itemId);
         const held = brainState.files.find((file) => file.path === path);
         if (held === undefined) {
+          try { assertPinnableFile(options.root, path); }
+          catch (error) {
+            pushStatus(`pin failed: ${errorText(error)}`);
+            tui.requestRender();
+            return;
+          }
           await brain.apply({ kind: "file.pin", path, pinned: "user" }, Date.now());
           pushStatus(`pinned ${path} (you): the head keeps it, read again at every collapse`);
         } else {
@@ -1147,18 +1152,28 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.requestRender();
       return;
     }
+    if (partId === "chat" || partId === "ledger" || partId === "atlas") {
+      pushStatus(`that ${partId} record is no longer in the Brain`);
+      tui.requestRender();
+      return;
+    }
     if (partId === "transcript" || partId === "tool-work" || partId === "ephemera") {
       const id = String(itemId);
       const held = brainState.ephemera.find((pin) => pin.id === id);
       if (partId === "ephemera") {
-        if (held === undefined) return;
+        const frozen = [...(await frozenItemsOf()).values()].find((item) => item.id === id);
+        const item = held ?? frozen;
+        if (item === undefined) {
+          pushStatus("that item is no longer in the frozen head");
+          return;
+        }
         if (action === "delete" && !now) {
           await brain.apply({ kind: "ephemeral.delete-mark", id, marked: true }, Date.now());
         } else {
           const session = state.session;
           const live = (await readGenerationEphemera(generationPaths(options.root, session.generation).store, session.generation)).find((candidate) => candidate.id === id);
           if (action === "archive") {
-            await brain.archiveEphemeral(live ?? { id, layer: "ephemeral", ephemeral: { kind: held.kind, text: held.text, ...(held.entity === undefined ? {} : { data: held.entity }) } }, session.generation, Date.now());
+            await brain.archiveEphemeral(live ?? { id, layer: "ephemeral", ephemeral: { kind: item.kind, text: item.text, ...(item.entity === undefined ? {} : { data: item.entity }) } }, session.generation, Date.now());
           }
           if (live !== undefined && !(await applyOmitNow(session, id))) {
             pushStatus("the live item could not be removed; its pin is unchanged");
@@ -1168,6 +1183,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           next = await brain.apply({ kind: "ephemeral.delete-mark", id, marked: false }, Date.now());
           rewriteHeadSnapshot(options.root, session.generation, next, session.state.person, Date.now());
         }
+        await rebuildTranscript();
         await syncContextView(await brain.read());
         await refreshSidebar();
         tui.requestRender();
@@ -1261,6 +1277,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const brainState = await brain.read();
       if (partId === "transcript" || partId === "tool-work" || partId === "ephemera") {
         await brain.apply({ kind: "ephemeral.delete-mark", id: String(itemId), marked: false }, Date.now());
+        await rebuildTranscript();
         await syncContextView(await brain.read());
         tui.requestRender();
         return;
@@ -1418,7 +1435,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { ...chrome(2), visible: margin.wide },
     { ...chrome(1), visible: margin.narrow },
   ]);
-  // The single-row bands take the same margin.
+  // The header and bottom bands take the same horizontal margin.
   const framed = (inner: Component) =>
     new Row([
       { ...chrome(2), visible: margin.wide },
@@ -1433,7 +1450,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     chrome(1, margin.gap),
     { component: panes, basis: 0, grow: 1, minSize: 6 },
     chrome(1, margin.gap),
-    { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 1 }])), basis: 2 },
+    { component: framed(new Column([{ component: footer, basis: 1 }, { component: tokenBar, basis: 2 }])), basis: 3 },
     chrome(1, margin.edge),
   ]);
 
@@ -1466,20 +1483,32 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.stop();
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
-    await stopAllJobs(jobs).catch(() => undefined);
-    await closeLiveSession(state.session);
-    resolveRun?.(code);
+    try {
+      if (code === WIPE_REQUESTED) {
+        // A queued admission/collapse must finish before closing its session.
+        await admission;
+        await interruptRun(state.session);
+        await contextActionQueue;
+        await transcriptRebuild?.catch(() => undefined);
+        await capacityRefreshFlight?.catch(() => undefined);
+      }
+      await stopAllJobs(jobs);
+      await closeLiveSession(state.session, code === WIPE_REQUESTED);
+      resolveRun?.(code);
+    } catch (error) {
+      process.stderr.write(`Carto could not close cleanly; no wipe was attempted: ${errorText(error)}\n`);
+      resolveRun?.(1);
+    }
   };
 
   /**
-   * Rebuild the landed view from the sources of truth: the context's entries
-   * (person lines land exactly where they were placed), the Brain's agent
-   * chat records, and the retained prefix from the last collapse. Cheap
-   * enough to run after every settle and on a 1.5s timer; it skips the
-   * re-render entirely when nothing moved.
+   * Rebuild from the frozen projection and current context entries, in prompt
+   * order. The Brain supplies marks and identities, not additional history.
+   * Re-renders are skipped when nothing moved.
    */
   const shownBookSig: { atlas: string; ledger: string } = { atlas: "", ledger: "" };
   let shownSidebarSig = "";
+  let lastFrozen: { generation: string; text: string } | undefined;
   const performTranscriptRebuild = async (): Promise<void> => {
     // The session is closed on the way out, and a rebuild in flight at that
     // moment reads a closed harness: there is nothing left to draw, and the
@@ -1488,15 +1517,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     try {
       const brainState = await brain.read();
       const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
-
-      // The context's entries are the frame: monotonic numeric ids, in the
-      // order the model sees them. Person lines key off their own entry.
-      const frame: Array<{ id: number; t: number }> = [];
-      for (const entry of entries) {
-        const id = typeof entry.id === "number" ? entry.id : 0;
-        const message = messageOf(entry);
-        frame.push({ id, t: message === undefined ? 0 : timestampOf(message) });
-      }
 
       const visibleMessages: BlockMessageLike[] = [];
       for (const entry of entries) {
@@ -1508,17 +1528,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
       const landedTexts: Array<{ text: string; t: number }> = [];
       const toolErrors = new Map<string, boolean>();
-      const toolOutputs = new Map<string, { text: string; resultId: string }>();
+      const toolOutputs = new Map<string, { text: string; resultId: string; entryKey: string; order: number }>();
       const assistantParts: Array<{ entryId: number; parts: unknown[]; partKeys?: readonly string[] | undefined; stopReason?: string }> = [];
       // One order, one numbering, both views (§5.4).
-      const promptItems = promptItemsOf(entries);
+      const promptItems = promptItemsOf(entries, state.session.generation);
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
         const message = messageOf(entry);
         if (message === undefined) continue;
         const role = typeof message.role === "string" ? message.role : "";
-        if (role === "user" && typeof message.content === "string") {
-          const text = message.content;
+        if (role === "user") {
+          const text = userText(message.content);
           if (text.trim() === STATE_BLOCK_MARKER || text.trim().length === 0) continue;
           const t = timestampOf(message);
           person.push({ key: id, entry: { kind: "person", text } });
@@ -1539,11 +1559,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             } else if (typeof message.content === "string") {
               out = message.content;
             }
-            toolOutputs.set(callId, { text: out, resultId: ephemeralItemId(state.session.generation, id, "r") });
+            toolOutputs.set(callId, { text: out, resultId: ephemeralItemId(state.session.generation, id, "r"), entryKey: String(id), order: id });
           }
         }
       }
-      const handles = promptHandles(promptItems);
+      const handles = promptHandles(promptItems, state.session.state.headEphemeraCount ?? 0);
       // Now that the items are numbered, each row takes its own: a person's
       // line is `U1`, a card is the `X` of the item it renders, and a result is
       // the `R` or `S` of the result it is.
@@ -1559,6 +1579,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // The working, as cards: reasoning, plain model text, and tool calls, in
       // the order the model produced them. Landed cards default folded.
       const cards: Array<{ key: number; entry: TranscriptEntry }> = [];
+      const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
       // The landed stop reason of each assistant turn — one quiet line per
       // turn, warn-toned when the turn was cut short (length) or failed.
       // Always present, so a truncated generation is glanceable.
@@ -1584,6 +1605,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             const callId = typeof part.id === "string" ? part.id : undefined;
             const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
+            if (part.name === "chat" && callId !== undefined && output !== undefined && toolErrors.get(callId) !== true && isRecord(part.arguments) && typeof part.arguments.text === "string") {
+              const record = brainState.chat.find((candidate) => candidate.id === `chat:${callId}`);
+              const chatHandle = record === undefined ? undefined : handleOf(brainState.handles, "chat", record.id);
+              agent.push({ key: key + 0.00001, entry: { kind: "agent", text: part.arguments.text, ...(record === undefined ? source : { recordId: record.id, mark: record.mark }), ...(chatHandle === undefined ? {} : { handle: chatHandle }) } });
+            }
             cards.push({
               key,
               entry: {
@@ -1593,101 +1619,57 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
                 args: formatToolArgs(part.arguments, part.name),
                 ...itemHandle,
                 ...source,
-                ...(output === undefined ? {} : { output: output.text, resultId: output.resultId }),
-                ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
               },
             });
+            if (output !== undefined) {
+              const handle = toolRowHandle(handles, `${entryId}-${partIndex}`, output.entryKey);
+              cards.push({
+                key: output.order,
+                entry: {
+                  kind: "tool", id: `result-${output.entryKey}`, name: part.name, args: "",
+                  output: output.text, resultId: output.resultId,
+                  ...(handle === undefined ? {} : { handle }),
+                  ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
+                },
+              });
+            }
           }
         });
       }
 
-      // A tool row is the call and its result together, so it wears the
-      // result's handle: that is the text the person quotes, and pinning it
-      // pins the text that came back (§5.5).
-      for (const item of cards) {
-        const card = item.entry;
-        if (!isCard(card) || card.kind !== "tool") continue;
-        const handle = handles.result(String(card.id).replace(/^ctx-/, ""));
-        if (handle !== undefined) card.handle ??= handle;
+      for (const { entry } of cards) {
+        if (!isCard(entry)) continue;
+        const id = entry.resultId ?? entry.sourceId;
+        if (id !== undefined && brainState.ephemeralDeletes?.includes(id)) entry.deleteMarked = true;
       }
 
-      // Agent Chat is the conversation, so every record is on screen: one
-      // written now, and one a collapse built the context with — those are in
-      // the archive once the store that held them is gone, which is why this
-      // asks the store and not the Brain alone. A record is placed by its
-      // timestamp, so Chat that came back at a collapse sits at the head of this
-      // generation, where the model reads it, and the earlier transcript stays
-      // under it.
-      const retained = retainAfterCollapse(state.sealed, brainState.ephemera);
-      // Once a carried item is unpinned or deleted it is no longer history:
-      // remove its content from the retained prefix, not just from the render.
-      state.sealed = retained;
-      const retainedChat = new Set(
-        retained.flatMap((entry) => (entry.kind === "agent" || entry.kind === "system") && entry.recordId !== undefined ? [entry.recordId] : []),
+      // The head is the frozen projection, not a retained transcript or the
+      // archive. Its sidecar supplies the record identities behind those bytes.
+      const sidecar = await readFile(snapshotPaths(options.root, state.session.generation).sidecar, "utf8")
+        .then((text) => JSON.parse(text) as { chat?: string[]; ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> })
+        .catch(() => ({} as { chat?: string[]; ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }));
+      const headChat = Array.isArray(sidecar.chat) ? sidecar.chat : [];
+      const headItems = sidecar.ephemeralItems === undefined
+        ? state.session.state.headEphemera ?? new Map()
+        : new Map(sidecar.ephemeralItems.map(({ handle, item }) => [handle, item]));
+      const projection = await readFile(state.session.markdownPath, "utf8").catch(() => undefined);
+      if (projection !== undefined) lastFrozen = { generation: state.session.generation, text: projection };
+      const head = frozenTranscript(
+        projection ?? (lastFrozen?.generation === state.session.generation ? lastFrozen.text : ""),
+        brainState, headChat, headItems, state.session.state.person,
       );
-      const chatRecords = await brain.readChat();
-      // The Chat the frozen head holds, in the head's order: it is drawn where
-      // the head is, before the generation's work, as the Context view lists it.
-      const headChat: string[] = await readFile(snapshotPaths(options.root, state.session.generation).sidecar, "utf8")
-        .then((text) => {
-          const sidecar = JSON.parse(text) as { chat?: unknown };
-          return Array.isArray(sidecar.chat) ? sidecar.chat.filter((id): id is string => typeof id === "string") : [];
-        })
-        .catch(() => []);
-      const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
-      // The person's own Chat is a record too (§2.3), and the transcript is a
-      // view of the same records the Context view lists, so none is missing
-      // from it. A person's line the context already shows live, the retained
-      // history already holds, or the queue still waits to land is that very
-      // record, and it is not drawn a second time; any other is history from
-      // before this screen opened, and it is drawn here, in order.
-      const shownPerson = new Map<string, number>();
-      const showing = (text: string): void => void shownPerson.set(text, (shownPerson.get(text) ?? 0) + 1);
-      for (const entry of retained) if (entry.kind === "person") showing(entry.text);
-      for (const item of person) if (item.entry.kind === "person") showing(item.entry.text);
-      for (const item of state.pending) showing(item.text);
-      // A shown line is its record, so the keys can act on it (pin, mark). The
-      // pairing is the one above, by text and in order: the first records of a
-      // text are the lines the history and the context already show.
-      const liveChat = new Map(brainState.chat.map((chat) => [chat.id, chat]));
-      const unclaimed = new Map<string, string[]>();
-      for (const record of chatRecords) {
-        if (record.author === "user") unclaimed.set(record.text, [...(unclaimed.get(record.text) ?? []), record.id]);
-      }
-      const recordFields = (id: string) => ({ recordId: id, mark: liveChat.get(id)?.mark });
-      const sealedPerson = new Map<TranscriptEntry, string>();
-      for (const entry of retained) {
-        if (entry.kind !== "person") continue;
-        const id = unclaimed.get(entry.text)?.shift();
-        if (id !== undefined) sealedPerson.set(entry, id);
-      }
+
+      // A live person line is its Chat record when one was recorded on submit.
+      // Head records are already represented above and cannot claim a body line.
+      const bindings = personChatBindings(entries, brainState.chat, new Set(Array.isArray(sidecar.chat) ? headChat : brainState.chat.map((record) => record.id)));
       for (const item of person) {
         if (item.entry.kind !== "person") continue;
-        const id = unclaimed.get(item.entry.text)?.shift();
-        if (id !== undefined) item.entry = { ...item.entry, ...recordFields(id) };
-      }
-      for (const record of chatRecords) {
-        if (record.author === "user") {
-          const left = shownPerson.get(record.text) ?? 0;
-          if (left > 0) {
-            shownPerson.set(record.text, left - 1);
-          } else {
-            agent.push({ key: chatKeyOf(record, headChat, frame), entry: { kind: "person", text: record.text, ...recordFields(record.id) } });
-          }
-          continue;
+        const id = bindings.get(item.key);
+        if (id === undefined) {
+          item.entry = { ...item.entry, sourceId: ephemeralItemId(state.session.generation, item.key, "x0") };
+        } else {
+          item.entry = { ...item.entry, recordId: id, mark: brainState.chat.find((record) => record.id === id)?.mark };
         }
-        if (retainedChat.has(record.id)) continue;
-        const chatHandle = handleOf(brainState.handles, "chat", record.id);
-        agent.push({
-          key: chatKeyOf(record, headChat, frame),
-          entry: {
-            kind: record.author === "system" ? "system" : "agent",
-            text: record.text,
-            recordId: record.id,
-            ...(chatHandle === undefined ? {} : { handle: chatHandle }),
-            mark: brainState.chat.find((chat) => chat.id === record.id)?.mark,
-          },
-        });
       }
 
       // Clear pending items whose placement we can now see: same text, an
@@ -1713,27 +1695,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const parts = splitContextMessages(blockMessages);
       barState.parts = { system: parts.systemTokens, transcript: parts.transcriptTokens, toolWork: parts.toolWorkTokens };
 
-      const recordsById = new Map(chatRecords.map((record) => [record.id, record]));
-      const sealed = retained.map((entry): TranscriptEntry => {
-        if (isCard(entry)) {
-          const pinned = entry.resultId !== undefined && brainState.ephemera.some((item) => item.id === entry.resultId)
-            ? entry.resultId : entry.sourceId;
-          const handle = pinned === undefined ? undefined : handleOf(brainState.handles, "ephemera", pinned);
-          return handle === undefined ? entry : { ...entry, handle };
-        }
-        if (entry.kind === "person") {
-          const id = sealedPerson.get(entry);
-          return id === undefined ? entry : { ...entry, ...recordFields(id) };
-        }
-        if (entry.kind !== "agent" || entry.recordId === undefined) return entry;
-        const record = recordsById.get(entry.recordId);
-        const handle = handleOf(brainState.handles, "chat", entry.recordId);
-        const { handle: _oldHandle, ...old } = entry;
-        return { ...old, ...(record === undefined ? {} : { text: record.text }), ...(handle === undefined ? {} : { handle }), mark: brainState.chat.find((chat) => chat.id === entry.recordId)?.mark };
-      });
       const sig = [
         state.session.generation,
-        JSON.stringify(sealed),
+        JSON.stringify(head),
         JSON.stringify(person),
         JSON.stringify(cards),
         JSON.stringify(stops),
@@ -1753,18 +1717,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           entry: { kind: "status", text, tone: "warn" } as TranscriptEntry,
         }));
         const live = [...person, ...cards, ...stops, ...agent, ...notes];
-        live.sort((left, right) => left.key - right.key);
         transcript.setEntries(
-          [...sealed, ...live.map((item) => item.entry)],
+          orderTranscript(head, live),
           state.pending.map((item) => ({ text: item.text, mode: item.mode })),
         );
         headerState.windowUnknown = state.session.state.contextWindow <= 0;
         tui.requestRender();
       }
 
-      if (state.view === "context" && state.layer === "context") {
-        await syncContextView(brainState);
-      }
+      // The sidebar map stays current on every view, using the exact same
+      // ordered nodes as the Context view rather than a second projection.
+      await syncContextView(brainState);
 
       // The books follow the Brain on this same drain: Chat streams, and the
       // agent writes Atlas and Ledger mid-run, so the open book and the
@@ -1811,11 +1774,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const session = state.session;
     const watch = await session.conversation.watch(BACKGROUND_CONTEXT).catch(() => undefined);
     if (watch === undefined) return;
-    if (session !== state.session) {
+    if (shutdownRequested || session !== state.session) {
       await watch.stop().catch(() => undefined);
       return;
     }
     state.liveWatch = watch;
+    const observeRun = (value: typeof watch.value) => {
+      if (session !== state.session) return;
+      const live = value.docs[LiveDoc.definition.kind] as LiveState | undefined;
+      state.activity.observeRun(live?.run !== undefined);
+      headerState.running = state.running;
+      tui.requestRender();
+    };
+    // The run may already be active before the new watch is acquired.
+    observeRun(watch.value);
     const entryStream = new ConversationTranscript((query, limit, ctx) =>
       session.conversation.entries(query, limit, undefined, ctx),
     );
@@ -1823,7 +1795,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     let cachedPromptItems: PromptItem[] | undefined;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value" || session !== state.session) return;
+      if (shutdownRequested || call.kind !== "value" || session !== state.session) return;
+      observeRun(call.value);
       const merged = entryStream.merge(call.value);
       const entriesChanged = merged.items !== lastItems;
       lastItems = merged.items;
@@ -1831,13 +1804,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         // Reload landed contributions only when committed entries change (including
         // apply-now edits), rather than re-reading SQLite on every streaming token.
         const landedEntries = (await sessionTranscript(session).catch(() => [])) as unknown as ContextEntryLike[];
-        cachedPromptItems = promptItemsOf(landedEntries);
+        cachedPromptItems = promptItemsOf(landedEntries, session.generation);
       }
+      if (shutdownRequested || session !== state.session) return;
       const live = (call.value.docs[LiveDoc.definition.kind] as LiveState | undefined) ?? LiveDoc.definition.initial();
       // The partial continues the prompt's numbering rather than starting a
       // second one: a card in flight is the next item after everything the
       // generation already holds, and it wears the handle of the item it is.
-      const cards = liveCardsOf(live, generationHandles(live, cachedPromptItems));
+      const cards = liveCardsOf(live, generationHandles(live, cachedPromptItems, session.state.headEphemeraCount ?? 0));
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
@@ -1900,7 +1874,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus(`${state.pending.length} queued message(s) dropped by the collapse`);
       state.pending = [];
     }
-    let oldTranscript: TranscriptEntry[] | undefined;
     transcript.setLive([]);
     await state.liveWatch?.stop().catch(() => undefined);
     state.liveWatch = undefined;
@@ -1916,7 +1889,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // start another rebuild while the session is being replaced.
       await rebuildTranscript(true);
       transcript.setLive([]);
-      oldTranscript = transcript.snapshot();
       const outcome = await collapseLiveSession(
         state.session,
         sessionOptions(),
@@ -1926,7 +1898,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       );
       state.collapseEpoch += 1;
       state.session = outcome.session;
-      state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
+      state.activity.observeRun(false);
+      headerState.running = state.running;
       headerState.session = outcome.session;
       barState.session = outcome.session;
       bindTelemetry(outcome.session);
@@ -1952,10 +1925,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       try {
         await closeLiveSession(state.session).catch(() => undefined);
         const recovered = await openLiveSession(sessionOptions());
-        if (recovered.generation !== previous && oldTranscript !== undefined) {
-          state.sealed = retainAfterCollapse(oldTranscript, (await brain.read()).ephemera);
-        }
         state.session = recovered;
+        state.activity.observeRun(false);
+        headerState.running = state.running;
         headerState.session = recovered;
         barState.session = recovered;
         bindTelemetry(recovered);
@@ -1968,8 +1940,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
     } finally {
       state.collapsing = false;
-      state.inFlight = Math.max(0, state.inFlight);
-      state.running = state.inFlight > 0;
       headerState.running = state.running;
       await rebuildTranscript();
       tui.requestRender();
@@ -2008,9 +1978,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // as soon as the new session exists.
     const epoch = state.collapseEpoch;
     state.notes = [];
-    state.inFlight += 1;
-    state.running = true;
-    headerState.running = true;
+    state.activity.beginSubmission();
+    headerState.running = state.running;
     tui.requestRender();
     try {
       const whenBusy = state.sendMode === "after run" ? "followUp" : "steer";
@@ -2028,8 +1997,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     } catch (error) {
       if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
     }
-    state.inFlight = Math.max(0, state.inFlight - 1);
-    state.running = state.inFlight > 0;
+    state.activity.endSubmission();
     headerState.running = state.running;
     // The run settled after the person left: the session is closed, and every
     // read below would raise against a harness that is already gone.
@@ -2044,26 +2012,25 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
-  /**
-   * The person's mode toggle (§6.1). It flips the session flag the tools read,
-   * and the block reports the new mode on the next request. Nothing else knows
-   * the mode — `bash` stays trusted, and no gate is placed anywhere.
-   */
+  /** Person-owned modes are persisted before they take effect. */
   const toggleReadOnly = () => {
-    state.session.state.readOnly = !state.session.state.readOnly;
-    tui.flash(
-      state.session.state.readOnly
-        ? "read only mode — create and edit will refuse"
-        : "edit mode — the agent may change the project",
-      1_800,
-    );
-    tui.requestRender();
+    try {
+      const settings = setProjectModes(state.session, { readOnly: !state.session.state.readOnly });
+      tui.flash(settings.readOnly ? "read only mode — create and edit will refuse" : "edit mode — the agent may change files", 1_800);
+      tui.requestRender();
+    } catch (error) { pushStatus(`mode not changed: ${errorText(error)}`); }
   };
-
+  const togglePathScope = () => {
+    try {
+      const settings = setProjectModes(state.session, { pathScope: state.session.state.pathScope === "relaxed" ? "strict" : "relaxed" });
+      tui.flash(settings.pathScope === "relaxed" ? "relaxed scope — read and edit may access outside the project" : "strict scope — file tools stay inside the project", 1_800);
+      tui.requestRender();
+    } catch (error) { pushStatus(`scope not changed: ${errorText(error)}`); }
+  };
   const copyTranscript = async () => {
     const text = transcript.toPlainText();
     const result = await copyWithFallback(text, "transcript");
-    pushStatus(`transcript copied — ${result.where} (${text.split("\n").length} lines)`);
+    pushStatus(`transcript: ${result.where}; ${describeFallback(result)} (${text.split("\n").length} lines)`);
     return result;
   };
 
@@ -2102,7 +2069,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     lines.push("", "## archive (waiting out grace)", formatArchiveSummary(archiveState));
     const text = lines.join("\n");
     const result = await copyWithFallback(text, "session");
-    pushStatus(`session copied — ${result.where} (${text.split("\n").length} lines)`);
+    pushStatus(`session: ${result.where}; ${describeFallback(result)} (${text.split("\n").length} lines)`);
     return result;
   };
 
@@ -2147,9 +2114,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
       if (outcome.submission === undefined) return;
       state.notes = [];
-      state.inFlight += 1;
-      state.running = true;
-      headerState.running = true;
+      state.activity.beginSubmission();
+      headerState.running = state.running;
       pushStatus(outcome.line);
       tui.requestRender();
       try {
@@ -2161,8 +2127,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       } catch (error) {
         if (epoch === state.collapseEpoch && !state.collapsing) pushStatus(`the run failed: ${errorText(error)}`);
       }
-      state.inFlight = Math.max(0, state.inFlight - 1);
-      state.running = state.inFlight > 0;
+      state.activity.endSubmission();
       headerState.running = state.running;
       if (shutdownRequested) return;
       await rebuildTranscript();
@@ -2249,6 +2214,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const message = text.trim();
     if (message.length === 0) return;
     editor.addToHistory(message);
+    const copy = copySlashCommand(message);
+    if (copy !== undefined) {
+      void (copy === "transcript" ? copyTranscript() : copySession()).catch((error: unknown) => {
+        if (!shutdownRequested) pushStatus(`copy failed: ${errorText(error)}`);
+      });
+      return;
+    }
+    if (message === "/wipe") {
+      showWipeConfirmation();
+      return;
+    }
     if (message === "/resume") {
       void runResume();
       return;
@@ -2336,11 +2312,33 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   // order, and the footer shows the first ones that fit.
   const inChat = () => state.layer === "context" && state.view === "chat";
   const inView = (view: ViewMode) => state.layer === "context" && state.view === view;
-  const onArchive = () => state.layer === "archive";
+  const onArchive = () => state.layer === "archive" && !archiveView.isFiltering();
   /** The book the person is in, when it is Atlas or Ledger. */
   const bookOf = () => (state.view === "atlas" ? atlasView : state.view === "ledger" ? ledgerView : undefined);
   /** A book is open and not taking a `/` filter, so its command keys are commands. */
   const bookIsOpen = () => state.layer === "context" && bookOf() !== undefined && bookOf()?.isFiltering() === false;
+
+  /** The active view owns selection; text entry and filters must keep their keys. */
+  const selectedText = (): string | undefined => {
+    if (state.layer === "archive") return archiveView.isFiltering() ? undefined : archiveView.selectedText();
+    switch (state.view) {
+      case "chat": return transcript.selectedText();
+      case "context": return contextView.selectedText();
+      case "atlas": return atlasView.isFiltering() ? undefined : atlasView.selectedText();
+      case "ledger": return ledgerView.isFiltering() ? undefined : ledgerView.selectedText();
+      case "tree": return treeView.isFiltering() ? undefined : treeView.selectedText();
+      case "jobs": return jobsView.isTyping() ? undefined : jobsView.selectedText();
+    }
+  };
+
+  const copySelected = async (text: string) => {
+    try {
+      const result = await copyWithFallback(text, "selection");
+      pushStatus(`selection — ${result.where}; ${describeFallback(result)}`);
+    } catch (error) {
+      pushStatus(`selection copy failed: ${errorText(error)}`);
+    }
+  };
 
   const commands = new Registry([
     {
@@ -2400,21 +2398,24 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       available: () => true,
     },
     {
-      id: "stop",
-      group: "the run",
-      label: "stop the run",
-      key: "ctrl+x",
-      run: () => {
-        void interruptRun(state.session)
-          .then(
-            () => pushStatus("interrupt sent — the run stops"),
-            (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
-          )
-          .then(() => rebuildTranscript())
-          .catch(() => undefined);
-      },
-      available: () => state.running,
+      id: "wipe",
+      group: "the workspace",
+      label: "wipe project session and start fresh",
+      hint: "permanently delete .brain; confirmation required",
+      run: () => showWipeConfirmation(),
+      available: () => true,
     },
+    stopCommand(() => {
+      // Admissions also serialize collapse: a stop pressed during replacement
+      // targets the newly opened session rather than a closing harness.
+      void admitting(() => interruptRun(state.session))
+        .then(
+          (interrupted) => pushStatus(interrupted ? "interrupt sent — the run stops" : "no run to stop"),
+          (error: unknown) => pushStatus(`interrupt failed: ${errorText(error)}`),
+        )
+        .then(() => rebuildTranscript())
+        .catch(() => undefined);
+    }),
     {
       id: "resume",
       group: "the run",
@@ -2496,7 +2497,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       id: "block-select",
       group: "the transcript",
       label: "select a block",
-      hint: "walk the Chat and the cards with j/k, then pin, mark or withdraw as in any other view",
+      hint: "walk the Chat and cards with j/k; y copies, and eligible items can be pinned or marked",
       key: "escape",
       run: () => enterBlockSelection(),
       // Escape closes the prompt's completion list first.
@@ -2517,7 +2518,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "a pinned item in the live context goes on into the next collapse; Chat has no pin",
       key: "p",
       run: () => transcript.pinSelected(),
-      available: () => inChat() && transcript.selectedPart() === "tool-work",
+      available: () => inChat() && (transcript.selectedPart() === "tool-work" || transcript.selectedPart() === "ephemera"),
     },
     {
       id: "block-mark-archive",
@@ -2526,7 +2527,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "the next collapse moves it to the archive; `!` first applies it now",
       key: "a",
       run: () => transcript.markSelected("archive"),
-      available: () => inChat() && transcript.isSelecting(),
+      available: () => inChat() && transcript.selectedPart() !== undefined,
     },
     {
       id: "block-mark-delete",
@@ -2535,7 +2536,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "the next collapse removes it for good; `!` first applies it now",
       key: "d",
       run: () => transcript.markSelected("delete"),
-      available: () => inChat() && transcript.isSelecting(),
+      available: () => inChat() && transcript.selectedPart() !== undefined,
     },
     {
       id: "block-apply-now",
@@ -2564,6 +2565,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       label: "read only mode",
       hint: "flips whether the agent may change files",
       run: () => toggleReadOnly(),
+      available: () => true,
+    },
+    {
+      id: "path-scope",
+      group: "the workspace",
+      label: "strict / relaxed file scope",
+      hint: "relaxed lets read and edit use paths outside the project",
+      run: () => togglePathScope(),
       available: () => true,
     },
     {
@@ -2707,6 +2716,33 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     // What the person can do on the archive layer, named where every other act
     // is named: the footer, `f1` and the palette all read this list.
     {
+      id: "archive-filter",
+      group: "the archive",
+      label: "filter the archive",
+      hint: "search content and metadata; enter or escape ends editing",
+      key: "/",
+      run: () => { archiveView.handleInput("/"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
+      id: "archive-detail",
+      group: "the archive",
+      label: "open or close full item",
+      hint: "scroll to read the complete content and stored fields",
+      key: "enter",
+      run: () => { archiveView.handleInput("\r"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
+      id: "archive-now",
+      group: "the archive",
+      label: "apply restore now",
+      hint: "then r; deleting now always takes two d presses",
+      key: "!",
+      run: () => { archiveView.handleInput("!"); tui.requestRender(); },
+      available: onArchive,
+    },
+    {
       id: "archive-pin",
       group: "the archive",
       label: "pin or unpin the item",
@@ -2715,10 +2751,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // are declared here so the footer, `f1` and the palette name them (§3.3:
       // the same UI, so the same list).
       key: "p",
-      run: () => {
-        const item = archiveView.selectedItem();
-        if (item !== undefined) archiveView.onTogglePin?.(item.id);
-      },
+      run: () => archiveView.pinSelected(),
       available: onArchive,
     },
     {
@@ -2728,7 +2761,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       hint: "at the next collapse; `!r` restores it now",
       key: "r",
       run: () => {
-        if (archiveView.restoreSelected() === "applied") pushStatus("restored now, not at the next collapse");
+        archiveView.restoreSelected();
         tui.requestRender();
       },
       available: onArchive,
@@ -2847,19 +2880,20 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       run: () => void switchToView("context"),
       available: () => !inView("context"),
     },
+    copySelectionCommand(selectedText, (text) => void copySelected(text)),
     {
       id: "copy",
       group: "the record",
       label: "copy the transcript",
       key: "ctrl+y",
-      run: () => void copyTranscript(),
+      run: () => void copyTranscript().catch((error: unknown) => pushStatus(`copy failed: ${errorText(error)}`)),
       available: () => true,
     },
     {
       id: "copy-session",
       group: "the record",
       label: "copy a full session dump",
-      run: () => void copySession(),
+      run: () => void copySession().catch((error: unknown) => pushStatus(`copy failed: ${errorText(error)}`)),
       available: () => true,
     },
     {
@@ -2886,6 +2920,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     { group: "type it", key: "/help", label: "the command list in the transcript" },
     { group: "type it", key: "/model", label: "pick or switch the model (/model <name>)" },
     { group: "type it", key: "/resume", label: "start or resume the agent with a fresh state block" },
+    { group: "type it", key: "/wipe", label: "confirm permanent deletion of this project's Carto state" },
     { group: "type it", key: "/pause", label: "hold the run where it is (/pause off lets it go on)" },
   ];
 
@@ -2939,6 +2974,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       label: state.session.state.readOnly ? "Mode: back to editing" : "Mode: read only",
       run: () => toggleReadOnly(),
     });
+    list.push({
+      id: "path-scope-name",
+      group: "the workspace",
+      label: state.session.state.pathScope === "relaxed" ? "File scope: strict" : "File scope: relaxed",
+      run: () => togglePathScope(),
+    });
     return list;
   };
 
@@ -2949,6 +2990,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     palette.onClose = closeOverlay;
     state.overlayHandle = tui.showOverlay(palette, { width: 64, anchor: "bottom-center", offsetY: -3 });
     tui.setFocus(palette);
+    tui.requestRender();
+  };
+
+  const showWipeConfirmation = () => {
+    if (state.overlayOpen || shutdownRequested) return;
+    state.overlayOpen = true;
+    const dialog = new WipeConfirmation(options.root);
+    dialog.onClose = closeOverlay;
+    dialog.onConfirm = () => { closeOverlay(); void shutdown(WIPE_REQUESTED); };
+    state.overlayHandle = tui.showOverlay(dialog, { width: 78, anchor: "center" });
+    tui.setFocus(dialog);
     tui.requestRender();
   };
 
@@ -3005,6 +3057,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   tui.addInputListener((data) => {
+    // Pi dispatches motion to the pane under the pointer, not to the one it
+    // left. Observe coordinates without consuming them so the sidebar can
+    // dismiss its hover when the pointer enters another pane or overlay.
+    const mouse = /^\x1b\[<\d+;(\d+);(\d+)[Mm]$/.exec(data);
+    if (mouse !== null && sidebar.pointerMoved(Number(mouse[1]) - 1, Number(mouse[2]) - 1)) tui.requestRender();
     if (state.overlayOpen) return undefined;
     // The registry sees keys first: a command that is not available returns the
     // keystroke untouched, so the focused view still gets it.
@@ -3030,5 +3087,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   void startLiveWatch();
   await rebuildTranscript();
+  if (options.startupNotice !== undefined) tui.flash(options.startupNotice, 6_000);
   return runDone;
 }

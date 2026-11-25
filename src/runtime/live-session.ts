@@ -1,3 +1,4 @@
+import { personChatBindings, userText } from "../domain/chat-identity.js";
 /**
  * The live session (§4, §5.7).
  *
@@ -11,7 +12,7 @@
  * record carries the mutable present (the tree anchor, the pending list,
  * the last provider report); the Brain carries the durable past.
  */
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -41,7 +42,9 @@ import type { BrainStore } from "./brain-store.js";
 import {
   collapse,
   generationPaths,
+  ephemeralItemId,
   newGenerationId,
+  pinnedFileTexts,
   reconcileGenerations,
   removedPartKeys,
   stablePartKeys,
@@ -49,7 +52,7 @@ import {
   type CollapseOptions,
   type CollapseReport,
 } from "./collapse.js";
-import { writeSnapshot } from "./projection-files.js";
+import { snapshotPaths, writeSnapshot } from "./projection-files.js";
 import {
   appendCollapseLog,
   brainCountsOf,
@@ -62,6 +65,8 @@ import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
 import { createJobTable, type JobTable } from "./jobs.js";
+import { promptItemsOf } from "../ui/prompt-handles.js";
+import { readProjectSettings, writeProjectSettings, type ProjectSettings } from "./workspace.js";
 
 export interface LiveSessionOptions {
   /**
@@ -88,6 +93,8 @@ export interface LiveSessionOptions {
    * state block. Default: 75 (COLLAPSE_WARNING_PERCENT).
    */
   collapseWarningPercent?: number;
+  /** Maximum entries in each state-block tree page. */
+  treePageSize?: number;
   /** Persistent piped jobs owned by the host; preserved across context collapses. */
   jobs?: JobTable;
   now?: () => number;
@@ -140,6 +147,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const root = resolve(options.root);
   const now = () => options.now?.() ?? Date.now();
   await mkdir(resolve(root, ".brain/context"), { recursive: true });
+  const projectSettings = readProjectSettings(root);
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
   // or build a new one from the Brain — which is authoritative.
@@ -150,10 +158,22 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   } else {
     const stamp = new Date(now());
     generation = newGenerationId(stamp);
-    const projection = projectContext(await options.brain.read());
+    const brain = await options.brain.read();
+    const projection = projectContext(brain, pinnedFileTexts(root, brain), options.person ?? personName());
     writeSnapshot(root, generation, projection, stamp.getTime());
   }
   const paths = generationPaths(root, generation);
+  const frozenText = await readFile(paths.markdown, "utf8");
+  const headHandles = new Set([...frozenText.matchAll(/^X(\d+) \[(?:toolCall|reasoning|plainText|readResult|toolResult|personMessage)\]/gm)].map((match) => `X${match[1]}`));
+  const headEphemeraCount = Math.max(0, ...[...headHandles].map((handle) => Number(handle.slice(1))));
+  const openingBrain = await options.brain.read();
+  const headEphemera = new Map(openingBrain.handles.entries.flatMap((entry) => {
+    if (entry.kind !== "ephemera" || !headHandles.has(entry.handle)) return [];
+    const item = openingBrain.ephemera.find((candidate) => candidate.id === entry.id);
+    return item === undefined ? [] : [[entry.handle, item] as const];
+  }));
+  const sidecar = await readFile(paths.sidecar, "utf8").then((text) => JSON.parse(text) as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }).catch(() => ({ ephemeralItems: undefined }));
+  for (const entry of sidecar.ephemeralItems ?? []) if (headHandles.has(entry.handle)) headEphemera.set(entry.handle, entry.item);
 
   const database = await openNodeSqliteDatabase(paths.store);
   await database.exec("PRAGMA secure_delete = ON");
@@ -165,16 +185,20 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // server advertises one (the driver re-discovers after every settled run).
   const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? 0;
   const state: LiveSessionState = {
+    activeModel: { ...modelRef },
     person: options.person ?? personName(),
     contextWindow,
     collapseWarningPercent: options.collapseWarningPercent ?? COLLAPSE_WARNING_PERCENT,
     paused: false,
     pending: [],
-    tree: { anchor: root, depth: 2 },
+    tree: { anchor: root, depth: 2, ...(options.treePageSize === undefined ? {} : { limit: options.treePageSize }) },
     collapseRequested: null,
     collapseTrigger: null,
-    readOnly: false,
+    readOnly: projectSettings.readOnly,
+    pathScope: projectSettings.pathScope,
     generation,
+    headEphemeraCount,
+    headEphemera,
     lastReportedInput: undefined,
     desiredMaxOutput: options.models.getModel(modelRef.provider, modelRef.modelId)?.maxTokens ?? 0,
     work: newGenerationWork(),
@@ -187,7 +211,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // One gate per session, around every model call the session makes (§9).
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
-  const gatedModels = freeze.gate(options.models, createModelTelemetry(state));
+  const gatedModels = freeze.gate(options.models, createModelTelemetry(state), () => state.activeModel);
   const jobs = options.jobs ?? createJobTable({ root, now });
 
   let harness: Harness | undefined;
@@ -249,7 +273,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         }
       }
     }
-    harness.resume();
     const session: LiveSession = {
       root,
       generation,
@@ -284,6 +307,16 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         return { kind: "collapse", reason, trigger: resolvedTrigger };
       },
     };
+    state.loadPromptItems = async () => promptItemsOf(await sessionTranscript(session), generation);
+    state.refreshHeadEphemera = async () => {
+      // Apply-now may explicitly re-freeze the head. Adopt its identities at
+      // the next request boundary, never halfway through the preceding call.
+      const snapshot = await readFile(paths.sidecar, "utf8").then((text) => JSON.parse(text) as { ephemeralItems?: Array<{ handle: string; item: import("../domain/records.js").PinnedEphemeral }> }).catch(() => ({ ephemeralItems: undefined }));
+      if (snapshot.ephemeralItems === undefined) return; // legacy or temporarily unreadable sidecar
+      state.headEphemera = new Map(snapshot.ephemeralItems.map(({ handle, item }) => [handle, item]));
+      state.headEphemeraCount = Math.max(0, ...snapshot.ephemeralItems.map(({ handle }) => Number(handle.slice(1)) || 0));
+    };
+    harness.resume();
     // Only restores already committed by a collapse are retried here. Ordinary
     // archive marks still wait for collapse. An active run can defer recovery;
     // its marked source remains safe and will be retried at the next collapse.
@@ -323,18 +356,20 @@ export async function submitInput(session: LiveSession, text: UserInput, whenBus
   // itself still goes in as the turn the agent answers. A message carried over
   // a collapse is admitted without passing here, so it is recorded once.
   const said = inputText(text);
+  let recordId: string | undefined;
   if (said.trim().length > 0 && said.trim() !== STATE_BLOCK_MARKER) {
+    recordId = `chat:person:${randomUUID()}`;
     const at = session.now();
     await session.brain.apply(
-      { kind: "chat.record", record: { id: `chat:person:${randomUUID()}`, author: "user", text: said, createdAt: at, updatedAt: at } },
+      { kind: "chat.record", record: { id: recordId, author: "user", text: said, createdAt: at, updatedAt: at } },
       at,
     );
   }
-  return admitInput(session, text, whenBusy);
+  return admitInput(session, text, whenBusy, recordId);
 }
 
 /** Admit an input without treating it as the person's new word; the one path every input takes. */
-async function admitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp") {
+async function admitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp", recordId?: string) {
   // Admit the message and invalidate the rest in one commit. Whichever of a
   // wake or this message reaches the session line first wins; a crash cannot
   // leave an admitted message alongside an eligible old wake.
@@ -352,7 +387,7 @@ async function admitInput(session: LiveSession, text: UserInput, whenBusy: "stee
         cursor = page.next;
       } while (cursor !== undefined);
     }
-    const id = await session.conversation.submit(tx, { type: "input", content: text, whenBusy });
+    const id = await session.conversation.submit(tx, { type: "input", content: text, whenBusy, ...(recordId === undefined ? {} : { entry: { kind: "carto.user", data: { chatRecordId: recordId } } }) });
     rest.active = null;
     rest.legacyAllowed = false;
     return { id, oldTasks };
@@ -471,6 +506,29 @@ export async function applyRecordActionNow(
   id: string,
   action: "archive" | "delete",
 ): Promise<boolean> {
+  if (kind === "chat") {
+    const before = await brain.read();
+    const record = before.chat.find((candidate) => candidate.id === id);
+    if (record === undefined) return false;
+    const entries = await sessionTranscript(session);
+    if (record.author === "user") {
+      const headIds = await readFile(snapshotPaths(root, session.generation).sidecar, "utf8")
+        .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? before.chat.map((record) => record.id))
+        .catch(() => before.chat.map((record) => record.id));
+      const bindings = personChatBindings(entries, before.chat, new Set(headIds));
+      const entry = entries.find((candidate) => bindings.get(candidate.id) === id);
+      if (entry !== undefined && !(await applyOmitNow(session, ephemeralItemId(session.generation, entry.id, "x0")))) return false;
+    } else if (record.author === "agent" && id.startsWith("chat:")) {
+      const callId = id.slice(5);
+      for (const entry of entries) {
+        const message = entry.model[0];
+        if (message?.role !== "assistant") continue;
+        const index = message.content.findIndex((part) => part.type === "toolCall" && part.id === callId && part.name === "chat");
+        const key = entry.partKeys?.[index];
+        if (index >= 0 && key !== undefined && !(await applyOmitNow(session, ephemeralItemId(session.generation, entry.id, key)))) return false;
+      }
+    }
+  }
   const applied = await brain.applyRecordAction({ kind, id, action, generation: session.generation, now: Date.now() });
   if (!applied.found) return false;
   rewriteHeadSnapshot(root, session.generation, applied.brain, session.state.person, Date.now());
@@ -515,6 +573,14 @@ export interface PauseOutcome {
  * durable task, so its own timer is what wakes it; nothing here starts work
  * the agent did not ask for.
  */
+/** Persist first so a failed write never silently changes the active mode. */
+export function setProjectModes(session: LiveSession, update: Partial<ProjectSettings>): ProjectSettings {
+  const settings = writeProjectSettings(session.root, update);
+  session.state.readOnly = settings.readOnly;
+  session.state.pathScope = settings.pathScope;
+  return settings;
+}
+
 export async function togglePause(session: LiveSession, to?: boolean): Promise<PauseOutcome> {
   const paused = session.state.paused;
   const want = to ?? !paused;
@@ -613,11 +679,16 @@ export async function resumeSession(session: LiveSession): Promise<ResumeOutcome
 }
 
 /** Interrupt the current run at its Pi Durable boundary. No-op when idle. */
-export async function interruptRun(session: LiveSession): Promise<void> {
+export async function interruptRun(session: LiveSession): Promise<boolean> {
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
-  if (live?.run === undefined) return;
-  await session.harness.abortTask(live.run.taskId, BACKGROUND_CONTEXT);
+  if (live?.run === undefined) return false;
+  // abortTask joins the invocation. A frozen body can be waiting on our gate,
+  // so initiate the abort and release that gate before waiting for the join.
+  const abort = session.harness.abortTask(live.run.taskId, BACKGROUND_CONTEXT);
+  if (session.freeze.frozen()) session.freeze.abandon();
+  const result = await abort;
   await session.harness.waitForTask(live.run.taskId, BACKGROUND_CONTEXT);
+  return result === "marked";
 }
 
 /** The transcript without state-block markers — what a person-facing view may show. */
@@ -706,9 +777,10 @@ export async function sessionTranscript(session: LiveSession) {
   });
 }
 
-export async function closeLiveSession(session: LiveSession): Promise<void> {
+export async function closeLiveSession(session: LiveSession, requireCleanClose = false): Promise<void> {
   await session.harness.close(BACKGROUND_CONTEXT);
-  await session.database.close().catch(() => undefined);
+  if (requireCleanClose) await session.database.close();
+  else await session.database.close().catch(() => undefined);
 }
 
 export interface CollapseOutcome {
@@ -737,18 +809,20 @@ export interface CollapseFollow {
 }
 
 /** The text of a user input, for the places that need to show or compare it. */
-const inputText = (content: UserInput): string =>
-  typeof content === "string"
-    ? content
-    : content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("");
+const inputText = userText;
 
 /**
  * The person's messages a collapse would otherwise lose: those still queued in
  * the old store, and those of a run that failed — pi settles them unanswered and
  * the sweep archives them, so the rebuilt agent would never see what it was asked.
  */
-async function unansweredInputs(session: LiveSession): Promise<Array<{ content: UserInput; whenBusy: "steer" | "followUp" }>> {
-  const carried: Array<{ content: UserInput; whenBusy: "steer" | "followUp" }> = [];
+async function unansweredInputs(session: LiveSession): Promise<Array<{ content: UserInput; whenBusy: "steer" | "followUp"; recordId?: string }>> {
+  const carried: Array<{ content: UserInput; whenBusy: "steer" | "followUp"; recordId?: string }> = [];
+  const records = (await session.brain.read()).chat;
+  const head = await readFile(snapshotPaths(session.root, session.generation).sidecar, "utf8")
+    .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? records.map((record) => record.id))
+    .catch(() => records.map((record) => record.id));
+  const bindings = personChatBindings(await sessionTranscript(session), records, new Set(head));
   const live = await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT);
   const failure = live?.runFailure;
   if (failure !== undefined && failure.reason === "model_error") {
@@ -759,13 +833,16 @@ async function unansweredInputs(session: LiveSession): Promise<Array<{ content: 
       if (record === undefined || record.type !== "input" || record.entry === undefined) continue;
       const message = view.entries.find((entry) => entry.id === record.entry)?.model?.[0];
       if (message?.role !== "user" || inputText(message.content).trim() === STATE_BLOCK_MARKER) continue;
-      carried.push({ content: message.content, whenBusy: "followUp" });
+      const recordId = bindings.get(record.entry);
+      carried.push({ content: message.content, whenBusy: "followUp", ...(recordId === undefined ? {} : { recordId }) });
     }
   }
   const inbox = await session.harness.snapshot(InboxDoc, session.conversation.id, BACKGROUND_CONTEXT);
   for (const item of inbox?.items ?? []) {
     if (item.mode === "write") continue;
-    carried.push({ content: item.content as unknown as UserInput, whenBusy: item.mode });
+    const data = item.entry?.data as { chatRecordId?: unknown } | undefined;
+    const recordId = typeof data?.chatRecordId === "string" ? data.chatRecordId : undefined;
+    carried.push({ content: item.content as unknown as UserInput, whenBusy: item.mode, ...(recordId === undefined ? {} : { recordId }) });
   }
   return carried;
 }
@@ -845,7 +922,7 @@ export async function collapseLiveSession(
   // string names: one name, carried from the session that built it.
   const report = await collapse(session.root, options.brain, {
     person: session.state.person,
-    carriedTexts: carry.map((input) => inputText(input.content)),
+    carriedChatIds: carry.flatMap((input) => input.recordId === undefined ? [] : [input.recordId]),
     ...ceremony,
   });
   const brainAfter = brainCountsOf(await options.brain.read());
@@ -858,7 +935,7 @@ export async function collapseLiveSession(
     // The person's own words are never held back by a pause, which only stops
     // the agent starting on its own; a state block is that, so it waits.
     if (carry.length === 0 && !paused) await admitInput(next, STATE_BLOCK_MARKER, "followUp");
-    for (const input of carry) await admitInput(next, input.content, input.whenBusy);
+    for (const input of carry) await admitInput(next, input.content, input.whenBusy, input.recordId);
     resumed = carry.length > 0 || !paused;
   }
   const reportedTotal =
@@ -904,10 +981,10 @@ export interface SwitchModelResult {
 /**
  * Switch the live session's active model.
  *
- * Pi resolves `agent.model` in `generation`'s `prepare` phase at the start of
- * each LLM request and fixes it for that request, so updating `AgentDoc` via
- * `conversation.configure({ model })` leaves any in-flight request undisturbed
- * and takes effect at the next natural boundary (the next step or next turn).
+ * Updating `AgentDoc` via `conversation.configure({ model })` leaves an
+ * in-flight stream undisturbed and takes effect on the next request. A
+ * per-session lookup also reconciles a prepared llama-swap checkpoint with the
+ * selection when that next request starts, including after a restart.
  */
 export async function switchSessionModel(
   session: LiveSession,
@@ -923,6 +1000,7 @@ export async function switchSessionModel(
   if (changed) {
     await session.conversation.configure({ model }, BACKGROUND_CONTEXT);
   }
+  session.state.activeModel = { ...model };
   session.state.contextWindow = resolved.contextWindow;
   session.state.desiredMaxOutput = resolved.maxTokens;
   return {

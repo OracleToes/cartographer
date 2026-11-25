@@ -99,6 +99,8 @@ export interface StateBlockInput {
   sizes: { atlas: number; ledger: number; chat: number; ephemera: number };
   /** The mode the project is in (§6.1). The person sets it; it is reported, never enforced, here. */
   mode: "edit" | "read only";
+  /** Scope of read/edit; independent of edit vs read-only. */
+  pathScope?: "strict" | "relaxed";
   /** Brain writes since the projection was rebuilt. Ephemeral: the list starts empty at every collapse. */
   pending: PendingWrite[];
   /**
@@ -112,6 +114,8 @@ export interface StateBlockInput {
   resolveHandle: (kind: PendingWrite["kind"], id: string) => string | undefined;
   /** Every record carrying a pin marker, as handle + who placed it, in template order. */
   pinned: Array<{ handle: string; author: "user" | "agent" }>;
+  /** Live body items addressable by the pin tool, in prompt order. */
+  working?: Array<{ handle: string; kind: string }>;
   /** Every entry carrying a mark, with its action and its author (§4.1). */
   marks: MarkLine[];
   /** Persistent piped jobs currently held in host RAM; omitted from the block when empty. */
@@ -128,7 +132,7 @@ function decisionFlowLines(mode: "edit" | "read only", person: string): string[]
     return [
       "flow:",
       `  - Exploring in read only mode? -> use \`read\` and \`tree\` without modifying files; map findings in \`atlas\`/\`ledger\` and answer ${person} via \`chat\`.`,
-      "  - Head bloated or finished exploring? -> `mark` resolved items, `collapse`, or `sleep` when nothing is left to check.",
+      "  - Head bloated or finished exploring? -> `mark` resolved task items, `collapse`, or `sleep` when nothing is left to check.",
     ];
   }
   return [
@@ -137,7 +141,7 @@ function decisionFlowLines(mode: "edit" | "read only", person: string): string[]
     "  - Reading, editing, or creating files? -> use `read`, `edit`, `create` (not `bash` sed/cat/python file edits) and `pin` active files.",
     "  - Testing or running long-lived processes? -> extend one reusable interactive harness in place (no piling up test scripts); use `proc` for persistent processes.",
     "  - Changed code or learned something? -> update your `atlas`/`ledger` handle in place now, then verify edge cases through the harness.",
-    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved \`chat\`/leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
+    `  - Finished a leaf, head bloated, or pins stale? -> \`mark\` resolved task leaves, \`collapse\`, and \`chat\` ${person} when something matters (\`sleep\` only when nothing is left to verify).`,
   ];
 }
 
@@ -251,6 +255,10 @@ export function renderStateBlock(input: StateBlockInput): string {
     input.pinned.length === 0
       ? "pins: none"
       : ["pins:", ...input.pinned.map((item) => `  P ${item.handle} · placed by ${authorName(item.author, input.person)}`)].join("\n");
+  const working = input.working === undefined || input.working.length === 0 ? [] : [
+    "live items:",
+    ...input.working.map((item) => `  ${item.handle} · ${item.kind}`),
+  ];
   const marks: string =
     input.marks.length === 0
       ? "marks: none"
@@ -271,6 +279,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   return [
     STATE_BLOCK_OPEN,
     mode,
+    input.pathScope === "relaxed" ? "file scope: relaxed (read/edit may access outside the project; create stays inside)" : "file scope: strict (read/edit/create stay inside the project)",
     fullness,
     ...percentageLine,
     space,
@@ -278,6 +287,7 @@ export function renderStateBlock(input: StateBlockInput): string {
     stale,
     ...jobsLines,
     ...treeLines,
+    ...working,
     pinned,
     marks,
     ...flowLines,

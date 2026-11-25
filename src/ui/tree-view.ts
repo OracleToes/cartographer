@@ -10,7 +10,7 @@
  * broot gives the tree itself: branches drawn down from the anchor rather than
  * space-indented, a fold per directory so a deep hierarchy stays one screen,
  * and sizes that are honest about what they count — a directory's figure is its
- * whole subtree, because that is what it costs.
+ * scanned subtree, marked when it is only a lower bound.
  *
  * The details are the ones the harness *uses*, and nothing else. A handle is
  * here because a tool takes one. An attached node is here because the collapse
@@ -38,13 +38,15 @@ import {
 import { handleOf } from "../domain/handles.js";
 import type { CartoBrain } from "../domain/records.js";
 import { liveStaleMarks } from "../runtime/carto-extension.js";
-import { formatSize, projectTreeView, type TreeEntry, type TreeProjection } from "../runtime/project-tree.js";
+import { formatTreeSize, projectTreeView, type TreeEntry, type TreeProjection } from "../runtime/project-tree.js";
 import { padLine, tokens } from "./tokens.js";
 
 /** Where the agent is looking, and how much it can see: the `tree` tool's own arguments. */
 export interface TreeAnchor {
   anchor: string;
   depth: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface TreeViewData {
@@ -107,6 +109,8 @@ function gitStatuses(root: string, paths: readonly string[]): Map<string, string
 export class TreeView implements Component, Focusable {
   focused = false;
   onBack?: () => void;
+  /** Switch the shared tree to a different scanned-entry offset. */
+  onPage?: (offset: number) => void;
   /** Fired on `p` over a row: pin or unpin it. `directory` is true for a folder, which cannot be pinned. */
   onTogglePin?: (path: string, directory: boolean) => void;
   /**
@@ -139,7 +143,7 @@ export class TreeView implements Component, Focusable {
   private cursorLine = 0;
   setData(data: TreeViewData): void {
     this.data = data;
-    this.projection = projectTreeView(data.root, data.anchor.anchor, data.anchor.depth, data.brain);
+    this.projection = projectTreeView(data.root, data.anchor.anchor, data.anchor.depth, data.brain, data.anchor);
     this.refreshFacts();
     this.selectAfter(this.selectedIndex);
   }
@@ -247,6 +251,13 @@ export class TreeView implements Component, Focusable {
     return fuzzyFilter(rows, query, (row) => row.entry.name);
   }
 
+  /** Tree selection copies the project path, never reads the file as a side effect. */
+  selectedText(): string | undefined {
+    const row = this.selectedRow();
+    if (row === undefined || this.data === undefined) return undefined;
+    return relative(this.data.root, row.entry.path) || ".";
+  }
+
   private selectedRow(): Row | undefined {
     return this.visibleRows()[this.selectedIndex];
   }
@@ -347,6 +358,14 @@ export class TreeView implements Component, Focusable {
     if (data === "G") {
       this.selectedIndex = Math.max(0, this.visibleRows().length - 1);
       this.detailNote = undefined;
+      return;
+    }
+    if (data === "[" || data === "]") {
+      const page = this.projection?.page;
+      if (page !== undefined) {
+        const offset = data === "[" ? Math.max(0, page.offset - page.limit) : page.end;
+        if (offset !== page.offset && (data === "[" || page.end < page.total)) this.onPage?.(offset);
+      }
       return;
     }
     // `h`/`l` fold and unfold rather than navigate: in a tree, the hierarchy is
@@ -450,7 +469,7 @@ export class TreeView implements Component, Focusable {
 
     // The figures are right-aligned in their own column, so a column of sizes is
     // read down rather than scanned along — the sidebar's rule, applied here.
-    const size = tokens.muted(formatSize(row.entry.size).padStart(6));
+    const size = tokens.muted(formatTreeSize(row.entry).padStart(6));
     const left = ` ${cursor} ${tokens.faint(branch)}${tokens.faint(glyph)} ${tokens.muted(handleText)}${painted}`;
     const head = truncateToWidth(left, Math.max(8, width - 10), "…");
     const tail = `${marks.length > 0 ? `${marks.join(" ")} ` : ""}${size}`;
@@ -463,11 +482,10 @@ export class TreeView implements Component, Focusable {
     const lines: string[] = [];
     const handle = this.projection?.handles.get(entry.path) ?? "—";
     const rel = this.data === undefined ? entry.path : relative(resolve(this.data.root), entry.path);
-    const size = this.projection?.sizes.get(entry.path) ?? entry.size;
     const mtime = this.mtimeOf(entry.path);
 
     lines.push(padLine(` ${tokens.bold(tokens.accent(`[${handle}]`))} ${tokens.bold(entry.directory ? `${rel}/` : rel)}`, width));
-    lines.push(padLine(` ${tokens.faint(`${entry.directory ? "directory" : "file"} · ${formatSize(size)}${mtime === undefined ? "" : ` · ${new Date(mtime).toISOString()}`}`)}`, width));
+    lines.push(padLine(` ${tokens.faint(`${entry.directory ? "directory" : "file"} · ${formatTreeSize(entry)}${mtime === undefined ? "" : ` · ${new Date(mtime).toISOString()}`}`)}`, width));
 
     // A pinned file is the one fact worth a sentence: the head is holding a copy
     // of it, and that copy is what the agent reads rather than the file (§5.1).
@@ -504,7 +522,9 @@ export class TreeView implements Component, Focusable {
     // teaches the interface rather than describing it.
     const usable: string[] = [];
     const depth = this.projection === undefined ? "" : ` depth ${this.projection.depth}`;
-    if (entry.directory) {
+    if (entry.contextOnly) {
+      usable.push("ancestor shown for context; no handle on this page");
+    } else if (entry.directory) {
       usable.push(`\`tree ${handle}${depth}\` anchors the block here`);
     } else {
       usable.push(`\`read ${handle}\``);
@@ -556,9 +576,12 @@ export class TreeView implements Component, Focusable {
     } else if (query.length > 0) {
       filter = ` ${tokens.accent(`/${query}`)}`;
     }
+    const page = this.projection?.page;
+    const paging = page !== undefined && (page.offset > 0 || page.end < page.total) ? ` ${tokens.warn(`· ${page.end === page.offset ? "empty" : `${page.offset + 1}–${page.end}`}/${page.total} scanned`)}` : "";
+    const partial = this.projection?.entry.incomplete ? ` ${tokens.warn("· partial (>= sizes; entries may be omitted)")}` : "";
     const pinnedOnly = this.showPinnedOnly ? ` ${tokens.pin("· pinned only")}` : "";
-    const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${filter}${pinnedOnly}`;
-    const right = `${tokens.faint("j/k move · h/l fold · p pin · t note · f pinned · / filter ")}`;
+    const left = ` ${name} ${tokens.faint("·")} ${anchor} ${figure}${paging}${partial}${filter}${pinnedOnly}`;
+    const right = `${tokens.faint("p pin · [/] page · j/k move · h/l fold · t note · f pinned · / filter ")}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     lines.push(tokens.panel(padLine(`${left}${" ".repeat(gap)}${right}`, width)));
     lines.push(padLine("", width));
@@ -575,7 +598,9 @@ export class TreeView implements Component, Focusable {
             ? `Nothing here matches “${query}”.`
             : this.showPinnedOnly
               ? "Nothing in this tree is pinned."
-              : "This directory is empty, or everything in it is ignored.",
+              : this.projection.page.offset > 0
+                ? "This page is empty; use [ to go back."
+                : "This directory is empty, or everything in it is ignored.",
         )}`,
       );
       this.cursorLine = 0;

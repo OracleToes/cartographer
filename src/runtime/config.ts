@@ -15,6 +15,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { cartoConfigPath, cartoHome } from "./paths.js";
+import { DEFAULT_TREE_PAGE_SIZE, TREE_ENTRY_BUDGET } from "./project-tree.js";
 import { COLLAPSE_WARNING_PERCENT } from "../domain/state-block.js";
 
 export interface GlobalConfig {
@@ -27,6 +28,8 @@ export interface GlobalConfig {
   contextWindow?: number;
   /** Context fill percentage (1–100) that triggers `[COLLAPSE NEEDED]` in the state block. Unset: 75. */
   collapseWarningPercent?: number;
+  /** Maximum scanned tree entries shown per state-block page (default 100). */
+  treePageSize?: number;
   /**
    * What the agent calls the person at the keyboard. Unset: the account that
    * launched Carto, resolved at run time — a name, never a role word.
@@ -68,6 +71,14 @@ function parseCollapseWarningPercent(value: unknown, where: string): number | un
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1 || value > 100) {
     throw new ConfigError(`${where}: collapseWarningPercent must be an integer from 1 to 100 (default ${COLLAPSE_WARNING_PERCENT}); got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+function parseTreePageSize(value: unknown, where: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > TREE_ENTRY_BUDGET) {
+    throw new ConfigError(`${where}: treePageSize must be an integer from 1 to ${TREE_ENTRY_BUDGET} (default ${DEFAULT_TREE_PAGE_SIZE}); got ${JSON.stringify(value)}.`);
   }
   return value;
 }
@@ -116,6 +127,7 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
   const contextWindow = parseContextWindow(record.contextWindow, where);
   const collapseWarningPercent = parseCollapseWarningPercent(record.collapseWarningPercent, where);
   const userName = parseUserName(record.userName, where);
+  const treePageSize = parseTreePageSize(record.treePageSize, where);
   return {
     version: 1,
     model: record.model,
@@ -123,6 +135,7 @@ export function parseConfig(input: unknown, where = "config.json"): GlobalConfig
     ...(contextWindow === undefined ? {} : { contextWindow }),
     ...(collapseWarningPercent === undefined ? {} : { collapseWarningPercent }),
     ...(userName === undefined ? {} : { userName }),
+    ...(treePageSize === undefined ? {} : { treePageSize }),
   };
 }
 
@@ -216,6 +229,7 @@ export async function loadGlobalConfig(options: LoadOptions = {}): Promise<{ con
   if (llamaSwapEndpoint !== undefined) merged.llamaSwapEndpoint = llamaSwapEndpoint;
   if (effectiveWindow !== undefined) merged.contextWindow = effectiveWindow;
   if (effectiveCollapseWarning !== undefined) merged.collapseWarningPercent = effectiveCollapseWarning;
+  if (config.treePageSize !== undefined) merged.treePageSize = config.treePageSize;
   const effectiveName = userName ?? config.userName;
   if (effectiveName !== undefined) merged.userName = effectiveName;
   return { config: merged, path, created: false };

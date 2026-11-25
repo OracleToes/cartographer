@@ -2,7 +2,7 @@
 import "./agent-reminder.mjs";
 import "./fast-suite.mjs";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,12 +11,14 @@ import test from "node:test";
 import { applyWrite } from "../dist/domain/brain.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { openBrain } from "../dist/runtime/brain-store.js";
+import { createTools } from "../dist/runtime/tools.js";
+import { assertPinnableFile } from "../dist/runtime/workspace.js";
 import { collapse, discoverGenerations, reconcileGenerations, recoverCollapse, generationPaths, rewriteHeadSnapshot } from "../dist/runtime/collapse.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { projectContext } from "../dist/domain/projection.js";
-import { retainAfterCollapse } from "../dist/ui/transcript.js";
+import { frozenTranscript } from "../dist/ui/transcript.js";
 
 const at = (n) => 1_700_000_000_000 + n * 1_000;
 
@@ -165,6 +167,38 @@ test("a record marked for archive leaves the Brain and lands in the archive", as
   }
 });
 
+test("the agent can mark Atlas, Ledger, and Chat records for archive at collapse", async () => {
+  const root = tempRoot();
+  let store;
+  try {
+    fakeGeneration(root, "gen-20261116T020000Z-agentarchive", 1_700_000_100);
+    store = await openBrain(":memory:");
+    await store.apply({ kind: "atlas.upsert", node: { id: "a1", title: "Done", text: "atlas work", links: [], attachments: [], createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "ledger.upsert", entry: { id: "l1", kind: "note", text: "ledger work", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) } }, at(1));
+    await store.apply({ kind: "chat.record", record: { id: "c1", author: "agent", text: "chat work", createdAt: at(1), updatedAt: at(1) } }, at(1));
+    const session = { person: "OracleToes", pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-20261116T020000Z-agentarchive", readOnly: false };
+    const mark = createTools({ root, brain: store, session }).find((tool) => tool.name === "mark");
+    const api = { now: () => at(2) };
+    for (const handle of ["A1", "L1", "C1"]) await mark.execute({ handle, action: "archive" }, api, {});
+    const before = await store.read();
+    for (const record of [before.atlas[0], before.ledger[0], before.chat[0]]) {
+      assert.deepEqual(record.mark, { action: "archive", author: "agent" });
+    }
+    const report = await collapse(root, store);
+    const after = await store.read();
+    assert.equal(after.atlas.length + after.ledger.length + after.chat.length, 0);
+    const paths = generationPaths(root, report.generation);
+    const sidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+    const head = frozenTranscript(readFileSync(paths.markdown, "utf8"), after, sidecar.chat, new Map(), "OracleToes");
+    assert.equal(head.some((entry) => entry.text === "chat work"), false, "archived Chat is absent from the new prompt and transcript");
+    const archived = (await store.readArchive()).items.filter((item) => item.layer === "record");
+    assert.deepEqual(archived.map((item) => item.record.kind).sort(), ["atlas", "chat", "ledger"]);
+  } finally {
+    if (store !== undefined) await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a record marked for delete is deleted for real at the collapse and leaves nothing behind", async () => {
   const root = tempRoot();
   try {
@@ -184,7 +218,7 @@ test("a record marked for delete is deleted for real at the collapse and leaves 
   }
 });
 
-test("grace is one collapse: an item swept at a collapse survives the next one and is dropped by the one after", async () => {
+test("an unpinned item swept at a collapse is dropped at the next collapse", async () => {
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live005", 1_700_000_100);
@@ -196,14 +230,38 @@ test("grace is one collapse: an item swept at a collapse survives the next one a
     assert.deepEqual(first.archived, ["c1"]);
     assert.deepEqual(first.dropped, [], "nothing is dropped by the collapse that swept it");
 
+    assert.equal((await store.readArchive()).items.length, 1, "it remains available during the following period");
     const second = await collapse(root, store);
-    assert.deepEqual(second.dropped, [], "it lives through the collapse after the sweep");
-    assert.equal((await store.readArchive()).items.length, 1);
-
-    const third = await collapse(root, store);
-    assert.equal(third.dropped.length, 1, "the collapse after that drops it");
+    assert.equal(second.dropped.length, 1, "the next collapse drops the old item");
     assert.equal((await store.readArchive()).items.length, 0);
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("items archived between collapses expire at the next collapse, while new sweep items wait", async () => {
+  const root = tempRoot();
+  try {
+    const generation = "gen-20261116T020000Z-live0aa";
+    fakeGeneration(root, generation, 1_700_000_100);
+    const store = await openBrain(":memory:");
+    try {
+      const record = (id) => ({ id, author: "user", text: id, createdAt: at(1), updatedAt: at(1) });
+      await store.apply({ kind: "chat.record", record: record("immediate") }, at(1));
+      await store.applyRecordAction({ kind: "chat", id: "immediate", action: "archive", generation, now: at(2) });
+      await store.archiveEphemeral({ id: "ephemeral-now", layer: "ephemeral", ephemeral: { kind: "plainText", text: "archived now" } }, generation, at(2));
+      await store.apply({ kind: "chat.record", record: record("new-sweep") }, at(1));
+      await store.apply({ kind: "mark.set", target: "chat", id: "new-sweep", action: "archive", author: "user" }, at(2));
+      const report = await collapse(root, store);
+      assert.deepEqual(new Set(report.dropped), new Set(["record:chat:immediate", "ephemeral-now"]));
+      const remaining = (await store.readArchive()).items;
+      assert.deepEqual(remaining.map((item) => item.record?.value.id), ["new-sweep"], "the current collapse's sweep is not dropped immediately");
+      const next = await collapse(root, store);
+      assert.deepEqual(next.dropped, ["record:chat:new-sweep"]);
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -219,7 +277,9 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
     await collapse(root, store);
     const item = (await store.readArchive()).items[0];
     assert.ok(item !== undefined);
+    assert.deepEqual(await store.readArchiveCounts(), { total: 1, pinned: 0 });
     await store.applyArchive({ kind: "pin", id: item.id, pinned: "user" });
+    assert.deepEqual(await store.readArchiveCounts(), { total: 1, pinned: 1 });
 
     await collapse(root, store);
     await collapse(root, store);
@@ -233,6 +293,27 @@ test("a pinned archive item is never dropped; a restore puts it back as its type
     assert.equal(brain.ledger.length, 1);
     assert.equal(brain.ledger[0].text, "a note");
     await store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an old pinned archive item expires on the first collapse after unpinning", async () => {
+  const root = tempRoot();
+  try {
+    const generation = "gen-20261116T020000Z-live0ab";
+    fakeGeneration(root, generation, 1_700_000_100);
+    const store = await openBrain(":memory:");
+    try {
+      await store.archiveEphemeral({ id: "pinned-old", layer: "ephemeral", ephemeral: { kind: "plainText", text: "kept" } }, generation, at(1));
+      await store.applyArchive({ kind: "pin", id: "pinned-old", pinned: "user" });
+      assert.deepEqual((await collapse(root, store)).dropped, []);
+      assert.deepEqual((await collapse(root, store)).dropped, []);
+      await store.applyArchive({ kind: "pin", id: "pinned-old", pinned: null });
+      assert.deepEqual((await collapse(root, store)).dropped, ["pinned-old"]);
+    } finally {
+      await store.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -642,12 +723,12 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
       await store.read(),
     );
 
-    const generation = "gen-20261116T020000Z-live009";
-    const work = await readGenerationEphemera(generationPaths(root, generation).store, generation);
-    const transcript = work.map((item) => ({ kind: "reasoning", id: item.id, sourceId: item.id, text: item.ephemeral.text }));
     const report = await collapse(root, store, { person: "OracleToes" });
-    const retained = retainAfterCollapse(transcript, (await store.read()).ephemera);
-    assert.deepEqual(retained.map((entry) => entry.text), ["this one is worth keeping"], "the transcript follows the actual sweep and pin identities");
+    const paths = generationPaths(root, report.generation);
+    const sidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+    const head = frozenTranscript(readFileSync(paths.markdown, "utf8"), await store.read(), sidecar.chat, new Map(sidecar.ephemeralItems.map(({ handle, item }) => [handle, item])), "OracleToes");
+    assert.deepEqual(head.map((entry) => entry.text), ["this one is worth keeping"], "the transcript follows the new head, not the swept store");
+    assert.equal(head[0].sourceId, pinId);
     const archived = (await store.readArchive()).items;
     assert.equal(
       archived.some((item) => item.ephemeral?.text === "this one is worth keeping"),
@@ -665,6 +746,14 @@ test("an unpinned ephemeral is swept; a pinned one is carried into the head inst
     assert.match(markdown, /X1 \[reasoning\] this one is worth keeping/);
     assert.equal((await store.read()).ephemera.length, 1, "the pin survives the collapse it carried it through");
     await store.close();
+    const reopened = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      const reopenedSidecar = JSON.parse(readFileSync(paths.sidecar, "utf8"));
+      const reopenedHead = frozenTranscript(readFileSync(paths.markdown, "utf8"), await reopened.read(), reopenedSidecar.chat, new Map(reopenedSidecar.ephemeralItems.map(({ handle, item }) => [handle, item])), "OracleToes");
+      assert.deepEqual(reopenedHead, head, "reopening recovers the same head and actionable item identity");
+    } finally {
+      await reopened.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -726,6 +815,26 @@ test("Chat is swept like any Brain record: a recorded message is not archived as
       const rebuilt = readFileSync(generationPaths(root, report.generation).markdown, "utf8");
       assert.match(rebuilt, /said and recorded/);
       assert.doesNotMatch(rebuilt, /said since the freeze|carried on/, "the body holds what was said since; the head waits for the next collapse");
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a carried Chat identity excludes only that record from the frozen head", async () => {
+  const root = tempRoot();
+  try {
+    await realGeneration(root, "gen-20261116T020000Z-live0c2", 1_700_000_100, []);
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    try {
+      for (const [id, n] of [["first", 1], ["second", 2]]) {
+        await store.apply({ kind: "chat.record", record: { id, author: "user", text: "same", createdAt: at(n), updatedAt: at(n) } }, at(n));
+      }
+      const report = await collapse(root, store, { person: "OracleToes", carriedChatIds: ["first"] });
+      const sidecar = JSON.parse(readFileSync(generationPaths(root, report.generation).sidecar, "utf8"));
+      assert.deepEqual(sidecar.chat, ["second"]);
     } finally {
       await store.close();
     }
@@ -852,6 +961,65 @@ test("a pinned file is read again at the collapse, so the head holds the file an
     assert.match(markdown, /notes\.md · pinned by OracleToes/, "the pin says who placed it");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pins follow project symlinks outside the project and refresh at collapse, but never read Brain links", async () => {
+  const root = tempRoot();
+  const outside = tempRoot();
+  const alias = `${root}-alias`;
+  let store;
+  try {
+    symlinkSync(root, alias, "dir");
+    writeFileSync(join(root, "notes.md"), "linked project markdown\n");
+    writeFileSync(join(outside, "private.md"), "outside secret\n");
+    symlinkSync(join(root, "notes.md"), join(root, "inside.md"));
+    symlinkSync(join(root, "notes.md"), join(root, "retargeted.md"));
+    symlinkSync(join(outside, "private.md"), join(root, "outside.md"));
+    fakeGeneration(alias, "gen-20261116T020000Z-link01", 1_700_000_100);
+    writeFileSync(join(root, ".brain", "secret.md"), "brain secret\n");
+    symlinkSync(join(root, ".brain", "secret.md"), join(root, "brain.md"));
+    store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const state = { pending: [], tree: { anchor: alias, depth: 1 }, collapseRequested: null, generation: "gen-link", person: "OracleToes", readOnly: false };
+    const pin = createTools({ root: alias, brain: store, session: state }).find((tool) => tool.name === "pin");
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const handles = projectTreeBlock(alias, alias, 1, await store.read()).handles;
+    const api = { now: Date.now };
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "notes.md")) }, api, {});
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "inside.md")) }, api, {});
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "retargeted.md")) }, api, {});
+    rmSync(join(root, "retargeted.md"));
+    symlinkSync(join(outside, "private.md"), join(root, "retargeted.md"));
+    assert.doesNotThrow(() => assertPinnableFile(alias, join(alias, "outside.md")), "the Tree view can pin this link too");
+    await pin.execute({ action: "pin", handle: handles.get(join(alias, "outside.md")) }, api, {});
+    await assert.rejects(pin.execute({ action: "pin", handle: handles.get(join(alias, "brain.md")) }, api, {}), /\.brain/);
+    // A pre-existing forbidden pin is retained as stale, not read.
+    await store.apply({ kind: "file.pin", path: join(alias, "brain.md"), pinned: "user" }, at(1));
+    const report = await collapse(alias, store);
+    const markdown = readFileSync(generationPaths(alias, report.generation).markdown, "utf8");
+    assert.equal((markdown.match(/linked project markdown/g) ?? []).length, 2);
+    assert.equal((markdown.match(/outside secret/g) ?? []).length, 2);
+    assert.doesNotMatch(markdown, /brain secret/);
+    assert.equal((markdown.match(/this file could not be read at the collapse/g) ?? []).length, 1);
+    const files = (await store.read()).files;
+    assert.equal(files.find((file) => file.path === join(alias, "inside.md")).stale, undefined);
+    assert.equal(files.find((file) => file.path === join(alias, "outside.md")).stale, undefined);
+    assert.equal(files.find((file) => file.path === join(alias, "retargeted.md")).stale, undefined);
+    writeFileSync(join(outside, "private.md"), "outside updated\n");
+    const next = await collapse(alias, store);
+    const updated = readFileSync(generationPaths(alias, next.generation).markdown, "utf8");
+    assert.equal((updated.match(/outside updated/g) ?? []).length, 2);
+    assert.doesNotMatch(updated, /outside secret|brain secret/);
+    rmSync(join(outside, "private.md"));
+    const missing = await collapse(alias, store);
+    const afterRemoval = readFileSync(generationPaths(alias, missing.generation).markdown, "utf8");
+    assert.equal((afterRemoval.match(/this file could not be read at the collapse/g) ?? []).length, 3);
+    assert.equal((await store.read()).files.find((file) => file.path === join(alias, "outside.md")).stale, true);
+  } finally {
+    await store?.close();
+    rmSync(alias, { force: true });
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

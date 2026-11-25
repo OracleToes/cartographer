@@ -14,12 +14,10 @@
  * in the Brain and an archived record while it is here, and restoring makes it
  * a Brain record again. Nothing in the Brain carries an archived state.
  *
- * **Grace is one collapse, counted from the sweep.** An item swept by the
- * collapse that built generation G is dropped by the collapse that builds the
- * generation after next: it lives through G, and one collapse later it is gone.
- * An item swept by a collapse is never dropped by that same collapse, nor by
- * the one directly after it. A pin suspends this: a pinned item is never
- * dropped, and stays until it is unpinned or restored.
+ * **Grace is one collapse period, counted from the sweep.** An item swept by
+ * the collapse that built generation G remains available through G and is
+ * dropped by the next collapse. An item swept by a collapse is never dropped
+ * by that same collapse. A pin keeps an item until it is unpinned or restored.
  *
  * **The agent cannot reach any of it.** Nothing here renders, no handle names
  * an archived item, and no tool accepts one (§3.3). These are the person's
@@ -69,8 +67,7 @@ export interface ArchivedItem {
   sweptAtGeneration: string;
   /**
    * Which collapse swept this item in, counted from the first. Grace is counted
-   * from it: an item swept by collapse N is dropped by collapse N+2, and
-   * survives N+1.
+   * from it: an item swept by collapse N is dropped by collapse N+1.
    */
   sweptAtCollapse: number;
   /** Who placed the pin, if any (§3.2). A pinned item is never dropped. */
@@ -129,7 +126,7 @@ export function sweep(
 /**
  * Drop every unpinned item whose grace has run, and say which went. `collapse`
  * is the number of the collapse now running: an item swept by collapse N is
- * dropped when collapse N+2 runs, so it lives through N and N+1.
+ * dropped at N+1, after one period in the archive.
  */
 export function dropExpired(archive: Archive, collapse: number): { archive: Archive; dropped: string[] } {
   const dropped: string[] = [];
@@ -139,7 +136,7 @@ export function dropExpired(archive: Archive, collapse: number): { archive: Arch
     // grace does not run while the person or the agent has decided something
     // about it. Both marks read as "not yet gone".
     if (item.mark !== undefined) return true;
-    if (item.sweptAtCollapse > collapse - 2) return true;
+    if (item.sweptAtCollapse >= collapse) return true;
     dropped.push(item.id);
     return false;
   });

@@ -33,7 +33,7 @@ import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { lexicalProjectPath } from "./workspace.js";
+import { assertFileScope, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 
 export interface GenerationFiles {
@@ -448,33 +448,44 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
   // A person's message is the one kind that is somebody's words rather than the
   // model's own: restoring it puts a message back, so it is not `plainText`.
   const kind: EphemeralKind = role === "user" ? "personMessage" : "plainText";
-  for (const [index, value] of text.entries()) parts.push({ key: `x${index}`, value: { kind, text: value } });
+  // A user message can contain multiple text blocks, but is one Chat line and
+  // one selectable contribution. Its recorded text concatenates those blocks.
+  const values = role === "user" ? [text.join("")] : text;
+  for (const [index, value] of values.entries()) if (value.trim()) parts.push({ key: `x${index}`, value: { kind, text: value } });
   return parts;
 }
 
 /**
  * A pinned file's text as it stands, or `undefined` when it cannot be read:
- * outside the project, missing, or not a text file this can hold. The head says
+ * missing, inaccessible, or not a regular file. The head says
  * so in its place, and the pin's stale mark does the same in the state block.
  */
-function readPinnedFile(root: string, path: string): string | undefined {
-  const real = safeResolve(root, path);
+function readPinnedFile(root: string, path: string, readResult = false): string | undefined {
+  let real: string | null;
+  try { real = readResult ? resolveReadReference(root, path, readProjectSettings(root).pathScope) : resolvePinnedFile(root, path); }
+  catch { return undefined; }
   if (real === null) return undefined;
   try {
-    if (statSync(real).isDirectory()) return undefined;
+    if (!statSync(real).isFile()) return undefined;
     return readFileSync(real, "utf8");
   } catch {
     return undefined;
   }
 }
 
-/** Lexical resolve; returns null instead of throwing. */
+/** Resolve project paths and their symlink targets, returning null when inaccessible. */
 function safeResolve(root: string, path: string): string | null {
   try {
+    assertFileScope(root, path, "strict");
     return lexicalProjectPath(root, path);
   } catch {
     return null;
   }
+}
+
+/** Read current file pins for a newly frozen projection. */
+export function pinnedFileTexts(root: string, brain: CartoBrain): Map<string, string | undefined> {
+  return new Map(brain.files.map((file) => [file.path, readPinnedFile(root, file.path)]));
 }
 
 function mtimeOf(root: string, path: string): number | null {
@@ -520,6 +531,8 @@ export interface CollapseOptions {
    * left out of the head, so each is read once: as that turn (§2.3).
    */
   carriedTexts?: readonly string[];
+  /** Exact Chat identities of handed-on inputs, when known. */
+  carriedChatIds?: readonly string[];
 }
 
 export interface CollapseReport {
@@ -624,10 +637,9 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // becomes what the file holds now, and if the file is gone it keeps its text
   // and is marked stale, because a pin that silently kept the old bytes would
   // be the stale quotation the pin exists to prevent.
-  const fileTexts = new Map<string, string | undefined>();
+  const fileTexts = pinnedFileTexts(root, refreshed);
   for (const file of refreshed.files) {
-    const text = readPinnedFile(root, file.path);
-    fileTexts.set(file.path, text);
+    const text = fileTexts.get(file.path);
     const stale = text === undefined;
     const already = file.stale === true;
     if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
@@ -636,7 +648,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     if (item.pinned === undefined || deletions.has(item.id)) continue;
     const path = item.kind === "readResult" ? item.entity?.path : undefined;
     if (path === undefined) continue;
-    const text = readPinnedFile(root, path);
+    const text = readPinnedFile(root, path, true);
     if (text === undefined) continue;
     const refreshedItem: PinnedEphemeral = { ...item, text };
     writes.push({ write: { kind: "ephemeral.pin", item: refreshedItem }, now });
@@ -650,10 +662,9 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     const write = writeBackOf(item);
     if (write !== undefined) next = applyWrite(next, write, now);
   }
-  // The messages handed on as the new generation's first turn are not in its
-  // head as well: the newest record with that text is the one sent, and it
-  // joins the head at the next collapse, from the body it will be in then.
-  const handedOn = new Set<string>();
+  // A handed-on record stays in the body, not also the head. Prefer its exact
+  // identity; carriedTexts is retained for older callers without identities.
+  const handedOn = new Set<string>(options.carriedChatIds ?? []);
   for (const text of options.carriedTexts ?? []) {
     const record = [...next.chat].reverse().find((candidate) => candidate.author === "user" && candidate.text === text && !handedOn.has(candidate.id));
     if (record !== undefined) handedOn.add(record.id);
@@ -729,8 +740,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
  * and no grace is spent, because this is not a collapse.
  */
 export function rewriteHeadSnapshot(root: string, generation: string, brain: CartoBrain, person: string, now: number): void {
-  const fileTexts = new Map<string, string | undefined>();
-  for (const file of brain.files) fileTexts.set(file.path, readPinnedFile(root, file.path));
+  const fileTexts = pinnedFileTexts(root, brain);
   // Chat said since the freeze is in the body, and a rebuilt head keeps to the
   // records the frozen one held: the head gathers in new Chat at a collapse,
   // not before, or the model would read the same words twice (§2.3). A

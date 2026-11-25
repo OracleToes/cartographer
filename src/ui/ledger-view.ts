@@ -88,6 +88,15 @@ export class LedgerView implements Component, Focusable {
     return this.getFilteredEntries()[this.selectedIndex]?.id;
   }
 
+  /** Full selected record, including its answer rather than the truncated list row. */
+  selectedText(): string | undefined {
+    const entry = this.getFilteredEntries()[this.selectedIndex];
+    if (entry === undefined) return undefined;
+    const handle = this.brain === undefined ? undefined : handleOf(this.brain.handles, "ledger", entry.id);
+    return [`${handle ?? "L?"} [${entry.kind} · ${entry.status}]`, entry.text,
+      ...(entry.answer === null ? [] : ["", "Answer / Outcome:", entry.answer.text])].join("\n");
+  }
+
   private revealListRow(): void {
     const scroll = this.listScroll;
     if (scroll === undefined) return;

@@ -35,19 +35,18 @@
  * the text a person quotes and a pin holds. The number is the Context view's
  * number, because the two views are one prompt seen two ways.
  *
- * Order is the context's order, not arrival order: a person's line appears
- * where it actually landed, and a line that is submitted but not yet placed sits
- * at the end, dimmed and labelled, until the run reaches a boundary. Chat a
- * collapse brought into the new context is placed by when it was said, so it
- * sits at the head of this generation and the transcript before it stays under
- * it rather than being replaced.
+ * Order is the context's order, not arrival order: frozen Chat and pinned
+ * ephemera come first, in the head's order, followed by the live body. A line
+ * submitted but not yet placed sits at the end, dimmed and labelled, until the
+ * run reaches a boundary. Swept or archived content is not retained as history.
  *
  * Nothing here is data: the workspace rebuilds the landed list from the session
  * and the Brain at every drain and pushes the in-flight partial separately.
  */
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from "@earendil-works/pi-tui";
 
-import type { Mark, PinnedEphemeral } from "../domain/records.js";
+import type { CartoBrain, Mark, PinnedEphemeral } from "../domain/records.js";
+import { parseProjection } from "./context-view.js";
 import { canvasLine, renderMarkdown, statusLine, statusWarnLine, surfaceLine, tokens } from "./tokens.js";
 import { RecordControls, type RecordAction } from "./record-controls.js";
 
@@ -56,15 +55,15 @@ import { RecordControls, type RecordAction } from "./record-controls.js";
  * a key pressed here is the same act as the key on that view's row: a Chat
  * block is its Brain record, a card is the ephemeral item it renders.
  */
-export type BlockTarget = { part: "chat" | "tool-work"; id: string };
+export type BlockTarget = { part: "chat" | "tool-work" | "ephemera"; id: string };
 
 /** A block the keys can select: where it was drawn, and what it is. */
-type Selectable = { key: string; target: BlockTarget; start: number; end: number };
+type Selectable = { key: string; target?: BlockTarget; text: string; start: number; end: number };
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
   id: string;
-  /** The prompt's ephemeral handle (§5.4): `X3` for one item, or the call's own handle on its result. */
+  /** The prompt handle (§5.4): `X3` for an item, or `R`/`S` for a completed tool result. */
   handle?: string;
   /** True while fed from the live partial: defaults its fold open and is replaced when the round lands. */
   live?: boolean;
@@ -75,6 +74,10 @@ type CardBase = {
   /** Stable Context identities for the call/part and its result, if any. */
   sourceId?: string;
   resultId?: string;
+  /** This item is in the frozen head, even if it has since been unpinned. */
+  headItem?: boolean;
+  /** A deferred deletion mark on this exact item. */
+  deleteMarked?: boolean;
 };
 export type CardEntry =
   | (CardBase & { kind: "reasoning"; text: string })
@@ -82,8 +85,8 @@ export type CardEntry =
   | (CardBase & { kind: "tool"; name: string; args: string; /** Retained running output while the call executes; preferred as the card body when present. */ output?: string });
 
 export type TranscriptEntry =
-  | { kind: "person"; text: string; /** The prompt's `U` handle (§5.4). */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; mark?: Mark | undefined }
-  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
+  | { kind: "person"; text: string; /** The prompt's `U` or frozen `C` handle. */ handle?: string; /** The Brain Chat record this line is, once it has one (§2.3). */ recordId?: string; /** Restored person messages without a Chat record are ephemeral. */ sourceId?: string; mark?: Mark | undefined }
+  | { kind: "agent"; text: string; /** The Brain chat record this block is a rendering of; omitted for boot-burst text. */ recordId?: string; /** The live call when no record can be found. */ sourceId?: string; /** The record's handle (§5.4). A Chat record survives a collapse, so its handle is the Brain's own. */ handle?: string; /** A pending Brain action, not historical transcript content. */ mark?: Mark | undefined }
   | { kind: "system"; text: string; /** The Brain chat record this system notice is (e.g. automatic collapse). */ recordId?: string; handle?: string; mark?: Mark | undefined }
   | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
@@ -91,57 +94,51 @@ export type TranscriptEntry =
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
 
-/** Below every context entry's key: where the Chat the head holds is drawn. */
-const HEAD_CHAT_KEY = -1_000_000;
-
-/**
- * Where a Chat record is drawn among the generation's entries. A record the
- * frozen head holds is in the head, which is before everything the generation
- * did, so it is drawn first, in the head's order, whatever its timestamp says.
- * Any other record sits after the last entry that was written at or before it;
- * an entry with no message of its own has no time and anchors nothing.
- */
-export function chatKeyOf(
-  record: { id: string; createdAt: number },
-  head: readonly string[],
-  frame: ReadonlyArray<{ id: number; t: number }>,
-): number {
-  const at = head.indexOf(record.id);
-  if (at >= 0) return HEAD_CHAT_KEY + at;
-  let anchor = 0;
-  for (const slot of frame) if (slot.t > 0 && slot.t <= record.createdAt) anchor = Math.max(anchor, slot.id);
-  return anchor + 0.5;
-}
-
-/** Retain dialogue and only the work that actually survived a collapse. */
-export function retainAfterCollapse(entries: readonly TranscriptEntry[], pins: readonly PinnedEphemeral[]): TranscriptEntry[] {
-  const held = new Map(pins.filter((item) => item.pinned !== undefined).map((item) => [item.id, item]));
-  const seenChat = new Set<string>();
-  const retained: TranscriptEntry[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "person") {
-      // U handles belong to the old generation, not to historical dialogue.
-      retained.push({ kind: "person", text: entry.text });
-    } else if (entry.kind === "agent" || entry.kind === "system") {
-      if (entry.recordId !== undefined && seenChat.has(entry.recordId)) continue;
-      if (entry.recordId !== undefined) seenChat.add(entry.recordId);
-      retained.push(entry);
-    } else if (isCard(entry)) {
-      const part = entry.sourceId === undefined ? undefined : held.get(entry.sourceId);
-      const result = entry.resultId === undefined ? undefined : held.get(entry.resultId);
-      if (part === undefined && result === undefined) continue;
-      // A tool row combines a call and a result. If only one was pinned, do
-      // not leak the swept half back into the transcript or its copied text.
-      if (entry.kind === "tool") {
-        const { handle: _handle, output: _output, failed: _failed, ...card } = entry;
-        retained.push({ ...card, id: `retained-${entry.sourceId ?? entry.resultId}`, args: part === undefined ? "" : entry.args, ...(result === undefined ? {} : { output: result.text, ...(entry.failed === undefined ? {} : { failed: entry.failed }) }) });
-      } else if (part !== undefined) {
-        const { handle: _handle, ...card } = entry;
-        retained.push({ ...card, id: `retained-${entry.sourceId}`, text: part.text });
+/** Render the actual frozen Chat and pinned ephemera, in projection order. */
+export function frozenTranscript(
+  text: string,
+  brain: CartoBrain,
+  chatIds: readonly string[],
+  frozenItems: ReadonlyMap<string, PinnedEphemeral>,
+  person: string,
+): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = [];
+  let chatIndex = 0;
+  for (const row of parseProjection(text)) {
+    const [header = "", ...lines] = row.lines;
+    if (row.kind === "chat") {
+      const id = chatIds[chatIndex++];
+      const record = brain.chat.find((candidate) => candidate.id === id);
+      const speaker = /^C\d+ \[([^\]]*)\]/.exec(header)?.[1];
+      const author = record?.author ?? (speaker === "system" ? "system" : speaker === person ? "user" : "agent");
+      const content = lines.map((line) => line.startsWith("  ") ? line.slice(2) : line).join("\n");
+      entries.push({
+        kind: author === "user" ? "person" : author === "system" ? "system" : "agent",
+        text: content,
+        handle: row.key,
+        ...(record === undefined ? {} : { recordId: record.id, mark: record.mark }),
+      });
+    } else if (row.kind === "ephemera") {
+      const match = /^X\d+ \[([^\]]+)\] ?(.*)$/.exec(header);
+      const kind = match?.[1];
+      const content = [match?.[2] ?? "", ...lines].join("\n");
+      const item = frozenItems.get(row.key);
+      const source = item === undefined ? {} : { sourceId: item.id, headItem: true, deleteMarked: brain.ephemeralDeletes?.includes(item.id) === true };
+      if (kind === "toolResult" || kind === "readResult") {
+        entries.push({ kind: "tool", id: `head-${row.key}`, handle: row.key, name: item?.entity?.tool ?? (kind === "readResult" ? "read" : "result"), args: "", output: content, ...(item === undefined ? {} : { resultId: item.id, headItem: true, deleteMarked: brain.ephemeralDeletes?.includes(item.id) === true }) });
+      } else if (kind === "reasoning") {
+        entries.push({ kind: "reasoning", id: `head-${row.key}`, handle: row.key, text: content, ...source });
+      } else {
+        entries.push({ kind: "output", id: `head-${row.key}`, handle: row.key, text: content, ...source });
       }
     }
   }
-  return retained;
+  return entries;
+}
+
+/** The frozen head precedes the live body, which is ordered by its context position. */
+export function orderTranscript(head: readonly TranscriptEntry[], body: ReadonlyArray<{ key: number; entry: TranscriptEntry }>): TranscriptEntry[] {
+  return [...head, ...[...body].sort((left, right) => left.key - right.key).map(({ entry }) => entry)];
 }
 
 /** Deliver UI status through pi's flash, suppressing rapid identical repeats. */
@@ -388,15 +385,22 @@ export class TranscriptView implements Component, Focusable {
     if (block !== undefined) this.onReveal?.(block.start, block.end);
   }
 
+  /** Copy the entire selected block, independent of folding or viewport size. */
+  selectedText(): string | undefined {
+    if (!this.selecting) return undefined;
+    this.render(this.lastWidth);
+    return this.selectedBlock()?.text;
+  }
+
   /** Which kind of thing is selected: only a card (an ephemeral item) can be pinned. */
   selectedPart(): BlockTarget["part"] | undefined {
-    return this.selecting ? this.selectedBlock()?.target.part : undefined;
+    return this.selecting ? this.selectedBlock()?.target?.part : undefined;
   }
 
   /** Pin or unpin the selected card, the act `p` performs; the palette calls this. */
   pinSelected(): void {
     const target = this.selectedBlock()?.target;
-    if (target?.part === "tool-work") this.onTogglePin?.(target.part, target.id);
+    if (target?.part === "tool-work" || target?.part === "ephemera") this.onTogglePin?.(target.part, target.id);
   }
 
   /** Mark the selected block, the act `a` and `d` perform; the palette calls this. */
@@ -422,7 +426,7 @@ export class TranscriptView implements Component, Focusable {
   private markBlock(key: string, action: RecordAction, now: boolean): void {
     const target = this.selectables.find((block) => block.key === key)?.target;
     if (target === undefined) return;
-    const ephemeral = target.part === "tool-work";
+    const ephemeral = target.part === "tool-work" || target.part === "ephemera";
     if (ephemeral && action === "archive" && !now && this.archiveConfirmation !== key) {
       this.archiveConfirmation = key;
       this.cacheWidth = -1;
@@ -618,6 +622,7 @@ export class TranscriptView implements Component, Focusable {
     const keyPrefix = `  ${handle}${tint(glyph)} ${label}`;
 
     const marks: string[] = [];
+    if (card.deleteMarked === true) marks.push(tokens.danger("· delete on collapse"));
     if (card.failed === true) marks.push(tokens.danger("· failed"));
     else if (card.status === "running") marks.push(tokens.faint("· running"));
     else if (card.status === "pending") marks.push(tokens.faint("· queued"));
@@ -757,12 +762,13 @@ export class TranscriptView implements Component, Focusable {
       const drawn = this.renderCard(card, width, start);
       lines.push(...drawn.lines);
       this.ranges.push(drawn.range);
-      // A card in flight is not an item anything holds yet; a landed one is the
-      // ephemeral item its source id names (the result's, for a tool row).
+      // Streaming cards can be copied, but only landed cards have a mark target.
       const id = card.live === true ? undefined : (card.resultId ?? card.sourceId);
-      if (id !== undefined) this.selectables.push({ key: `card:${card.id}`, target: { part: "tool-work", id }, start, end: lines.length });
+      const target: BlockTarget | undefined = id === undefined ? undefined : { part: card.headItem === true ? "ephemera" : "tool-work", id };
+      const text = card.kind === "tool" ? `tool ${card.name}\n${card.output ?? card.args}` : card.text;
+      this.selectables.push({ key: `card:${card.id}`, ...(target === undefined ? {} : { target }), text, start, end: lines.length });
     };
-    for (const entry of this.items) {
+    for (const [index, entry] of this.items.entries()) {
       if (isCard(entry)) {
         pushCard(entry);
         continue;
@@ -779,16 +785,21 @@ export class TranscriptView implements Component, Focusable {
             lines.push(`  ${tokens.warn(line)}`);
           }
         }
-        if (entry.recordId !== undefined) {
-          this.selectables.push({ key: `chat:${entry.recordId}`, target: { part: "chat", id: entry.recordId }, start, end: lines.length });
-        }
+        const target: BlockTarget | undefined = entry.recordId !== undefined
+          ? { part: "chat", id: entry.recordId }
+          : (entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined
+            ? { part: "tool-work", id: entry.sourceId } : undefined;
+        const key = entry.recordId !== undefined ? `chat:${entry.recordId}`
+          : (entry.kind === "person" || entry.kind === "agent") && entry.sourceId !== undefined
+            ? `${entry.kind}:${entry.sourceId}` : `message:${index}`;
+        this.selectables.push({ key, ...(target === undefined ? {} : { target }), text: entry.text, start, end: lines.length });
       } else {
         const text = entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text);
         for (const line of wrapTextWithAnsi(`${text}`, width - 3)) lines.push(`  ${line}`);
       }
     }
     for (const card of this.liveCards) pushCard(card);
-    for (const item of this.queued) {
+    for (const [index, item] of this.queued.entries()) {
       gap();
       const start = lines.length;
       headers.add(start);
@@ -798,6 +809,7 @@ export class TranscriptView implements Component, Focusable {
       for (const line of wrapTextWithAnsi(item.text, body)) {
         lines.push(`  ${tokens.faint(tokens.italic(line))}`);
       }
+      this.selectables.push({ key: `queued:${index}`, text: item.text, start, end: lines.length });
     }
     this.cacheWidth = width;
     this.cacheLines = this.inset(lines, width, this.cursorLines(), headers);

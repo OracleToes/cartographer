@@ -153,7 +153,14 @@ the `chat` tool's result; the head does not repeat either until a collapse ends
 that body. Both are Chat records in the Brain, so they stay until someone deletes
 them, and the collapse places them in the head (§3.2, §5.1): the conversation
 goes on across a collapse, and the transcript and the Context view are two views
-of the same records. Chat is swept like every Brain record: only a delete or an
+of the same records. New person messages carry their Chat identity in the live
+entry, including when carried across an automatic collapse. Applying a Chat
+record action now removes its corresponding live contribution as well as the
+record; unrelated identical messages and sibling tool calls remain. Legacy
+entries without an identity are matched only when there is one live occurrence
+and one available record with that text; ambiguous lines remain separately
+actionable as live contributions, without guessing which Brain record they are.
+Chat is swept like every Brain record: only a delete or an
 archive mark removes one, and an archived record moves out as the record, never
 also as a swept line. A rebuild in the middle of a generation (an apply-now)
 keeps to the Chat the head held at the freeze, and a message handed on as the new
@@ -202,8 +209,9 @@ everything a collapse sweeps and for ephemeral entries the person archives
 immediately (§4.1).
 
 - It holds swept ephemeral items and Brain records marked for archive.
-- It grants one collapse of grace. An unpinned item in the archive is deleted
-  for good at the following collapse.
+- It holds unpinned items for one collapse period. An item archived during a
+  collapse or between collapses is deleted for good at the next collapse, unless
+  it is pinned or restored.
 - A pinned item in the archive remains until it is unpinned or restored.
 
 Restoring puts an entry back where it came from, as its original type: a Brain
@@ -222,6 +230,11 @@ context layer and the archive layer, and the person then works the UI as they
 would anywhere else: pin, unpin, and restore from there. There is no separate
 recovery screen and no mode of its own. The archive is the same UI over a
 different layer, which is why a pin means the same thing on both (§3.2).
+The person can filter the archive, navigate or click its items, and open the
+complete stored item, including its original content and metadata. The list
+shows a bounded page around the selection rather than drawing the entire
+archive on every frame. `r` marks a restore, `!r` restores now, `d` marks a
+delete and a second `d` deletes now; `u` withdraws a mark.
 
 ### 3.4 Deleted text is really gone
 
@@ -452,8 +465,8 @@ dashboard about its Brain and the project, and it reports:
   `flow:` checklist at the tail, plus conditional `attention:` cues derived
   strictly from live facts (such as `bash` used for file edits, pinned files
   drifting on disk since collapse, an untouched/flat Brain after several tool
-  calls, bloated Chat history, or persistent jobs with unread output). Omitted
-  when clean.
+  calls or persistent jobs with unread output). It does not instruct the agent
+  to archive or delete Chat. Omitted when clean.
 
 A long pending list is the signal to collapse.
 
@@ -476,7 +489,7 @@ handle. The handles are also why the context can be talked about at all: a handl
 is how one item refers to another.
 
 **Files are handled by the tree.** The project tree gives a handle to every file
-and directory it shows. A file's handle comes from the tree, not from a separate
+and directory on its current page. Ancestors repeated only for context have no handle. A file's handle comes from the tree, not from a separate
 inventory, so a file the tree does not show has no handle — which is why the tree
 is rendered for a whole project and not only for what the agent happens to
 mention.
@@ -528,6 +541,11 @@ survives a collapse with the record. An ephemeral item has no record to hold one
 so its number comes from where it sits: `X3` is the third ephemeral item in the
 prompt in both views, because a handle is only useful if it names the same thing
 wherever the person reads it.
+
+The state block lists live ephemeral items by handle and type only, without
+repeating their content, so the agent can select an item without rewriting the
+cached prompt body. Pinned items already in the frozen head keep their `X`
+handles; live `X` numbering starts after those handles.
 
 A tool row in the transcript is one row — the call's arguments and its result —
 so it wears the result's handle, `R` or `S`, which is the text a person quotes
@@ -595,8 +613,20 @@ delivered as the next turn, and the agent reads the current state and acts.
 
 ## 6. Project files
 
-Carto reads and edits paths that resolve inside the selected project root. A
-symlink that resolves outside the root is rejected.
+File scope is a person-controlled, per-project setting. **Strict** is the default:
+`read`, `edit`, `create`, and the other path tools stay inside the selected
+project root, including resolved symlink targets. **Relaxed** allows `read` and
+`edit` to access paths outside it; `create` and other path tools remain scoped.
+The `.brain` wall still applies in either scope, including through symlinks.
+A file pin names an entry in the project tree, and may follow a symlink to a
+file outside the project in either mode. It checks that the target is a readable
+regular file when placed and reads it again into each new head. The `.brain`
+wall still applies to its target. A missing, inaccessible or forbidden target is
+retained as a stale pin. A symlinked project root is treated as the same project
+as its real directory. The scope mode still controls the agent's file tools.
+The workspace palette toggles scope; headless `/mode strict` and `/mode relaxed`
+do the same. The state block reports the current scope to the agent. This is not
+a shell sandbox: `bash` remains trusted.
 
 The agent's ideal edit is small, atomic, and scoped: one function, one value
 changed, one chunk removed, one small file added, or the minimum scaffolding that
@@ -608,10 +638,30 @@ counts lines. What keeps changes small is the prompt and the agent's willingness
 to stop. That is deliberate: a mechanism that refused large changes would be the
 prompt not being trusted (§1).
 
+### Wiping a project session
+
+The person may permanently wipe all Carto state for this project using the
+workspace palette or `/wipe`, or `/wipe` in headless mode. The workspace asks
+them to type `WIPE`; headless asks for `/wipe confirm` as the next nonempty
+line. Cancelling or an unarmed confirmation does nothing. The warning names
+`.brain`, the scope of deletion, and asks the person to close any other Carto
+instances on the same project first. The live run, jobs, generation store and
+Brain are closed before the host removes the project's entire `.brain` directory,
+including the Brain, archive, all generations and project settings. Carto stays
+open and starts a fresh session with default project modes. No old conversation,
+archive, queued input, job or transient UI state is carried across. Project files and
+global configuration outside `.brain` are not touched. A symlink or non-directory
+`.brain` is refused, and failures are reported rather than reported as success.
+Deletion is not a guarantee of secure erasure from backups or storage media.
+
 ### 6.1 Read only mode and edit mode
 
 Carto is always in one of two modes. A toggle in the workspace switches between
-them. The person sets it; nothing else does.
+them; headless `/mode read-only` and `/mode edit` set them. The person sets it;
+nothing else does. Read-only/edit and strict/relaxed are independent and are
+stored in that project's `.brain/settings.json`, surviving restart and collapse.
+New projects default to edit and strict. A failed settings write leaves the live
+mode unchanged; malformed settings are reported rather than silently discarded.
 
 - **Edit mode** is the default. The harness enforces nothing, and the agent edits
   as it works.
@@ -650,7 +700,8 @@ it is not a permission gate. Direct access would fill the agent's context with
 duplicated or stale copies of its own state.
 
 `.brain` never renders. It is skipped in every listing, excluded from aggregated
-sizes, and rejected as a tree anchor at any depth.
+sizes, and rejected as a tree anchor at any depth, including through symlinked
+ancestors. Tree symlink entries are leaves; they are not traversed as directories.
 
 ### 6.3 The project tree
 
@@ -660,7 +711,7 @@ attached to, so the tree is a map of what the agent understands rather than a
 listing.
 
 The tree is anchored at the project root by default, at a depth of two. The `tree`
-tool sets the anchor and the depth, both optional: the anchor defaults to the
+tool sets the anchor, depth, and page offset, all optional: the anchor defaults to the
 project root, and the depth defaults to two. A depth of one is the anchor and its
 immediate contents; anything below one renders the same as one, because there is
 no useful rendering of an anchor with nothing under it. The tool does not return the tree:
@@ -670,6 +721,28 @@ result is only that the block will be rendered at the new anchor.
 **`tree` ends the turn immediately.** The state block renders as the next turn, so
 the agent sets where it is attending and sees the tree it just asked for at once,
 rather than reading a second rendering of it in a tool result.
+
+The state block displays at most `treePageSize` scanned entries per page,
+configured in `~/.carto/config.json` (integer 1–2,000; default 100). This is an
+entry limit, not an exact tokenizer limit. The block states the number of scanned
+entries before and after the page and the next zero-based `tree` offset. Pages
+follow depth-first tree order; ancestors needed for context are repeated without
+handles. Changing anchor or depth resets the offset unless one is supplied. The
+Tree view shows the same page and uses `[` and `]` to move between pages. Only
+entries on the page receive handles; agent tools continue to resolve against the
+last state block sent. Counts do not claim to include entries the scan never saw.
+
+The scan itself stops at the requested display depth (at most 64 levels) and
+a budget of 2,000 encountered entries, including ignored entries. Directories
+at the depth boundary are not opened. A directory size prefixed `>=` is the
+exact count of bytes found, a lower bound rather than a full subtree size;
+ancestors inherit incompleteness. A listing cut short by the budget or an
+unreadable entry says entries were omitted. The tree view signals partial data
+as well. Ignored entries, `.brain`, and `.git` never contribute to sizes.
+The filesystem result is shared briefly across the sidebar, view, and block,
+and is eligible for refresh after one second; Brain annotations are projected afresh. Tree
+handles used by agent tools resolve against the last block sent to the agent,
+not a later scan that might have renumbered them.
 
 The anchor stays inside the project.
 
@@ -704,20 +777,20 @@ and `create` takes a path because the file it makes has no handle yet.
 | `chat` | Writes one Agent Chat record: something declared person-facing. |
 | `atlas` | Creates or updates one Atlas node, optionally linked to other nodes and attached to a reference. |
 | `ledger` | Writes to the Ledger: a goal, note, question, instruction, or progress. |
-| `pin` | Sets or clears the pin on one file from the tree. |
+| `pin` | Sets or clears the pin on one file from the tree or one live ephemeral item by handle; the agent cannot remove the person's pin. |
 | `mark` | Marks one Brain record for archive or delete, or withdraws a mark the agent placed. Applies at the next collapse. |
 | `read` | Reads a file by handle, or by path, from a start line, for a number of lines. |
 | `edit` | Applies ordered text replacements to an existing file, named by handle or by path. Never creates, never replaces a file whole. Errors in read only mode. |
 | `create` | Writes a new file, at a path. Refuses a path that already exists. Errors in read only mode. |
 | `bash` | Runs a command inside the project. |
 | `proc` | Starts, drives, reads, and stops persistent piped processes (`J` handles) that live in host memory, survive collapse, and are shared live in the `jobs` view. |
-| `tree` | Sets the project tree's anchor and depth. The tree renders in the state block. |
+| `tree` | Sets the project tree's anchor, depth, and page offset. The tree renders in the state block. |
 | `collapse` | Ends the context here and rebuilds it from the Brain, recording a required Chat `message` to the person. |
 | `sleep` | Waits: forever, or for a number of seconds. |
 
 `read`, `edit`, and `bash` are taken from the durable package. Carto supplies
-their descriptions and scopes them to the project root; it does not write a file
-or command layer beside them.
+their descriptions and scopes file access according to the person’s selected
+mode; it does not write a file or command layer beside them.
 
 - **`read`** takes a file's handle, or its path, and optional `offset` and
   `limit`.
@@ -825,14 +898,40 @@ Atlas, Ledger, and the Tree, where the marks are applied. While `/` takes a
 filter, every one of these keys is a letter of it. A file carries a pin and no
 mark: the `mark` tool is for Brain records. These keys are commands in the same
 list as everything else, so the footer, `f1`, and the palette show them.
+In the Chat prompt, `tab` completes a file or directory path relative to the
+project root using pi-tui; arrow keys select a suggestion, `tab` accepts it,
+and `escape` dismisses it. Completion inserts text only, not file contents.
+Pi-tui treats a leading `/` as a slash command, so an absolute path at the
+start of a line needs preceding text or a relative alternative.
+
 In Chat, `escape` leaves the prompt and selects a block (the last one); `j`/`k`
 (or the arrows) walk the Chat blocks, the person's and the agent's, and the cards;
 `g` and `G` go to the first and last; and `a`, `d`, `u` and `!` (and `p`, on a
 card) do what they do everywhere else, through the same handlers as the Context view's rows: a Chat block
 is its Brain record, a card is the ephemeral item it renders (a tool row is its
 result), and an ephemeral card asks before it archives. `escape` or `enter` returns
-to the prompt. A card still streaming is not an item anything holds and cannot be
-selected. A click folds a card; it never pins or marks.
+to the prompt. A streaming card or a message without a durable identity may be
+selected for copying, but cannot be pinned or marked until it has a target. A
+click folds a card; it never pins or marks.
+
+`y` copies the selected item in Chat, Context, Atlas, Ledger, Tree, Jobs, or the
+archive. Chat selection starts with `escape`; elsewhere the cursor selects a
+row. The complete item is copied even when folded or offscreen; Context uses
+its current human/model display mode, Tree copies the selected project-relative
+path without reading the file, and Jobs copies its retained output. Archive
+records include their stored fields. When a filter or job input is taking text,
+`y` remains a letter. Copy uses the same system clipboard and temporary-file
+fallback as transcript copying, and reports the fallback path. `ctrl+y` still
+copies the complete transcript, and `/copy-session` still copies the dump.
+`/copy` copies the transcript too. Mouse selection uses the same copy backend.
+Inside tmux every copy also loads its paste buffer and, on tmux 3.2 or newer,
+requests forwarding to the attached terminal's clipboard. A loaded tmux buffer
+is not proof that the terminal accepted it: the status says forwarding was
+requested, not that it succeeded. With older tmux the buffer is still usable
+with the tmux paste command. Terminal clipboard forwarding needs compatible tmux
+and terminal configuration; native clipboard tools are also tried. A temporary
+file is left as a fallback and its path is reported when the clipboard cannot
+be verified.
 
 **The open book follows the Brain.** The drain that rebuilds the transcript, on
 every run boundary, on a throttled live-watch tick and on a slow timer, also
@@ -840,6 +939,14 @@ redraws the open Atlas or Ledger when the Brain's records changed, and the
 sidebar's counts with it, judged by a digest of what the books show so a quiet
 Brain costs a read and a comparison, not a redraw. The Context view and the Tree
 follow on the same drain.
+
+The sidebar also has a single vertical, token-weighted map of the occupied
+prompt, using the Context view's ordered entries and their type colours: frozen
+head at the top, live body in occurrence order, and state-block tail at the
+bottom. It does not show unused capacity. Hovering a row shows its region,
+entry and estimated size; a row shared by several entries says so. Clicking a
+row provides the same detail when mouse motion is unavailable. On short screens
+the map yields to navigation. Hovering or clicking it does not change focus.
 
 **The transcript renders everything the model does.** The Chat the head holds is
 drawn first, in the head's order, before anything the generation did — after a
@@ -852,28 +959,37 @@ in flight inside a limited-height window, and folds to a one-line header at the
 boundary. A header click folds or opens a card; a click on a long card's body or
 hidden-lines indicator toggles between the preview and full content. A toggle
 folds or opens every card in view, and the wheel scrolls the transcript. Chat remains the only channel
-that addresses the person. When a collapse sweeps work out of the context, that
-work disappears from the transcript as well; the person's messages and the
-agent's Chat remain. Pinned work that survives the collapse remains visible.
+that addresses the person. The transcript shows the Chat and ephemera the model
+actually sees, in the frozen head's order followed by the live body; it does not
+retain a separate historical transcript. After collapse, archived or deleted
+Chat and swept work disappear, while Chat and pinned work in the new head remain.
 Session notifications are transient UI notices, not transcript messages.
 
 **The context bar spans the whole bottom of the application and is always
-visible.** Its width is the server's own context capacity: the total the server
+visible.** Usage, progress and speeds occupy a separate status row above the
+full-width track, so the figures never take space from the track or shift it.
+The track's width is the server's own context capacity: the total the server
 reports for its `-c` setting. Filling it is a picture of the context, not a
 gauge with a budget mark.
 
 It shows three quantities, each in its own colour:
 
-- **Fill** — how much of the context is occupied, as a solid colour. The last
-  known fill remains visible while a new request is prefilling and is restored
-  from the session's last measured response after reopening.
-- **Prefilled** — during a prompt read, how much has been read so far, including
-  the reused prefix; newly read tokens are distinguished from the solid fill.
-- **To prefill** — during a prompt read, how much is still to read.
+- **Fill** — how much of the context is occupied, in one colour regardless of
+  content type. It is restored from the session's last measured response after
+  reopening. During a prompt read, the cached prefix keeps its position and fill
+  colour, as does the prior fill beyond the prompt's extent.
+- **Prefilled** — during a prompt read, the newly processed part of the uncached
+  tail is shown in a second colour; the cached prefix is not recoloured.
+- **To prefill** — the remainder of that tail is shown in a third colour. With
+  an unknown context window, the progress bar scales to the prompt. The bar's
+  width does not change as progress labels, speeds or ETA change.
 
-The bar also shows prefill and decode speeds in tokens per second. When the
-server has not supplied a progress or speed figure, it is unknown, not zero or
-an invented live measurement. On narrow terminals the bar may shorten its labels.
+The bar also shows prefill and decode speeds in tokens per second. During an
+active prompt read, the prefill speed and remaining-time estimate are highlighted;
+during generation, the decode speed is highlighted. Paused, finished, or lost
+requests keep their figures in the quieter ink. When the server has not supplied
+a progress or speed figure, it is unknown, not zero or an invented live
+measurement. On narrow terminals the bar may shorten its labels.
 
 The two prefill quantities are the point of the bar. Prefill is the slow half of
 a long context, and a bar that shows how far along the read is tells the person

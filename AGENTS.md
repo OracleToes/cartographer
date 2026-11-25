@@ -44,6 +44,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [darrenburns/posting](https://github.com/darrenburns/posting) | person | Inspiration for the terminal layout only: keybinding bar, action registry, overlays. Not a dependency and not a port target | reference only |
 | [canop/broot](https://github.com/canop/broot) | person | Inspiration for the tree view only: how a whole hierarchy is made readable in one pane. Not a dependency and not a port target | reference only |
 | [eliaskg/pi-prefill](https://github.com/eliaskg/pi-prefill) | person | Reference for live prefill progress (`return_progress`, `prompt_progress`, delta-based rate and ETA). Not a dependency and not a port target | reference only |
+| [dimk90/pi-context-view](https://github.com/dimk90/pi-context-view) | person | Inspiration for a sidebar context visualization; the person requested a vertical stack, not its grid. Not a dependency or a port target | reference only |
 | [tomooshi/condensed-milk-pi](https://github.com/tomooshi/condensed-milk-pi) | person | Evaluated for context compression and bash output filtering; not adopted (retroactive masking conflicts with Carto's short-generation collapse model) | reference only (not adopted) |
 
 The three `pi` links are the reason this project exists in its current shape.
@@ -66,6 +67,7 @@ Rules:
 ### Model references
 
 - [nokeepai Inkling-2-Mini-Unbound GGUF](https://huggingface.co/bartowski/nokeepai_Inkling-2-Mini-Unbound-GGUF) — person; model under investigation for a llama.cpp grammar-stack error. This is a reference, not a project dependency.
+- [Mythos-nano](https://huggingface.co/squ11z1/Mythos-nano) — person; model for discussion of tool-free reasoning alongside Carto. This is a reference, not a project dependency.
 
 ## 3. Glossary
 

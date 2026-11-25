@@ -1,6 +1,6 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -14,6 +14,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@ear
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf } from "../dist/domain/handles.js";
+import { personChatBindings } from "../dist/domain/chat-identity.js";
 import {
   applyOmitNow,
   applyRecordActionNow,
@@ -129,6 +130,29 @@ test("the tree is addressable: a directory handle anchors it, a file handle does
   } finally {
     await cleanup();
   }
+});
+
+test("tree tools use the handles actually sent even if a later scan renumbers files", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const session = { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test", person: "OracleToes", readOnly: false };
+  const tools = Object.fromEntries(createTools({ root, brain, session }).map((tool) => [tool.name, tool]));
+  const api = { callId: "call-snapshot", now: Date.now, conversationId: "c", taskId: "t", env: new NodeExecutionEnv({ cwd: root }) };
+  try {
+    const { projectTreeBlock } = await import("../dist/runtime/project-tree.js");
+    const before = projectTreeBlock(root, root, 2, await brain.read());
+    session.requestTreeHandles = before.handles;
+    const file = join(root, "src", "verify-me.ts");
+    const handle = before.handles.get(file);
+    writeFileSync(join(root, "src", "aaa.ts"), "different content");
+    const after = projectTreeBlock(root, root, 3, await brain.read());
+    assert.notEqual(after.handles.get(file), handle);
+    const read = await tools.read.execute({ path: handle }, api, {});
+    assert.match(read.output.map((part) => part.text).join(""), /answer = 42/);
+    await assert.rejects(tools.read.execute({ path: "F999" }, api, {}), /not a file handle/);
+    const dir = before.handles.get(join(root, "src"));
+    await tools.tree.execute({ handle: dir }, api, {});
+    assert.equal(session.tree.anchor, join(root, "src"));
+  } finally { await cleanup(); }
 });
 
 test("no product tool carries a bound its own description does not state", async () => {
@@ -462,6 +486,41 @@ test("apply-now removes only the selected work row from the prompt, view and lat
   }
 });
 
+test("the head stays byte-identical across Brain writes and a projection read failure", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "first note" }, { id: "call-head-1" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-head-2" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "second note" }, { id: "call-head-3" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-head-4" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
+  // The head as pi carries it: every system entry's sections and tool set.
+  const headOf = (messages) => JSON.stringify(
+    messages.filter((message) => message.role === "system").map((message) => ({ sections: message.sections, tools: message.toolsAdded })),
+  );
+  try {
+    const first = await submitInput(session, "first turn");
+    await first.wait(BACKGROUND_CONTEXT);
+    const head = headOf(captured[0]);
+    assert.ok(head.includes("carto-context"), "the first request carried the frozen projection");
+
+    // The projection file goes away: the next read must keep the shown bytes,
+    // not re-project the Brain (which the agent has since written to).
+    const markdown = generationPaths(root, session.generation).markdown;
+    chmodSync(markdown, 0o644);
+    rmSync(markdown);
+
+    const second = await submitInput(session, "second turn");
+    await second.wait(BACKGROUND_CONTEXT);
+    assert.equal(headOf(captured.at(-1)), head, "the head is byte-identical across Brain writes and a projection read failure");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("sibling work identities survive repeated removals, including identical parts", async () => {
   const { root, brain, cleanup } = await fixture();
   const { models, ref } = fauxSetup();
@@ -486,6 +545,59 @@ test("sibling work identities survive repeated removals, including identical par
     assert.ok(!swept.some((item) => item.id === id("x2")));
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("applying Chat actions removes only the selected live person or agent contribution", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([
+      fauxText("keep this sibling"),
+      fauxToolCall("chat", { text: "same agent answer" }, { id: "chat-first" }),
+      fauxToolCall("chat", { text: "same agent answer" }, { id: "chat-second" }),
+    ], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "stop-first" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "stop-second" })], { stopReason: "toolUse" })),
+  ]);
+  let session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  try {
+    await (await submitInput(session, [{ type: "text", text: "same " }, { type: "text", text: "question" }])).wait(BACKGROUND_CONTEXT);
+    await (await submitInput(session, "same question")).wait(BACKGROUND_CONTEXT);
+    const people = (await brain.read()).chat.filter((record) => record.author === "user");
+    assert.equal(people.length, 2);
+    let entries = await sessionTranscript(session);
+    let bindings = personChatBindings(entries, (await brain.read()).chat, new Set());
+    const first = entries.find((entry) => bindings.get(entry.id) === people[0].id);
+    const second = entries.find((entry) => bindings.get(entry.id) === people[1].id);
+    assert.ok(first && second && first.id !== second.id, "equal text has separate durable identities");
+
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", people[1].id, "delete"), true);
+    entries = await sessionTranscript(session);
+    assert.equal(entries.find((entry) => entry.id === second.id).model.length, 0);
+    assert.equal(entries.find((entry) => entry.id === first.id).model[0].role, "user");
+    assert.ok((await brain.read()).chat.some((record) => record.id === people[0].id));
+    assert.ok(!(await brain.read()).chat.some((record) => record.id === people[1].id));
+
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", "chat:chat-first", "delete"), true);
+    entries = await sessionTranscript(session);
+    const model = JSON.stringify(entries.map((entry) => entry.model));
+    assert.ok(!model.includes('"id":"chat-first"'));
+    assert.ok(model.includes('"id":"chat-second"'));
+    assert.ok(model.includes("keep this sibling"));
+    assert.ok((await brain.read()).chat.some((record) => record.id === "chat:chat-second"));
+
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    entries = await sessionTranscript(session);
+    bindings = personChatBindings(entries, (await brain.read()).chat, new Set());
+    assert.equal(bindings.get(first.id), people[0].id, "identity survives reopening");
+    assert.equal(await applyRecordActionNow(session, brain, root, "chat", people[0].id, "archive"), true);
+    assert.equal((await sessionTranscript(session)).find((entry) => entry.id === first.id).model.length, 0);
+    assert.ok((await brain.readArchive()).items.some((item) => item.record?.value?.id === people[0].id));
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });
@@ -616,6 +728,39 @@ const waitUntil = async (predicate, label) => {
   }
   assert.fail(`timed out waiting for ${label}`);
 };
+
+test("interrupting a paused stream releases the gate and stops the run", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const stand = await pausedServer(["started "], ["must not continue"]);
+  const ref = { provider: "llama-swap", modelId: "ByteShape" };
+  const models = configuredModels({ version: 1, model: "llama-swap/ByteShape", llamaSwapEndpoint: stand.endpoint }, ref);
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  let timer;
+  try {
+    const submission = await submitInput(session, "start then stop");
+    await waitUntil(() => session.freeze.live(), "the response body");
+    assert.equal((await togglePause(session, true)).held, true);
+    stand.release();
+    const interrupted = await Promise.race([
+      interruptRun(session),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("paused interrupt did not settle")), 1500); }),
+    ]);
+    assert.equal(interrupted, true);
+    assert.equal(session.freeze.frozen(), false);
+    const result = await submission.wait(BACKGROUND_CONTEXT);
+    assert.notEqual(result.status, "running");
+    await waitForRunEnd(session);
+    assert.equal(stand.requests(), 1, "the interrupted reply did not resume into another turn");
+    assert.doesNotMatch(JSON.stringify(await sessionTranscript(session)), /must not continue/);
+    assert.equal(await interruptRun(session), false, "stopping an idle session is a no-op");
+  } finally {
+    clearTimeout(timer);
+    stand.release();
+    await closeLiveSession(session).catch(() => undefined);
+    await stand.close();
+    await cleanup();
+  }
+});
 
 test("a pause holds the reply mid-sentence and the same response finishes it: nothing is re-requested", async () => {
   const { root, brain, cleanup } = await fixture();

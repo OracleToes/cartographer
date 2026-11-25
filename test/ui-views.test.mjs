@@ -1,25 +1,102 @@
 import "./agent-reminder.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
+import { Editor } from "@earendil-works/pi-tui";
+import { enablePromptPathCompletion } from "../dist/ui/prompt-completion.js";
+import { selectTheme } from "../dist/ui/palette.js";
+import { barTokens, padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
 import { TokenBarView } from "../dist/ui/context-bar.js";
 import { createModelTelemetry } from "../dist/runtime/model-telemetry.js";
-import { Registry } from "../dist/ui/commands.js";
+import { Registry, stopCommand } from "../dist/ui/commands.js";
+import { RunActivity } from "../dist/ui/run-activity.js";
 import { previewArchive, previewContext, previewTranscript, previewTree } from "../dist/ui/preview.js";
-import { TranscriptView, chatKeyOf, createStatusNotifier, formatToolArgs, retainAfterCollapse } from "../dist/ui/transcript.js";
+import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, orderTranscript } from "../dist/ui/transcript.js";
+import { projectContext } from "../dist/domain/projection.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { ArchiveView } from "../dist/ui/archive-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
 import { emptyBrain } from "../dist/domain/records.js";
 import { applyWrite } from "../dist/domain/brain.js";
-import { promptHandles } from "../dist/ui/prompt-handles.js";
+import { promptHandles, promptItemsOf, toolRowHandle } from "../dist/ui/prompt-handles.js";
+import { personChatBindings } from "../dist/domain/chat-identity.js";
 import { renderStateBlock } from "../dist/domain/state-block.js";
 import { JumpOverlay, JUMP_TARGETS } from "../dist/ui/jump.js";
 
 /** A rendered line without its ANSI styling, so tests assert on words, not escape codes. */
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("prompt path completion uses the project root and keeps the editor controls", async () => {
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "carto-completion-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "alpha.ts"), "");
+    writeFileSync(join(root, "src", "alpine.ts"), "");
+    writeFileSync(join(root, "src", "one file.ts"), "");
+    const editor = new Editor({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s) => s, selectList: selectTheme });
+    enablePromptPathCompletion(editor, root);
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    editor.setText("read ./sr");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), "read ./src/");
+
+    editor.setText("read ./src/al");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.isShowingAutocomplete(), true);
+    assert.match(editor.render(80).join("\n"), /alpha\.ts/);
+    editor.handleInput("\x1b[B");
+    editor.handleInput("\t");
+    assert.equal(editor.getText(), "read ./src/alpine.ts");
+    assert.equal(editor.isShowingAutocomplete(), false);
+
+    editor.setText("read ./src/on");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), 'read "./src/one file.ts"');
+
+    editor.setText("read ./src/al");
+    editor.handleInput("\t");
+    await settle();
+    editor.handleInput("\x1b");
+    assert.equal(editor.isShowingAutocomplete(), false);
+    assert.equal(editor.getText(), "read ./src/al");
+
+    editor.setText("/wipe");
+    editor.handleInput("\t");
+    await settle();
+    assert.equal(editor.getText(), "/wipe");
+    assert.equal(editor.isShowingAutocomplete(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("run activity includes autonomous work and stop stays dispatchable before its watch arrives", () => {
+  const activity = new RunActivity();
+  let stops = 0;
+  const registry = new Registry([stopCommand(() => { stops += 1; })]);
+  assert.equal(activity.running, false);
+  assert.equal(registry.dispatch("\x18"), true, "Ctrl-X is not gated by stale UI activity");
+  assert.equal(stops, 1);
+  activity.beginSubmission();
+  activity.observeRun(true);
+  activity.endSubmission();
+  assert.equal(activity.running, true, "a resumed or timed-wake run outlives the earlier submission");
+  activity.observeRun(false);
+  assert.equal(activity.running, false);
+  activity.beginSubmission();
+  activity.observeRun(false);
+  assert.equal(activity.running, true, "a pending submission stays active until settled");
+  activity.endSubmission();
+  assert.equal(activity.running, false);
+});
 
 test("padLine pads accurately with and without ANSI escape sequences", () => {
   const plain = "hello";
@@ -116,38 +193,164 @@ test("Sidebar mouse click switches view", () => {
   assert.equal(selected, "context");
 });
 
-test("collapse retains dialogue and pinned work, without swept halves or duplicate Chat", () => {
-  const entries = [
-    { kind: "person", text: "hello", handle: "U1" },
-    { kind: "agent", text: "hi", recordId: "chat-1", handle: "C1" },
-    { kind: "reasoning", id: "think", sourceId: "think-id", text: "swept thought" },
-    { kind: "output", id: "out", sourceId: "out-id", text: "kept output" },
-    { kind: "tool", id: "tool-result-pin", sourceId: "call1", resultId: "result1", name: "read", args: "swept arguments", output: "old result" },
-    { kind: "tool", id: "tool-call-pin", sourceId: "call2", resultId: "result2", name: "bash", args: "kept arguments", output: "swept result", failed: true },
-    { kind: "status", text: "stopped: toolUse" },
-    { kind: "agent", text: "hi", recordId: "chat-1" },
-    { kind: "person", text: "hello", handle: "U2" },
+test("sidebar's ordered prompt strip supports hover, click, grouping, and short screens", () => {
+  let height = 26;
+  const sidebar = new Sidebar(() => height);
+  const node = (kind, handle, label, tokens) => ({ kind, handle, label, tokens });
+  const sections = [
+    { title: "head", nodes: [node("system", "H", "system prompt", 100)] },
+    { title: "body", nodes: [node("person", "U1", "you", 100)] },
+    { title: "tail", nodes: [node("state", "B", "state block", 100)] },
   ];
-  const pins = [
-    { id: "out-id", kind: "plainText", text: "kept output", pinned: "user", createdAt: 1 },
-    { id: "result1", kind: "readResult", text: "refreshed result", pinned: "user", createdAt: 1 },
-    { id: "call2", kind: "toolCall", text: "kept arguments", pinned: "agent", createdAt: 1 },
+  assert.equal(sidebar.setContextSections(sections), true);
+  assert.equal(sidebar.setContextSections(sections), false);
+  let lines = sidebar.render(28);
+  const strip = lines.flatMap((line, row) => plain(line).includes("███") ? [row] : []);
+  assert.equal(strip.length, 8);
+  assert.equal(lines.length, height);
+  assert.equal(strip.at(-1), height - 2, "one row separates the strip from the bottom");
+  assert.equal(plain(lines.at(-1)).trim(), "", "the bottom row is padding");
+  assert.ok(lines[strip[0]].includes(tokens.muted("███")), "head is first");
+  assert.ok(lines[strip[3]].includes(tokens.person("███")), "body follows head");
+  assert.ok(lines[strip[7]].includes(tokens.warn("███")), "tail is last");
+  assert.ok(lines.every((line) => visibleWidth(line) === 28));
+  const mouse = (type, y, x = 4) => ({ type, button: "left", x, y, screenX: x + 2, screenY: y + 3, width: 28, height, shift: false, alt: false, ctrl: false });
+  const tooltip = () => sidebar.render(28).slice(strip[0]).map((line) => plain(line).slice(8).trim()).join(" ");
+  assert.ok(sidebar.handleMouse(mouse("move", strip[0]))?.render);
+  let text = tooltip();
+  assert.match(text, /head · H · ~100 tok · system prompt/);
+  assert.equal(sidebar.pointerMoved(6, strip[0] + 3), false);
+  assert.equal(sidebar.pointerMoved(40, 1), true, "moving to another pane clears hover");
+  assert.doesNotMatch(tooltip(), /system prompt/);
+  assert.ok(sidebar.handleMouse(mouse("click", strip[7]))?.handled, "click fallback does not switch views");
+  assert.match(tooltip(), /tail · B · ~100 tok · state block/);
+  assert.equal(sidebar.pointerMoved(6, height - 1 + 3), true, "padding is outside the hover target");
+
+  height = 16;
+  sidebar.setContextSections([
+    { title: "head", nodes: [node("system", "H", "system", 1), node("tool", "Y1", "tool", 1)] },
+    { title: "body", nodes: [node("person", "U1", "you", 1), node("reasoning", "X1", "thinking", 1)] },
+    { title: "tail", nodes: [node("state", "B", "state block", 2)] },
+  ]);
+  lines = sidebar.render(28);
+  const grouped = lines.findIndex((line) => plain(line).includes("███"));
+  sidebar.handleMouse(mouse("move", grouped));
+  text = sidebar.render(28).slice(grouped).map((line) => plain(line).slice(8).trim()).join(" ");
+  assert.match(text, /2 entries/);
+  assert.match(text, /~2 tok/);
+  assert.match(text, /system, tool/);
+  assert.equal(plain(lines.at(-1)).trim(), "", "compact layouts keep the bottom padding too");
+  height = 15;
+  lines = sidebar.render(28);
+  assert.ok(!plain(lines.join("\n")).includes("███"), "navigation takes priority on short screens");
+  assert.ok(plain(lines.join("\n")).includes("transcript"));
+});
+
+test("the transcript follows the frozen head and its actions target the same items as context", () => {
+  let brain = emptyBrain();
+  const record = (id, author, text, time) => ({ id, author, text, createdAt: time, updatedAt: time });
+  brain = applyWrite(brain, { kind: "chat.record", record: record("person-1", "user", "same words", 1) }, 1);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("person-2", "user", "same words", 2) }, 2);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("agent-1", "agent", "frozen answer", 3) }, 3);
+  brain = applyWrite(brain, { kind: "ephemeral.pin", item: { id: "kept-result", kind: "readResult", text: "frozen file", entity: { callId: "r", tool: "read", path: "x" }, createdAt: 4, pinned: "user" } }, 4);
+  const projection = projectContext(brain, new Map(), "OracleToes");
+  const frozenItems = new Map(projection.ephemeralItems.map(({ handle, item }) => [handle, item]));
+  // Later Brain changes do not rewrite the head. An unrelated non-head record
+  // must not be invented as history, and an unpinned head item is still visible.
+  brain = applyWrite(brain, { kind: "chat.update", id: "agent-1", text: "new Brain text", updatedAt: 5 }, 5);
+  brain = applyWrite(brain, { kind: "chat.record", record: record("not-in-head", "agent", "not in model context", 6) }, 6);
+  brain = applyWrite(brain, { kind: "ephemeral.unpin", id: "kept-result" }, 7);
+  const head = frozenTranscript(projection.text, brain, projection.chatIds, frozenItems, "OracleToes");
+  const body = [
+    { key: 9, entry: { kind: "output", id: "work", sourceId: "g:9:x0", text: "new work" } },
+    { key: 3, entry: { kind: "person", text: "live line", recordId: "live-chat" } },
   ];
-  const first = retainAfterCollapse(entries, pins);
-  assert.deepEqual(first.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello"], "identical person messages are distinct");
-  assert.equal(first.filter((entry) => entry.kind === "agent").length, 1, "the same Chat record is kept only once");
-  assert.equal(first[0].handle, undefined, "old generation U handles are not reused");
-  const view = new TranscriptView();
-  view.setEntries(first);
-  const text = view.toPlainText();
-  assert.match(text, /kept output/);
-  assert.match(text, /refreshed result/);
-  assert.match(text, /kept arguments/);
-  assert.doesNotMatch(text, /swept thought|swept arguments|swept result|stopped: toolUse/);
-  const second = retainAfterCollapse([...first, { kind: "agent", text: "hi", recordId: "chat-1" }, { kind: "person", text: "next" }], [pins[0]]);
-  assert.equal(second.filter((entry) => entry.kind === "agent").length, 1);
-  assert.equal(second.filter((entry) => entry.kind === "tool").length, 0, "unpinned work disappears on the next collapse");
-  assert.deepEqual(second.filter((entry) => entry.kind === "person").map((entry) => entry.text), ["hello", "hello", "next"]);
+  const ordered = orderTranscript(head, body);
+  assert.deepEqual(ordered.map((entry) => entry.kind), ["person", "person", "agent", "tool", "person", "output"]);
+  assert.deepEqual(ordered.slice(0, 3).map((entry) => entry.recordId), ["person-1", "person-2", "agent-1"]);
+  assert.equal(ordered[2].text, "frozen answer");
+  assert.equal(ordered[3].output, "frozen file");
+  assert.ok(!JSON.stringify(ordered).includes("not in model context"));
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id, now) => actions.push([part, id, now]);
+  transcript.onTogglePin = (part, id) => actions.push(["pin", part, id]);
+  transcript.setEntries(ordered);
+  transcript.render(100);
+  assert.ok(transcript.startSelecting());
+  transcript.handleInput("g");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.markSelected("delete");
+  transcript.handleInput("j");
+  transcript.pinSelected();
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [
+    ["chat", "person-1", false], ["chat", "person-2", false], ["chat", "agent-1", false],
+    ["pin", "ephemera", "kept-result"], ["ephemera", "kept-result", false],
+  ]);
+  const context = new ContextView();
+  context.setData({ brain, projectionText: projection.text, headEphemera: frozenItems, systemPrompt: "", tools: [], transcriptMessages: [], toolWorkItems: [], stateBlockText: "" });
+  const contextText = plain(context.render(100).join("\n"));
+  const sections = context.promptSections();
+  assert.deepEqual(sections.map((section) => section.title), ["head", "body", "tail"]);
+  assert.ok(sections[0].nodes.some((node) => node.handle === "X1"), "sidebar source keeps the frozen head item");
+  assert.ok(!JSON.stringify(sections).includes("not in model context"), "sidebar source excludes unrelated live Brain records");
+  assert.ok(contextText.indexOf("C1") < contextText.indexOf("C2") && contextText.indexOf("C2") < contextText.indexOf("C3") && contextText.indexOf("C3") < contextText.indexOf("X1"));
+  assert.match(context.nodeFor("ephemera", "kept-result")?.body ?? "", /frozen file/, "an unpinned head item remains actionable in context");
+  // If a Brain record has disappeared without a head rewrite, its frozen text
+  // is still in the prompt but must never act on another record.
+  brain = applyWrite(brain, { kind: "delete", target: "chat", id: "person-1" }, 8);
+  const stale = frozenTranscript(projection.text, brain, projection.chatIds, frozenItems, "OracleToes");
+  assert.equal(stale[0].text, "same words");
+  assert.equal(stale[0].recordId, undefined);
+  assert.equal(stale[1].recordId, "person-2");
+});
+
+test("a live person entry without a Chat record targets its prompt identity", () => {
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id, now) => actions.push([part, id, now]);
+  transcript.onTogglePin = (part, id) => actions.push(["pin", part, id]);
+  transcript.setEntries([{ kind: "person", handle: "U1", text: "carried line", sourceId: "generation:1:x0" }]);
+  assert.ok(transcript.startSelecting());
+  transcript.pinSelected();
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [["pin", "tool-work", "generation:1:x0"], ["tool-work", "generation:1:x0", false]]);
+});
+
+test("person identity binds both views without reassigning ambiguous legacy lines", () => {
+  const records = [
+    { id: "one", author: "user", text: "repeated", createdAt: 1, updatedAt: 1 },
+    { id: "two", author: "user", text: "repeated", createdAt: 2, updatedAt: 2 },
+  ];
+  const entry = (id, recordId) => ({ id, ...(recordId === undefined ? {} : { data: { chatRecordId: recordId } }), model: [{ role: "user", content: [{ type: "text", text: "repeated" }] }] });
+  const entries = [entry(1, "one"), entry(2, "two")];
+  assert.deepEqual([...personChatBindings(entries, records, new Set())], [[1, "one"], [2, "two"]]);
+  assert.deepEqual([...personChatBindings(entries, [records[1]], new Set())], [[2, "two"]], "a missing record does not claim its sibling");
+  assert.deepEqual([...personChatBindings([entry(1), entry(2)], [records[1]], new Set())], [], "ambiguous legacy lines are not reassigned");
+  assert.deepEqual([...personChatBindings([entry(1), entry(2)], records, new Set())], [], "equal counts cannot prove which duplicate is which");
+  assert.deepEqual([...personChatBindings([entry(1)], [records[0]], new Set())], [[1, "one"]]);
+  assert.equal(promptItemsOf(entries, "g")[0].item.text, "repeated", "text parts remain visible and get a person handle");
+
+  const brain = { ...emptyBrain(), chat: records };
+  const context = new ContextView();
+  context.setData({ brain, projectionText: "", systemPrompt: "", tools: [], toolWorkItems: [], stateBlockText: "", transcriptMessages: [
+    { id: 1, role: "user", text: "repeated", targetId: "g:1:x0", recordId: null },
+    { id: 2, role: "user", text: "repeated", targetId: "g:2:x0", recordId: "two" },
+  ] });
+  const people = context.promptSections().find((section) => section.title === "body").nodes.filter((node) => node.kind === "person");
+  assert.deepEqual(people.map((node) => node.target), [{ part: "transcript", id: "g:1:x0" }, { part: "chat", id: "two" }]);
+
+  const transcript = new TranscriptView();
+  const actions = [];
+  transcript.onDelete = (part, id) => actions.push([part, id]);
+  transcript.setEntries([{ kind: "agent", text: "orphaned call", sourceId: "g:3:c0" }]);
+  assert.ok(transcript.startSelecting());
+  transcript.markSelected("delete");
+  assert.deepEqual(actions, [["tool-work", "g:3:c0"]]);
 });
 
 test("notifications flash transiently instead of accumulating in the transcript", () => {
@@ -331,6 +534,9 @@ test("every item in the prompt carries its own handle, and a bash result takes S
   assert.equal(handles.result("3"), "R1", "a tool result has a handle like any other item");
   assert.equal(handles.ephemeral("2-2"), "X4", "and the other items are still counted in prompt order");
   assert.equal(handles.result("5"), "S1", "a bash result is the subdivision of R that gets quoted");
+  assert.equal(toolRowHandle(handles, "2-1", "3"), "R1", "the completed row uses the result entry, not the call entry");
+  assert.equal(toolRowHandle(handles, "4-0", "5"), "S1", "a completed shell row uses its S handle");
+  assert.equal(toolRowHandle(handles, "2-1"), "X2", "a call without a result retains its own handle");
 
   // The transcript draws them: a person's line, a card, and a tool row that
   // carries the handle of the result it holds.
@@ -653,7 +859,10 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
 
   assert.equal(transcript.startSelecting(), true);
   assert.ok(plain(transcript.render(120).join("\n")).split("\n").some((line) => line.startsWith("▌")), "the selected block carries a cursor in the margin");
-  // The cursor starts on the last block that has an item behind it: the card.
+  // A message without a target is copyable; move to the card to pin it.
+  assert.equal(transcript.selectedText(), "boot burst, no record");
+  assert.equal(transcript.selectedPart(), undefined);
+  transcript.handleInput("k");
   transcript.pinSelected();
   assert.deepEqual(acts.pop(), ["pin", "tool-work", "gen:1:r0"], "a card is its result, the item a pin keeps");
   transcript.handleInput("k");
@@ -672,6 +881,7 @@ test("a click never pins; block selection acts with the same keys on Chat blocks
   transcript.markSelected("archive");
   assert.deepEqual(acts.pop(), ["archive", "chat", "c-p", false], "a person's line is a record too");
   transcript.handleInput("G");
+  transcript.handleInput("k");
   transcript.markSelected("archive");
   assert.deepEqual(acts, [], "an ephemeral card asks before it archives");
   transcript.markSelected("archive");
@@ -692,20 +902,22 @@ test("the context bar spans the bottom, reports the server's window, and greys w
   };
   const bar = new TokenBarView(state);
   const lines = bar.render(60);
-  assert.equal(lines.length, 1, "the bar is one row");
+  assert.equal(lines.length, 2, "status and track have separate rows");
+  assert.equal(visibleWidth(lines[1]), 60, "the track spans the whole width");
+  assert.match(plain(lines[1]), /^[█░]{60}$/, "every track column is used");
+  assert.doesNotMatch(plain(lines[0]), /[█░▓]/, "the status does not share the track");
   assert.equal(visibleWidth(lines[0]), 60, "it spans the whole width");
   assert.match(plain(lines[0]), /8,000 \/ 32,768/);
 
-  // Fill stays visible while the current prompt's cached, processed and
-  // remaining regions advance independently. Progress changes invalidate the
+  // Prefill overlays the previous fill; progress changes invalidate the
   // render cache even if no transcript entry has changed.
   Object.assign(state.session.state, { prefillActive: true, prefillTotal: 16000, prefilledTokens: 6000, prefillCached: 2000, prefillRate: 100, decodeRate: 20 });
-  const reading = plain(bar.render(130)[0]);
+  const [status, track] = bar.render(130);
+  const reading = plain(status);
   assert.match(reading, /8,000 \/ 32,768/);
   assert.match(reading, /prefill 6,000\/16,000/);
   assert.match(reading, /P 100\.0 D 20\.0 tok\/s/);
-  assert.match(reading, /█/);
-  assert.match(reading, /▓/);
+  assert.match(plain(track), /▓/);
   state.session.state.prefilledTokens = 9000;
   assert.match(plain(bar.render(130)[0]), /prefill 9,000\/16,000/);
   state.session.state.prefillTotal = undefined;
@@ -741,11 +953,128 @@ test("the context bar draws live prefill progress even when the window is unknow
     parts: { system: 1_000, transcript: 500, toolWork: 500 },
   };
   const bar = new TokenBarView(state);
-  const line = plain(bar.render(120)[0]);
+  const [status, styled] = bar.render(120);
+  const line = plain(status);
   assert.match(line, /window unknown/);
   assert.match(line, /prefill 6,000\/10,000 50% ~20s/);
-  assert.match(line, /█/, "cached prefix is visible even before the window is known");
-  assert.match(line, /▓/, "active prefill bar renders even when contextWindow is 0");
+  const barWidth = 120;
+  assert.equal(styled.split(barTokens.fill("█")).length - 1, Math.round(barWidth * 0.2), "the cached prefix uses the normal fill color");
+  assert.equal(styled.split(barTokens.prefilled("▓")).length - 1, Math.round(barWidth * 0.6) - Math.round(barWidth * 0.2), "only newly processed tokens are colored as prefill");
+  assert.equal(styled.split(barTokens.pending("▓")).length - 1, barWidth - Math.round(barWidth * 0.6));
+});
+
+test("the context bar colors occupancy and prefill by status, not content type", () => {
+  const session = { contextWindow: 10_000, lastReportedInput: 8_000, toolWorkAtLastReport: 1_000 };
+  const state = { session: { state: session }, parts: { system: 2_000, transcript: 3_000, toolWork: 1_000 } };
+  const bar = new TokenBarView(state);
+  const idle = bar.render(120)[1];
+  assert.ok(idle.includes(barTokens.fill("█")));
+  assert.ok(!idle.includes(tokens.tool("█")) && !idle.includes(tokens.person("█")), "content types do not color the fill");
+  state.parts = { system: 4_000, transcript: 1_000, toolWork: 1_000 };
+  assert.equal(bar.render(120)[1], idle, "reclassifying context does not change the fill");
+
+  Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefilledTokens: 2_000, prefillCached: 1_000 });
+  const reading = bar.render(120)[1];
+  const width = 120;
+  const count = (style, glyph) => reading.split(style(glyph)).length - 1;
+  assert.equal(count(barTokens.prefilled, "▓"), Math.round(width * 0.2) - Math.round(width * 0.1), "only the uncached processed tail changes color");
+  assert.equal(count(barTokens.pending, "▓"), Math.round(width * 0.6) - Math.round(width * 0.2));
+  assert.equal(count(barTokens.fill, "█"), Math.round(width * 0.1) + Math.round(width * 0.8) - Math.round(width * 0.6), "the cache and prior fill beyond the prompt keep their color");
+  assert.equal(visibleWidth(reading), 120);
+
+  session.prefillActive = false;
+  assert.ok(bar.render(120)[1].includes(barTokens.fill("█")), "fill returns when prefill ends");
+  session.serverLost = true;
+  assert.ok(bar.render(120)[1].includes(tokens.faint("█")), "lost server figures are faint");
+});
+
+test("prefill changes only the uncached tail without resizing or moving the rest of the bar", () => {
+  const session = { contextWindow: 10_000, lastReportedInput: 8_000, requestActive: true };
+  const bar = new TokenBarView({ session: { state: session }, parts: { system: 0, transcript: 0, toolWork: 0 } });
+  const cells = (line) => plain(line
+    .replaceAll(barTokens.fill("█"), "F")
+    .replaceAll(barTokens.prefilled("▓"), "C")
+    .replaceAll(barTokens.pending("▓"), "P")).match(/^[FCP░]*/)[0];
+  for (const width of [60, 100, 130]) {
+    session.prefillActive = false;
+    const idle = cells(bar.render(width)[1]);
+    assert.equal(idle.length, width, "the track uses every available column");
+    Object.assign(session, { prefillActive: true, prefillTotal: 6_000, prefillCached: 1_000, prefilledTokens: 1_000, prefillRate: 10 });
+    const start = cells(bar.render(width)[1]);
+    const cached = Math.round(idle.length * 0.1);
+    const total = Math.round(idle.length * 0.6);
+    assert.equal(start.length, idle.length, "prefill status cannot change the bar width");
+    assert.equal(start.slice(0, cached), idle.slice(0, cached), "the cached prefix is unchanged");
+    assert.equal(start.slice(total), idle.slice(total), "everything beyond the prompt is unchanged");
+    assert.equal(start.slice(cached, total), "P".repeat(total - cached));
+    session.prefilledTokens = 4_000;
+    session.prefillRate = 1000;
+    const during = cells(bar.render(width)[1]);
+    const processed = Math.round(idle.length * 0.4);
+    assert.equal(during.length, idle.length, "changing counts, ETA and rate never shifts the bar");
+    assert.equal(during.slice(0, cached), idle.slice(0, cached));
+    assert.equal(during.slice(cached, processed), "C".repeat(processed - cached));
+    assert.equal(during.slice(processed, total), "P".repeat(total - processed));
+    assert.equal(during.slice(total), idle.slice(total));
+    session.prefilledTokens = 6_000;
+    const done = cells(bar.render(width)[1]);
+    assert.equal(done.slice(0, cached), idle.slice(0, cached));
+    assert.equal(done.slice(cached, total), "C".repeat(total - cached));
+    assert.equal(done.slice(total), idle.slice(total));
+    session.prefillTotal = undefined;
+    assert.equal(cells(bar.render(width)[1]), idle, "unknown progress does not invent an overlay");
+    Object.assign(session, { prefillTotal: 6_000, prefillCached: 6_000, prefilledTokens: 6_000 });
+    const allCached = cells(bar.render(width)[1]);
+    assert.equal(allCached, idle, "an entirely cached prompt does not recolor anything");
+    Object.assign(session, { prefillCached: 0, prefilledTokens: 0 });
+    const uncached = cells(bar.render(width)[1]);
+    assert.equal(uncached.slice(0, total), "P".repeat(total), "a fully invalidated prompt starts prefill at the beginning");
+    assert.equal(uncached.slice(total), idle.slice(total));
+  }
+});
+
+test("the context bar highlights only live prefill ETA and the current phase's speed", () => {
+  const session = { contextWindow: 10000, lastReportedInput: 1000, paused: false };
+  const bar = new TokenBarView({ session: { state: session }, parts: { system: 1000, transcript: 0, toolWork: 0 } });
+  const telemetry = createModelTelemetry(session);
+  const id = telemetry.start();
+  telemetry.event(id, { prompt_progress: { total: 2000, processed: 1000, time_ms: 10000 } });
+  let line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.warn("P 100.0")));
+  assert.ok(line.includes(tokens.warn(" ~10s")));
+  assert.ok(line.includes(tokens.muted("D —")));
+  assert.equal(visibleWidth(line), 100);
+
+  telemetry.event(id, { choices: [{ delta: { content: "hello" } }], timings: { predicted_per_second: 42 } });
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("P 100.0")));
+  assert.ok(line.includes(tokens.accent("D 42.0")));
+  assert.doesNotMatch(plain(line), /prefill/);
+
+  session.paused = true;
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("D 42.0")), "paused figures are not live");
+  session.paused = false;
+  assert.ok(bar.render(100)[0].includes(tokens.accent("D 42.0")), "unpausing invalidates the cached colors");
+  telemetry.end(id, false);
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.muted("D 42.0")), "finished figures are not live");
+  assert.ok(!line.includes(tokens.accent("D 42.0")));
+
+  const lostId = telemetry.start();
+  telemetry.event(lostId, { timings: { predicted_n: 1, predicted_per_second: 42 } });
+  telemetry.end(lostId, true);
+  line = bar.render(100)[0];
+  assert.ok(line.includes(tokens.faint("D 42.0")), "lost server remains faint");
+  const narrow = bar.render(20);
+  assert.ok(narrow.every((row) => visibleWidth(row) === 20), "both narrow rows fit");
+  assert.match(plain(narrow[1]), /^[█░▓]{20}$/, "narrow track still uses the whole row");
+
+  const currentId = telemetry.start();
+  telemetry.end(lostId, true);
+  assert.equal(session.requestActive, true, "an obsolete request cannot end the current one");
+  telemetry.end(currentId, false);
+  assert.equal(session.requestActive, false);
 });
 
 test("model telemetry tracks delta-based prefill rate across heartbeats, handles missing cache, and detects generation start", () => {
@@ -876,6 +1205,9 @@ test("the drawn workspace is exact to its width, and the archive is a layer over
     for (const line of frame.split("\n")) {
       assert.equal(visibleWidth(line), width, `${name}: every line is the frame's width — "${plain(line)}"`);
     }
+    const lines = frame.split("\n").map(plain);
+    assert.match(lines.at(-2), /\/ 32,768/, `${name}: status has its own row`);
+    assert.match(lines.at(-1), new RegExp(`^[█░▓]{${width}}$`), `${name}: track fills its own row`);
   }
 
   const shown = plain(transcript);
@@ -974,6 +1306,51 @@ test("the archive's u withdraws the mark on the selected item, and refuses when 
   view.handleInput("k");
   view.handleInput("u");
   assert.deepEqual(withdrawn, ["1", "1"], "u withdraws the selected item's mark");
+});
+
+test("archive filtering, bounded pages, full content and selection survive refresh", () => {
+  const view = new ArchiveView();
+  const items = Array.from({ length: 85 }, (_, i) => ({
+    id: `item-${i}`, layer: "ephemeral", ephemeral: { kind: "toolResult", text: `result ${i} ${"long ".repeat(80)}needle-${i}`, data: { path: `file-${i}` } },
+    sweptAtGeneration: "gen", sweptAtCollapse: 1, sweptAt: i,
+  }));
+  view.setData({ version: 1, items });
+  const initial = plain(view.render(80).join("\n"));
+  assert.match(initial, /items 1–20 of 85/);
+  assert.ok(view.render(80).length < 100, "the list is bounded, not proportional to the archive");
+  view.handleInput("G");
+  assert.equal(view.selectedItem().id, "item-0");
+  assert.match(plain(view.render(80).join("\n")), /items 81–85 of 85/);
+  view.setData({ version: 1, items: [...items, { ...items[0], id: "new", sweptAt: 100 }] });
+  assert.equal(view.selectedItem().id, "item-0", "refresh keeps the item, not the old index");
+  view.handleInput("\r");
+  const detail = plain(view.render(80).join("\n"));
+  assert.match(detail, /needle-0/);
+  assert.match(detail, /file-0/, "the full stored payload is accessible");
+  view.handleInput("/");
+  for (const char of "needle-42") view.handleInput(char);
+  assert.equal(view.isFiltering(), true);
+  view.handleInput("\r");
+  assert.equal(view.selectedItem().id, "item-42");
+  assert.equal(view.isFiltering(), false);
+  assert.match(plain(view.render(80).join("\n")), /filter: needle-42/);
+});
+
+test("archive mouse selection and delete confirmation are cancelled by other actions", () => {
+  const view = new ArchiveView();
+  view.setData({ version: 1, items: ["one", "two"].map((id, i) => ({ id, layer: "ephemeral", ephemeral: { kind: "plainText", text: id }, sweptAtGeneration: "g", sweptAtCollapse: 0, sweptAt: 2 - i })) });
+  const frame = view.render(80).map(plain);
+  const secondRow = frame.findIndex((line) => line.includes("two"));
+  view.handleMouse({ type: "click", button: "left", x: 2, y: secondRow, screenX: 2, screenY: secondRow, width: 80, height: 20, shift: false, alt: false, ctrl: false });
+  assert.equal(view.selectedItem().id, "two");
+  const applied = [];
+  view.onApplyNow = (id, action) => applied.push([id, action]);
+  view.deleteSelected();
+  view.restoreSelected();
+  assert.equal(view.deleteSelected(), "marked", "restore cancels the delete confirmation");
+  view.handleInput("!");
+  assert.equal(view.deleteSelected(), "marked", "! does not bypass delete confirmation");
+  assert.deepEqual(applied, []);
 });
 
 test("the archive keeps a restored item's type and the author of its pin", () => {
@@ -1302,8 +1679,8 @@ test("the tree view shows the harness's own facts: handles, attached notes, pins
   assert.match(shown, /read F\d/, "the pane names the call the file's handle is for");
   assert.match(shown, /tree D\d+ depth \d+/, "and the call that moves the anchor");
 
-  // A directory's size counts its whole subtree: it is a cost, not a listing.
-  assert.match(shown, /\d+(\.\d+)?[KMG]?\s+src/, "directories carry a deep size");
+  // A directory shows its scanned size, with a lower-bound marker when partial.
+  assert.match(shown, /(?:>=)?\d+(\.\d+)?[BKMG]?\s+src/, "directories carry a deep size");
 });
 
 test("the tree pins the file under the cursor with p, and a directory or a filter never does", async () => {
@@ -1333,6 +1710,31 @@ test("the tree pins the file under the cursor with p, and a directory or a filte
   assert.equal(view.isFiltering(), true);
   view.handleInput("p");
   assert.equal(asked.length, 2);
+});
+
+test("tree page controls track the same page and never mint a handle for context ancestors", async () => {
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const root = mkdtempSync(join(tmpdir(), "carto-tree-pages-ui-"));
+  try {
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "a"), "a");
+    writeFileSync(join(root, "src", "b"), "b");
+    const view = new TreeView();
+    const offsets = [];
+    view.onPage = (offset) => offsets.push(offset);
+    view.setData({ root, anchor: { anchor: root, depth: 2, limit: 1 }, brain: emptyBrain() });
+    view.handleInput("]");
+    assert.deepEqual(offsets, [1]);
+    view.setData({ root, anchor: { anchor: root, depth: 2, limit: 1, offset: 1 }, brain: emptyBrain() });
+    const shown = plain(view.render(120).join("\n"));
+    assert.match(shown, /ancestor shown for context; no handle on this page/);
+    assert.match(shown, /F1/);
+    view.handleInput("[");
+    assert.deepEqual(offsets, [1, 0]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("Atlas and Ledger mark, withdraw and apply now from the list and from the detail pane", () => {
@@ -1730,20 +2132,6 @@ test("the system message is the instructions first and the frozen projection sec
   assert.equal(first, cartoInstructions("OracleToes"));
 });
 
-test("Chat the head holds is drawn before the generation's work, whatever the entries' times say", () => {
-  // A reloaded generation: its entries are all newer than the Chat the head holds,
-  // and two of them (a system entry, a result) carry no time of their own.
-  const frame = [{ id: 1, t: 0 }, { id: 2, t: 5_000 }, { id: 3, t: 6_000 }, { id: 9, t: 0 }];
-  const head = ["c-first", "c-second"];
-  const first = chatKeyOf({ id: "c-first", createdAt: 1_000 }, head, frame);
-  const second = chatKeyOf({ id: "c-second", createdAt: 2_000 }, head, frame);
-  assert.ok(first < second, "in the head's own order");
-  for (const entryId of [1, 2, 3, 9]) assert.ok(second < entryId, `before entry ${entryId}`);
-  // Not in the head: after the last entry written before it. An entry with no time anchors nothing.
-  assert.equal(chatKeyOf({ id: "later", createdAt: 5_500 }, head, frame), 2.5);
-  assert.equal(chatKeyOf({ id: "older", createdAt: 100 }, [], frame), 0.5, "older than every entry: before them all, not after a timeless one");
-});
-
 test("the frame paints every cell: fills are solid, resets re-arm the surface, and the chrome is exact to its width", async () => {
   const { Fill, margin } = await import("../dist/ui/frame.js");
   const { fillLine } = await import("../dist/ui/tokens.js");
@@ -1804,6 +2192,24 @@ test("the frame's stacks are laid out once per frame: a long pane is not re-rend
   const frame = renderLayoutFrame(new Column([{ component: inner, basis: 0, grow: 1 }]), 80, 24, () => {});
   assert.equal(spy.calls, 1, "rendered once, by the layout pass");
   assert.equal(frame.lines.length, 24);
+});
+
+test("the footer layout leaves two separate visible rows for status and the full track", async () => {
+  const { Column } = await import("../dist/ui/frame.js");
+  const { renderLayoutFrame } = await import("../node_modules/@earendil-works/pi-tui/dist/layout.js");
+  const bar = new TokenBarView({ session: { state: { contextWindow: 1000, lastReportedInput: 500 } }, parts: { system: 0, transcript: 0, toolWork: 0 } });
+  const filler = { render: (width) => ["work".padEnd(width)] };
+  const footer = { render: (width) => ["keys".padEnd(width)] };
+  const layout = new Column([
+    { component: filler, basis: 0, grow: 1 },
+    { component: new Column([{ component: footer, basis: 1 }, { component: bar, basis: 2 }]), basis: 3 },
+  ]);
+  for (const [width, height] of [[80, 24], [36, 12]]) {
+    const rows = renderLayoutFrame(layout, width, height, () => {}).lines.map(plain);
+    assert.match(rows.at(-3), /^keys/);
+    assert.match(rows.at(-2), /500 \/ 1,000/);
+    assert.match(rows.at(-1), new RegExp(`^[█░]{${width}}$`));
+  }
 });
 
 test("a pane's margin, floor and seam are one box, and a click lands on the row it meant", async () => {
@@ -1967,8 +2373,29 @@ test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList
   assert.deepEqual(ran, ["b", "a"]);
 });
 
+test("wipe confirmation requires WIPE and can be cancelled", async () => {
+  const { WipeConfirmation } = await import("../dist/ui/palette.js");
+  const dialog = new WipeConfirmation("/my/project");
+  let confirmed = 0, closed = 0;
+  dialog.onConfirm = () => { confirmed += 1; };
+  dialog.onClose = () => { closed += 1; };
+  dialog.focused = true;
+  const lines = dialog.render(78);
+  assert.ok(lines.every((line) => visibleWidth(line) === 78));
+  assert.match(plain(lines.join("\n")), /Brain, archive, history and project settings/);
+  assert.match(plain(lines.join("\n")), /fresh session opens/);
+  assert.doesNotMatch(plain(lines.join("\n")), /Carto exits/);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 0);
+  assert.match(plain(dialog.render(78).join("\n")), /Type WIPE exactly/);
+  for (const ch of "WIPE") dialog.handleInput(ch);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 1);
+  dialog.handleInput("\x1b");
+  assert.equal(closed, 1);
+});
+
 test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact width", async () => {
-  const { retainAfterCollapse } = await import("../dist/ui/transcript.js");
   const transcript = new TranscriptView();
   const entries = [
     { kind: "agent", handle: "C1", recordId: "c1", text: "## Summary\n\n- **Bold** item with `code`" },
@@ -1985,8 +2412,6 @@ test("TranscriptView renders agent Chat blocks with pi-tui Markdown and exact wi
   assert.match(text, /Automatic context collapse/);
   assert.doesNotMatch(text, /\*\*Bold\*\*/, "markdown emphasis delimiters are rendered, not left raw");
   assert.match(transcript.toPlainText(), /^system: Automatic context collapse/m);
-  const retained = retainAfterCollapse(entries, []);
-  assert.equal(retained.filter((entry) => entry.kind === "system").length, 1, "system Chat survives retainAfterCollapse");
 });
 
 test("estimate.ts delegates to pi-ai/utils/estimate", async () => {
@@ -2091,4 +2516,153 @@ test("PaneScrollView renders a dynamic-size scrollbar when overflowing and stays
   const appSource = readFileSync("src/ui/app.ts", "utf8");
   assert.doesNotMatch(appSource, /new ScrollView\(/, "all views in app.ts mount PaneScrollView");
   assert.match(appSource, /new PaneScrollView\(/);
+});
+
+test("copy selection follows the cursor and copies full unfolded content across views", async () => {
+  const { copySelectionCommand } = await import("../dist/ui/commands.js");
+  const copied = [];
+  let selection;
+  const registry = new Registry([copySelectionCommand(() => selection, (text) => copied.push(text))]);
+  assert.equal(registry.dispatch("y"), false, "no selection leaves the key to the input");
+  selection = "";
+  assert.equal(registry.dispatch("y"), true, "an empty selected item is still copyable");
+  assert.deepEqual(copied, [""]);
+
+  const transcript = new TranscriptView();
+  const long = "first line\n" + "unabridged ".repeat(100);
+  transcript.setEntries([
+    { kind: "person", text: "hello", recordId: "c1" },
+    { kind: "agent", text: "not yet recorded" },
+    { kind: "tool", id: "tool1", name: "read", args: "path", output: long, resultId: "result" },
+  ], [{ text: "queued question", mode: "after run" }]);
+  transcript.setLive([{ kind: "reasoning", id: "live", text: "streaming thought", live: true }]);
+  assert.equal(transcript.selectedText(), undefined);
+  assert.equal(transcript.startSelecting(), true);
+  assert.equal(transcript.selectedText(), "queued question");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "streaming thought");
+  assert.equal(transcript.selectedPart(), undefined, "live cards cannot be marked");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), `tool read\n${long}`, "folded card returns its full result");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "not yet recorded");
+  assert.equal(transcript.selectedPart(), undefined, "unrecorded messages cannot be marked");
+  transcript.handleInput("k");
+  assert.equal(transcript.selectedText(), "hello");
+  transcript.stopSelecting();
+  assert.equal(transcript.selectedText(), undefined);
+
+  const brain = emptyBrain();
+  brain.atlas.push({ id: "a1", title: "Title", text: long, links: ["a2"], attachments: [{ kind: "file", path: "src/file.ts" }, { kind: "record", id: "l1" }], createdAt: 1, updatedAt: 1 });
+  brain.atlas.push({ id: "a2", title: "Next", text: "second", links: [], attachments: [], createdAt: 2, updatedAt: 2 });
+  brain.ledger.push({ id: "l1", kind: "question", text: long, status: "answered", answer: { text: "the full answer" }, createdAt: 1, updatedAt: 1 });
+  brain.handles.entries.push({ kind: "atlas", id: "a1", handle: "A1", timestamp: 1 }, { kind: "atlas", id: "a2", handle: "A2", timestamp: 2 }, { kind: "ledger", id: "l1", handle: "L1", timestamp: 1 });
+  const atlas = new AtlasView(); atlas.setData(brain, []);
+  assert.match(atlas.selectedText(), /A1 Title/);
+  assert.ok(atlas.selectedText().includes(long));
+  assert.match(atlas.selectedText(), /A2/);
+  assert.match(atlas.selectedText(), /src\/file\.ts/);
+  assert.match(atlas.selectedText(), /L1/);
+  atlas.handleInput("j");
+  assert.match(atlas.selectedText(), /A2 Next/);
+  atlas.handleInput("/"); atlas.handleInput("T"); atlas.handleInput("i"); atlas.handleInput("t"); atlas.handleInput("l"); atlas.handleInput("e"); atlas.handleInput("\r");
+  assert.match(atlas.selectedText(), /A1 Title/, "filter selection uses the filtered list");
+  const ledger = new LedgerView(); ledger.setData(brain);
+  assert.ok(ledger.selectedText().includes(long));
+  assert.match(ledger.selectedText(), /the full answer/);
+  assert.equal(new LedgerView().selectedText(), undefined);
+
+  const context = contextOf();
+  assert.equal(context.selectedText(), "you are carto");
+  context.handleInput("j");
+  assert.match(context.selectedText(), /the frozen words/);
+  context.handleInput("\t");
+  assert.match(context.selectedText(), /^A1 /, "model view copies frozen head bytes");
+  assert.match(context.selectedText(), /the frozen words/);
+
+  const archive = new ArchiveView();
+  archive.setData({ version: 1, items: [{ id: "one", layer: "ephemeral", ephemeral: { kind: "plainText", text: long }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 1 }] });
+  assert.equal(archive.selectedText(), long);
+  archive.setData({ version: 1, items: [{ id: "record", layer: "record", record: { kind: "ledger", value: brain.ledger[0] }, sweptAtGeneration: "g", sweptAtCollapse: 1, sweptAt: 2 }] });
+  assert.match(archive.selectedText(), /the full answer/);
+
+  const { TreeView } = await import("../dist/ui/tree-view.js");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "carto-copy-"));
+  try {
+    writeFileSync(join(root, "name.txt"), "private file contents");
+    const tree = new TreeView(); tree.setData({ root, anchor: { anchor: root, depth: 1 }, brain: emptyBrain() });
+    assert.equal(tree.selectedText(), "name.txt");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const { JobsView } = await import("../dist/ui/jobs-view.js");
+  const jobs = new JobsView();
+  assert.equal(jobs.selectedText(), undefined);
+  jobs.setData([{ handle: "J1", label: "worker", command: "echo hi", status: "running", pid: 1, exitCode: null, exitSignal: null, startedAt: 1, exitedAt: undefined, unreadLines: 0, lines: [{ seq: 1, kind: "stdout", text: long, at: 1 }], pendingPartial: "last partial" }]);
+  assert.ok(jobs.selectedText().includes(long));
+  assert.ok(jobs.selectedText().endsWith("last partial"));
+});
+
+test("all copy paths preserve text and report tmux buffer and clipboard outcomes honestly", async () => {
+  const { writeClipboard, describeClipboard, copyWithFallback, createSelectionCopier } = await import("../dist/ui/clipboard.js");
+  const { copySlashCommand } = await import("../dist/ui/commands.js");
+  const { readFile, rm } = await import("node:fs/promises");
+  const { stat } = await import("node:fs/promises");
+  const text = "unicode π \u001b[31m\n" + "large item ".repeat(10000) + "\n";
+  const calls = [];
+  const tmuxOnly = { env: { TMUX: "/tmp/socket,1,0" }, run(command, args, input) {
+    calls.push({ command, args, input });
+    if (command !== "tmux") throw new Error("unavailable");
+  } };
+  const forwarded = writeClipboard(text, tmuxOnly);
+  assert.deepEqual(forwarded, { tmux: "forward" });
+  assert.deepEqual(calls[0], { command: "tmux", args: ["load-buffer", "-w", "-"], input: text });
+  assert.match(describeClipboard(forwarded), /tmux buffer saved/);
+  assert.match(describeClipboard(forwarded), /forwarding requested \(not verified\)/);
+  assert.equal(calls.filter((call) => call.command === "tmux").length, 1);
+
+  const legacyCalls = [];
+  const legacy = writeClipboard(text, { env: { TMUX: "1" }, run(command, args, input) {
+    legacyCalls.push({ command, args, input });
+    if (command !== "tmux" || args.includes("-w")) throw new Error("unavailable");
+  } });
+  assert.equal(legacy.tmux, "buffer");
+  assert.deepEqual(legacyCalls.slice(0, 2).map((call) => call.args), [["load-buffer", "-w", "-"], ["load-buffer", "-"]]);
+  assert.equal(legacyCalls[1].input, text);
+  assert.match(describeClipboard(legacy), /not forwarded/);
+
+  const both = writeClipboard(text, { env: { TMUX: "1" }, run(command) {
+    if (command !== "tmux" && command !== "xclip") throw new Error("unavailable");
+  } });
+  assert.deepEqual(both, { tmux: "forward", native: "xclip" });
+  assert.match(describeClipboard(both), /system clipboard via xclip/);
+  const local = writeClipboard(text, { env: {}, run(command) { if (command !== "pbcopy") throw new Error("unavailable"); } });
+  assert.deepEqual(local, { native: "pbcopy" });
+  const failed = writeClipboard(text, { env: { TMUX: "1" }, run() { throw new Error("unavailable"); } });
+  assert.equal(failed.tmux, undefined);
+  assert.match(describeClipboard(failed), /tmux buffer unavailable/);
+  const emptyCalls = [];
+  const empty = writeClipboard("", { env: { TMUX: "1" }, run(command) { emptyCalls.push(command); throw new Error("unavailable"); } });
+  assert.match(describeClipboard(empty), /cannot store an empty buffer/);
+  assert.ok(!emptyCalls.includes("tmux"), "tmux silently ignores empty input");
+
+  const result = await copyWithFallback(text, "test", tmuxOnly);
+  try {
+    assert.equal(await readFile(result.fallbackPath, "utf8"), text);
+    assert.equal(result.bytes, Buffer.byteLength(text));
+    assert.equal((await stat(result.fallbackPath)).mode & 0o077, 0);
+  } finally { await rm(result.fallbackPath); }
+  const mouse = await createSelectionCopier(tmuxOnly)(text);
+  assert.equal(typeof mouse, "string", "pi-tui must not report a verified clipboard when only tmux accepted the buffer");
+  assert.match(mouse, /tmux buffer saved/);
+  const path = mouse.match(/saved to (.*)$/)?.[1];
+  assert.ok(path);
+  try { assert.equal(await readFile(path, "utf8"), text); } finally { await rm(path); }
+  const confirmed = await createSelectionCopier({ env: {}, run(command) { if (command !== "pbcopy") throw new Error("unavailable"); } })("mouse text");
+  assert.equal(confirmed, true);
+  assert.equal(copySlashCommand("/copy"), "transcript");
+  assert.equal(copySlashCommand("/copy-session"), "session");
+  assert.equal(copySlashCommand("/copy other"), undefined);
 });

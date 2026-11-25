@@ -18,7 +18,7 @@
 import { handleOf } from "./handles.js";
 import { personName } from "./person.js";
 import { estimateTokens } from "./estimate.js";
-import type { CartoBrain } from "./records.js";
+import type { CartoBrain, PinnedEphemeral } from "./records.js";
 
 export type ProjectionPartId = "atlas" | "ledger" | "chat" | "files" | "ephemera";
 
@@ -43,6 +43,8 @@ export interface Projection {
    * head without gathering in what the live body already shows (§2.3).
    */
   chatIds: string[];
+  /** Frozen identities allow a head item to be re-pinned after unpinning and restart. */
+  ephemeralItems?: Array<{ handle: string; item: PinnedEphemeral }>;
 }
 
 /** What a caller may choose about the head it is building. */
@@ -187,5 +189,5 @@ export function projectContext(
       : parts.map((part) => part.text).join("\n\n");
   const sizes: Record<ProjectionPartId, number> = { atlas: 0, ledger: 0, chat: 0, files: 0, ephemera: 0 };
   for (const part of parts) sizes[part.id] = part.tokens;
-  return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes, chatIds: held.map((record) => record.id) };
+  return { text, parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), sizes, chatIds: held.map((record) => record.id), ephemeralItems: pinned.flatMap((item) => { const handle = handleOf(handles, "ephemera", item.id); return handle === undefined ? [] : [{ handle, item }]; }) };
 }

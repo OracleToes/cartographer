@@ -10,7 +10,7 @@
 import { existsSync, statSync } from "node:fs";
 
 import { arr, bool, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
-import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi, ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 // The file tools are the package's, not a layer beside them (§7): scoping is
 // the env's cwd, and the two things Carto adds are the `.brain` wall and the
@@ -18,11 +18,12 @@ import { defineTool, InboxDoc } from "@earendil-works/pi-durable";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 
-import type { CartoBrain, Attachment } from "../domain/records.js";
+import type { CartoBrain, Attachment, PinnedEphemeral } from "../domain/records.js";
+import type { PromptItem } from "../ui/prompt-handles.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
-import { projectTreeBlock } from "./project-tree.js";
+import { projectTreeBlock, type TreeHandles } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
-import { lexicalProjectPath, refuseBrainPath } from "./workspace.js";
+import { assertFileScope, assertPinnableFile, lexicalProjectPath, type PathScope } from "./workspace.js";
 import { RestCallDoc, RestDoc, SleepTask } from "./sleep-task.js";
 import type { PendingWrite } from "../domain/state-block.js";
 import {
@@ -45,7 +46,9 @@ export interface ToolSession {
   /** Pending Brain writes since the last rebuild; ephemeral, cleared at collapse. */
   pending: PendingWrite[];
   /** Where the state block renders the tree. */
-  tree: { anchor: string; depth: number };
+  tree: { anchor: string; depth: number; limit?: number; offset?: number };
+  /** Handles in the last state block actually sent to the agent. */
+  requestTreeHandles?: TreeHandles;
   /** Set by the collapse tool; the host ends the generation and rebuilds when the run settles. */
   collapseRequested: string | null;
   /** Who triggered the pending collapse request (`agent` tool call vs forced `automatic` limit). */
@@ -53,8 +56,16 @@ export interface ToolSession {
 
   /** Edit mode or read only mode (§6.1). The person sets it; `create` and `edit` refuse in read only mode. */
   readOnly: boolean;
+  /** Strict keeps file tools in the project; relaxed lets read/edit use outside paths. */
+  pathScope?: PathScope;
   /** The generation this context belongs to; recorded on context-sourced pins. */
   generation: string;
+  /** The frozen head's X namespace, and the items exposed in the last request. */
+  headEphemeraCount?: number;
+  headEphemera?: Map<string, PinnedEphemeral>;
+  liveEphemera?: Map<string, PinnedEphemeral>;
+  loadPromptItems?: () => Promise<PromptItem[]>;
+  refreshHeadEphemera?: () => Promise<void>;
 }
 
 export interface ToolDeps {
@@ -139,6 +150,7 @@ function resolveAttachment(
 ): Attachment {
   if (attachment.kind === "file") {
     lexicalProjectPath(root, attachment.path);
+    assertFileScope(root, attachment.path, "strict");
     return { kind: "file", path: attachment.path };
   }
   const found = findByHandle(current.handles, normalizeHandle(attachment.handle));
@@ -162,20 +174,53 @@ const errorOutput = (text: string): ToolExecutionResult => ({ output: [{ type: "
  * a file the agent can see, and nothing here will pretend it is.
  */
 function treePathOf(root: string, brain: CartoBrain, session: ToolSession, handle: string): string | undefined {
-  const block = projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain);
-  for (const [path, named] of block.handles) if (named === handle) return path;
+  const handles = session.requestTreeHandles ?? projectTreeBlock(root, session.tree.anchor, session.tree.depth, brain, session.tree).handles;
+  for (const [path, named] of handles) if (named === handle) return path;
   return undefined;
 }
 
-/**
- * The path a file tool is about to touch, resolved against the project root:
- * `.brain` is refused here, before the package's tool sees it. Paths outside
- * the root are the env's business — its cwd is the root, and its own
- * `absolutePath` refuses what escapes it.
- */
-function guardedPath(root: string, path: string): void {
-  const absolute = lexicalProjectPath(root, path);
-  refuseBrainPath(root, absolute);
+/** Wrap the package environment at the actual filesystem operations, after Pi
+ * has normalized paths and selected read-path variants. Shell is unaffected. */
+function fileToolApi<T extends ToolExecutionApi>(api: T, root: string, scope: PathScope): T {
+  const env = api.env;
+  if (env === undefined) return api;
+  const operations = new Set(["exists", "openBinaryReader", "fileInfo", "readTextFile", "writeFile"]);
+  const scoped = new Proxy(env, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (key === "absolutePath") {
+        return async (...args: unknown[]) => {
+          const result = await Reflect.apply(value, target, args) as { ok: boolean; value?: string };
+          if (result.ok && result.value !== undefined) assertFileScope(root, result.value, scope);
+          return result;
+        };
+      }
+      if (typeof key === "string" && operations.has(key)) {
+        return (path: string, ...args: unknown[]) => {
+          assertFileScope(root, path, scope);
+          return Reflect.apply(value, target, [path, ...args]);
+        };
+      }
+      return value.bind(target);
+    },
+  });
+  return new Proxy(api, {
+    get(target, key) {
+      if (key === "env") return scoped;
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+/** Resolve against what was sent, not a new scan whose numbering may have changed. */
+function fileToolPath(path: string, session: ToolSession): string {
+  if (!/^F\d+$/i.test(path) || session.requestTreeHandles === undefined) return path;
+  for (const [candidate, handle] of session.requestTreeHandles) {
+    if (handle === path.toUpperCase()) return candidate;
+  }
+  throw new Error(`${path} is not a file handle in the last state block.`);
 }
 
 /**
@@ -184,16 +229,16 @@ function guardedPath(root: string, path: string): void {
  * package's own bounds are the tool's bounds (§1). `wrapTool` keeps the
  * package tool's types, so nothing here restates its schema.
  */
-function scopedRead(root: string): ToolRegistration {
+function scopedRead(root: string, session: ToolSession): ToolRegistration {
   const base = createReadTool();
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
     // Carto adds is how the file is named and how to keep reads slim.
-    description: `${base.description ?? ""} Name the file by its tree handle or a project path, using \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
+    description: `${base.description ?? ""} Name the file by its tree handle or a path; strict scope stays in the project, relaxed scope permits outside paths. Use \`offset\` and \`limit\` to read only the slice you need. Read before writing about or editing a file.`,
     async execute(args, api, context) {
-      guardedPath(root, pathOf(args));
-      return base.execute(args, api, context);
+      const path = fileToolPath(pathOf(args), session);
+      return base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
     },
   });
 }
@@ -203,17 +248,17 @@ function scopedRead(root: string): ToolRegistration {
  * file, all or nothing, and a path that must be an existing file. Creating is
  * `create`'s job, so the package tool's behaviour is the spec's (§7).
  */
-function scopedEdit(root: string, readOnly: () => boolean): ToolRegistration {
+function scopedEdit(root: string, session: ToolSession, readOnly: () => boolean): ToolRegistration {
   const base = createEditTool();
   return defineTool({
     ...base,
     // The package's sentence states the tool's own bounds (§1) and stays; what
     // Carto adds is how the file is named, atomic pacing, and read-only mode.
-    description: `${base.description ?? ""} Name the file by its tree handle or a project path (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
+    description: `${base.description ?? ""} Name the file by its tree handle or a path; strict scope stays in the project, relaxed scope permits outside paths (must already exist; use \`create\` for a new file). Aim for one atomic change per step (a function, a value, or a small block) after reading the part you are changing. All replacements match the current file and apply all-or-nothing. Refused in read only mode.`,
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
-      guardedPath(root, pathOf(args));
-      return base.execute(args, api, context);
+      const path = fileToolPath(pathOf(args), session);
+      return base.execute({ ...args, path }, fileToolApi(api, root, session.pathScope ?? "strict"), context);
     },
   });
 }
@@ -232,14 +277,16 @@ function createFile(envRoot: string, readOnly: () => boolean): ToolRegistration 
     async execute(args, api, context) {
       refuseWhenReadOnly(readOnly());
       const path = pathOf(args);
-      const env = api.env;
+      const scoped = fileToolApi(api, envRoot, "strict");
+      const env = scoped.env;
       if (env === undefined) throw new Error("create needs the project environment");
-      guardedPath(envRoot, path);
-      const absolute = getOrThrow(await env.absolutePath(path, context));
+      // Match the package's path normalization before checking for overwrite.
+      const normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "");
+      const absolute = getOrThrow(await env.absolutePath(normalized, context));
       if (getOrThrow(await env.exists(absolute, context))) {
         throw new Error(`${path} already exists, and creating a file never overwrites one. Change it with \`edit\`, or choose a path that is free.`);
       }
-      return write.execute(args, api, context);
+      return write.execute({ ...args, path: absolute }, scoped, context);
     },
   });
 }
@@ -370,7 +417,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "pin",
       description:
-        `Pin or unpin a file from the tree by its handle (at least 1 character). Pinned files are re-read fresh into the head at every collapse, so pin the files you are actively building in before collapsing. Only ${them} can remove a pin ${them} placed.`,
+        `Pin or unpin a file or an ephemeral item by its handle (at least 1 character). Use F for files, X for working, U for messages, and R or S for results. Pinned files and read results are re-read at collapse; other pinned items retain their text. Only ${them} can remove a pin ${them} placed.`,
       parameters: obj({
         action: oneOf(["pin", "unpin"] as const),
         handle: ExistingHandle,
@@ -382,6 +429,29 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         // a file means "read it again every collapse", which is how the head
         // holds the file rather than a quotation of a read of it.
         const named = normalizeHandle(args.handle);
+        const item = session.headEphemera?.get(named) ?? session.liveEphemera?.get(named);
+        if (item !== undefined) {
+          // A request's handle names the exact item shown in that request, not
+          // whatever happens to take its number after a later edit.
+          if (!session.headEphemera?.has(named) && session.loadPromptItems !== undefined) {
+            const stillVisible = (await session.loadPromptItems()).some((candidate) => candidate.item?.id === item.id);
+            if (!stillVisible) throw new Error(`${named} is no longer in the live context.`);
+          }
+          const held = current.ephemera.find((candidate) => candidate.id === item.id);
+          if (args.action === "pin" && current.ephemeralDeletes?.includes(item.id)) throw new Error(`${named} is marked for deletion; the person must withdraw that mark before it can be kept.`);
+          if (held?.pinned === "user") throw new Error(`${named} carries ${them}'s pin, and only ${them} can remove it.`);
+          if (args.action === "unpin") {
+            if (held !== undefined) await brain.apply({ kind: "ephemeral.unpin", id: item.id, author: "agent" }, api.now());
+            return textOutput(`${named} is unpinned; it will not be carried through the next collapse.`);
+          }
+          // Resolve a read by F handle while the tree still identifies that
+          // path; collapse must reread the file, not a transient F number.
+          const path = item.kind === "readResult" ? item.entity?.path : undefined;
+          const resolved = path === undefined ? undefined : treePathOf(root, current, session, normalizeHandle(path)) ?? path;
+          const pinned: PinnedEphemeral = { ...item, pinned: "agent", ...(item.entity === undefined ? {} : { entity: { ...item.entity, ...(resolved === undefined ? {} : { path: resolved }) } }) };
+          await brain.apply({ kind: "ephemeral.pin", item: pinned }, api.now());
+          return textOutput(`${named} is pinned; it will be carried into the next context.`);
+        }
         const filePath = treePathOf(root, current, session, named);
         if (filePath !== undefined) {
           const held = current.files.find((file) => file.path === filePath);
@@ -390,6 +460,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               `${named} carries ${them}'s pin, and a pin ${them} placed is theirs to remove. Leave it where it is.`,
             );
           }
+          if (args.action === "pin") assertPinnableFile(root, filePath);
           await brain.apply(
             { kind: "file.pin", path: filePath, pinned: args.action === "pin" ? "agent" : null },
             api.now(),
@@ -404,7 +475,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           );
         }
         throw new Error(
-          `${named} is not a file in the tree. Only a file is pinned: a record of the Brain stays until it is deleted or marked for archive, so there is nothing for a pin to keep.`,
+          `${named} is not a file in the tree or a visible ephemeral item. Brain records stay until marked for archive or deletion.`,
         );
       },
     }),
@@ -444,20 +515,21 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       },
     }),
 
-    scopedRead(root),
+    scopedRead(root, session),
 
-    scopedEdit(root, () => session.readOnly),
+    scopedEdit(root, session, () => session.readOnly),
 
     createFile(root, () => session.readOnly),
 
     defineTool({
       name: "tree",
       description:
-        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
+        "Move the `<carto-state>` project tree to a directory (by `D` handle or path) and optional `depth`, ending this turn so the refreshed tree arrives immediately as your next turn. The scan stops at depth 64 or 2000 encountered entries; >= sizes are partial. The state block pages the scanned entries: use offset from its next-page notice, or anchor at a directory. Pages may change as the filesystem changes. Files in the tree carry handles you can pass to `read`, `edit`, and `pin`, alongside attached Atlas handles.",
       parameters: obj({
         handle: opt(str({ description: "A directory's handle from the tree, such as D2. The tree anchors there." })),
         anchor: opt(str()),
         depth: opt(int({ description: "How many levels below the anchor to render. One is the anchor's own contents, and less than one renders the same as one." })),
+        offset: opt(int({ description: "A non-negative, zero-based offset into the scanned entries; use the next offset in the state block to see another page." })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -474,8 +546,11 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         }
         const anchor = anchoredByHandle ?? args.anchor ?? session.tree.anchor;
         const depth = args.depth ?? session.tree.depth;
-        const block = projectTreeBlock(root, anchor, depth, await brain.read());
-        session.tree = { anchor: block.root, depth: block.depth };
+        const offset = args.offset ?? (args.handle !== undefined || args.anchor !== undefined || args.depth !== undefined ? 0 : (session.tree.offset ?? 0));
+        if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("tree offset must be a non-negative integer.");
+        const block = projectTreeBlock(root, anchor, depth, await brain.read(), { ...session.tree, offset });
+        session.tree = { anchor: block.root, depth: block.depth, offset: block.page.offset,
+          ...(session.tree.limit === undefined ? {} : { limit: session.tree.limit }) };
         // The tree itself is not the result (§6.3): it ends the turn, and the
         // state block — rendered at this anchor — is the next turn. So the agent
         // sees the tree it just asked for instead of acting on the last one.
@@ -485,7 +560,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           output: [
             {
               type: "text" as const,
-              text: `Anchored at ${block.root}, depth ${block.depth}. This turn ends here, and the tree is in your state block as your next turn.`,
+              text: `Anchored at ${block.root}, depth ${block.depth}, offset ${block.page.offset}. This turn ends here, and the tree is in your state block as your next turn.`,
             },
           ],
           control: { terminate: true },

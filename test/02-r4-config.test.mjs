@@ -7,7 +7,7 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -18,9 +18,10 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig } from "../dist/runtime/config.js";
+import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig, updateConfigModel } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
+import { wipeProjectBrain } from "../dist/runtime/paths.js";
 import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
 
@@ -65,6 +66,23 @@ test("parseConfig rejects a bad version, model, endpoint, context window, and co
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 1 }).collapseWarningPercent, 1);
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 60 }).collapseWarningPercent, 60);
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", collapseWarningPercent: 100 }).collapseWarningPercent, 100);
+});
+
+test("the tree page size is validated and survives config loading and model changes", async () => {
+  const home = tempDir();
+  try {
+    const base = { version: 1, model: "llama-swap/x" };
+    assert.equal(parseConfig(base).treePageSize, undefined);
+    for (const value of [0, -1, 1.5, 2001, "100", null]) {
+      assert.throws(() => parseConfig({ ...base, treePageSize: value }), /treePageSize must be an integer/);
+    }
+    assert.equal(parseConfig({ ...base, treePageSize: 1 }).treePageSize, 1);
+    assert.equal(parseConfig({ ...base, treePageSize: 2000 }).treePageSize, 2000);
+    await saveGlobalConfig({ ...base, treePageSize: 37 }, home);
+    assert.equal((await loadGlobalConfig({ home, contextWindowOverride: 4096 })).config.treePageSize, 37);
+    await updateConfigModel("llama-swap/y", home);
+    assert.equal(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).treePageSize, 37);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {
@@ -245,6 +263,36 @@ test("stdin that is not a terminal and carries no lines announces itself instead
   }
 });
 
+test("a wipe keeps headless open and the next message reaches a genuinely fresh session", async () => {
+  const root = tempDir();
+  mkdirSync(join(root, ".brain"));
+  let brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  const { faux, models, ref } = fauxFor();
+  const out = captureStream();
+  const contexts = [];
+  await brain.apply({ kind: "chat.record", record: { id: "old", author: "user", text: "OLD_SECRET_MESSAGE", createdAt: 1, updatedAt: 1 } }, 1);
+  await brain.archiveEphemeral({ id: "old-archive", layer: "ephemeral", ephemeral: { kind: "plainText", text: "old archive" } }, "gen-old", 1);
+  faux.setResponses([
+    (context) => { contexts.push(JSON.stringify(context.messages)); return fauxAssistantMessage([fauxToolCall("chat", { text: "fresh answer" }, { id: "fresh-chat" })], { stopReason: "toolUse" }); },
+    () => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "fresh-sleep" })], { stopReason: "toolUse" }),
+  ]);
+  try {
+    const code = await runHeadless({
+      root, brain, models, model: ref, input: inputFrom(["/mode read-only", "/mode relaxed", "/wipe", "/wipe confirm", "/mode", "new question", "/quit"]), output: out.stream,
+      resetProjectBrain: async () => { await brain.close(); await wipeProjectBrain(root); brain = await openBrain(join(root, ".brain", "brain.sqlite")); return { brain }; },
+    });
+    assert.equal(code, 0);
+    assert.match(out.text(), /fresh session ready/);
+    assert.match(out.text(), /mode: edit · file scope: strict/);
+    assert.match(out.text(), /carto: fresh answer/);
+    assert.ok(contexts.length > 0);
+    assert.doesNotMatch(contexts[0], /OLD_SECRET_MESSAGE/);
+    assert.match(contexts[0], /new question/);
+    assert.deepEqual((await brain.read()).chat.map((entry) => entry.text), ["new question", "fresh answer"]);
+    assert.equal((await brain.readArchive()).items.length, 0);
+  } finally { await brain.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("headless waits for consecutive tree continuations and prints their chat", async () => {
   const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
@@ -381,7 +429,7 @@ test("bare llama-server (GGUF filename id) and /props fallback populate the conf
       response.end(JSON.stringify({ data: [{ id: "ByteShape" }] }));
       return;
     }
-    if (request.method === "GET" && request.url === "/props") {
+    if (request.method === "GET" && request.url === "/props?model=ByteShape&autoload=false") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ default_generation_settings: { n_ctx: 49_152 } }));
       return;
@@ -401,6 +449,27 @@ test("bare llama-server (GGUF filename id) and /props fallback populate the conf
   } finally {
     await new Promise((resolveClose) => propsServer.close(resolveClose));
   }
+});
+
+test("capacity discovery addresses the active model without asking llama-swap to load it", async () => {
+  let active = "org/Swift";
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(url);
+    if (url.endsWith("/v1/models")) return { ok: true, async json() { return { data: [{ id: "org/Swift" }, { id: "DaisyRose" }] }; } };
+    return { ok: false, status: 409, async json() { return {}; } };
+  };
+  const models = configuredModels(
+    { version: 1, model: "llama-swap/org/Swift", llamaSwapEndpoint: "http://localhost:8888/v1" },
+    { provider: "llama-swap", modelId: active },
+    { fetchImpl, activeModelId: () => active },
+  );
+  await models.refresh({ providers: ["llama-swap"], force: true });
+  active = "DaisyRose";
+  await models.refresh({ providers: ["llama-swap"], force: true });
+  const props = urls.filter((url) => new URL(url).pathname === "/props").map((url) => new URL(url).searchParams);
+  assert.deepEqual(props.map((query) => [query.get("model"), query.get("autoload")]), [["org/Swift", "false"], ["DaisyRose", "false"]]);
+  assert.equal(models.getModel("llama-swap", "DaisyRose").contextWindow, 0, "a cold model's capacity remains unknown");
 });
 
 test("cold llama-swap discovers the context window mid-first-run as soon as the model responds", async () => {
@@ -552,6 +621,47 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       rmSync(home, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("wipe requires confirmation, closes storage, removes all project state, and leaves files and global config", async () => {
+    const home = tempDir(), root = projectRoot();
+    const brainDir = join(root, ".brain");
+    mkdirSync(brainDir);
+    writeFileSync(join(root, "src", "keep"), "project file");
+    writeFileSync(join(brainDir, "settings.json"), JSON.stringify({ version: 1, readOnly: true, pathScope: "relaxed" }));
+    const brain = await openBrain(join(brainDir, "brain.sqlite"));
+    await brain.apply({ kind: "chat.record", record: { id: "old-chat", author: "user", text: "old session", createdAt: 1, updatedAt: 1 } }, 1);
+    await brain.archiveEphemeral({ id: "old-archive", layer: "ephemeral", ephemeral: { kind: "plainText", text: "old archive" } }, "gen-old", 1);
+    await brain.close();
+    const args = ["--model", "llama-swap/ByteShape", "--endpoint", "http://127.0.0.1:9/v1", "--root", root, "--headless"];
+    try {
+      const cancelled = await runCli(args, { home, input: "/wipe confirm\n/wipe\n/help\n/wipe confirm\n/quit\n" });
+      assert.match(cancelled, /wipe cancelled/);
+      assert.ok(existsSync(join(brainDir, "brain.sqlite")));
+      assert.ok(existsSync(join(brainDir, "settings.json")));
+      const done = await runCli(args, { home, input: "/wipe\n/wipe confirm\n/mode\n/mode read-only\n/quit\n" });
+      assert.match(done, /wiped .*\.brain; fresh session ready/);
+      assert.match(done, /mode: edit · file scope: strict/);
+      assert.match(done, /mode: read-only · file scope: strict/);
+      assert.equal(existsSync(brainDir), true, "a fresh session is open before quit");
+      assert.equal(readFileSync(join(root, "src", "keep"), "utf8"), "project file");
+      assert.ok(existsSync(join(home, "config.json")));
+      const fresh = await openBrain(join(brainDir, "brain.sqlite"));
+      try {
+        assert.equal((await fresh.read()).chat.length, 0);
+        assert.equal((await fresh.readArchive()).items.length, 0);
+      } finally { await fresh.close(); }
+    } finally { rmSync(home, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("wipe refuses a symlinked .brain without touching its target", async () => {
+    const root = tempDir(), elsewhere = tempDir();
+    try {
+      writeFileSync(join(elsewhere, "keep"), "safe");
+      symlinkSync(elsewhere, join(root, ".brain"));
+      await assert.rejects(wipeProjectBrain(root), /real directory/);
+      assert.equal(readFileSync(join(elsewhere, "keep"), "utf8"), "safe");
+    } finally { rmSync(root, { recursive: true, force: true }); rmSync(elsewhere, { recursive: true, force: true }); }
   });
 
   test("an unsupported provider fails plainly, before any request is made", async () => {
