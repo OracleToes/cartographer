@@ -2,8 +2,7 @@
 
 **Status: proposed plan, not implementation or a change to `SPEC.md`.** This
 records the person's decisions and an approach to building them; unresolved
-choices and feasibility checks are explicitly marked. See
-`focused-task-discussion.md` for the discussion. Implementation should first
+choices and feasibility checks are explicitly marked. Implementation should first
 update the specification to reflect the agreed behavior, then land in tested,
 coherent stages. No parallel models or concurrent agents: this is a sequential
 context switch on hardware that can run only one model at a time.
