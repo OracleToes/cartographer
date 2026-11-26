@@ -50,6 +50,8 @@ import { ConversationTranscript, LiveDoc, type LiveState } from "@earendil-works
 import {
   applyOmitNow,
   applyRecordActionNow,
+  readLiveWorkEdit,
+  editLiveWork,
   closeLiveSession,
   collapseLiveSession,
   interruptRun,
@@ -2458,6 +2460,47 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  const selectedLiveWorkId = (): string | undefined => {
+    if (state.layer !== "context") return undefined;
+    const target = state.view === "chat" ? transcript.selectedTarget() : state.view === "context" ? contextView.selectedEntry()?.target : undefined;
+    return target?.part === "tool-work" ? String(target.id) : undefined;
+  };
+
+  const editSelectedLiveWork = async (id: string) => {
+    const session = state.session;
+    const snapshot = await readLiveWorkEdit(session, id);
+    let outcome: EditorOutcome;
+    let stopped = false;
+    try {
+      tui.stop(); stopped = true;
+      outcome = await composeInEditor(snapshot.text);
+    } catch (error) {
+      outcome = { ok: false, error: errorText(error) };
+    } finally {
+      if (stopped) tui.start();
+      focusCurrent();
+      tui.requestRender();
+    }
+    if (!outcome.ok) { pushStatus(`editor failed: ${outcome.error}`); return; }
+    if (outcome.text === snapshot.text) return;
+    try {
+      if (state.session !== session || state.collapsing) throw new Error("The session changed while the editor was open.");
+      await editLiveWork(session, snapshot, outcome.text);
+      await rebuildTranscript();
+      pushStatus("Edited the live context item.");
+    } catch (error) {
+      try {
+        const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
+        const path = join(dir, snapshot.kind === "call" ? "work.json" : "work.txt");
+        await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
+        pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+      } catch (saveError) {
+        pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
+      }
+    }
+    tui.requestRender();
+  };
+
   const selectedSourcePath = (): string | undefined => {
     if (state.layer !== "context") return undefined;
     if (state.view === "tree" && !treeView.isFiltering()) {
@@ -2610,6 +2653,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       key: "ctrl+g",
       run: () => void editArchivedEphemeral().catch((error: unknown) => { pushStatus(`edit failed: ${errorText(error)}`); tui.requestRender(); }),
       available: () => !state.overlayOpen && state.layer === "archive" && !archiveView.isFiltering() && archiveView.selectedItem()?.ephemeral !== undefined,
+    },
+    {
+      id: "edit-live-work",
+      group: "the record",
+      label: "edit selected live work",
+      hint: "tool-call arguments use JSON",
+      key: "ctrl+g",
+      run: () => { const id = selectedLiveWorkId(); if (id !== undefined) void editSelectedLiveWork(id).catch((error: unknown) => { pushStatus(`edit failed: ${errorText(error)}`); tui.requestRender(); }); },
+      available: () => !state.overlayOpen && selectedLiveWorkId() !== undefined,
     },
     {
       id: "edit-source",

@@ -229,6 +229,7 @@ export async function readGenerationEphemera(storePath: string, generation: stri
         return { id: String(row.id), entry, original: entry };
       });
     const removed = removedPartKeys(parsed.map(({ entry }) => entry), generation);
+    const changedParts = editedPartValues(parsed.map(({ entry }) => entry), generation);
     // Pi's context edits supersede the raw model contribution. A delete applied
     // now must not reappear in the archive when the old store is swept.
     const edits = new Map<string, NonNullable<StoredEntry["edits"]>[number]>();
@@ -252,12 +253,25 @@ export async function readGenerationEphemera(storePath: string, generation: stri
         }
       }
     }
+    // Prefer the call actually in the context when saving a result's restore
+    // payload, but retain the original as a fallback for an omitted call.
+    for (const { entry } of parsed) {
+      for (const call of toolCallsOf(entry)) tools.set(call.id, call);
+      for (const message of entry.model ?? []) {
+        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (part === null || typeof part !== "object") continue;
+          const call = part as { type?: unknown; id?: unknown };
+          if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
+        }
+      }
+    }
     const incoming: IncomingItem[] = [];
     for (const { id, entry, original } of parsed) {
       const oldMessage = original.model?.[0];
       const message = entry.model?.[0];
       const keys = oldMessage?.role === "assistant" && message?.role === "assistant"
-        ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set())
+        ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set(), changedParts.get(id))
         : undefined;
       // The entity is what a restore needs to put the item back where it was:
       // the tool call's own id, and for a result the call it answers.
@@ -309,7 +323,7 @@ interface StoredEntry {
  * Never guess if another writer changed the contribution or an old edit cannot
  * be reconciled: guessing could delete or pin a different, identical sibling.
  */
-export function stablePartKeys(original: unknown, current: unknown, removed: ReadonlySet<string>): string[] {
+export function stablePartKeys(original: unknown, current: unknown, removed: ReadonlySet<string>, changed?: ReadonlyMap<string, string>): string[] {
   if (!Array.isArray(original) || !Array.isArray(current)) throw new Error("Cannot identify edited context parts safely");
   let thinking = 0;
   let text = 0;
@@ -318,10 +332,26 @@ export function stablePartKeys(original: unknown, current: unknown, removed: Rea
     const key = type === "thinking" ? `t${thinking++}` : type === "text" ? `x${text++}` : type === "toolCall" ? `c${index}` : `other${index}`;
     return { key, part };
   }).filter(({ key }) => !removed.has(key));
-  if (candidates.length !== current.length || candidates.some(({ part }, index) => JSON.stringify(part) !== JSON.stringify(current[index]))) {
+  if (candidates.length !== current.length || candidates.some(({ key, part }, index) => (changed?.get(key) ?? JSON.stringify(part)) !== JSON.stringify(current[index]))) {
     throw new Error("Context parts changed outside Carto; refusing to guess their identities");
   }
   return candidates.map(({ key }) => key);
+}
+
+/** Exact edited values, recorded with Pi's context edit so identities are never guessed. */
+export function editedPartValues(entries: readonly { kind?: string | undefined; data?: unknown }[], generation: string): Map<string, Map<string, string>> {
+  const changed = new Map<string, Map<string, string>>();
+  for (const entry of entries) {
+    if (entry.kind !== "carto.edit-work" || entry.data === null || typeof entry.data !== "object") continue;
+    const data = entry.data as { entry?: unknown; item?: unknown; partJson?: unknown };
+    if (typeof data.entry !== "string" || typeof data.item !== "string" || typeof data.partJson !== "string") continue;
+    const prefix = `${generation}:${data.entry}:`;
+    if (!data.item.startsWith(prefix)) continue;
+    const values = changed.get(data.entry) ?? new Map<string, string>();
+    values.set(data.item.slice(prefix.length), data.partJson);
+    changed.set(data.entry, values);
+  }
+  return changed;
 }
 
 /** Carto's persisted part removals, keyed by original entry id. */

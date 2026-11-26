@@ -18,6 +18,8 @@ import { personChatBindings } from "../dist/domain/chat-identity.js";
 import {
   applyOmitNow,
   applyRecordActionNow,
+  readLiveWorkEdit,
+  editLiveWork,
   closeLiveSession,
   interruptRun,
   openLiveSession,
@@ -482,6 +484,46 @@ test("apply-now removes only the selected work row from the prompt, view and lat
     assert.ok(sweptText.includes("keep this text"));
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("live work edits keep identities across further edits, removal, reopening and sweep", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  let session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    await session.conversation.submit({ type: "write", entry: { kind: "test.edit-work", model: [fauxAssistantMessage([
+      fauxText("same"), fauxText("same"), fauxToolCall("read", { path: "old" }, { id: "edit-call" }),
+    ], { stopReason: "toolUse" })] } }, BACKGROUND_CONTEXT);
+    await session.conversation.submit({ type: "write", entry: { kind: "test.edit-result", model: [{
+      role: "toolResult", toolCallId: "edit-call", toolName: "read", content: [{ type: "text", text: "old result" }], isError: false, timestamp: Date.now(),
+    }] } }, BACKGROUND_CONTEXT);
+    const entries = await sessionTranscript(session);
+    const entry = entries.find((item) => item.kind === "test.edit-work");
+    const result = entries.find((item) => item.kind === "test.edit-result");
+    const id = (key) => ephemeralItemId(session.generation, entry.id, key);
+    const resultId = ephemeralItemId(session.generation, result.id, "r");
+    const stale = await readLiveWorkEdit(session, id("x1"));
+    await editLiveWork(session, stale, "changed sibling");
+    await assert.rejects(editLiveWork(session, stale, "stale"), /changed/);
+    await editLiveWork(session, await readLiveWorkEdit(session, id("c2")), '{"path":"new"}');
+    await assert.rejects(editLiveWork(session, await readLiveWorkEdit(session, id("c2")), "[]"), /JSON object/);
+    await editLiveWork(session, await readLiveWorkEdit(session, resultId), "new result");
+    assert.equal(await applyOmitNow(session, id("x0")), true);
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref });
+    const current = (await sessionTranscript(session)).find((item) => item.kind === "test.edit-work");
+    assert.deepEqual(current.partKeys, ["x1", "c2"]);
+    assert.equal(current.model[0].content[0].text, "changed sibling");
+    const swept = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
+    assert.ok(!swept.some((item) => item.id === id("x0")));
+    assert.equal(swept.find((item) => item.id === id("x1")).ephemeral.text, "changed sibling");
+    const saved = swept.find((item) => item.id === resultId).ephemeral.model;
+    assert.equal(saved[0].content[0].arguments.path, "new");
+    assert.equal(saved[1].content[0].text, "new result");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });

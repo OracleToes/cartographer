@@ -24,6 +24,7 @@ import {
   InboxDoc,
   LiveDoc,
   type Conversation,
+  type EntryId,
   type HarnessOptions,
   type ModelRef,
   type Cursor,
@@ -47,6 +48,7 @@ import {
   pinnedFileTexts,
   reconcileGenerations,
   removedPartKeys,
+  editedPartValues,
   stablePartKeys,
   rewriteHeadSnapshot,
   type CollapseOptions,
@@ -429,9 +431,105 @@ export async function applyOmitNow(session: LiveSession, itemId: string): Promis
   }
 }
 
+/** Snapshot the exact Pi contribution before handing it to an external editor. */
+export interface LiveWorkEdit {
+  itemId: string;
+  generation: string;
+  entryId: EntryId;
+  partKey: string;
+  kind: "reasoning" | "text" | "call" | "result";
+  text: string;
+  expected: string;
+}
+
+export async function readLiveWorkEdit(session: LiveSession, itemId: string): Promise<LiveWorkEdit> {
+  if ((await session.brain.read()).ephemera.some((item) => item.id === itemId)) throw new Error("Unpin this item before editing its live copy.");
+  const view = await session.conversation.context(BACKGROUND_CONTEXT);
+  const removed = removedPartKeys(view.entries, session.generation);
+  const changed = editedPartValues(view.entries, session.generation);
+  for (const [index, entry] of view.entries.entries()) {
+    const prefix = `${session.generation}:${entry.id}:`;
+    if (!itemId.startsWith(prefix)) continue;
+    const key = itemId.slice(prefix.length);
+    const messages = view.contributions[index] ?? [];
+    const message = messages[0];
+    const base = { itemId, generation: session.generation, entryId: entry.id, partKey: key, expected: JSON.stringify(messages) };
+    if (messages.length !== 1 || message === undefined) break;
+    if (key === "r" && message.role === "toolResult") {
+      return { ...base, kind: "result", text: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") };
+    }
+    if (message.role !== "assistant") break;
+    const original = entry.model?.find((candidate) => candidate.role === "assistant");
+    if (original === undefined) break;
+    const keys = stablePartKeys(original.content, message.content, removed.get(String(entry.id)) ?? new Set(), changed.get(String(entry.id)));
+    const part = message.content[keys.indexOf(key)];
+    if (part?.type === "thinking") {
+      if (part.thinkingSignature || part.redacted) throw new Error("Signed or redacted reasoning cannot be safely edited.");
+      return { ...base, kind: "reasoning", text: part.thinking };
+    }
+    if (part?.type === "text") return { ...base, kind: "text", text: part.text };
+    if (part?.type === "toolCall") {
+      if (part.name === "chat") throw new Error("Chat calls are edited through their Chat record.");
+      if (part.thoughtSignature) throw new Error("A signed tool call cannot be safely edited.");
+      return { ...base, kind: "call", text: JSON.stringify(part.arguments, null, 2) + "\n" };
+    }
+    break;
+  }
+  throw new Error("The selected live item is no longer available for editing.");
+}
+
+/** Apply a context-only edit, preserving siblings and the original part identity. */
+export async function editLiveWork(session: LiveSession, snapshot: LiveWorkEdit, text: string): Promise<void> {
+  const previous = omitQueues.get(session) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(async () => {
+    if (session.generation !== snapshot.generation) throw new Error("The session collapsed while the editor was open.");
+    if ((await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT))?.run !== undefined) throw new Error("The agent is running; stop it before editing live work.");
+    const fresh = await readLiveWorkEdit(session, snapshot.itemId);
+    if (fresh.expected !== snapshot.expected || fresh.kind !== snapshot.kind) throw new Error("The item changed while the editor was open.");
+    const messages = JSON.parse(snapshot.expected) as Message[];
+    const message = messages[0];
+    let partJson: string | undefined;
+    if (snapshot.kind === "result" && message?.role === "toolResult") {
+      let inserted = false;
+      message.content = message.content.flatMap<(typeof message.content)[number]>((part) => {
+        if (part.type !== "text") return [part];
+        if (inserted) return [];
+        inserted = true;
+        return [{ type: "text" as const, text }];
+      });
+      if (!inserted) message.content.unshift({ type: "text", text });
+    } else if (message?.role === "assistant") {
+      const current = await sessionTranscript(session);
+      const item = current.find((entry) => entry.id === snapshot.entryId);
+      const part = message.content[item?.partKeys?.indexOf(snapshot.partKey) ?? -1];
+      if (snapshot.kind === "reasoning" && part?.type === "thinking") part.thinking = text;
+      else if (snapshot.kind === "text" && part?.type === "text") part.text = text;
+      else if (snapshot.kind === "call" && part?.type === "toolCall") {
+        const args: unknown = JSON.parse(text);
+        if (args === null || typeof args !== "object" || Array.isArray(args)) throw new Error("Tool arguments must be a JSON object.");
+        part.arguments = args as typeof part.arguments;
+        delete part.argumentsError;
+      } else throw new Error("The selected work item changed.");
+      partJson = JSON.stringify(part);
+    } else throw new Error("The selected work item changed.");
+    const submission = await session.conversation.submit({
+      type: "write",
+      entry: {
+        kind: "carto.edit-work",
+        data: { entry: String(snapshot.entryId), item: snapshot.itemId, ...(partJson === undefined ? {} : { partJson }) },
+        edits: [{ target: snapshot.entryId, action: "replace", messages }],
+      },
+    }, BACKGROUND_CONTEXT);
+    if ((await submission.wait(BACKGROUND_CONTEXT)).status !== "done") throw new Error("Pi did not apply the edit.");
+  });
+  omitQueues.set(session, operation);
+  try { await operation; } finally { if (omitQueues.get(session) === operation) omitQueues.delete(session); }
+}
+
 async function omitOneNow(session: LiveSession, itemId: string): Promise<boolean> {
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
   const removed = removedPartKeys(view.entries, session.generation);
+  const changed = editedPartValues(view.entries, session.generation);
   for (const [index, entry] of view.entries.entries()) {
     const messages = view.contributions[index] ?? [];
     const prefix = `${session.generation}:${entry.id}:`;
@@ -450,7 +548,7 @@ async function omitOneNow(session: LiveSession, itemId: string): Promise<boolean
         if (message.role !== "assistant") return message;
         const original = entry.model?.find((candidate) => candidate.role === "assistant");
         if (original === undefined) throw new Error("Cannot identify the original assistant message");
-        const keys = stablePartKeys(original.content, message.content, removed.get(String(entry.id)) ?? new Set());
+        const keys = stablePartKeys(original.content, message.content, removed.get(String(entry.id)) ?? new Set(), changed.get(String(entry.id)));
         const content = message.content.filter((_part, partIndex) => {
           if (keys[partIndex] !== partKey) return true;
           foundPart = true;
@@ -768,12 +866,13 @@ export async function sessionTranscript(session: LiveSession) {
   // The raw entries remain on disk after an apply-now edit. Views must show
   // the contributions Pi actually sends, not the superseded raw messages.
   const removed = removedPartKeys(view.entries, session.generation);
+  const changed = editedPartValues(view.entries, session.generation);
   return view.entries.map((entry, index) => {
     const model = view.contributions[index] ?? [];
     const original = entry.model?.[0];
     const current = model[0];
     const partKeys = original?.role === "assistant" && current?.role === "assistant"
-      ? stablePartKeys(original.content, current.content, removed.get(String(entry.id)) ?? new Set())
+      ? stablePartKeys(original.content, current.content, removed.get(String(entry.id)) ?? new Set(), changed.get(String(entry.id)))
       : undefined;
     return { ...entry, model, partKeys };
   });

@@ -392,6 +392,13 @@ export class TranscriptView implements Component, Focusable {
     return this.selectedBlock()?.text;
   }
 
+  /** The stable source identity of the selected block, if it has one. */
+  selectedTarget(): BlockTarget | undefined {
+    if (!this.selecting) return undefined;
+    this.render(this.lastWidth);
+    return this.selectedBlock()?.target;
+  }
+
   /** Which kind of thing is selected: only a card (an ephemeral item) can be pinned. */
   selectedPart(): BlockTarget["part"] | undefined {
     return this.selecting ? this.selectedBlock()?.target?.part : undefined;
