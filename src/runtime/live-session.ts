@@ -39,7 +39,9 @@ import type { ArchivedItem } from "../domain/archive.js";
 import { projectContext } from "../domain/projection.js";
 import { createCartoExtension, generationProgressed, newGenerationWork, type LiveSessionState } from "./carto-extension.js";
 import { personName } from "../domain/person.js";
-import type { BrainStore } from "./brain-store.js";
+import type { BrainStore, ChatEditJournal } from "./brain-store.js";
+import type { ChatRecord, PinnedEphemeral } from "../domain/records.js";
+import { parseEditedRecord } from "../domain/record-editor.js";
 import {
   collapse,
   generationPaths,
@@ -154,7 +156,11 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
   // or build a new one from the Brain — which is authoritative.
+  const pendingChatEdit = await options.brain.readChatEdit();
   const reconciled = await reconcileGenerations(root, options.brain);
+  if (pendingChatEdit !== undefined && reconciled.live?.generation !== pendingChatEdit.generation) {
+    throw new Error("A pending Chat edit's generation is missing; all remaining data was preserved.");
+  }
   let generation: string;
   if (reconciled.live !== null) {
     generation = reconciled.live.generation;
@@ -320,6 +326,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       state.headEphemera = new Map(snapshot.ephemeralItems.map(({ handle, item }) => [handle, item]));
       state.headEphemeraCount = Math.max(0, ...snapshot.ephemeralItems.map(({ handle }) => Number(handle.slice(1)) || 0));
     };
+    await recoverChatEdit(session);
     harness.resume();
     // Only restores already committed by a collapse are retried here. Ordinary
     // archive marks still wait for collapse. An active run can defer recovery;
@@ -351,6 +358,7 @@ export async function waitForRunEnd(session: LiveSession): Promise<void> {
 
 /** Submit a person message; the submission settles when its run answers. */
 export async function submitInput(session: LiveSession, text: UserInput, whenBusy: "steer" | "followUp" = "followUp") {
+  await recoverChatEdit(session);
   // The person has spoken: whatever the agent was caught in, this is a new
   // direction, so a collapse after it is not judged against the stall before it.
   session.state.rebuiltAutomatically = false;
@@ -485,10 +493,15 @@ export async function readLiveWorkEdit(session: LiveSession, itemId: string): Pr
 export async function editLiveWork(session: LiveSession, snapshot: LiveWorkEdit, text: string): Promise<void> {
   const previous = omitQueues.get(session) ?? Promise.resolve();
   const operation = previous.catch(() => undefined).then(async () => {
+    await recoverChatEdit(session);
     if (session.generation !== snapshot.generation) throw new Error("The session collapsed while the editor was open.");
     if ((await session.harness.snapshot(LiveDoc, session.conversation.id, BACKGROUND_CONTEXT))?.run !== undefined) throw new Error("The agent is running; stop it before editing live work.");
     const fresh = await readLiveWorkEdit(session, snapshot.itemId);
     if (fresh.expected !== snapshot.expected || fresh.kind !== snapshot.kind) throw new Error("The item changed while the editor was open.");
+    const current = await sessionTranscript(session);
+    const item = current.find((entry) => entry.id === snapshot.entryId);
+    if (JSON.stringify(item?.model) !== snapshot.expected) throw new Error("The item changed while the editor was open.");
+    const tail = current.at(-1)?.id;
     const messages = JSON.parse(snapshot.expected) as Message[];
     const message = messages[0];
     let partJson: string | undefined;
@@ -514,8 +527,6 @@ export async function editLiveWork(session: LiveSession, snapshot: LiveWorkEdit,
         if (!inserted) message.content.unshift({ type: "text", text });
       }
     } else if (message?.role === "assistant") {
-      const current = await sessionTranscript(session);
-      const item = current.find((entry) => entry.id === snapshot.entryId);
       const part = message.content[item?.partKeys?.indexOf(snapshot.partKey) ?? -1];
       if (snapshot.kind === "reasoning" && part?.type === "thinking") part.thinking = text;
       else if (snapshot.kind === "text" && part?.type === "text") part.text = text;
@@ -527,21 +538,174 @@ export async function editLiveWork(session: LiveSession, snapshot: LiveWorkEdit,
       } else throw new Error("The selected work item changed.");
       partJson = JSON.stringify(part);
     } else throw new Error("The selected work item changed.");
-    const submission = await session.conversation.submit({
-      type: "write",
-      entry: {
-        kind: "carto.edit-work",
-        data: { entry: String(snapshot.entryId), item: snapshot.itemId, ...(partJson === undefined ? {} : { partJson }) },
-        edits: [{ target: snapshot.entryId, action: "replace", messages }],
-      },
+    const submissionId = await session.conversation.commit(async (tx) => {
+      if ((await tx.doc(LiveDoc, session.conversation.id)).run !== undefined || (await tx.doc(InboxDoc, session.conversation.id)).items.length !== 0) throw new Error("The agent is running or has queued input; wait before editing live work.");
+      if (await tx.latestEntryId(session.conversation.id) !== tail) throw new Error("The context changed while the editor was open.");
+      return session.conversation.submit(tx, {
+        type: "write",
+        entry: {
+          kind: "carto.edit-work",
+          data: { entry: String(snapshot.entryId), item: snapshot.itemId, ...(partJson === undefined ? {} : { partJson }) },
+          edits: [{ target: snapshot.entryId, action: "replace", messages }],
+        },
+      });
     }, BACKGROUND_CONTEXT);
-    if ((await submission.wait(BACKGROUND_CONTEXT)).status !== "done") throw new Error("Pi did not apply the edit.");
+    const submission = await session.harness.submission(submissionId, BACKGROUND_CONTEXT);
+    if (submission === undefined || (await submission.status(BACKGROUND_CONTEXT)).status !== "done") throw new Error("Pi did not apply the edit.");
+  });
+  omitQueues.set(session, operation);
+  try { await operation; } finally { if (omitQueues.get(session) === operation) omitQueues.delete(session); }
+}
+
+/** The Brain record and the exact live contribution it currently names. */
+export interface LiveChatEdit {
+  record: ChatRecord;
+  generation: string;
+  entryId: EntryId;
+  itemId: string;
+  partKey: string;
+  before: string;
+  tail: EntryId | undefined;
+  pin?: PinnedEphemeral;
+}
+
+export async function readLiveChatEdit(session: LiveSession, record: ChatRecord): Promise<LiveChatEdit> {
+  const brain = await session.brain.read();
+  if (JSON.stringify(brain.chat.find((item) => item.id === record.id)) !== JSON.stringify(record)) throw new Error("The Chat record changed or disappeared.");
+  const entries = await sessionTranscript(session);
+  const head = await readFile(snapshotPaths(session.root, session.generation).sidecar, "utf8")
+    .then((text) => (JSON.parse(text) as { chat?: string[] }).chat ?? []);
+  if (head.includes(record.id)) throw new Error("This Chat record is in the frozen head.");
+  const bindings = personChatBindings(entries, brain.chat, new Set(head));
+  const candidates: Array<{ entryId: EntryId; key: string; messages: readonly Message[] }> = [];
+  for (const entry of entries) {
+    const message = entry.model[0];
+    if (entry.model.length !== 1 || message === undefined) continue;
+    if (record.author === "user" && message.role === "user" && bindings.get(entry.id) === record.id && userText(message.content) === record.text) {
+      candidates.push({ entryId: entry.id, key: "x0", messages: entry.model });
+    } else if (record.author === "agent" && message.role === "assistant" && record.id.startsWith("chat:")) {
+      for (const [index, part] of message.content.entries()) {
+        if (part.type !== "toolCall" || part.name !== "chat" || part.id !== record.id.slice(5)) continue;
+        if (part.thoughtSignature) throw new Error("A signed Chat call cannot be safely edited.");
+        if (part.arguments.text !== record.text) throw new Error("The Chat call and Brain record already differ.");
+        const key = entry.partKeys?.[index];
+        if (key !== undefined) candidates.push({ entryId: entry.id, key, messages: entry.model });
+      }
+    }
+  }
+  if (candidates.length !== 1) throw new Error("The live Chat contribution cannot be identified unambiguously.");
+  const candidate = candidates[0]!;
+  const itemId = ephemeralItemId(session.generation, candidate.entryId, candidate.key);
+  const pin = brain.ephemera.find((item) => item.id === itemId);
+  if (pin !== undefined) {
+    const message = candidate.messages[0];
+    const call = message?.role === "assistant" ? message.content.find((part) => part.type === "toolCall" && part.id === pin.entity?.callId) : undefined;
+    const expectedPinText = record.author === "agent" && call?.type === "toolCall" ? `chat ${JSON.stringify(call.arguments)}` : record.text;
+    if (pin.text !== expectedPinText) throw new Error("The pinned copy differs from the live Chat contribution; edit or unpin it first.");
+  }
+  return { record, generation: session.generation, entryId: candidate.entryId, itemId, partKey: candidate.key, before: JSON.stringify(candidate.messages), tail: entries.at(-1)?.id, ...(pin === undefined ? {} : { pin }) };
+}
+
+/** Resolve a selected live chat-tool call to its Brain record, not a duplicate pin. */
+export async function chatRecordForLiveWork(session: LiveSession, itemId: string): Promise<ChatRecord | undefined> {
+  for (const entry of await sessionTranscript(session)) {
+    const prefix = `${session.generation}:${entry.id}:`;
+    if (!itemId.startsWith(prefix)) continue;
+    const message = entry.model[0];
+    if (message?.role !== "assistant") return undefined;
+    const part = message.content[entry.partKeys?.indexOf(itemId.slice(prefix.length)) ?? -1];
+    if (part?.type !== "toolCall" || part.name !== "chat") return undefined;
+    return (await session.brain.read()).chat.find((item) => item.id === `chat:${part.id}`);
+  }
+  return undefined;
+}
+
+/** Complete a journaled Pi replacement, or leave it intact if it cannot be proven safe. */
+export async function recoverChatEdit(session: LiveSession): Promise<void> {
+  const journal = await session.brain.readChatEdit();
+  if (journal === undefined) return;
+  if (journal.generation !== session.generation) throw new Error("The pending Chat edit belongs to another generation.");
+  const view = await session.conversation.context(BACKGROUND_CONTEXT);
+  const placed = view.entries.some((entry) => entry.kind === "carto.edit-chat" && entry.data !== null && typeof entry.data === "object" && !Array.isArray(entry.data) && (entry.data as { operation?: unknown }).operation === journal.operation);
+  if (!placed) {
+    const index = view.entries.findIndex((entry) => entry.id === journal.entryId);
+    if (index < 0 || JSON.stringify(view.contributions[index] ?? []) !== journal.before) throw new Error("Pending Chat edit conflicts with the live context; recovery stopped without discarding either copy.");
+    const tail = view.entries.at(-1)?.id;
+    await session.conversation.commit(async (tx) => {
+      if ((await tx.doc(LiveDoc, session.conversation.id)).run !== undefined || (await tx.doc(InboxDoc, session.conversation.id)).items.length !== 0) throw new Error("A pending Chat edit needs an idle session to recover.");
+      if (await tx.latestEntryId(session.conversation.id) !== tail) throw new Error("The context changed during Chat edit recovery.");
+      await session.conversation.submit(tx, chatEditSubmission(journal));
+    }, BACKGROUND_CONTEXT);
+  }
+  await session.brain.finishChatEdit(journal.operation);
+}
+
+function chatEditSubmission(journal: ChatEditJournal) {
+  return {
+    type: "write" as const,
+    requestId: `carto.edit-chat:${journal.operation}`,
+    entry: {
+      kind: "carto.edit-chat",
+      data: { operation: journal.operation, entry: String(journal.entryId), item: journal.itemId, recordId: journal.recordId, ...(journal.partJson === undefined ? {} : { partJson: journal.partJson }) },
+      edits: [{ target: journal.entryId, action: "replace" as const, messages: journal.messages }],
+    },
+  };
+}
+
+export async function editLiveChat(session: LiveSession, snapshot: LiveChatEdit, text: string, now: number): Promise<void> {
+  const previous = omitQueues.get(session) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(async () => {
+    if (session.generation !== snapshot.generation) throw new Error("The session collapsed while the editor was open.");
+    const edited = parseEditedRecord({ kind: "chat", value: snapshot.record }, text, now);
+    if (edited.kind !== "chat") throw new Error("Invalid Chat edit.");
+    const fresh = await readLiveChatEdit(session, snapshot.record);
+    if (fresh.entryId !== snapshot.entryId || fresh.before !== snapshot.before) throw new Error("The Chat contribution changed while the editor was open.");
+    if (JSON.stringify(fresh.pin ?? null) !== JSON.stringify(snapshot.pin ?? null)) throw new Error("The Chat pin changed while the editor was open.");
+    const messages = JSON.parse(snapshot.before) as Message[];
+    const message = messages[0];
+    let partJson: string | undefined;
+    if (snapshot.record.author === "user" && message?.role === "user") {
+      if (typeof message.content === "string") message.content = edited.value.text;
+      else {
+        let inserted = false;
+        message.content = message.content.flatMap<(typeof message.content)[number]>((part) => {
+          if (part.type !== "text") return [part];
+          if (inserted) return [];
+          inserted = true;
+          return [{ type: "text" as const, text: edited.value.text }];
+        });
+        if (!inserted) message.content.unshift({ type: "text", text: edited.value.text });
+      }
+    } else if (snapshot.record.author === "agent" && message?.role === "assistant") {
+      const part = message.content.find((item) => item.type === "toolCall" && item.name === "chat" && item.id === snapshot.record.id.slice(5));
+      if (part?.type !== "toolCall") throw new Error("The Chat call disappeared.");
+      part.arguments = { ...part.arguments, text: edited.value.text };
+      partJson = JSON.stringify(part);
+    } else throw new Error("The Chat contribution changed.");
+    const journal: ChatEditJournal = { operation: randomUUID(), generation: session.generation, entryId: snapshot.entryId, itemId: snapshot.itemId, recordId: snapshot.record.id, before: snapshot.before, messages, ...(partJson === undefined ? {} : { partJson }) };
+    try {
+      await session.conversation.commit(async (tx) => {
+        if ((await tx.doc(LiveDoc, session.conversation.id)).run !== undefined || (await tx.doc(InboxDoc, session.conversation.id)).items.length !== 0) throw new Error("The agent is running or has queued input; wait before editing Chat.");
+        if (await tx.latestEntryId(session.conversation.id) !== fresh.tail) throw new Error("The context changed while the editor was open.");
+        await session.brain.beginChatEdit(journal, snapshot.record, text, now, snapshot.pin);
+        await session.conversation.submit(tx, chatEditSubmission(journal));
+      }, BACKGROUND_CONTEXT);
+      await session.brain.finishChatEdit(journal.operation);
+    } catch (error) {
+      const pending = await session.brain.readChatEdit();
+      if (pending?.operation === journal.operation) {
+        try { await recoverChatEdit(session); return; }
+        catch { throw new Error("The Chat edit was saved but needs recovery; reopen Carto before continuing."); }
+      }
+      throw error;
+    }
   });
   omitQueues.set(session, operation);
   try { await operation; } finally { if (omitQueues.get(session) === operation) omitQueues.delete(session); }
 }
 
 async function omitOneNow(session: LiveSession, itemId: string): Promise<boolean> {
+  await recoverChatEdit(session);
   const view = await session.conversation.context(BACKGROUND_CONTEXT);
   const removed = removedPartKeys(view.entries, session.generation);
   const changed = editedPartValues(view.entries, session.generation);
@@ -774,6 +938,7 @@ export interface ResumeOutcome {
  *   `<carto-state>` with no Chat record written to the Brain.
  */
 export async function resumeSession(session: LiveSession): Promise<ResumeOutcome> {
+  await recoverChatEdit(session);
   if (session.state.paused && session.freeze.frozen()) {
     const outcome = await togglePause(session, false);
     return { kind: "unpaused", line: outcome.line };
@@ -882,6 +1047,12 @@ export async function sessionTranscript(session: LiveSession) {
   // the contributions Pi actually sends, not the superseded raw messages.
   const removed = removedPartKeys(view.entries, session.generation);
   const changed = editedPartValues(view.entries, session.generation);
+  const chatIds = new Map<string, string>();
+  for (const entry of view.entries) {
+    if (entry.kind !== "carto.edit-chat" || entry.data === null || typeof entry.data !== "object" || Array.isArray(entry.data)) continue;
+    const data = entry.data as { entry?: unknown; recordId?: unknown };
+    if (typeof data.entry === "string" && typeof data.recordId === "string") chatIds.set(data.entry, data.recordId);
+  }
   return view.entries.map((entry, index) => {
     const model = view.contributions[index] ?? [];
     const original = entry.model?.[0];
@@ -889,7 +1060,9 @@ export async function sessionTranscript(session: LiveSession) {
     const partKeys = original?.role === "assistant" && current?.role === "assistant"
       ? stablePartKeys(original.content, current.content, removed.get(String(entry.id)) ?? new Set(), changed.get(String(entry.id)))
       : undefined;
-    return { ...entry, model, partKeys };
+    const chatId = current?.role === "user" ? chatIds.get(String(entry.id)) : undefined;
+    const data = chatId === undefined ? entry.data : { ...(entry.data !== null && typeof entry.data === "object" && !Array.isArray(entry.data) ? entry.data : {}), chatRecordId: chatId };
+    return { ...entry, data, model, partKeys };
   });
 }
 
@@ -983,6 +1156,7 @@ export async function collapseLiveSession(
   ceremony: CollapseOptions = {},
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
+  await recoverChatEdit(session);
   const automatic = follow.automatic === true;
   const trigger: CollapseTrigger = !automatic
     ? "person"

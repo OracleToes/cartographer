@@ -964,8 +964,8 @@ Editing Carto source may require a rebuild or reinstall and restart. The state
 block, job output and directory selections open as scratch files; the path is
 reported and the original is unchanged. Archived ephemeral items can be edited:
 text edits update the saved restore payload too, including preserving images;
-tool-call arguments are edited as JSON. Signed model content cannot be changed
-safely and is refused. Edits to an item already pending restore are also refused.
+tool-call arguments are edited as JSON. Signed model content and items already
+pending restore open as scratch copies, because they cannot safely be changed.
 Landed unpinned live tool-work and restored person messages can be edited from
 Chat or Context: text and reasoning as text, tool-call arguments as JSON, and
 tool results without losing images or their call pairing. These edits replace the
@@ -973,10 +973,13 @@ live contribution, not the frozen head; concurrent changes are rejected with the
 draft saved, and the agent must not be running. A pinned work item edits its Brain
 pin instead, with the change entering the head at collapse; a pinned read result
 with a file path opens that source after confirmation because collapse re-reads it.
-Frozen Chat records edit the Brain as JSON and likewise change on collapse.
-Live Chat record edits are not yet supported: they open a scratch copy instead of
-splitting the Brain from the live context. Other selections with no safe writable
-source, including streaming and signed live content, also open scratch copies.
+Frozen Chat records edit the Brain as JSON and likewise change on collapse. A
+live Chat record edits its Brain record and its identified live contribution
+together, preserving other parts and any pin; a journal recovers an interrupted
+cross-store edit. A running agent or queued input must settle first. If the live
+contribution cannot be identified safely, it opens a scratch copy instead. Other
+selections with no safe writable source, including streaming and signed live
+content, also open scratch copies.
 
 `y` copies the selected item in Chat, Context, Atlas, Ledger, Tree, Jobs, or the
 archive. Chat selection starts with `escape`; elsewhere the cursor selects a

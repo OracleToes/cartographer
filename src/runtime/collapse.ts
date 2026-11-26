@@ -342,7 +342,7 @@ export function stablePartKeys(original: unknown, current: unknown, removed: Rea
 export function editedPartValues(entries: readonly { kind?: string | undefined; data?: unknown }[], generation: string): Map<string, Map<string, string>> {
   const changed = new Map<string, Map<string, string>>();
   for (const entry of entries) {
-    if (entry.kind !== "carto.edit-work" || entry.data === null || typeof entry.data !== "object") continue;
+    if ((entry.kind !== "carto.edit-work" && entry.kind !== "carto.edit-chat") || entry.data === null || typeof entry.data !== "object") continue;
     const data = entry.data as { entry?: unknown; item?: unknown; partJson?: unknown };
     if (typeof data.entry !== "string" || typeof data.item !== "string" || typeof data.partJson !== "string") continue;
     const prefix = `${generation}:${data.entry}:`;
@@ -604,6 +604,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
 }
 
 async function performCollapse(root: string, brain: BrainStore, options: CollapseOptions): Promise<CollapseReport> {
+  if (await brain.readChatEdit() !== undefined) throw new Error("A Chat edit is awaiting recovery; reopen the session before collapsing.");
   await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);

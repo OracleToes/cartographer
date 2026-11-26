@@ -30,6 +30,8 @@
  */
 import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
+import type { Message } from "@earendil-works/pi-ai";
+import type { EntryId } from "@earendil-works/pi-durable";
 
 import { reconcileHandles } from "../domain/handles.js";
 import { parseEditedRecord, type EditableRecord } from "../domain/record-editor.js";
@@ -60,6 +62,10 @@ export interface BrainStore {
   editBookRecord(original: EditableRecord, text: string, now: number): Promise<CartoBrain>;
   /** Replace a pin's text only if the original pin is still current. */
   editPinnedEphemeral(original: PinnedEphemeral, text: string): Promise<CartoBrain>;
+  /** A cross-store Chat edit is recoverable until its Pi write is acknowledged. */
+  readChatEdit(): Promise<ChatEditJournal | undefined>;
+  beginChatEdit(journal: ChatEditJournal, original: ChatRecord, editedJson: string, now: number, pin?: PinnedEphemeral): Promise<void>;
+  finishChatEdit(operation: string): Promise<void>;
   /** Edit an archived record without changing its archive identity or marks. */
   editArchivedRecord(original: ArchivedItem, text: string, now: number): Promise<Archive>;
   /** Edit the stored content and restore payload of an archived ephemeral item. */
@@ -123,6 +129,7 @@ const ARCHIVE_TABLE =
 /** The collapse counters, so grace can be counted and the archive survives a restart. */
 const COUNTER_TABLE = "CREATE TABLE IF NOT EXISTS archive_counter (id INTEGER PRIMARY KEY CHECK (id = 1), collapses INTEGER NOT NULL)";
 const COLLAPSE_JOURNAL_TABLE = "CREATE TABLE IF NOT EXISTS collapse_journal (id INTEGER PRIMARY KEY CHECK (id = 1), source TEXT NOT NULL, destination TEXT NOT NULL, owner_pid INTEGER NOT NULL, committed INTEGER NOT NULL CHECK (committed IN (0, 1)))";
+const CHAT_EDIT_TABLE = "CREATE TABLE IF NOT EXISTS chat_edit_journal (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
 const ARCHIVE_INSERT =
   "INSERT INTO archive_item (id, swept_at_collapse, swept_at_generation, pinned, document) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET swept_at_collapse = excluded.swept_at_collapse, swept_at_generation = excluded.swept_at_generation, pinned = excluded.pinned, document = excluded.document";
 const ARCHIVE_SELECT = "SELECT document FROM archive_item ORDER BY rowid";
@@ -147,6 +154,17 @@ export function writeBackOf(item: ArchivedItem): BrainWrite | undefined {
     case "atlas":
       return { kind: "atlas.upsert", node: record.value as AtlasNode };
   }
+}
+
+export interface ChatEditJournal {
+  operation: string;
+  generation: string;
+  entryId: EntryId;
+  itemId: string;
+  recordId: string;
+  before: string;
+  messages: Message[];
+  partJson?: string;
 }
 
 export interface CollapseJournal {
@@ -226,6 +244,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
   await database.exec(ARCHIVE_TABLE);
   await database.exec(COUNTER_TABLE);
   await database.exec(COLLAPSE_JOURNAL_TABLE);
+  await database.exec(CHAT_EDIT_TABLE);
   await database.exec("INSERT OR IGNORE INTO archive_counter (id, collapses) VALUES (1, 0)");
 
   const decode = (document: string): CartoBrain => {
@@ -289,10 +308,50 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     return row === undefined ? undefined : { source: row.source, destination: row.destination, ownerPid: row.owner_pid, committed: row.committed === 1 };
   };
 
+  const readChatEditFrom = async (source: SqliteExecutor): Promise<ChatEditJournal | undefined> => {
+    const row = await source.get<{ document: string }>("SELECT document FROM chat_edit_journal WHERE id = 1");
+    return row === undefined ? undefined : JSON.parse(row.document) as ChatEditJournal;
+  };
+  const requireNoChatEdit = async (source: SqliteExecutor): Promise<void> => {
+    if (await readChatEditFrom(source) !== undefined) throw new Error("A Chat edit is awaiting recovery; reopen the session before changing the Brain.");
+  };
+
   return {
     read: () => readFrom(database),
+    readChatEdit: () => readChatEditFrom(database),
+    beginChatEdit: (journal, original, editedJson, now, pin) => database.transaction(async (tx) => {
+      await requireNoChatEdit(tx);
+      if (await readJournalFrom(tx) !== undefined) throw new Error("A collapse is in progress.");
+      const edited = parseEditedRecord({ kind: "chat", value: original }, editedJson, now);
+      if (edited.kind !== "chat" || journal.recordId !== original.id) throw new Error("Invalid Chat edit identity.");
+      const current = await readFrom(tx);
+      const record = current.chat.find((item) => item.id === original.id);
+      if (record === undefined || JSON.stringify(record) !== JSON.stringify(original)) throw new Error("The Chat record changed while the editor was open.");
+      const held = current.ephemera.find((item) => item.id === journal.itemId);
+      if (JSON.stringify(held ?? null) !== JSON.stringify(pin ?? null)) throw new Error("The item's pin changed while the editor was open.");
+      let next = applyWrite(current, { kind: "chat.update", id: original.id, text: edited.value.text, updatedAt: now }, now);
+      if (held !== undefined) {
+        let text = edited.value.text;
+        if (original.author === "agent") {
+          const message = journal.messages[0];
+          const call = message?.role === "assistant" ? message.content.find((part) => part.type === "toolCall" && part.id === held.entity?.callId && part.name === "chat") : undefined;
+          if (call?.type !== "toolCall") throw new Error("The Chat pin does not match the edited call.");
+          text = `chat ${JSON.stringify(call.arguments)}`;
+        }
+        next = { ...next, ephemera: next.ephemera.map((item) => item.id === held.id ? { ...item, text } : item) };
+      }
+      await tx.run(UPSERT, JSON.stringify(next));
+      await tx.run("INSERT INTO chat_edit_journal (id, document) VALUES (1, ?)", JSON.stringify(journal));
+    }),
+    finishChatEdit: (operation) => database.transaction(async (tx) => {
+      const pending = await readChatEditFrom(tx);
+      if (pending === undefined) return;
+      if (pending.operation !== operation) throw new Error("A different Chat edit is awaiting recovery.");
+      await tx.run("DELETE FROM chat_edit_journal WHERE id = 1");
+    }),
     readCollapseJournal: () => readJournalFrom(database),
     beginCollapse: (source, destination, validate) => database.transaction(async (tx) => {
+      await requireNoChatEdit(tx);
       if (await readJournalFrom(tx) !== undefined) throw new Error("A collapse is already in progress or awaiting recovery.");
       validate?.();
       await tx.run("INSERT INTO collapse_journal (id, source, destination, owner_pid, committed) VALUES (1, ?, ?, ?, 0)", source, destination, process.pid);
@@ -308,6 +367,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
 
     apply: (writeToApply, now) =>
       database.transaction(async (tx) => {
+        await requireNoChatEdit(tx);
         const current = await readFrom(tx);
         const next = applyWrite(current, writeToApply, now);
         await tx.run(UPSERT, JSON.stringify(next));
@@ -315,6 +375,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       }),
 
     editBookRecord: (original, text, now) => database.transaction(async (tx) => {
+      await requireNoChatEdit(tx);
       const edited = parseEditedRecord(original, text, now);
       const current = await readFrom(tx);
       const record = recordOf(current, original.kind, original.value.id);
@@ -332,6 +393,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     }),
 
     editPinnedEphemeral: (original, text) => database.transaction(async (tx) => {
+      await requireNoChatEdit(tx);
       if (original.kind === "readResult" && original.entity?.path !== undefined) throw new Error("A pinned read result is refreshed from its source file at collapse.");
       let value = text;
       if (original.kind === "toolCall") {
@@ -448,6 +510,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
 
     applyArchive: (write) =>
       database.transaction(async (tx) => {
+        await requireNoChatEdit(tx);
         const current = await readArchiveFrom(tx);
         const now = Date.now();
         if (write.kind === "pin") {
@@ -507,6 +570,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
 
     applyRecordAction: (change) =>
       database.transaction(async (tx) => {
+        await requireNoChatEdit(tx);
         const current = await readFrom(tx);
         const record = recordOf(current, change.kind, change.id);
         // A record that is not in the Brain is not an error: the person may

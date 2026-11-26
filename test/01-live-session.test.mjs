@@ -20,6 +20,10 @@ import {
   applyRecordActionNow,
   readLiveWorkEdit,
   editLiveWork,
+  readLiveChatEdit,
+  editLiveChat,
+  chatRecordForLiveWork,
+  collapseLiveSession,
   closeLiveSession,
   interruptRun,
   openLiveSession,
@@ -661,6 +665,114 @@ test("applying Chat actions removes only the selected live person or agent contr
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
+});
+
+test("live Chat edits update the Brain, the exact Pi contribution and its pin", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, factory, ref } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxText("sibling"), fauxToolCall("chat", { text: "agent original" }, { id: "edit-chat-call" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "edit-chat-sleep" })], { stopReason: "toolUse" })),
+  ]);
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  try {
+    const head = readFileSync(session.markdownPath, "utf8");
+    await (await submitInput(session, [{ type: "text", text: "person original" }, { type: "image", data: "YWJj", mimeType: "image/png" }])).wait(BACKGROUND_CONTEXT);
+    let records = (await brain.read()).chat;
+    const person = records.find((item) => item.author === "user");
+    const agent = records.find((item) => item.id === "chat:edit-chat-call");
+    const snapshot = await readLiveChatEdit(session, person);
+    await assert.rejects(editLiveChat(session, snapshot, JSON.stringify({ ...person, author: "agent" }), Date.now()), /author cannot/);
+    await editLiveChat(session, snapshot, JSON.stringify({ ...person, text: "person edited" }), Date.now());
+    await assert.rejects(editLiveChat(session, snapshot, JSON.stringify({ ...person, text: "stale" }), Date.now()), /changed/);
+    let agentSnapshot = await readLiveChatEdit(session, agent);
+    assert.equal((await chatRecordForLiveWork(session, agentSnapshot.itemId)).id, agent.id);
+    const pin = { id: agentSnapshot.itemId, kind: "toolCall", text: 'chat {"text":"agent original"}', entity: { callId: "edit-chat-call", tool: "chat" }, pinned: "user", createdAt: 1 };
+    await brain.apply({ kind: "ephemeral.pin", item: pin }, Date.now());
+    await assert.rejects(editLiveChat(session, agentSnapshot, JSON.stringify({ ...agent, text: "bad pin" }), Date.now()), /pin/);
+    agentSnapshot = await readLiveChatEdit(session, agent);
+    await editLiveChat(session, agentSnapshot, JSON.stringify({ ...agent, text: "agent edited" }), Date.now());
+    records = (await brain.read()).chat;
+    assert.equal(records.find((item) => item.id === agent.id).text, "agent edited");
+    assert.equal((await brain.read()).ephemera[0].text, 'chat {"text":"agent edited"}');
+    const entries = await sessionTranscript(session);
+    const personContent = entries.find((item) => item.id === snapshot.entryId).model[0].content;
+    assert.equal(personContent[0].text, "person edited");
+    assert.equal(personContent[1].data, "YWJj");
+    const agentEntry = entries.find((item) => item.id === agentSnapshot.entryId);
+    assert.equal(agentEntry.model[0].content[0].text, "sibling");
+    assert.equal(agentEntry.model[0].content[1].arguments.text, "agent edited");
+    assert.deepEqual(agentEntry.partKeys, ["x0", "c1"]);
+    assert.equal(readFileSync(session.markdownPath, "utf8"), head, "frozen bytes stay unchanged");
+    session = (await collapseLiveSession(session, options, "edit test")).session;
+    assert.match(readFileSync(session.markdownPath, "utf8"), /person edited/);
+    assert.match(readFileSync(session.markdownPath, "utf8"), /agent edited/);
+    assert.ok(!(await brain.readArchive()).items.some((item) => item.ephemeral?.text === "person edited"));
+  } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
+});
+
+test("Chat edit journal recovers an interrupted cross-store write and legacy identity", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  try {
+    const record = { id: "legacy-person", author: "user", text: "legacy text", createdAt: 10, updatedAt: 10 };
+    await brain.apply({ kind: "chat.record", record }, 10);
+    await session.conversation.submit({ type: "write", entry: { kind: "legacy", model: [{ role: "user", content: "legacy text", timestamp: 10 }] } }, BACKGROUND_CONTEXT);
+    const snapshot = await readLiveChatEdit(session, record);
+    const messages = JSON.parse(snapshot.before);
+    messages[0].content = "recovered text";
+    const journal = { operation: "recovery-test", generation: session.generation, entryId: snapshot.entryId, itemId: snapshot.itemId, recordId: record.id, before: snapshot.before, messages };
+    await brain.beginChatEdit(journal, record, JSON.stringify({ ...record, text: "recovered text" }), 20);
+    await assert.rejects(brain.apply({ kind: "chat.update", id: record.id, text: "wrong", updatedAt: 21 }, 21), /awaiting recovery/);
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.equal(await brain.readChatEdit(), undefined);
+    assert.equal((await brain.read()).chat[0].text, "recovered text");
+    let entries = await sessionTranscript(session);
+    assert.equal(entries.find((item) => item.id === snapshot.entryId).model[0].content, "recovered text");
+    assert.equal(personChatBindings(entries, (await brain.read()).chat, new Set()).get(snapshot.entryId), record.id);
+    assert.equal(entries.filter((item) => item.kind === "carto.edit-chat").length, 1);
+    const updated = (await brain.read()).chat[0];
+    const next = await readLiveChatEdit(session, updated);
+    const secondMessages = JSON.parse(next.before);
+    secondMessages[0].content = "already placed";
+    const secondJournal = { operation: "already-placed", generation: session.generation, entryId: next.entryId, itemId: next.itemId, recordId: updated.id, before: next.before, messages: secondMessages };
+    await brain.beginChatEdit(secondJournal, updated, JSON.stringify({ ...updated, text: "already placed" }), 30);
+    await session.conversation.submit({ type: "write", requestId: "carto.edit-chat:already-placed", entry: {
+      kind: "carto.edit-chat", data: { operation: "already-placed", entry: String(next.entryId), item: next.itemId, recordId: updated.id },
+      edits: [{ target: next.entryId, action: "replace", messages: secondMessages }],
+    } }, BACKGROUND_CONTEXT);
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    entries = await sessionTranscript(session);
+    assert.equal(entries.filter((item) => item.kind === "carto.edit-chat").length, 2);
+    assert.equal(entries.find((item) => item.id === next.entryId).model[0].content, "already placed");
+    assert.equal(await brain.readChatEdit(), undefined);
+  } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
+});
+
+test("Chat edit recovery preserves a conflicting contribution instead of overwriting it", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  const session = await openLiveSession(options);
+  try {
+    const record = { id: "conflict-person", author: "user", text: "original", createdAt: 1, updatedAt: 1 };
+    await brain.apply({ kind: "chat.record", record }, 1);
+    await session.conversation.submit({ type: "write", entry: { kind: "legacy", model: [{ role: "user", content: "original", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    const snapshot = await readLiveChatEdit(session, record);
+    const message = { role: "user", content: "desired", timestamp: 1 };
+    const journal = { operation: "conflict-test", generation: session.generation, entryId: snapshot.entryId, itemId: snapshot.itemId, recordId: record.id, before: snapshot.before, messages: [message] };
+    await brain.beginChatEdit(journal, record, JSON.stringify({ ...record, text: "desired" }), 2);
+    await session.conversation.submit({ type: "write", entry: { kind: "external.change", edits: [{ target: snapshot.entryId, action: "replace", messages: [{ ...message, content: "someone else" }] }] } }, BACKGROUND_CONTEXT);
+    await closeLiveSession(session);
+    await assert.rejects(openLiveSession(options), /conflicts with the live context/);
+    assert.equal((await brain.readChatEdit()).operation, "conflict-test");
+    assert.equal((await brain.read()).chat[0].text, "desired");
+  } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
 });
 
 // ---------- §4.1: a Brain record's action applies now, and the head follows ----------

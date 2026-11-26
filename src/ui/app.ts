@@ -34,7 +34,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EditableRecord } from "../domain/record-editor.js";
 import type { ArchivedItem } from "../domain/archive.js";
-import { archivedEphemeralText } from "../domain/archive-editor.js";
+import { archivedEphemeralText, editArchivedEphemeral as validateArchivedEphemeralEdit } from "../domain/archive-editor.js";
 
 import {
   Editor,
@@ -52,6 +52,9 @@ import {
   applyRecordActionNow,
   readLiveWorkEdit,
   editLiveWork,
+  readLiveChatEdit,
+  editLiveChat,
+  chatRecordForLiveWork,
   closeLiveSession,
   collapseLiveSession,
   interruptRun,
@@ -2388,18 +2391,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     throw new Error("The selected record is no longer in the Brain.");
   };
 
-  const editSelectedBookRecord = async () => {
-    const selected = await selectedBookRecord();
+  const editSelectedBookRecord = async (selectedRecord?: EditableRecord) => {
+    const selected = selectedRecord === undefined ? await selectedBookRecord() : { record: selectedRecord, archived: undefined };
     const session = state.session;
+    if (selected.archived?.restorePending === true) {
+      await editScratch(JSON.stringify(selected.record.value, null, 2) + "\n");
+      return;
+    }
     const inFrozenChat = async () => {
       const sidecar = JSON.parse(await readFile(snapshotPaths(options.root, session.generation).sidecar, "utf8")) as { chat?: unknown };
       return Array.isArray(sidecar.chat) && sidecar.chat.includes(selected.record.value.id);
     };
+    let liveChat: Awaited<ReturnType<typeof readLiveChatEdit>> | undefined;
     if (selected.archived === undefined && selected.record.kind === "chat" && !(await inFrozenChat().catch(() => false))) {
-      // A live Chat line has a separate Pi contribution; until those writes can
-      // be made crash-safe together, do not silently split it from the Brain.
-      await editScratch(JSON.stringify(selected.record.value, null, 2) + "\n");
-      return;
+      try { liveChat = await readLiveChatEdit(session, selected.record.value); }
+      catch { await editScratch(JSON.stringify(selected.record.value, null, 2) + "\n"); return; }
     }
     const before = JSON.stringify(selected.record.value, null, 2) + "\n";
     let outcome: EditorOutcome;
@@ -2422,11 +2428,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         await refreshArchive();
         pushStatus(`Edited archived ${selected.record.kind}.`);
       } else {
-        if (selected.record.kind === "chat" && (state.session !== session || state.collapsing || !(await inFrozenChat()))) throw new Error("The Chat context changed while the editor was open.");
-        await brain.editBookRecord(selected.record, outcome.text, Date.now());
+        if (selected.record.kind === "chat" && (state.session !== session || state.collapsing)) throw new Error("The Chat context changed while the editor was open.");
+        if (liveChat !== undefined) {
+          await editLiveChat(session, liveChat, outcome.text, Date.now());
+          pushStatus("Edited the Chat record and live context.");
+        } else {
+          if (selected.record.kind === "chat" && !(await inFrozenChat())) throw new Error("The Chat context changed while the editor was open.");
+          await brain.editBookRecord(selected.record, outcome.text, Date.now());
+          pushStatus(`Edited ${selected.record.kind}; the frozen head refreshes at collapse.`);
+        }
         await refreshBrainViews();
         await rebuildTranscript();
-        pushStatus(`Edited ${selected.record.kind}; the frozen head refreshes at collapse.`);
       }
       await refreshSidebar();
     } catch (error) {
@@ -2435,9 +2447,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
         const path = join(dir, "record.json");
         await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
-        pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+        pushStatus(`Edit failed: ${errorText(error)} Draft saved at ${path}`);
       } catch (saveError) {
-        pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
+        pushStatus(`Edit failed: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
       }
     }
     tui.requestRender();
@@ -2447,7 +2459,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const id = archiveView.selectedItem()?.id;
     const item = (await brain.readArchive()).items.find((candidate) => candidate.id === id);
     if (item?.ephemeral === undefined) throw new Error("The selected archive item is no longer available.");
-    const before = archivedEphemeralText(item);
+    let before: string;
+    try {
+      before = archivedEphemeralText(item);
+      validateArchivedEphemeralEdit(item, before);
+    } catch {
+      await editScratch(item.ephemeral.text);
+      return;
+    }
     let outcome: EditorOutcome;
     let stopped = false;
     try {
@@ -2487,6 +2506,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const editSelectedLiveWork = async (id: string) => {
     const session = state.session;
+    const chat = await chatRecordForLiveWork(session, id);
+    if (chat !== undefined) { await editSelectedBookRecord({ kind: "chat", value: chat }); return; }
     const pin = (await brain.read()).ephemera.find((item) => item.id === id);
     if (pin !== undefined) {
       if (pin.kind === "readResult" && pin.entity?.path !== undefined) {
