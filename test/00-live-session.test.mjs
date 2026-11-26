@@ -231,7 +231,11 @@ test("vision reads survive the request and archive, while image pins are refused
     assert.ok(archived);
     assert.match(archived.ephemeral.text, /\[image\]/);
     assert.equal(archived.ephemeral.model[1].content.find((part) => part.type === "image").data, png.toString("base64"));
-    assert.equal(await restoreEphemeral(session, archived), true);
+    await brain.editArchivedEphemeral(archived, "a caption");
+    const editedImage = (await brain.readArchive()).items.find((item) => item.id === archived.id);
+    assert.equal(editedImage.ephemeral.text, "a caption\n[image]");
+    assert.equal(editedImage.ephemeral.model[1].content.find((part) => part.type === "image").data, png.toString("base64"));
+    assert.equal(await restoreEphemeral(session, editedImage), true);
     assert.ok((await sessionTranscript(session)).some((entry) => entry.model?.[0]?.content?.some?.((part) => part.type === "image")));
     await switchSessionModel(session, models, { provider: "faux-vision", modelId: "text" });
     faux.setResponses([
@@ -641,16 +645,25 @@ test("work restores retain their actual Pi messages and tool result pairing", as
     const output = swept.find((item) => item.ephemeral?.text === "recover output");
     const result = swept.find((item) => item.ephemeral?.text === "recover result");
     assert.ok(output && result);
-    assert.equal(await restoreEphemeral(session, output), true);
-    assert.equal(await restoreEphemeral(session, result), true);
+    await brain.archiveEphemeral(output, session.generation, Date.now());
+    await brain.archiveEphemeral(result, session.generation, Date.now());
+    const originals = (await brain.readArchive()).items;
+    const oldOutput = originals.find((item) => item.id === output.id);
+    const oldResult = originals.find((item) => item.id === result.id);
+    await brain.editArchivedEphemeral(oldOutput, "edited output");
+    await brain.editArchivedEphemeral(oldResult, "edited result");
+    await assert.rejects(brain.editArchivedEphemeral(oldOutput, "stale edit"), /changed or disappeared/);
+    const edited = (await brain.readArchive()).items;
+    assert.equal(await restoreEphemeral(session, edited.find((item) => item.id === output.id)), true);
+    assert.equal(await restoreEphemeral(session, edited.find((item) => item.id === result.id)), true);
     const view = await session.conversation.context(BACKGROUND_CONTEXT);
     const restored = view.entries.map((entry, index) => ({ entry, model: view.contributions[index] })).filter(({ entry }) => entry.kind === "carto.restored");
     assert.equal(restored.length, 3);
-    assert.equal(restored[0].model[0].content[0].text, "recover output");
+    assert.equal(restored[0].model[0].content[0].text, "edited output");
     const call = restored[1].model[0].content[0];
     assert.notEqual(call.id, "original-call");
     assert.equal(restored[2].model[0].toolCallId, call.id);
-    assert.equal(restored[2].model[0].content[0].text, "recover result");
+    assert.equal(restored[2].model[0].content[0].text, "edited result");
   } finally {
     await closeLiveSession(session);
     await cleanup();

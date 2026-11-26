@@ -65,6 +65,25 @@ test("structured book edits validate JSON and reject concurrent changes", async 
   } finally { await store.close(); cleanup(); }
 });
 
+test("archived tool calls edit JSON arguments while preserving restore identity", async () => {
+  const { fauxAssistantMessage, fauxToolCall } = await import("@earendil-works/pi-ai/providers/faux");
+  const { archivedEphemeralText } = await import("../dist/domain/archive-editor.js");
+  const { path, cleanup } = tempBrain();
+  const store = await openBrain(path);
+  try {
+    const model = [fauxAssistantMessage([fauxToolCall("read", { path: "old" }, { id: "call-a" })], { stopReason: "toolUse" })];
+    await store.archiveEphemeral({ id: "item", layer: "ephemeral", ephemeral: { kind: "toolCall", text: 'read {"path":"old"}', model } }, "g", at(1));
+    const item = (await store.readArchive()).items[0];
+    assert.match(archivedEphemeralText(item), /old/);
+    await assert.rejects(store.editArchivedEphemeral(item, "[]"), /JSON object/);
+    await store.editArchivedEphemeral(item, '{"path":"new"}');
+    const updated = (await store.readArchive()).items[0];
+    assert.equal(updated.ephemeral.text, 'read {"path":"new"}');
+    assert.equal(updated.ephemeral.model[0].content[0].id, "call-a");
+    assert.equal(updated.ephemeral.model[0].content[0].arguments.path, "new");
+  } finally { await store.close(); cleanup(); }
+});
+
 test("delete is single-step and stays deleted across reopening", async () => {
   const { path, cleanup } = tempBrain();
   try {

@@ -34,6 +34,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EditableRecord } from "../domain/record-editor.js";
 import type { ArchivedItem } from "../domain/archive.js";
+import { archivedEphemeralText } from "../domain/archive-editor.js";
 
 import {
   Editor,
@@ -2421,6 +2422,42 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     tui.requestRender();
   };
 
+  const editArchivedEphemeral = async () => {
+    const id = archiveView.selectedItem()?.id;
+    const item = (await brain.readArchive()).items.find((candidate) => candidate.id === id);
+    if (item?.ephemeral === undefined) throw new Error("The selected archive item is no longer available.");
+    const before = archivedEphemeralText(item);
+    let outcome: EditorOutcome;
+    let stopped = false;
+    try {
+      tui.stop(); stopped = true;
+      outcome = await composeInEditor(before);
+    } catch (error) {
+      outcome = { ok: false, error: errorText(error) };
+    } finally {
+      if (stopped) tui.start();
+      focusCurrent();
+      tui.requestRender();
+    }
+    if (!outcome.ok) { pushStatus(`editor failed: ${outcome.error}`); tui.requestRender(); return; }
+    if (outcome.text === before) return;
+    try {
+      await brain.editArchivedEphemeral(item, outcome.text);
+      await refreshArchive();
+      pushStatus("Edited the archived item and its restore payload.");
+    } catch (error) {
+      try {
+        const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
+        const path = join(dir, "archive-draft.txt");
+        await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
+        pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+      } catch (saveError) {
+        pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
+      }
+    }
+    tui.requestRender();
+  };
+
   const selectedSourcePath = (): string | undefined => {
     if (state.layer !== "context") return undefined;
     if (state.view === "tree" && !treeView.isFiltering()) {
@@ -2564,6 +2601,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           (state.view === "context" && (contextView.selectedEntry()?.target?.part === "atlas" || contextView.selectedEntry()?.target?.part === "ledger"))
         ))
       ),
+    },
+    {
+      id: "edit-archived-ephemeral",
+      group: "the record",
+      label: "edit selected archived item",
+      hint: "tool-call arguments use JSON",
+      key: "ctrl+g",
+      run: () => void editArchivedEphemeral().catch((error: unknown) => { pushStatus(`edit failed: ${errorText(error)}`); tui.requestRender(); }),
+      available: () => !state.overlayOpen && state.layer === "archive" && !archiveView.isFiltering() && archiveView.selectedItem()?.ephemeral !== undefined,
     },
     {
       id: "edit-source",

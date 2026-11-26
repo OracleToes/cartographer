@@ -33,6 +33,7 @@ import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlit
 
 import { reconcileHandles } from "../domain/handles.js";
 import { parseEditedRecord, type EditableBookRecord, type EditableRecord } from "../domain/record-editor.js";
+import { editArchivedEphemeral as updateArchivedEphemeral } from "../domain/archive-editor.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry } from "../domain/records.js";
 import {
@@ -59,6 +60,8 @@ export interface BrainStore {
   editBookRecord(original: EditableBookRecord, text: string, now: number): Promise<CartoBrain>;
   /** Edit an archived record without changing its archive identity or marks. */
   editArchivedRecord(original: ArchivedItem, text: string, now: number): Promise<Archive>;
+  /** Edit the stored content and restore payload of an archived ephemeral item. */
+  editArchivedEphemeral(original: ArchivedItem, text: string): Promise<Archive>;
   /** The archive as it stands. The agent never sees it (§3.3). */
   readArchive(): Promise<Archive>;
   /** Sidebar counts without loading or parsing archived content. */
@@ -337,6 +340,17 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       const item: ArchivedItem = { ...found, record: { kind: edited.kind, value: edited.value } };
       await writeArchiveItem(tx, item);
       return { ...current, items: current.items.map((candidate) => candidate.id === item.id ? item : candidate) };
+    }),
+
+    editArchivedEphemeral: (original, text) => database.transaction(async (tx) => {
+      const changed = updateArchivedEphemeral(original, text);
+      const current = await readArchiveFrom(tx);
+      const found = current.items.find((item) => item.id === original.id);
+      if (found === undefined || JSON.stringify(found) !== JSON.stringify(original)) {
+        throw new Error("The archived item changed or disappeared while the editor was open; no changes were applied.");
+      }
+      await writeArchiveItem(tx, changed);
+      return { ...current, items: current.items.map((item) => item.id === changed.id ? changed : item) };
     }),
 
     readArchive: () => readArchiveFrom(database),

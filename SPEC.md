@@ -962,9 +962,12 @@ On project files (Tree or a Context file row), and on Carto's system prompt or
 Carto-defined tool descriptions, it confirms before opening their source file.
 Editing Carto source may require a rebuild or reinstall and restart. The state
 block, job output and directory selections open as scratch files; the path is
-reported and the original is unchanged. Editing other selected entries,
-including live Chat and tool work and archived ephemeral items, is not yet
-supported and says so instead of silently changing the wrong thing.
+reported and the original is unchanged. Archived ephemeral items can be edited:
+text edits update the saved restore payload too, including preserving images;
+tool-call arguments are edited as JSON. Signed model content cannot be changed
+safely and is refused. Edits to an item already pending restore are also refused.
+Live Chat and tool-work editing is not yet supported and says so instead of
+silently changing the wrong thing.
 
 `y` copies the selected item in Chat, Context, Atlas, Ledger, Tree, Jobs, or the
 archive. Chat selection starts with `escape`; elsewhere the cursor selects a
