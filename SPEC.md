@@ -52,6 +52,13 @@ The Brain is the persistent record. It survives restarts and collapses, and a
 live context can always be rebuilt from it alone — after a crash as well as at a
 collapse, and a crash during a collapse cannot lose Brain state.
 
+On initialization Carto creates `.brain/.gitignore` with a rule ignoring all
+contents of `.brain`, including the ignore file itself, without changing the
+project's `.gitignore`. Existing rules are preserved and the ignore-all rule is
+appended when needed. A symlink or non-directory `.brain`, or a symlink or
+non-file `.brain/.gitignore`, is refused rather than followed. Git ignore rules
+do not remove files already tracked, and forced adds can bypass them.
+
 It holds three kinds of record: **Atlas**, **Ledger**, and **Chat**.
 
 ### 2.1 Atlas

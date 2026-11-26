@@ -74,6 +74,7 @@ test("a new generation reads existing file pins rather than reporting them unrea
   let session;
   try {
     session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    assert.match(readFileSync(join(root, ".brain", ".gitignore"), "utf8"), /\n\*\n$/);
     const snapshot = readFileSync(session.markdownPath, "utf8");
     assert.match(snapshot, /a readable markdown pin/);
     assert.match(snapshot, /a readable external pin/);

@@ -6,7 +6,7 @@
  */
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +21,7 @@ import { openBrain } from "../dist/runtime/brain-store.js";
 import { loadGlobalConfig, parseConfig, parseModelRef, ConfigError, saveGlobalConfig, updateConfigModel } from "../dist/runtime/config.js";
 import { advertisedCapacityOf, catalogModel, configuredModels, modelsForConfig, UNKNOWN_MAX_TOKENS } from "../dist/runtime/llama-swap-model.js";
 import { runHeadless, applyCapacityRefresh } from "../dist/runtime/headless.js";
-import { wipeProjectBrain } from "../dist/runtime/paths.js";
+import { brainDatabasePath, wipeProjectBrain } from "../dist/runtime/paths.js";
 import { openLiveSession, closeLiveSession, submitInput } from "../dist/runtime/live-session.js";
 import { createServer } from "node:http";
 
@@ -109,6 +109,58 @@ test("vision model IDs are validated, preserved, and applied on every catalog pa
     await noCapacity.refresh({ providers: ["llama-swap"] });
     assert.deepEqual(noCapacity.getModel("llama-swap", "vision/model").input, ["text", "image"]);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("the Brain ignores its own files in Git without changing project rules", () => {
+  const root = tempDir();
+  try {
+    execFileSync("git", ["init", "-q", root]);
+    const projectIgnore = "# project rules\n*.tmp\n";
+    writeFileSync(join(root, ".gitignore"), projectIgnore);
+    writeFileSync(join(root, "project.txt"), "project");
+    const db = brainDatabasePath(root);
+    writeFileSync(db, "private database");
+    mkdirSync(join(root, ".brain", "context"));
+    writeFileSync(join(root, ".brain", "context", "generation.sqlite"), "private context");
+    writeFileSync(join(root, ".brain", "collapse-log.jsonl"), "private log");
+    const ignore = join(root, ".brain", ".gitignore");
+    const original = readFileSync(ignore, "utf8");
+    assert.match(original, /^# Carto session data\n\*\n$/);
+    assert.equal(brainDatabasePath(root), db);
+    assert.equal(readFileSync(ignore, "utf8"), original);
+    assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), projectIgnore);
+    const status = execFileSync("git", ["-C", root, "status", "--short", "--untracked-files=all"], { encoding: "utf8" });
+    assert.match(status, /\?\? project\.txt/);
+    assert.match(status, /\?\? \.gitignore/);
+    assert.doesNotMatch(status, /\.brain/);
+    // Ignore rules protect untracked files, but never untrack a forced add.
+    execFileSync("git", ["-C", root, "add", "-f", ".brain/brain.sqlite"]);
+    assert.match(execFileSync("git", ["-C", root, "status", "--short"], { encoding: "utf8" }), /A  \.brain\/brain\.sqlite/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("existing Brain ignore rules are preserved and an unsafe symlink is refused", () => {
+  const root = tempDir(), elsewhere = tempDir();
+  try {
+    mkdirSync(join(root, ".brain"));
+    const ignore = join(root, ".brain", ".gitignore");
+    writeFileSync(ignore, "# existing\n!important");
+    brainDatabasePath(root);
+    const updated = readFileSync(ignore, "utf8");
+    assert.match(updated, /^# existing\n!important\n# Carto session data\n\*\n$/);
+    brainDatabasePath(root);
+    assert.equal(readFileSync(ignore, "utf8"), updated);
+    rmSync(ignore);
+    const target = join(elsewhere, "target");
+    writeFileSync(target, "untouched");
+    symlinkSync(target, ignore);
+    assert.throws(() => brainDatabasePath(root), /regular file/);
+    assert.equal(readFileSync(target, "utf8"), "untouched");
+    rmSync(join(root, ".brain"), { recursive: true });
+    symlinkSync(elsewhere, join(root, ".brain"));
+    assert.throws(() => brainDatabasePath(root), /real directory/);
+    assert.equal(readFileSync(target, "utf8"), "untouched");
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(elsewhere, { recursive: true, force: true }); }
 });
 
 test("a missing config without --model fails with the one-liner that creates it", async () => {
@@ -670,6 +722,7 @@ describe("the CLI, end to end, run concurrently", { concurrency: 4 }, () => {
       assert.match(done, /mode: edit · file scope: strict/);
       assert.match(done, /mode: read-only · file scope: strict/);
       assert.equal(existsSync(brainDir), true, "a fresh session is open before quit");
+      assert.match(readFileSync(join(brainDir, ".gitignore"), "utf8"), /\n\*\n$/);
       assert.equal(readFileSync(join(root, "src", "keep"), "utf8"), "project file");
       assert.ok(existsSync(join(home, "config.json")));
       const fresh = await openBrain(join(brainDir, "brain.sqlite"));

@@ -12,7 +12,7 @@ import { personChatBindings, userText } from "../domain/chat-identity.js";
  * record carries the mutable present (the tree anchor, the pending list,
  * the last provider report); the Brain carries the durable past.
  */
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -67,6 +67,7 @@ import { estimateContextTokens } from "../domain/estimate.js";
 import { createJobTable, type JobTable } from "./jobs.js";
 import { promptItemsOf } from "../ui/prompt-handles.js";
 import { readProjectSettings, writeProjectSettings, type ProjectSettings } from "./workspace.js";
+import { ensureBrainDirectory } from "./paths.js";
 
 export interface LiveSessionOptions {
   /**
@@ -146,7 +147,7 @@ export function stalledCollapseExplanation(reason: string): string {
 export async function openLiveSession(options: LiveSessionOptions): Promise<LiveSession> {
   const root = resolve(options.root);
   const now = () => options.now?.() ?? Date.now();
-  await mkdir(resolve(root, ".brain/context"), { recursive: true });
+  ensureBrainDirectory(root);
   const projectSettings = readProjectSettings(root);
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
