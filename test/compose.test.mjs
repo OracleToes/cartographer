@@ -2,7 +2,7 @@ import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, editorCommand } from "../dist/ui/compose.js";
+import { composeInEditor, ctrlC, editSourceFile, CTRL_C_ARM_WINDOW_MS, editorCommand } from "../dist/ui/compose.js";
 
 test("the editor is $VISUAL first, then $EDITOR, then vi — and a blank one is no editor at all", () => {
   assert.deepEqual(editorCommand({}), { command: "vi", args: [] }, "the conventional fallback");
@@ -61,6 +61,23 @@ test("the editor's file comes back as the prompt; a failure says why and keeps t
 
   assert.equal(none.ok, false);
   assert.match(none.ok ? "" : none.error, /no editor set/);
+});
+
+test("source editing writes the actual file and reports errors", async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "carto-source-"));
+  const file = join(dir, "source.txt");
+  try {
+    writeFileSync(file, "original");
+    const result = await editSourceFile(file, { EDITOR: `sh -c 'printf edited > "$1"' sh` });
+    assert.equal(result.ok, true);
+    assert.equal(readFileSync(file, "utf8"), "edited");
+    const failed = await editSourceFile(file, { EDITOR: "sh -c 'exit 2'" });
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /source may have been changed/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("Ctrl-C clears a line with text, arms on an empty one, and leaves on the second press inside the window", () => {

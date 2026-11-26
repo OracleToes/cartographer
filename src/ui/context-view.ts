@@ -704,6 +704,11 @@ export class ContextView implements Component, Focusable {
     return node === undefined ? undefined : this.showReal && node.real !== undefined ? node.real : node.body;
   }
 
+  /** Stable identity of the selected row, including the source it acts on. */
+  selectedEntry(): PromptNode | undefined {
+    return this.selectedNode();
+  }
+
   /** Pin or unpin the row under the cursor, the same act `p` performs. The palette calls this. */
   pinSelected(): void {
     const target = this.selectedNode()?.target;

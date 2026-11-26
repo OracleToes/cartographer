@@ -23,13 +23,17 @@ import { personChatBindings, userText } from "../domain/chat-identity.js";
  * State is one explicit value; behaviour is functions over it (§8). Pi
  * performs; Carto adds only the composition.
  */
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { snapshotPaths } from "../runtime/projection-files.js";
 import { WIPE_REQUESTED } from "../runtime/paths.js";
 import { assertPinnableFile } from "../runtime/workspace.js";
 import { createHash } from "node:crypto";
 import { Writable } from "node:stream";
-import { basename, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { EditableRecord } from "../domain/record-editor.js";
+import type { ArchivedItem } from "../domain/archive.js";
 
 import {
   Editor,
@@ -87,12 +91,12 @@ import { Registry, copySelectionCommand, copySlashCommand, stopCommand, type Com
 import { RunActivity } from "./run-activity.js";
 import { TokenBarView, type ContextBarState } from "./context-bar.js";
 import { copyWithFallback, createSelectionCopier, describeFallback } from "./clipboard.js";
-import { composeInEditor, ctrlC, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
+import { composeInEditor, ctrlC, editSourceFile, CTRL_C_ARM_WINDOW_MS, type EditorOutcome } from "./compose.js";
 import { flattenEntry } from "./dump.js";
 import { HelpPanel, keyText, type HelpExtra } from "./help-panel.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { ModelPicker } from "./model-picker.js";
-import { Palette, WipeConfirmation, selectTheme, type PaletteCommand } from "./palette.js";
+import { Palette, SourceEditConfirmation, WipeConfirmation, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
 import { TranscriptView, createStatusNotifier, formatToolArgs, frozenTranscript, isCard, orderTranscript, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
@@ -2347,6 +2351,147 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
   };
 
+  /** Select a durable book record by identity, never by its rendered text. */
+  const selectedBookRecord = async (): Promise<{ record: EditableRecord; archived?: ArchivedItem }> => {
+    let kind: "atlas" | "ledger" | undefined;
+    let id: string | undefined;
+    if (state.layer === "archive") {
+      const id = archiveView.isFiltering() ? undefined : archiveView.selectedItem()?.id;
+      const archived = (await brain.readArchive()).items.find((item) => item.id === id);
+      if (archived?.record === undefined) throw new Error("No archived record is selected.");
+      return { record: archived.record as EditableRecord, archived };
+    }
+    if (state.view === "atlas" && !atlasView.isFiltering()) { kind = "atlas"; id = atlasView.selectedId(); }
+    else if (state.view === "ledger" && !ledgerView.isFiltering()) { kind = "ledger"; id = ledgerView.selectedId(); }
+    else if (state.view === "context") {
+      const target = contextView.selectedEntry()?.target;
+      if (target?.part === "atlas" || target?.part === "ledger") { kind = target.part; id = String(target.id); }
+    }
+    if (kind === undefined || id === undefined) throw new Error("No editable record is selected.");
+    const current = await brain.read();
+    if (kind === "atlas") {
+      const value = current.atlas.find((item) => item.id === id);
+      if (value !== undefined) return { record: { kind, value } };
+    } else {
+      const value = current.ledger.find((item) => item.id === id);
+      if (value !== undefined) return { record: { kind, value } };
+    }
+    throw new Error("The selected record is no longer in the Brain.");
+  };
+
+  const editSelectedBookRecord = async () => {
+    const selected = await selectedBookRecord();
+    const before = JSON.stringify(selected.record.value, null, 2) + "\n";
+    let outcome: EditorOutcome;
+    let stopped = false;
+    try {
+      tui.stop(); stopped = true;
+      outcome = await composeInEditor(before);
+    } catch (error) {
+      outcome = { ok: false, error: errorText(error) };
+    } finally {
+      if (stopped) tui.start();
+      focusCurrent();
+      tui.requestRender();
+    }
+    if (!outcome.ok) { pushStatus(`editor failed: ${outcome.error}`); tui.requestRender(); return; }
+    if (outcome.text === before) return;
+    try {
+      if (selected.archived !== undefined) {
+        await brain.editArchivedRecord(selected.archived, outcome.text, Date.now());
+        await refreshArchive();
+        pushStatus(`Edited archived ${selected.record.kind}.`);
+      } else if (selected.record.kind !== "chat") {
+        await brain.editBookRecord(selected.record, outcome.text, Date.now());
+        await refreshBrainViews();
+        pushStatus(`Edited ${selected.record.kind}; the frozen head refreshes at collapse.`);
+      } else throw new Error("Editing live Chat is not supported yet.");
+      await refreshSidebar();
+    } catch (error) {
+      // Never discard text when validation fails or another writer wins.
+      try {
+        const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
+        const path = join(dir, "record.json");
+        await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
+        pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+      } catch (saveError) {
+        pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
+      }
+    }
+    tui.requestRender();
+  };
+
+  const selectedSourcePath = (): string | undefined => {
+    if (state.layer !== "context") return undefined;
+    if (state.view === "tree" && !treeView.isFiltering()) {
+      const entry = treeView.selectedEntry();
+      return entry === undefined || entry.directory ? undefined : entry.path;
+    }
+    if (state.view === "context") {
+      const node = contextView.selectedEntry();
+      const target = node?.target;
+      if (target?.part === "files") return resolve(options.root, String(target.id));
+      if (node?.kind === "system") return fileURLToPath(new URL("../../src/runtime/carto-extension.ts", import.meta.url));
+      if (target?.part === "tools" && ["create", "chat", "atlas", "ledger", "pin", "mark", "tree", "collapse", "sleep", "proc"].includes(String(target.id))) {
+        return fileURLToPath(new URL("../../src/runtime/tools.ts", import.meta.url));
+      }
+    }
+    return undefined;
+  };
+
+  const editSource = (path: string) => {
+    if (state.overlayOpen) return;
+    state.overlayOpen = true;
+    const dialog = new SourceEditConfirmation(path);
+    dialog.onClose = closeOverlay;
+    dialog.onConfirm = () => {
+      closeOverlay();
+      void (async () => {
+        let stopped = false;
+        try {
+          tui.stop(); stopped = true;
+          const result = await editSourceFile(path);
+          pushStatus(result.ok ? `Editor closed: ${path}` : `Editor: ${result.error}`);
+        } catch (error) {
+          pushStatus(`Editor failed: ${errorText(error)}`);
+        } finally {
+          if (stopped) tui.start();
+          focusCurrent();
+          await refreshBrainViews().catch(() => undefined);
+          tui.requestRender();
+        }
+      })();
+    };
+    state.overlayHandle = tui.showOverlay(dialog, { width: 78, anchor: "center" });
+    tui.setFocus(dialog);
+    tui.requestRender();
+  };
+
+  /** Runtime-generated selections have no writable record; keep a scratch file instead. */
+  const selectedScratchText = (): string | undefined => {
+    if (state.layer !== "context") return undefined;
+    if (state.view === "context" && contextView.selectedEntry()?.kind === "state") return contextView.selectedText();
+    if (state.view === "jobs" && !jobsView.isTyping()) return jobsView.selectedText();
+    if (state.view === "tree" && !treeView.isFiltering() && treeView.selectedEntry()?.directory) return treeView.selectedText();
+    return undefined;
+  };
+
+  const editScratch = async (text: string) => {
+    const dir = await mkdtemp(join(tmpdir(), "carto-scratch-"));
+    const path = join(dir, "scratch.txt");
+    await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
+    let stopped = false;
+    try {
+      tui.stop(); stopped = true;
+      const result = await editSourceFile(path);
+      pushStatus(result.ok ? `Scratch copy saved at ${path}; the original is unchanged.` : `Scratch at ${path}: ${result.error}`);
+    } finally {
+      if (stopped) tui.start();
+      focusCurrent();
+      tui.requestRender();
+    }
+  };
+
   const copySelected = async (text: string) => {
     try {
       const result = await copyWithFallback(text, "selection");
@@ -2402,7 +2547,49 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       run: () => void composeInPrompt(),
       // Only where there is a message to write, and only with the terminal to
       // itself: an editor opened over an overlay would fight it for the screen.
-      available: () => inChat() && !state.overlayOpen,
+      available: () => inChat() && !transcript.isSelecting() && !state.overlayOpen,
+    },
+    {
+      id: "edit-record",
+      group: "the record",
+      label: "edit selected record",
+      hint: "$VISUAL, else $EDITOR; JSON",
+      key: "ctrl+g",
+      run: () => void editSelectedBookRecord().catch((error: unknown) => { pushStatus(`edit failed: ${errorText(error)}`); tui.requestRender(); }),
+      available: () => !state.overlayOpen && (
+        (state.layer === "archive" && !archiveView.isFiltering() && archiveView.selectedItem()?.record !== undefined) ||
+        (state.layer === "context" && (
+          (state.view === "atlas" && !atlasView.isFiltering() && atlasView.selectedId() !== undefined) ||
+          (state.view === "ledger" && !ledgerView.isFiltering() && ledgerView.selectedId() !== undefined) ||
+          (state.view === "context" && (contextView.selectedEntry()?.target?.part === "atlas" || contextView.selectedEntry()?.target?.part === "ledger"))
+        ))
+      ),
+    },
+    {
+      id: "edit-source",
+      group: "the record",
+      label: "edit selected source file",
+      hint: "confirmation required",
+      key: "ctrl+g",
+      run: () => { const path = selectedSourcePath(); if (path !== undefined) editSource(path); },
+      available: () => !state.overlayOpen && selectedSourcePath() !== undefined,
+    },
+    {
+      id: "edit-scratch",
+      group: "the record",
+      label: "open a scratch copy",
+      hint: "does not change runtime state",
+      key: "ctrl+g",
+      run: () => { const text = selectedScratchText(); if (text !== undefined) void editScratch(text).catch((error: unknown) => { pushStatus(`scratch failed: ${errorText(error)}`); tui.requestRender(); }); },
+      available: () => !state.overlayOpen && selectedScratchText() !== undefined,
+    },
+    {
+      id: "edit-unavailable",
+      group: "the record",
+      label: "edit selected item (not yet supported)",
+      key: "ctrl+g",
+      run: () => { pushStatus("Editing this selection is not available yet."); tui.requestRender(); },
+      available: () => !state.overlayOpen && selectedText() !== undefined,
     },
     {
       id: "quit",

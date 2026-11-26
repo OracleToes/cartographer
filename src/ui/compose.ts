@@ -130,6 +130,22 @@ export async function composeInEditor(
   }
 }
 
+/** Open an actual source file; the editor writes the source itself. */
+export async function editSourceFile(file: string, env: NodeJS.ProcessEnv = process.env): Promise<{ ok: true } | { ok: false; error: string }> {
+  const editor = editorCommand(env);
+  if (editor === undefined) return { ok: false, error: "no editor is configured" };
+  try {
+    const status = await new Promise<number>((resolve, reject) => {
+      const child = spawn(editor.command, [...editor.args, file], { stdio: "inherit" });
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    return status === 0 ? { ok: true } : { ok: false, error: `${editor.command} exited ${status}; the source may have been changed` };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export type CtrlCOutcome =
   /** Text was on the line: it was cleared, nothing else happened. */
   | { action: "cleared" }

@@ -2373,6 +2373,24 @@ test("Palette delegates selection, paging, and mouse clicks to pi-tui SelectList
   assert.deepEqual(ran, ["b", "a"]);
 });
 
+test("source editing confirmation names the source and requires EDIT", async () => {
+  const { SourceEditConfirmation } = await import("../dist/ui/palette.js");
+  const dialog = new SourceEditConfirmation("/my/project/file.txt");
+  let confirmed = 0, cancelled = 0;
+  dialog.onConfirm = () => { confirmed += 1; };
+  dialog.onClose = () => { cancelled += 1; };
+  dialog.focused = true;
+  assert.match(plain(dialog.render(78).join("\n")), /source, not a copy/);
+  assert.match(plain(dialog.render(78).join("\n")), /file\.txt/);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 0);
+  for (const ch of "EDIT") dialog.handleInput(ch);
+  dialog.handleInput("\r");
+  assert.equal(confirmed, 1);
+  dialog.handleInput("\x1b");
+  assert.equal(cancelled, 1);
+});
+
 test("wipe confirmation requires WIPE and can be cancelled", async () => {
   const { WipeConfirmation } = await import("../dist/ui/palette.js");
   const dialog = new WipeConfirmation("/my/project");
@@ -2574,6 +2592,7 @@ test("copy selection follows the cursor and copies full unfolded content across 
 
   const context = contextOf();
   assert.equal(context.selectedText(), "you are carto");
+  assert.equal(context.selectedEntry().kind, "system");
   context.handleInput("j");
   assert.match(context.selectedText(), /the frozen words/);
   context.handleInput("\t");
@@ -2595,6 +2614,7 @@ test("copy selection follows the cursor and copies full unfolded content across 
     writeFileSync(join(root, "name.txt"), "private file contents");
     const tree = new TreeView(); tree.setData({ root, anchor: { anchor: root, depth: 1 }, brain: emptyBrain() });
     assert.equal(tree.selectedText(), "name.txt");
+    assert.equal(tree.selectedEntry().path, join(root, "name.txt"));
   } finally { rmSync(root, { recursive: true, force: true }); }
 
   const { JobsView } = await import("../dist/ui/jobs-view.js");

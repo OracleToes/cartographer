@@ -258,6 +258,11 @@ export class TreeView implements Component, Focusable {
     return relative(this.data.root, row.entry.path) || ".";
   }
 
+  /** The source selected by the cursor, not the display path. */
+  selectedEntry(): TreeEntry | undefined {
+    return this.selectedRow()?.entry;
+  }
+
   private selectedRow(): Row | undefined {
     return this.visibleRows()[this.selectedIndex];
   }

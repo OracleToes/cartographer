@@ -35,6 +35,36 @@ test("a fresh Brain opens empty, and a write survives reopening", async () => {
   }
 });
 
+test("structured book edits validate JSON and reject concurrent changes", async () => {
+  const { path, cleanup } = tempBrain();
+  const store = await openBrain(path);
+  try {
+    const node = { id: "a1", title: "old", text: "detail", links: [], attachments: [], createdAt: at(1), updatedAt: at(1) };
+    const entry = { id: "l1", kind: "question", text: "question", status: "open", answer: null, createdAt: at(1), updatedAt: at(1) };
+    await store.apply({ kind: "atlas.upsert", node }, at(1));
+    await store.apply({ kind: "ledger.upsert", entry }, at(1));
+    const original = { kind: "atlas", value: (await store.read()).atlas[0] };
+    const updated = { ...original.value, title: "new", attachments: [{ kind: "file", path: "src/a.ts" }] };
+    await store.editBookRecord(original, JSON.stringify(updated), at(2));
+    assert.equal((await store.read()).atlas[0].title, "new");
+    assert.equal((await store.read()).atlas[0].updatedAt, at(2));
+    await assert.rejects(store.editBookRecord(original, JSON.stringify(updated), at(3)), /changed or disappeared/);
+    const ledger = { kind: "ledger", value: (await store.read()).ledger[0] };
+    await assert.rejects(store.editBookRecord(ledger, "{", at(2)), SyntaxError);
+    await assert.rejects(store.editBookRecord(ledger, JSON.stringify({ ...entry, status: "broken" }), at(2)), /Invalid ledger/);
+    await assert.rejects(store.editBookRecord(ledger, JSON.stringify({ ...entry, id: "other" }), at(2)), /id and createdAt/);
+    await store.editBookRecord(ledger, JSON.stringify({ ...entry, status: "answered", answer: { text: "yes" } }), at(3));
+    assert.equal((await store.read()).ledger[0].answer.text, "yes");
+    await store.applyRecordAction({ kind: "ledger", id: "l1", action: "archive", generation: "g", now: at(4) });
+    const archived = (await store.readArchive()).items[0];
+    await store.editArchivedRecord(archived, JSON.stringify({ ...archived.record.value, text: "archived change" }), at(5));
+    assert.equal((await store.readArchive()).items[0].record.value.text, "archived change");
+    await assert.rejects(store.editArchivedRecord(archived, JSON.stringify(archived.record.value), at(6)), /changed or disappeared/);
+    await store.applyArchive({ kind: "restore", id: archived.id });
+    assert.equal((await store.read()).ledger[0].text, "archived change");
+  } finally { await store.close(); cleanup(); }
+});
+
 test("delete is single-step and stays deleted across reopening", async () => {
   const { path, cleanup } = tempBrain();
   try {

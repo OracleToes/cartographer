@@ -32,6 +32,7 @@ import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
 
 import { reconcileHandles } from "../domain/handles.js";
+import { parseEditedRecord, type EditableBookRecord, type EditableRecord } from "../domain/record-editor.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry } from "../domain/records.js";
 import {
@@ -54,6 +55,10 @@ export interface BrainStore {
   read(): Promise<CartoBrain>;
   /** Apply one write inside one transaction; returns the next Brain. */
   apply(write: BrainWrite, now: number): Promise<CartoBrain>;
+  /** Validate and replace a book record only if it has not changed while being edited. */
+  editBookRecord(original: EditableBookRecord, text: string, now: number): Promise<CartoBrain>;
+  /** Edit an archived record without changing its archive identity or marks. */
+  editArchivedRecord(original: ArchivedItem, text: string, now: number): Promise<Archive>;
   /** The archive as it stands. The agent never sees it (§3.3). */
   readArchive(): Promise<Archive>;
   /** Sidebar counts without loading or parsing archived content. */
@@ -303,6 +308,36 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         await tx.run(UPSERT, JSON.stringify(next));
         return next;
       }),
+
+    editBookRecord: (original, text, now) => database.transaction(async (tx) => {
+      const edited = parseEditedRecord(original, text, now);
+      if (edited.kind === "chat") throw new Error("Chat is not a book record.");
+      const current = await readFrom(tx);
+      const record = recordOf(current, original.kind, original.value.id);
+      if (record === undefined || JSON.stringify(record) !== JSON.stringify(original.value)) {
+        throw new Error("The record changed or disappeared while the editor was open; no changes were applied.");
+      }
+      const write: BrainWrite = edited.kind === "atlas"
+        ? { kind: "atlas.upsert", node: edited.value }
+        : { kind: "ledger.upsert", entry: edited.value };
+      const next = applyWrite(current, write, now);
+      await tx.run(UPSERT, JSON.stringify(next));
+      return next;
+    }),
+
+    editArchivedRecord: (original, text, now) => database.transaction(async (tx) => {
+      if (original.record === undefined || original.restorePending) throw new Error("That archive item cannot be edited as a record.");
+      const editable = original.record as EditableRecord;
+      const edited = parseEditedRecord(editable, text, now);
+      const current = await readArchiveFrom(tx);
+      const found = current.items.find((item) => item.id === original.id);
+      if (found === undefined || JSON.stringify(found) !== JSON.stringify(original)) {
+        throw new Error("The archived item changed or disappeared while the editor was open; no changes were applied.");
+      }
+      const item: ArchivedItem = { ...found, record: { kind: edited.kind, value: edited.value } };
+      await writeArchiveItem(tx, item);
+      return { ...current, items: current.items.map((candidate) => candidate.id === item.id ? item : candidate) };
+    }),
 
     readArchive: () => readArchiveFrom(database),
     readArchiveCounts: async () => {

@@ -143,6 +143,39 @@ export class Palette implements Component, Focusable {
 }
 
 
+/** Confirm that the editor will write to an actual source file. */
+export class SourceEditConfirmation implements Component, Focusable {
+  focused = false;
+  onClose?: () => void;
+  onConfirm?: () => void;
+  private readonly input = new Input({ prompt: "> ", placeholder: "type EDIT to confirm" });
+  private invalid = false;
+
+  constructor(private readonly path: string) {
+    this.input.onEscape = () => this.onClose?.();
+    this.input.onSubmit = (value) => { if (value === "EDIT") this.onConfirm?.(); else this.invalid = true; };
+  }
+  handleInput(data: string): void {
+    if (matchesKey(data, "ctrl+c")) { this.onClose?.(); return; }
+    this.input.focused = this.focused;
+    this.input.handleInput(data);
+  }
+  invalidate(): void { this.input.invalidate(); }
+  render(width: number): string[] {
+    this.input.focused = this.focused;
+    const paint = (line: string) => tokens.panel(padLine(`  ${line}`, width));
+    return [
+      paint(tokens.danger("Edit the underlying source file?")),
+      paint(this.path),
+      paint("Changes in your editor affect the source, not a copy."),
+      paint("Carto source changes may need a rebuild or reinstall and restart."),
+      paint("Type EDIT and press enter; escape cancels."),
+      paint(this.input.render(Math.max(1, width - 4)).join("")),
+      ...(this.invalid ? [paint(tokens.danger("Type EDIT exactly, or press escape to cancel."))] : []),
+    ];
+  }
+}
+
 /** A destructive action requires an explicit typed word, not a selected default. */
 export class WipeConfirmation implements Component, Focusable {
   focused = false;
