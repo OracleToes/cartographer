@@ -966,13 +966,14 @@ reported and the original is unchanged. Archived ephemeral items can be edited:
 text edits update the saved restore payload too, including preserving images;
 tool-call arguments are edited as JSON. Signed model content and items already
 pending restore open as scratch copies, because they cannot safely be changed.
-Landed unpinned live tool-work and restored person messages can be edited from
-Chat or Context: text and reasoning as text, tool-call arguments as JSON, and
-tool results without losing images or their call pairing. These edits replace the
-live contribution, not the frozen head; concurrent changes are rejected with the
-draft saved, and the agent must not be running. A pinned work item edits its Brain
-pin instead, with the change entering the head at collapse; a pinned read result
-with a file path opens that source after confirmation because collapse re-reads it.
+Landed live tool-work and restored person messages can be edited from Chat or
+Context: text and reasoning as text, tool-call arguments as JSON, and tool results
+without losing images or their call pairing. These edits replace the live
+contribution and update any matching pin, not the frozen head; concurrent changes
+are rejected with the draft saved, and the agent must not be running. A frozen
+pinned work item edits its Brain pin, with the change entering the head at
+collapse. A pinned read result with a file path opens that source after
+confirmation because collapse re-reads it.
 Frozen Chat records edit the Brain as JSON and likewise change on collapse. A
 live Chat record edits its Brain record and its identified live contribution
 together, preserving other parts and any pin; a journal recovers an interrupted

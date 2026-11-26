@@ -2509,13 +2509,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const chat = await chatRecordForLiveWork(session, id);
     if (chat !== undefined) { await editSelectedBookRecord({ kind: "chat", value: chat }); return; }
     const pin = (await brain.read()).ephemera.find((item) => item.id === id);
-    if (pin !== undefined) {
-      if (pin.kind === "readResult" && pin.entity?.path !== undefined) {
-        // A read pin is refreshed from the file at collapse, so editing its
-        // cached quotation would be silently overwritten.
-        editSource(resolve(options.root, pin.entity.path));
-        return;
-      }
+    if (pin?.kind === "readResult" && pin.entity?.path !== undefined) {
+      // A read pin is refreshed from the file at collapse, so editing its
+      // cached quotation would be silently overwritten.
+      editSource(resolve(options.root, pin.entity.path));
+      return;
+    }
+    if (pin !== undefined && !id.startsWith(`${session.generation}:`)) {
       let before = pin.text;
       if (pin.kind === "toolCall") {
         const separator = pin.text.indexOf(" ");
@@ -2577,9 +2577,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
         const path = join(dir, snapshot.kind === "call" ? "work.json" : "work.txt");
         await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
-        pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+        pushStatus(`Edit failed: ${errorText(error)} Draft saved at ${path}`);
       } catch (saveError) {
-        pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
+        pushStatus(`Edit failed: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`);
       }
     }
     tui.requestRender();

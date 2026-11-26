@@ -532,6 +532,40 @@ test("live work edits keep identities across further edits, removal, reopening a
   }
 });
 
+test("pinned live work edits update both the contribution and pin and recover after interruption", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  try {
+    await session.conversation.submit({ type: "write", entry: { kind: "test.pinned", model: [fauxAssistantMessage([fauxText("first"), fauxText("second")])] } }, BACKGROUND_CONTEXT);
+    const entry = (await sessionTranscript(session)).find((item) => item.kind === "test.pinned");
+    const id = ephemeralItemId(session.generation, entry.id, "x1");
+    const pin = { id, kind: "plainText", text: "second", createdAt: 1, pinned: "user" };
+    await brain.apply({ kind: "ephemeral.pin", item: pin }, 1);
+    const snapshot = await readLiveWorkEdit(session, id);
+    await editLiveWork(session, snapshot, "changed");
+    assert.equal((await brain.read()).ephemera[0].text, "changed");
+    let current = (await sessionTranscript(session)).find((item) => item.id === entry.id);
+    assert.deepEqual(current.partKeys, ["x0", "x1"]);
+    assert.equal(current.model[0].content[1].text, "changed");
+    const next = await readLiveWorkEdit(session, id);
+    const messages = JSON.parse(next.expected);
+    messages[0].content[1].text = "recovered";
+    const journal = { kind: "work", operation: "work-recovery", generation: session.generation, entryId: entry.id, itemId: id, before: next.expected, messages, partJson: JSON.stringify(messages[0].content[1]) };
+    await brain.beginWorkEdit(journal, next.pin, "recovered");
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    current = (await sessionTranscript(session)).find((item) => item.id === entry.id);
+    assert.equal(current.model[0].content[1].text, "recovered");
+    assert.deepEqual(current.partKeys, ["x0", "x1"]);
+    assert.equal((await brain.read()).ephemera[0].text, "recovered");
+    assert.equal(await brain.readPendingEdit(), undefined);
+    const swept = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
+    assert.equal(swept.find((item) => item.id === id).ephemeral.text, "recovered");
+  } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
+});
+
 test("restored person messages can be edited without losing image parts", async () => {
   const { root, brain, cleanup } = await fixture();
   const { models, ref } = fauxSetup();
@@ -729,7 +763,7 @@ test("Chat edit journal recovers an interrupted cross-store write and legacy ide
     await assert.rejects(brain.apply({ kind: "chat.update", id: record.id, text: "wrong", updatedAt: 21 }, 21), /awaiting recovery/);
     await closeLiveSession(session);
     session = await openLiveSession(options);
-    assert.equal(await brain.readChatEdit(), undefined);
+    assert.equal(await brain.readPendingEdit(), undefined);
     assert.equal((await brain.read()).chat[0].text, "recovered text");
     let entries = await sessionTranscript(session);
     assert.equal(entries.find((item) => item.id === snapshot.entryId).model[0].content, "recovered text");
@@ -750,7 +784,7 @@ test("Chat edit journal recovers an interrupted cross-store write and legacy ide
     entries = await sessionTranscript(session);
     assert.equal(entries.filter((item) => item.kind === "carto.edit-chat").length, 2);
     assert.equal(entries.find((item) => item.id === next.entryId).model[0].content, "already placed");
-    assert.equal(await brain.readChatEdit(), undefined);
+    assert.equal(await brain.readPendingEdit(), undefined);
   } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
 });
 
@@ -770,7 +804,7 @@ test("Chat edit recovery preserves a conflicting contribution instead of overwri
     await session.conversation.submit({ type: "write", entry: { kind: "external.change", edits: [{ target: snapshot.entryId, action: "replace", messages: [{ ...message, content: "someone else" }] }] } }, BACKGROUND_CONTEXT);
     await closeLiveSession(session);
     await assert.rejects(openLiveSession(options), /conflicts with the live context/);
-    assert.equal((await brain.readChatEdit()).operation, "conflict-test");
+    assert.equal((await brain.readPendingEdit()).operation, "conflict-test");
     assert.equal((await brain.read()).chat[0].text, "desired");
   } finally { await closeLiveSession(session).catch(() => undefined); await cleanup(); }
 });

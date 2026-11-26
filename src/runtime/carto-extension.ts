@@ -450,17 +450,17 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       }),
       hook(GenerationTask, {
         beforeRequest: async (request, api, context) => {
-          const pending = await options.brain.readChatEdit();
+          const pending = await options.brain.readPendingEdit();
           if (pending !== undefined) {
             let cursor: import("@earendil-works/pi-durable").Cursor | undefined;
             let found = false;
             do {
               const page = await api.entries({ minEntryId: pending.entryId }, 100, cursor, context);
-              found = page.items.some((entry) => entry.kind === "carto.edit-chat" && entry.data !== null && typeof entry.data === "object" && !Array.isArray(entry.data) && (entry.data as { operation?: unknown }).operation === pending.operation);
+              found = page.items.some((entry) => entry.kind === (pending.kind === "work" ? "carto.edit-work" : "carto.edit-chat") && entry.data !== null && typeof entry.data === "object" && !Array.isArray(entry.data) && (entry.data as { operation?: unknown }).operation === pending.operation);
               cursor = page.next;
             } while (!found && cursor !== undefined);
-            if (!found) throw new Error("A Chat edit is awaiting recovery; reopen the session before requesting the model.");
-            await options.brain.finishChatEdit(pending.operation);
+            if (!found) throw new Error("A context edit is awaiting recovery; reopen the session before requesting the model.");
+            await options.brain.finishPendingEdit(pending.operation);
           }
           const visible = stripStateBlocks(request.messages);
           await options.session.refreshHeadEphemera?.();

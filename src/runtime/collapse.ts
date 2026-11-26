@@ -604,7 +604,7 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
 }
 
 async function performCollapse(root: string, brain: BrainStore, options: CollapseOptions): Promise<CollapseReport> {
-  if (await brain.readChatEdit() !== undefined) throw new Error("A Chat edit is awaiting recovery; reopen the session before collapsing.");
+  if (await brain.readPendingEdit() !== undefined) throw new Error("A context edit is awaiting recovery; reopen the session before collapsing.");
   await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
