@@ -2356,7 +2356,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   /** Select a durable book record by identity, never by its rendered text. */
   const selectedBookRecord = async (): Promise<{ record: EditableRecord; archived?: ArchivedItem }> => {
-    let kind: "atlas" | "ledger" | undefined;
+    let kind: "atlas" | "ledger" | "chat" | undefined;
     let id: string | undefined;
     if (state.layer === "archive") {
       const id = archiveView.isFiltering() ? undefined : archiveView.selectedItem()?.id;
@@ -2368,15 +2368,21 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     else if (state.view === "ledger" && !ledgerView.isFiltering()) { kind = "ledger"; id = ledgerView.selectedId(); }
     else if (state.view === "context") {
       const target = contextView.selectedEntry()?.target;
-      if (target?.part === "atlas" || target?.part === "ledger") { kind = target.part; id = String(target.id); }
+      if (target?.part === "atlas" || target?.part === "ledger" || target?.part === "chat") { kind = target.part; id = String(target.id); }
+    } else if (state.view === "chat") {
+      const target = transcript.selectedTarget();
+      if (target?.part === "chat") { kind = "chat"; id = target.id; }
     }
     if (kind === undefined || id === undefined) throw new Error("No editable record is selected.");
     const current = await brain.read();
     if (kind === "atlas") {
       const value = current.atlas.find((item) => item.id === id);
       if (value !== undefined) return { record: { kind, value } };
-    } else {
+    } else if (kind === "ledger") {
       const value = current.ledger.find((item) => item.id === id);
+      if (value !== undefined) return { record: { kind, value } };
+    } else {
+      const value = current.chat.find((item) => item.id === id);
       if (value !== undefined) return { record: { kind, value } };
     }
     throw new Error("The selected record is no longer in the Brain.");
@@ -2384,6 +2390,17 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   const editSelectedBookRecord = async () => {
     const selected = await selectedBookRecord();
+    const session = state.session;
+    const inFrozenChat = async () => {
+      const sidecar = JSON.parse(await readFile(snapshotPaths(options.root, session.generation).sidecar, "utf8")) as { chat?: unknown };
+      return Array.isArray(sidecar.chat) && sidecar.chat.includes(selected.record.value.id);
+    };
+    if (selected.archived === undefined && selected.record.kind === "chat" && !(await inFrozenChat().catch(() => false))) {
+      // A live Chat line has a separate Pi contribution; until those writes can
+      // be made crash-safe together, do not silently split it from the Brain.
+      await editScratch(JSON.stringify(selected.record.value, null, 2) + "\n");
+      return;
+    }
     const before = JSON.stringify(selected.record.value, null, 2) + "\n";
     let outcome: EditorOutcome;
     let stopped = false;
@@ -2404,11 +2421,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         await brain.editArchivedRecord(selected.archived, outcome.text, Date.now());
         await refreshArchive();
         pushStatus(`Edited archived ${selected.record.kind}.`);
-      } else if (selected.record.kind !== "chat") {
+      } else {
+        if (selected.record.kind === "chat" && (state.session !== session || state.collapsing || !(await inFrozenChat()))) throw new Error("The Chat context changed while the editor was open.");
         await brain.editBookRecord(selected.record, outcome.text, Date.now());
         await refreshBrainViews();
+        await rebuildTranscript();
         pushStatus(`Edited ${selected.record.kind}; the frozen head refreshes at collapse.`);
-      } else throw new Error("Editing live Chat is not supported yet.");
+      }
       await refreshSidebar();
     } catch (error) {
       // Never discard text when validation fails or another writer wins.
@@ -2463,12 +2482,56 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const selectedLiveWorkId = (): string | undefined => {
     if (state.layer !== "context") return undefined;
     const target = state.view === "chat" ? transcript.selectedTarget() : state.view === "context" ? contextView.selectedEntry()?.target : undefined;
-    return target?.part === "tool-work" ? String(target.id) : undefined;
+    return target?.part === "tool-work" || target?.part === "ephemera" || target?.part === "transcript" ? String(target.id) : undefined;
   };
 
   const editSelectedLiveWork = async (id: string) => {
     const session = state.session;
-    const snapshot = await readLiveWorkEdit(session, id);
+    const pin = (await brain.read()).ephemera.find((item) => item.id === id);
+    if (pin !== undefined) {
+      if (pin.kind === "readResult" && pin.entity?.path !== undefined) {
+        // A read pin is refreshed from the file at collapse, so editing its
+        // cached quotation would be silently overwritten.
+        editSource(resolve(options.root, pin.entity.path));
+        return;
+      }
+      let before = pin.text;
+      if (pin.kind === "toolCall") {
+        const separator = pin.text.indexOf(" ");
+        if (separator < 1) { await editScratch(pin.text); return; }
+        try { before = JSON.stringify(JSON.parse(pin.text.slice(separator + 1)), null, 2) + "\n"; }
+        catch { await editScratch(pin.text); return; }
+      }
+      let outcome: EditorOutcome;
+      let stopped = false;
+      try { tui.stop(); stopped = true; outcome = await composeInEditor(before); }
+      catch (error) { outcome = { ok: false, error: errorText(error) }; }
+      finally { if (stopped) tui.start(); focusCurrent(); tui.requestRender(); }
+      if (!outcome.ok) { pushStatus(`editor failed: ${outcome.error}`); return; }
+      if (outcome.text === before) return;
+      try {
+        if (state.session !== session || state.collapsing) throw new Error("The session changed while the editor was open.");
+        await brain.editPinnedEphemeral(pin, outcome.text);
+        await rebuildTranscript();
+        pushStatus("Edited the pin; its new content enters the head at collapse.");
+      } catch (error) {
+        try {
+          const dir = await mkdtemp(join(tmpdir(), "carto-edit-recovery-"));
+          const path = join(dir, pin.kind === "toolCall" ? "pin.json" : "pin.txt");
+          await writeFile(path, outcome.text, { encoding: "utf8", mode: 0o600 });
+          pushStatus(`Edit not applied: ${errorText(error)} Draft saved at ${path}`);
+        } catch (saveError) { pushStatus(`Edit not applied: ${errorText(error)}; saving the draft failed: ${errorText(saveError)}`); }
+      }
+      tui.requestRender();
+      return;
+    }
+    if ([...(await frozenItemsOf()).values()].some((item) => item.id === id)) {
+      await editScratch(selectedText() ?? "");
+      return;
+    }
+    let snapshot: Awaited<ReturnType<typeof readLiveWorkEdit>>;
+    try { snapshot = await readLiveWorkEdit(session, id); }
+    catch { await editScratch(selectedText() ?? ""); return; }
     let outcome: EditorOutcome;
     let stopped = false;
     try {
@@ -2641,7 +2704,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         (state.layer === "context" && (
           (state.view === "atlas" && !atlasView.isFiltering() && atlasView.selectedId() !== undefined) ||
           (state.view === "ledger" && !ledgerView.isFiltering() && ledgerView.selectedId() !== undefined) ||
-          (state.view === "context" && (contextView.selectedEntry()?.target?.part === "atlas" || contextView.selectedEntry()?.target?.part === "ledger"))
+          (state.view === "context" && ["atlas", "ledger", "chat"].includes(contextView.selectedEntry()?.target?.part ?? "")) ||
+          (state.view === "chat" && transcript.selectedTarget()?.part === "chat")
         ))
       ),
     },
@@ -2684,9 +2748,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     {
       id: "edit-unavailable",
       group: "the record",
-      label: "edit selected item (not yet supported)",
+      label: "open selected item as a scratch copy",
+      hint: "does not change the original",
       key: "ctrl+g",
-      run: () => { pushStatus("Editing this selection is not available yet."); tui.requestRender(); },
+      run: () => { const text = selectedText(); if (text !== undefined) void editScratch(text).catch((error: unknown) => { pushStatus(`scratch failed: ${errorText(error)}`); tui.requestRender(); }); },
       available: () => !state.overlayOpen && selectedText() !== undefined,
     },
     {

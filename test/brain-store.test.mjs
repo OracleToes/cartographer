@@ -65,6 +65,29 @@ test("structured book edits validate JSON and reject concurrent changes", async 
   } finally { await store.close(); cleanup(); }
 });
 
+test("Chat and pinned work edits validate, preserve identities, and reject stale originals", async () => {
+  const { path, cleanup } = tempBrain();
+  const store = await openBrain(path);
+  try {
+    const record = chat("chat-one", "old", at(1));
+    await store.apply({ kind: "chat.record", record }, at(1));
+    await store.editBookRecord({ kind: "chat", value: record }, JSON.stringify({ ...record, text: "new" }), at(2));
+    assert.equal((await store.read()).chat[0].text, "new");
+    await assert.rejects(store.editBookRecord({ kind: "chat", value: record }, JSON.stringify(record), at(3)), /changed or disappeared/);
+    const updated = (await store.read()).chat[0];
+    await assert.rejects(store.editBookRecord({ kind: "chat", value: updated }, JSON.stringify({ ...updated, author: "agent" }), at(3)), /author cannot/);
+    const pin = { id: "pin", kind: "toolCall", text: 'read {"path":"old"}', createdAt: at(1), pinned: "user", entity: { callId: "call" } };
+    await store.apply({ kind: "ephemeral.pin", item: pin }, at(1));
+    await assert.rejects(store.editPinnedEphemeral(pin, "[]"), /JSON object/);
+    await store.editPinnedEphemeral(pin, '{"path":"new"}');
+    assert.deepEqual((await store.read()).ephemera[0], { ...pin, text: 'read {"path":"new"}' });
+    await assert.rejects(store.editPinnedEphemeral(pin, "{}"), /changed or disappeared/);
+    const readPin = { ...pin, id: "result", kind: "readResult", text: "data", entity: { callId: "call", path: "src/file" } };
+    await store.apply({ kind: "ephemeral.pin", item: readPin }, at(1));
+    await assert.rejects(store.editPinnedEphemeral(readPin, "new"), /source file/);
+  } finally { await store.close(); cleanup(); }
+});
+
 test("archived tool calls edit JSON arguments while preserving restore identity", async () => {
   const { fauxAssistantMessage, fauxToolCall } = await import("@earendil-works/pi-ai/providers/faux");
   const { archivedEphemeralText } = await import("../dist/domain/archive-editor.js");

@@ -32,10 +32,10 @@ import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
 
 import { reconcileHandles } from "../domain/handles.js";
-import { parseEditedRecord, type EditableBookRecord, type EditableRecord } from "../domain/record-editor.js";
+import { parseEditedRecord, type EditableRecord } from "../domain/record-editor.js";
 import { editArchivedEphemeral as updateArchivedEphemeral } from "../domain/archive-editor.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
-import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry } from "../domain/records.js";
+import { emptyBrain, type AtlasNode, type CartoBrain, type ChatRecord, type LedgerEntry, type PinnedEphemeral } from "../domain/records.js";
 import {
   applyArchiveMarks,
   dropExpired,
@@ -56,8 +56,10 @@ export interface BrainStore {
   read(): Promise<CartoBrain>;
   /** Apply one write inside one transaction; returns the next Brain. */
   apply(write: BrainWrite, now: number): Promise<CartoBrain>;
-  /** Validate and replace a book record only if it has not changed while being edited. */
-  editBookRecord(original: EditableBookRecord, text: string, now: number): Promise<CartoBrain>;
+  /** Validate and replace a Brain record only if it has not changed while being edited. */
+  editBookRecord(original: EditableRecord, text: string, now: number): Promise<CartoBrain>;
+  /** Replace a pin's text only if the original pin is still current. */
+  editPinnedEphemeral(original: PinnedEphemeral, text: string): Promise<CartoBrain>;
   /** Edit an archived record without changing its archive identity or marks. */
   editArchivedRecord(original: ArchivedItem, text: string, now: number): Promise<Archive>;
   /** Edit the stored content and restore payload of an archived ephemeral item. */
@@ -314,7 +316,6 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
 
     editBookRecord: (original, text, now) => database.transaction(async (tx) => {
       const edited = parseEditedRecord(original, text, now);
-      if (edited.kind === "chat") throw new Error("Chat is not a book record.");
       const current = await readFrom(tx);
       const record = recordOf(current, original.kind, original.value.id);
       if (record === undefined || JSON.stringify(record) !== JSON.stringify(original.value)) {
@@ -322,8 +323,28 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       }
       const write: BrainWrite = edited.kind === "atlas"
         ? { kind: "atlas.upsert", node: edited.value }
-        : { kind: "ledger.upsert", entry: edited.value };
+        : edited.kind === "ledger"
+          ? { kind: "ledger.upsert", entry: edited.value }
+          : { kind: "chat.update", id: edited.value.id, text: edited.value.text, updatedAt: now };
       const next = applyWrite(current, write, now);
+      await tx.run(UPSERT, JSON.stringify(next));
+      return next;
+    }),
+
+    editPinnedEphemeral: (original, text) => database.transaction(async (tx) => {
+      if (original.kind === "readResult" && original.entity?.path !== undefined) throw new Error("A pinned read result is refreshed from its source file at collapse.");
+      let value = text;
+      if (original.kind === "toolCall") {
+        const separator = original.text.indexOf(" ");
+        if (separator < 1) throw new Error("The pinned tool call has no identifiable arguments.");
+        const args: unknown = JSON.parse(text);
+        if (args === null || typeof args !== "object" || Array.isArray(args)) throw new Error("Tool arguments must be a JSON object.");
+        value = `${original.text.slice(0, separator)} ${JSON.stringify(args)}`;
+      }
+      const current = await readFrom(tx);
+      const pin = current.ephemera.find((item) => item.id === original.id);
+      if (pin === undefined || JSON.stringify(pin) !== JSON.stringify(original)) throw new Error("The pin changed or disappeared while the editor was open; no changes were applied.");
+      const next = { ...current, ephemera: current.ephemera.map((item) => item.id === original.id ? { ...item, text: value } : item) };
       await tx.run(UPSERT, JSON.stringify(next));
       return next;
     }),

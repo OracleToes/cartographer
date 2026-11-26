@@ -966,13 +966,17 @@ reported and the original is unchanged. Archived ephemeral items can be edited:
 text edits update the saved restore payload too, including preserving images;
 tool-call arguments are edited as JSON. Signed model content cannot be changed
 safely and is refused. Edits to an item already pending restore are also refused.
-Unpinned, landed live tool-work can be edited from Chat or Context: text and
-reasoning as text, tool-call arguments as JSON, and tool results without losing
-images or their call pairing. These edits replace the live contribution, not the
-frozen head; concurrent changes are rejected with the draft saved. A running
-agent, signed content and currently pinned work cannot be safely edited this way.
-Live Chat and pinned live work editing are not yet supported and say so instead
-of silently changing the wrong thing.
+Landed unpinned live tool-work and restored person messages can be edited from
+Chat or Context: text and reasoning as text, tool-call arguments as JSON, and
+tool results without losing images or their call pairing. These edits replace the
+live contribution, not the frozen head; concurrent changes are rejected with the
+draft saved, and the agent must not be running. A pinned work item edits its Brain
+pin instead, with the change entering the head at collapse; a pinned read result
+with a file path opens that source after confirmation because collapse re-reads it.
+Frozen Chat records edit the Brain as JSON and likewise change on collapse.
+Live Chat record edits are not yet supported: they open a scratch copy instead of
+splitting the Brain from the live context. Other selections with no safe writable
+source, including streaming and signed live content, also open scratch copies.
 
 `y` copies the selected item in Chat, Context, Atlas, Ledger, Tree, Jobs, or the
 archive. Chat selection starts with `escape`; elsewhere the cursor selects a

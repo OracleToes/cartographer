@@ -528,6 +528,25 @@ test("live work edits keep identities across further edits, removal, reopening a
   }
 });
 
+test("restored person messages can be edited without losing image parts", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    await session.conversation.submit({ type: "write", entry: { kind: "carto.restored", model: [{
+      role: "user", content: [{ type: "text", text: "old" }, { type: "image", data: "YWJj", mimeType: "image/png" }], timestamp: Date.now(),
+    }] } }, BACKGROUND_CONTEXT);
+    const entry = (await sessionTranscript(session)).find((item) => item.kind === "carto.restored");
+    const id = ephemeralItemId(session.generation, entry.id, "x0");
+    await editLiveWork(session, await readLiveWorkEdit(session, id), "edited");
+    const content = (await sessionTranscript(session)).find((item) => item.id === entry.id).model[0].content;
+    assert.deepEqual(content.map((part) => part.type), ["text", "image"]);
+    assert.equal(content[0].text, "edited");
+    const swept = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
+    assert.equal(swept.find((item) => item.id === id).ephemeral.model[0].content[1].data, "YWJj");
+  } finally { await closeLiveSession(session); await cleanup(); }
+});
+
 test("the head stays byte-identical across Brain writes and a projection read failure", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();

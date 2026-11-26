@@ -437,7 +437,7 @@ export interface LiveWorkEdit {
   generation: string;
   entryId: EntryId;
   partKey: string;
-  kind: "reasoning" | "text" | "call" | "result";
+  kind: "reasoning" | "text" | "call" | "result" | "person";
   text: string;
   expected: string;
 }
@@ -457,6 +457,9 @@ export async function readLiveWorkEdit(session: LiveSession, itemId: string): Pr
     if (messages.length !== 1 || message === undefined) break;
     if (key === "r" && message.role === "toolResult") {
       return { ...base, kind: "result", text: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") };
+    }
+    if (key === "x0" && entry.kind === "carto.restored" && message.role === "user") {
+      return { ...base, kind: "person", text: userText(message.content) };
     }
     if (message.role !== "assistant") break;
     const original = entry.model?.find((candidate) => candidate.role === "assistant");
@@ -498,6 +501,18 @@ export async function editLiveWork(session: LiveSession, snapshot: LiveWorkEdit,
         return [{ type: "text" as const, text }];
       });
       if (!inserted) message.content.unshift({ type: "text", text });
+    } else if (snapshot.kind === "person" && message?.role === "user") {
+      if (typeof message.content === "string") message.content = text;
+      else {
+        let inserted = false;
+        message.content = message.content.flatMap<(typeof message.content)[number]>((part) => {
+          if (part.type !== "text") return [part];
+          if (inserted) return [];
+          inserted = true;
+          return [{ type: "text" as const, text }];
+        });
+        if (!inserted) message.content.unshift({ type: "text", text });
+      }
     } else if (message?.role === "assistant") {
       const current = await sessionTranscript(session);
       const item = current.find((entry) => entry.id === snapshot.entryId);
