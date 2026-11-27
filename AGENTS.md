@@ -47,6 +47,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [dimk90/pi-context-view](https://github.com/dimk90/pi-context-view) | person | Inspiration for a sidebar context visualization; the person requested a vertical stack, not its grid. Not a dependency or a port target | reference only |
 | [tomooshi/condensed-milk-pi](https://github.com/tomooshi/condensed-milk-pi) | person | Evaluated for context compression and bash output filtering; not adopted (retroactive masking conflicts with Carto's short-generation collapse model) | reference only (not adopted) |
 | [dense-analysis/ale](https://github.com/dense-analysis/ale) | person | Reference for asynchronous linting and diagnostics in projects Carto works on | reference only |
+| [turri-oss/turri](https://github.com/turri-oss/turri) | person | Reference for regenerative coding, ***plain specifications, and orchestration | reference only |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at
