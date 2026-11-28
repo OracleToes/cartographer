@@ -25,6 +25,42 @@ notice. Archive grace advances normally on each main return collapse, even when
 returns are close together. Other unresolved boundaries remain decisions, not
 assumptions.
 
+## Dependency and duplication audit
+
+The foundations are still dormant and incomplete. An audit of the installed Pi
+1.5.2 APIs and Carto's existing collapse paths found:
+
+- The session inference gate had reimplemented stream forwarding and provider
+  failure messages. It now uses Pi AI's exported `lazyStream`, retaining only
+  Carto's FIFO admission and cancellation policy. Pi Durable schedules tasks but
+  does not expose a session-wide model inference semaphore; Pi's code-mode
+  concurrency bound applies to one script, not all Harness requests. The gate
+  still does not coordinate other sessions, processes or provider-side deferred
+  work. This gate is also used in direct mode.
+- The delegate's initial input request ID was spelled independently in
+  admission, retry, checkpoint and sweep code. One shared identity function now
+  supplies those paths; Pi still performs submission deduplication.
+- Child creation and ownership, documents and transactional admission, active
+  context derivation, task abortion, and request replay use Pi's APIs. Return
+  record marks, pin refresh, freshness, archive and projection planning reuse
+  Carto's ordinary collapse/domain code. These prospective planners are not an
+  integrated collapse, journal, or proof that a source can be deleted.
+- The manual source-store seal is a schema-dependent change detector, not a
+  Pi-provided snapshot or lock. Pi's public SQLite storage opener runs migrations,
+  so it is not a substitute for Carto's read-only inspection. The seal is a
+  maintenance and compatibility risk; unknown schemas fail closed. No equivalent
+  public Pi API for a read-only logical store fingerprint was identified.
+- Input checkpoints, return barriers and provenance checks encode Carto-specific
+  loss-prevention rules that Pi's abort and scheduler do not provide. In
+  particular, Pi can withdraw queued input, and throwing a generation hook is
+  not a fail-closed barrier. These checks are not a writer lock; source and
+  destination sealing and end-to-end recovery remain unimplemented.
+
+This audit does not prove every custom guard necessary or complete; future host
+integration must re-evaluate them against the then-installed Pi APIs rather than
+recreating Pi scheduling, context or storage behavior. The source-deletion
+guard and startup rejection remain in place.
+
 ## Implementation progress
 
 The first foundation reserves and validates a per-project execution-mode

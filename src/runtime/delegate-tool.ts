@@ -5,7 +5,7 @@
  */
 import { defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
-import { admitDelegateInput, ensureDelegateConversation } from "./delegate-conversation.js";
+import { admitDelegateInput, delegateInputRequestId, ensureDelegateConversation } from "./delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "./delegate-report.js";
 import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
@@ -88,7 +88,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
         // same request ID retrieves the already-admitted submission, even if
         // the handoff returned between this commit and this lookup.
         const submitted = await child.submit({
-          type: "input", content: JSON.stringify(input), requestId: `carto.delegate-input:${api.taskId}`,
+          type: "input", content: JSON.stringify(input), requestId: delegateInputRequestId(api.taskId),
         }, context);
         if (submitted.id !== submissionId) throw new Error("Delegate input identity changed; the handoff was preserved.");
         const settled = await submitted.wait(context);

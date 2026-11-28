@@ -7,6 +7,9 @@
 import { configure, defineDoc, type ConversationHandle, type ConversationId, type Extension, type ModelRef, type SubmissionId, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { DelegationDoc, startDelegation } from "./delegation-record.js";
 
+/** The same Pi request identity is used for admission, retry and recovery scans. */
+export const delegateInputRequestId = (ownerId: TaskId): string => `carto.delegate-input:${ownerId}`;
+
 /** Durable link checked by the child request barrier; not a substitute for task ownership. */
 export const DelegateChildIdentityDoc = defineDoc<{ mainId: number | null; ownerId: number | null; handoffId: string | null }>({
   kind: "carto.delegate-child-identity", version: 1, scope: "conversation", history: "latest", fork: "initial",
@@ -90,6 +93,6 @@ export async function admitDelegateInput(
   }
   if (active.phase === "returned" || active.phase === "ending") return null;
   return child.submit(tx, {
-    type: "input", content: JSON.stringify(active.input), requestId: `carto.delegate-input:${ownerId}`,
+    type: "input", content: JSON.stringify(active.input), requestId: delegateInputRequestId(ownerId),
   });
 }

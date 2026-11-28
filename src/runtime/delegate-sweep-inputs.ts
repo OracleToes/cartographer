@@ -1,7 +1,7 @@
 /** Dormant source-checkpoint identity inspection for a prospective return sweep. */
 import { isDeepStrictEqual } from "node:util";
 import { InboxDoc, ROOT_CONVERSATION_ID, type ConversationId, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
-import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
+import { DelegateChildIdentityDoc, delegateInputRequestId } from "./delegate-conversation.js";
 import { ownedHandoff } from "./delegate-control.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
@@ -76,7 +76,7 @@ export async function inspectReturnSweepInputs(
     if (submission?.type !== "input" || (submission.conversationId !== mainId && submission.conversationId !== owned.childId)) {
       throw new Error("A checkpoint submission is missing or belongs to another conversation; the source was preserved.");
     }
-    if (submission.requestId === `carto.delegate-input:${owned.ownerId}`) {
+    if (submission.requestId === delegateInputRequestId(owned.ownerId)) {
       throw new Error("The delegate's initial instruction is not a checkpointed person input; the source was preserved.");
     }
     if (input.placement === "queued") {

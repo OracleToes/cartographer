@@ -77,6 +77,39 @@ test("session inference admission serializes stream methods and cancels waiting 
   } finally { releaseFirst(); }
 });
 
+test("inference admission releases Pi lazy streams after setup, iteration and result failures", async () => {
+  const faux = fauxProvider({ provider: "lazy-failure", models: [{ id: "one" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const model = models.getModel("lazy-failure", "one");
+  const inner = Object.create(models);
+  let calls = 0;
+  Object.defineProperty(inner, "streamSimple", { value: (...args) => {
+    calls++;
+    if (calls === 1) throw new Error("setup failed");
+    if (calls === 2) return {
+      async *[Symbol.asyncIterator]() { throw Object.assign(new Error("iterator aborted"), { name: "AbortError" }); },
+      result: async () => { throw new Error("unreachable"); },
+    };
+    if (calls === 3) return {
+      async *[Symbol.asyncIterator]() {},
+      result: async () => { throw new Error("result failed"); },
+    };
+    if (calls === 4) return {
+      async *[Symbol.asyncIterator]() {},
+      result: async () => fauxAssistantMessage("result without terminal event"),
+    };
+    return models.streamSimple(...args);
+  } });
+  faux.setResponses([() => fauxAssistantMessage("after failures")]);
+  const admitted = createInferenceAdmission(inner);
+  const context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+  const responses = await Promise.all(Array.from({ length: 5 }, () => admitted.streamSimple(model, context).result()));
+  assert.deepEqual(responses.map((response) => response.stopReason), ["error", "aborted", "error", "stop", "stop"]);
+  assert.deepEqual(responses.slice(0, 3).map((response) => response.errorMessage), ["setup failed", "iterator aborted", "result failed"]);
+  assert.equal(faux.state.callCount, 1);
+});
+
 test("deferred polls and completion helpers share admission without blocking cancellation", async () => {
   const faux = fauxProvider({ provider: "deferred-serial", models: [{ id: "one" }] });
   const models = createModels();

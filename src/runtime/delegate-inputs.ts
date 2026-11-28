@@ -3,7 +3,7 @@ import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type Cursor, type Storage, type SubmissionRecord, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegateMainBarrierDoc, DelegationDoc, type DelegationTransfer } from "./delegation-record.js";
-import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
+import { DelegateChildIdentityDoc, delegateInputRequestId } from "./delegate-conversation.js";
 
 export type CapturedInput = {
   submissionId: number;
@@ -89,7 +89,7 @@ export async function findUnansweredInputs(
 export async function findUnansweredDelegateInputs(
   storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,
 ): Promise<Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>>> {
-  return (await findUnansweredInputs(storage, childId, context)).filter((submission) => submission.requestId !== `carto.delegate-input:${ownerId}`);
+  return (await findUnansweredInputs(storage, childId, context)).filter((submission) => submission.requestId !== delegateInputRequestId(ownerId));
 }
 
 export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({
@@ -175,7 +175,7 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
     if (owner?.kind !== "pi.tool" || owner.conversationId !== mainId) {
       throw new Error("Delegate owner is unavailable; its inputs were preserved.");
     }
-    await capture(childId, `carto.delegate-input:${identity.ownerId}`);
+    await capture(childId, delegateInputRequestId(identity.ownerId as TaskId));
   }
   inputs.sort((left, right) => left.submissionId - right.submissionId);
   if (new Set(inputs.map((input) => input.submissionId)).size !== inputs.length) {

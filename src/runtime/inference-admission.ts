@@ -4,8 +4,8 @@
  * this does not itself schedule agents.
  */
 import type { Models } from "@earendil-works/pi-ai/models";
-import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 
 type Waiter = { signal: AbortSignal | undefined; resolve: (release: () => void) => void; reject: (error: Error) => void; cancel: () => void };
 
@@ -53,31 +53,34 @@ export function createInferenceAdmission(models: Models): Models {
     const inner = models[name].bind(models);
     Object.defineProperty(wrapped, name, {
       value: (model: Model<Api>, context: unknown, options: { signal?: AbortSignal } = {}) => {
-        const output = createAssistantMessageEventStream();
-        void (async () => {
-          let release: (() => void) | undefined;
+        let release: (() => void) | undefined;
+        // Pi's lazy stream classifies failures by its signal. Preserve the
+        // existing AbortError classification even when an inner stream throws
+        // that error without aborting the caller's signal.
+        const abort = new AbortController();
+        const signal = options.signal === undefined ? abort.signal : AbortSignal.any([options.signal, abort.signal]);
+        const markAbort = (error: unknown) => {
+          if (error instanceof Error && error.name === "AbortError") abort.abort();
+        };
+        return lazyStream(model, async () => {
           try {
             release = await acquire(options.signal);
             // The signal may have fired between acquisition and this microtask.
             if (options.signal?.aborted) throw abortError();
             const stream = inner(model as never, context as never, options as never);
-            for await (const event of stream) output.push(event);
-            output.end(await stream.result());
-          } catch (error) {
-            const aborted = options.signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
-            const message: AssistantMessage = {
-              role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
-              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-              stopReason: aborted ? "aborted" : "error",
-              errorMessage: error instanceof Error ? error.message : String(error), timestamp: Date.now(),
+            return {
+              async *[Symbol.asyncIterator]() {
+                try { yield* stream; } catch (error) { markAbort(error); throw error; }
+              },
+              async result() {
+                try { return await stream.result(); } catch (error) { markAbort(error); throw error; }
+              },
             };
-            output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
-            output.end(message);
-          } finally {
-            release?.();
+          } catch (error) {
+            markAbort(error);
+            throw error;
           }
-        })();
-        return output;
+        }, { onResult: () => release?.() }, signal);
       },
     });
   }
