@@ -70,8 +70,10 @@ proposal text; unresolved details are not implicitly decided by them.
   normal message. The person can steer the delegate to report if desired, or
   use a command to end the delegation immediately; the UI prompts for a reason,
   which may be blank. Immediate end does not give the delegate an extra reporting
-  turn or require a report. Preserve partial work and do not invent a report.
-  The handling and destination of the optional reason still need specification.
+  turn. The person's reason, including a blank reason, goes in the report field,
+  and main is informed that the person ended the task early. The reason is the
+  person's input, not a delegate-generated account of work or completion.
+  Preserve partial work and do not invent a delegate report.
 - **Behavior provenance and promotion.** Keep these distinctions:
   - **Dictated:** a feature, build, or implementation requested by the person,
     or behavior promoted to dictated.
@@ -93,9 +95,9 @@ proposal text; unresolved details are not implicitly decided by them.
   confirmation is needed. Incidental changes not covered by that request still
   need to be flagged and confirmed.
 
-**Next unanswered question:** should the optional reason for ending a delegate
-be delivered to main along with the fact that the person ended it, so main can
-reconcile the partial work?
+**Next unanswered question:** if an implementation delegate discovers that
+finishing would change a behavior not covered by the person's request, should
+it return to main to get the person's decision, or ask the person directly?
 
 ## 1. Recommendation in one sentence
 
@@ -489,10 +491,12 @@ no special models are required by this design.
    main with the report and current Brain; main checks project/spec changes and
    evidence, resolves questions and updates Atlas/Ledger before delegating
    again. An immediate end also returns through the normal main collapse, but
-   without demanding a report or a fabricated delegate message; its optional
-   reason handling remains open. Do not transfer task-local conversation into
-   main. A stale input/report is labeled and
-   re-assessed; it cannot certify the changed contract.
+   without demanding a delegate report or fabricating a delegate message. The
+   person's optional reason goes into the report field and main is told that the
+   person ended the task early. Keep its person-authored provenance clear; do not
+   treat the reason as a delegate's findings. Do not transfer task-local
+   conversation into main. A stale input/report is labeled and re-assessed; it
+   cannot certify the changed contract.
 7. **Failures remain real.** On overflow, a system message tells main to
    investigate and stitch a continuation; no fabricated report or success.
    Interruption, provider failure, unavailable grammar or failed collapse must
