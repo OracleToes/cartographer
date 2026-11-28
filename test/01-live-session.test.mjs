@@ -48,7 +48,7 @@ import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, DelegateChildIdentityDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
-import { acknowledgeDelegationReturn, admitDelegationReturn, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
+import { acknowledgeDelegationReturn, admitDelegationReturn, delegationReturnId, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
@@ -876,6 +876,34 @@ test("delegate return preserves a staged input omitted or edited in Pi context",
     assert.equal((await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT)).handoffId, "handoff");
     await edit({ action: "replace", messages: entry.model });
     assert.equal(await acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), true);
+  } finally { await harness.close(BACKGROUND_CONTEXT); await cleanup(); }
+});
+
+test("return admission refuses a request ID collision and a conflicting recorded input", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const harness = await Harness.open(new MemoryStorage(), { models, registry: createRegistry() }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, compaction: { enabled: false } } });
+    await main.commit(async (tx) => {
+      const record = await tx.doc(DelegationDoc, main.id);
+      prepareDelegation(record, { id: "handoff", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(record, "handoff", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const requestId = delegationReturnId(active);
+    faux.setResponses([fauxAssistantMessage("answered the unrelated input")]);
+    const other = await main.submit({ type: "input", content: "not the delegate return", requestId }, BACKGROUND_CONTEXT);
+    assert.equal((await other.wait(BACKGROUND_CONTEXT)).status, "done");
+    await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /request identity is already in use/);
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.input.id, "handoff");
+    await main.commit(async (tx) => {
+      const marker = await tx.doc(DelegateMainBarrierDoc, main.id);
+      marker.admittedId = requestId; marker.submissionId = other.id;
+    }, BACKGROUND_CONTEXT);
+    await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /return input conflicts/);
+    await assert.rejects(acknowledgeDelegationReturn(main, "handoff", other.id, BACKGROUND_CONTEXT), /return input conflicts/);
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.input.id, "handoff");
   } finally { await harness.close(BACKGROUND_CONTEXT); await cleanup(); }
 });
 

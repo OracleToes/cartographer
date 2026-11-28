@@ -810,7 +810,12 @@ child receives only explicitly selected extensions and tools. A dormant return
 admission helper uses Pi's transactional input and request-ID deduplication to
 put a clearly attributed return into main's context. It retains the handoff
 until the corresponding input is answered; a retry reuses that input and an
-unanswered input cannot clear the handoff. The caller is responsible for the
+unanswered input cannot clear the handoff. Pi deduplicates a request by ID and
+type without comparing content, so an unmarked existing request blocks a new
+admission. A marked retry and acknowledgement verify its indexed submission,
+original Pi entry, return text and provenance instead of trusting the ID alone.
+This does not prove the model received an unmodified return: the host must seal
+context writers and control request hooks. The caller is responsible for the
 required preceding collapse and for handling unanswered inputs. These
 foundations do not yet drive delegation or return presentation in the product
 and are not exposed as an orchestration feature. They do not imply isolation

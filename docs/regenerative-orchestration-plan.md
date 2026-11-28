@@ -86,8 +86,11 @@ extensions. A dedicated Pi tool records a structured delegate report in the
 handoff, with idempotent replay and conflict refusal. A dormant return-admission
 helper uses Pi's transactional submissions and request IDs to present a return
 to main, retaining the handoff until that input is answered and checked before
-clearing the slot. The caller must first perform the return collapse and must
-handle unanswered inputs. A dormant Pi delegation tool composes the child and
+clearing the slot. Pi's ID deduplication compares submission type, not content:
+Carto refuses an unmarked existing request and checks the original entry's text
+and provenance on marked retries and acknowledgement. This is not proof of the
+model's request; the host must seal context writers and control request hooks.
+The caller must first perform the return collapse and must handle unanswered inputs. A dormant Pi delegation tool composes the child and
 report foundations, with request-ID replay and an explicit missing-report
 failure; a test reuses Carto's scoped read tool for capture. Both delegation
 and report now fail closed unless their durable Pi tool task references a
