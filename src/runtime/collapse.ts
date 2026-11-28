@@ -802,6 +802,34 @@ export interface CollapseReport {
   deleted: readonly string[];
 }
 
+/**
+ * Prepare the ordinary collapse's file-pin refresh without mutating the Brain.
+ * File contents can change immediately after reading; callers must control
+ * writers and reconcile the Brain and projection before committing a sweep.
+ */
+export function prepareCollapsePinRefresh(root: string, brain: CartoBrain, now: number): {
+  fileTexts: Map<string, string | undefined>;
+  writes: Array<{ write: BrainWrite; now: number }>;
+} {
+  const writes: Array<{ write: BrainWrite; now: number }> = [];
+  const fileTexts = pinnedFileTexts(root, brain);
+  for (const file of brain.files) {
+    const stale = fileTexts.get(file.path) === undefined;
+    if (stale !== (file.stale === true)) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
+  }
+  const deletions = new Set(brain.ephemeralDeletes ?? []);
+  for (const item of brain.ephemera) {
+    if (item.pinned === undefined || deletions.has(item.id)) continue;
+    const path = item.kind === "readResult" ? item.entity?.path : undefined;
+    if (path === undefined) continue;
+    const text = readPinnedFile(root, path, true);
+    if (text === undefined) continue;
+    const refreshedItem: PinnedEphemeral = { ...item, text };
+    writes.push({ write: { kind: "ephemeral.pin", item: refreshedItem }, now });
+  }
+  return { fileTexts, writes };
+}
+
 /** Clear pending ephemeral deletions and their pins in the collapse transaction. */
 export function collapseEphemeralDeletionWrites(brain: CartoBrain, now: number): Array<{ write: BrainWrite; now: number }> {
   const pins = new Set(brain.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
@@ -894,22 +922,9 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // becomes what the file holds now, and if the file is gone it keeps its text
   // and is marked stale, because a pin that silently kept the old bytes would
   // be the stale quotation the pin exists to prevent.
-  const fileTexts = pinnedFileTexts(root, refreshed);
-  for (const file of refreshed.files) {
-    const text = fileTexts.get(file.path);
-    const stale = text === undefined;
-    const already = file.stale === true;
-    if (stale !== already) writes.push({ write: { kind: "file.stale", path: file.path, stale }, now });
-  }
-  for (const item of refreshed.ephemera) {
-    if (item.pinned === undefined || deletions.has(item.id)) continue;
-    const path = item.kind === "readResult" ? item.entity?.path : undefined;
-    if (path === undefined) continue;
-    const text = readPinnedFile(root, path, true);
-    if (text === undefined) continue;
-    const refreshedItem: PinnedEphemeral = { ...item, text };
-    writes.push({ write: { kind: "ephemeral.pin", item: refreshedItem }, now });
-  }
+  const pinRefresh = prepareCollapsePinRefresh(root, refreshed, now);
+  const fileTexts = pinRefresh.fileTexts;
+  writes.push(...pinRefresh.writes);
 
   let next = refreshed;
   for (const step of writes) next = applyWrite(next, step.write, step.now);

@@ -199,7 +199,14 @@ Chat record or a pin/deletion mark on a checkpointed source entry blocks rather
 than silently overriding the person's action. Withdrawn queued content remains
 verifiable only against the checkpoint. The planner does not commit a sweep or
 permit source deletion; callers must seal Pi and Brain writers and verify the
-snapshot. A dormant source seal now hashes the logical contents and schema of a
+snapshot. An additional dormant planner composes that reconciliation with the
+same file-pin and pinned-read refresh used by ordinary collapse, returning file
+texts and prospective Brain writes. It retains existing missing-file and
+delete-over-pin behavior without mutating the snapshot. Pinned-read entity and
+path still need verification against the main source or old head; current mark
+checks do not establish those fields. The caller must seal files and settings
+as well as Pi and Brain writers. The reads are not atomic or bound to the source
+seal, snapshot, head, or journal and do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be

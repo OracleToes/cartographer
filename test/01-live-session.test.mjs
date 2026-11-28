@@ -56,7 +56,7 @@ import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js"
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
-import { prepareReturnSweepWithInputs } from "../dist/runtime/delegate-sweep-reconcile.js";
+import { prepareReturnSweepWithInputs, prepareReturnSweepWithInputsAndPinRefresh } from "../dist/runtime/delegate-sweep-reconcile.js";
 import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
 import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc, hasDelegateLimitMarker } from "../dist/runtime/delegate-limit.js";
 
@@ -1390,6 +1390,29 @@ test("person-ended delegate stops its in-flight work without a final report", as
     assert.equal(plan.pendingItems.length, 1);
     assert.equal(plan.pendingItems[0].ephemeral.text, "Start");
     assert.ok(!plan.incoming.some((item) => item.id === plan.pendingItems[0].id));
+    const withPins = structuredClone(brainSnapshot);
+    withPins.files = [
+      { path: "src/verify-me.ts", pinned: "user", createdAt: 1, stale: true },
+      { path: "missing.txt", pinned: "user", createdAt: 1 },
+    ];
+    withPins.ephemera = [
+      { id: "old:1:r", kind: "readResult", text: "old read", pinned: "user", createdAt: 1, entity: { callId: "read-1", tool: "read", path: "src/verify-me.ts" } },
+      { id: "old:2:r", kind: "readResult", text: "keep last read", pinned: "user", createdAt: 1, entity: { callId: "read-2", tool: "read", path: "missing.txt" } },
+      { id: "old:3:r", kind: "readResult", text: "delete me", pinned: "user", createdAt: 1, entity: { callId: "read-3", tool: "read", path: "src/verify-me.ts" } },
+    ];
+    withPins.ephemeralDeletes = ["old:3:r"];
+    const savedPins = structuredClone(withPins);
+    const refreshedPlan = await main.commit((tx) => prepareReturnSweepWithInputsAndPinRefresh(root, tx, main.id, active.input.id, returnViews, "gen-end", withPins, new Set(), new Set(["old:1:r", "old:2:r"]), 1), BACKGROUND_CONTEXT);
+    assert.deepEqual(withPins, savedPins, "pin preparation does not mutate the Brain");
+    assert.equal(refreshedPlan.fileTexts.get("src/verify-me.ts"), "export const answer = 42;\n");
+    assert.equal(refreshedPlan.fileTexts.get("missing.txt"), undefined);
+    let refreshedBrain = withPins;
+    for (const step of refreshedPlan.writes) refreshedBrain = applyWrite(refreshedBrain, step.write, step.now);
+    assert.equal(refreshedBrain.files.find((file) => file.path === "src/verify-me.ts").stale, undefined);
+    assert.equal(refreshedBrain.files.find((file) => file.path === "missing.txt").stale, true);
+    assert.equal(refreshedBrain.ephemera.find((item) => item.id === "old:1:r").text, "export const answer = 42;\n");
+    assert.equal(refreshedBrain.ephemera.find((item) => item.id === "old:2:r").text, "keep last read");
+    assert.equal(refreshedBrain.ephemera.some((item) => item.id === "old:3:r"), false, "deletion wins over refresh");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");

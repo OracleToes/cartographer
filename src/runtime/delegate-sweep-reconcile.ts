@@ -2,7 +2,7 @@
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import type { CartoBrain } from "../domain/records.js";
-import { ephemeralItemId } from "./collapse.js";
+import { ephemeralItemId, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { prepareReturnSweepMarks } from "./delegate-sweep-marks.js";
@@ -95,4 +95,22 @@ export async function prepareReturnSweepWithInputs(
     pendingChatDuplicates: plan.chatDuplicates.filter((duplicate) => pendingEntries.has(duplicate.entryId)),
     pendingChatIds,
   };
+}
+
+/**
+ * Extend the same prospective plan with ordinary collapse's file and pinned
+ * read refresh. The caller must additionally verify every pinned read's
+ * entity/path against its proven main source (including the old head); the
+ * current marks planner checks text and identity but not that entity. Seal Pi,
+ * Brain, project files and settings through planning and commit. These reads
+ * are not atomic and do not bind the plan to the source seal, journal or head.
+ * This helper neither commits a sweep nor permits source deletion.
+ */
+export async function prepareReturnSweepWithInputsAndPinRefresh(
+  root: string, tx: Tx, mainId: ConversationId, id: string, views: readonly ReturnSweepView[], generation: string,
+  brain: CartoBrain, headChatIds: ReadonlySet<string>, mainHeadPinIds: ReadonlySet<string>, now: number,
+) {
+  const plan = await prepareReturnSweepWithInputs(tx, mainId, id, views, generation, brain, headChatIds, mainHeadPinIds, now);
+  const refresh = prepareCollapsePinRefresh(root, brain, now);
+  return { ...plan, writes: [...plan.writes, ...refresh.writes], fileTexts: refresh.fileTexts };
 }
