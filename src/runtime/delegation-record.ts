@@ -34,13 +34,12 @@ export type Delegation =
   | { phase: "returned"; input: DelegationInput; conversationId: number | null; result: DelegationReturn };
 export type DelegationRecord = { active: Delegation | null };
 
-/** Exact source revision, retained until placement in the destination succeeds. */
-export type DelegationTransfer = {
+/** Exact source revisions, retained until placement in the destination succeeds. */
+export type StoredCheckpoint = { documentId: number; revision: number; content: string };
+export type DelegationTransfer = StoredCheckpoint & {
   source: string;
   destination: string;
-  documentId: number;
-  revision: number;
-  content: string;
+  inputCheckpoint?: StoredCheckpoint & { barrier: StoredCheckpoint };
 };
 
 /** Fail closed on unexpected shape; preserve the original bytes for comparison. */

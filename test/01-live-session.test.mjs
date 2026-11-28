@@ -172,6 +172,73 @@ test("a returned handoff survives crashes after sweep and after destination plac
   }
 });
 
+test("delegate input checkpoints transfer with the handoff and survive interrupted recovery", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  const content = [{ type: "text", text: "Keep this input" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }];
+  const checkpoint = { handoffId: "delegate:42", inputs: [
+    { submissionId: 7, placement: "queued", whenBusy: "followUp", content, entry: { kind: "carto.user", data: { chatRecordId: "chat:pending" } } },
+  ] };
+  try {
+    await brain.apply({ kind: "chat.record", record: { id: "chat:pending", author: "user", text: "Keep this input", createdAt: 1, updatedAt: 1 } }, 1);
+    await session.conversation.commit(async (tx) => {
+      const handoff = await tx.doc(DelegationDoc, session.conversation.id);
+      prepareDelegation(handoff, { id: checkpoint.handoffId, role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(handoff, checkpoint.handoffId, { kind: "person-ended", reason: "" });
+      (await tx.doc(DelegateMainBarrierDoc, session.conversation.id)).sourceId = checkpoint.handoffId;
+      const saved = await tx.doc(DelegateInputCheckpointDoc, session.conversation.id);
+      saved.handoffId = checkpoint.handoffId; saved.inputs = checkpoint.inputs;
+    }, BACKGROUND_CONTEXT);
+    const source = session.generation;
+    const sourcePath = generationPaths(root, source).store;
+    await closeLiveSession(session);
+    await assert.rejects(collapse(root, brain), /input checkpoint.*preserved/);
+    const interrupted = { ...brain, applyCollapse: async (change) => { await brain.applyCollapse(change); throw new Error("crash after sweep"); } };
+    await assert.rejects(collapse(root, interrupted, { transferDelegateInputs: true }), /crash after sweep/);
+    const transfer = await brain.readDelegationTransfer();
+    assert.deepEqual(JSON.parse(transfer.inputCheckpoint.content), checkpoint);
+    assert.equal(existsSync(sourcePath), true);
+    const changeCheckpoint = async (path, text) => {
+      const db = await openNodeSqliteDatabase(path);
+      try { await db.run("UPDATE live_document_revisions SET content = ? WHERE document_id IN (SELECT id FROM live_documents WHERE kind = ?)", text, JSON.stringify("carto.delegate-input-checkpoint")); }
+      finally { await db.close(); }
+    };
+    const changed = structuredClone(checkpoint); changed.inputs[0].content[0].text = "changed";
+    await changeCheckpoint(sourcePath, JSON.stringify(changed));
+    await assert.rejects(openLiveSession(options), /record changed or was not transferred/);
+    assert.equal(existsSync(sourcePath), true, "a changed source is not deleted");
+    await changeCheckpoint(sourcePath, transfer.inputCheckpoint.content);
+    const interruptedAck = { ...brain, acknowledgeDelegationTransfer: async () => { throw new Error("crash after placement"); } };
+    await assert.rejects(openLiveSession({ ...options, brain: interruptedAck }), /crash after placement/);
+    assert.equal(existsSync(sourcePath), false);
+    const destination = generationPaths(root, transfer.destination);
+    const head = JSON.parse(readFileSync(destination.sidecar, "utf8"));
+    assert.equal(head.chat.includes("chat:pending"), false, "the exact pending Chat identity is not duplicated in the head");
+    await changeCheckpoint(destination.store, JSON.stringify(changed));
+    await assert.rejects(openLiveSession(options), /input checkpoint conflicts/);
+    assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+    await changeCheckpoint(destination.store, transfer.inputCheckpoint.content);
+    await assert.rejects(openLiveSession(options), /input checkpoint is awaiting replay/);
+    assert.equal(await brain.readDelegationTransfer(), undefined, "acknowledged only after both documents were placed");
+    await assert.rejects(openLiveSession(options), /input checkpoint is awaiting replay/);
+    await assert.rejects(collapse(root, brain), /input checkpoint.*preserved/);
+    await assert.rejects(collapse(root, brain, { transferDelegateInputs: true }), /source barrier/);
+    assert.equal(faux.state.callCount, 0);
+    const db = await openNodeSqliteDatabase(destination.store);
+    const stored = await Harness.open(await SqliteStorage.open(db, { prefix: "live_" }), { models, registry: createRegistry() }, BACKGROUND_CONTEXT);
+    try {
+      const main = await stored.root(BACKGROUND_CONTEXT);
+      assert.deepEqual(await stored.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint);
+      assert.equal((await stored.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.input.id, checkpoint.handoffId);
+    } finally { await stored.close(BACKGROUND_CONTEXT); await db.close(); }
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("a collapsed return is admitted once and retained until main answers", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, ref, captured, factory } = fauxSetup();

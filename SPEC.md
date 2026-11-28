@@ -769,8 +769,16 @@ checkpoint. Repeating capture for the same handoff retains the original copy.
 A missing or inconsistent input, or a queued context write, stops capture rather
 than silently dropping it. The host must stop new input admission while capturing
 and keep it stopped through recovery; the checkpoint is not an admission lock.
-It is not yet transferred or replayed: collapse refuses to delete a generation
-containing one, preserving it for future recovery. A dormant main-conversation
+A dormant, explicit collapse path can transfer the checkpoint together with its
+matching returned handoff through the existing Brain journal. It verifies the
+source handoff, checkpoint and source barrier before deleting the old store,
+and places the handoff and checkpoint together in the destination before
+acknowledging the transfer. Conflicts and interrupted transfers preserve the
+remaining copies. The source must have no concurrent writers. An ordinary
+collapse still refuses a checkpoint, and Carto refuses to open a generation
+containing one because replay is not yet implemented. The host must eventually
+replay it in order, preserving provenance, and decide how it interacts with
+return admission before enabling orchestration. A dormant main-conversation
 generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for

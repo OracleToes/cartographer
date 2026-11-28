@@ -30,6 +30,7 @@
  */
 import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
 import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
+import { validateInputTransfer } from "./delegate-inputs.js";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { Message } from "@earendil-works/pi-ai";
 import type { EntryId } from "@earendil-works/pi-durable";
@@ -337,7 +338,13 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         !Number.isSafeInteger(value.documentId) || value.documentId < 1 || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.content !== "string") {
       throw new Error("Invalid delegation transfer; recovery data was preserved.");
     }
-    parseReturnedDelegation(value.content);
+    const active = parseReturnedDelegation(value.content).active;
+    if (value.inputCheckpoint !== undefined) {
+      if (active === null || value.inputCheckpoint === null || value.inputCheckpoint.documentId === value.documentId || value.inputCheckpoint.barrier?.documentId === value.documentId) {
+        throw new Error("Invalid delegate input transfer; recovery data was preserved.");
+      }
+      validateInputTransfer(value.inputCheckpoint, active.input.id);
+    }
     return value;
   };
 
@@ -554,7 +561,13 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
               !Number.isSafeInteger(transfer.revision) || transfer.revision < 1 || await readTransferFrom(tx) !== undefined) {
             throw new Error("Invalid or conflicting delegation transfer; the sweep was not committed.");
           }
-          parseReturnedDelegation(transfer.content);
+          const active = parseReturnedDelegation(transfer.content).active;
+          if (transfer.inputCheckpoint !== undefined) {
+            if (active === null || transfer.inputCheckpoint.documentId === transfer.documentId || transfer.inputCheckpoint.barrier?.documentId === transfer.documentId) {
+              throw new Error("Invalid delegate input transfer; the sweep was not committed.");
+            }
+            validateInputTransfer(transfer.inputCheckpoint, active.input.id);
+          }
           await tx.run("INSERT INTO delegation_transfer (id, document) VALUES (1, ?)", JSON.stringify(transfer));
         }
         // Commit the handoff in the same transaction as the sweep. Recovery can

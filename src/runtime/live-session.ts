@@ -58,6 +58,7 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
 import {
   appendCollapseLog,
   brainCountsOf,
@@ -271,19 +272,35 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     if (transfer !== undefined) {
       if (transfer.destination !== generation) throw new Error("Delegation transfer belongs to another generation; it was preserved.");
       const expected = parseReturnedDelegation(transfer.content);
+      const expectedInputs = transfer.inputCheckpoint === undefined ? undefined :
+        validateInputTransfer(transfer.inputCheckpoint, expected.active!.input.id);
       const existing = await harness.snapshot(DelegationDoc, conversation.id, BACKGROUND_CONTEXT);
-      if (existing === undefined) {
-        await conversation.commit(async (tx) => {
-          const target = await tx.doc(DelegationDoc, conversation.id);
-          if (target.active !== null && JSON.stringify(target) !== JSON.stringify(expected)) {
-            throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
-          }
-          target.active = expected.active;
-        }, BACKGROUND_CONTEXT);
-      } else if (JSON.stringify(existing) !== JSON.stringify(expected)) {
+      const existingInputs = await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT);
+      if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expected)) {
         throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
       }
+      if (existingInputs !== undefined && JSON.stringify(existingInputs) !== JSON.stringify(expectedInputs)) {
+        throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
+      }
+      await conversation.commit(async (tx) => {
+        const target = await tx.doc(DelegationDoc, conversation.id);
+        if (existing !== undefined ? JSON.stringify(target) !== JSON.stringify(expected) : target.active !== null) {
+          throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
+        }
+        target.active = expected.active;
+        if (expectedInputs !== undefined) {
+          const targetInputs = await tx.doc(DelegateInputCheckpointDoc, conversation.id);
+          if (existingInputs !== undefined ? JSON.stringify(targetInputs) !== JSON.stringify(expectedInputs) : targetInputs.handoffId !== null || targetInputs.inputs.length !== 0) {
+            throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
+          }
+          targetInputs.handoffId = expectedInputs.handoffId;
+          targetInputs.inputs = expectedInputs.inputs;
+        }
+      }, BACKGROUND_CONTEXT);
       await options.brain.acknowledgeDelegationTransfer(transfer);
+    }
+    if (await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT) !== undefined) {
+      throw new Error("A delegate input checkpoint is awaiting replay; the session and inputs were preserved.");
     }
     // `harness.root` skips `configure` when reopening an existing generation
     // store, leaving the persisted `pi.agent` stuck on the previous model.

@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { staleAtlasNodeIds } from "../domain/freshness.js";
+import { userText } from "../domain/chat-identity.js";
 import { projectContext } from "../domain/projection.js";
 import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
@@ -35,7 +36,8 @@ import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
-import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
+import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
+import { validateInputTransfer } from "./delegate-inputs.js";
 
 export interface GenerationFiles {
   generation: string;
@@ -114,7 +116,9 @@ const activeCollapses = new Set<string>();
  * and must not be discarded. The caller must stop generation writers: this
  * check is not a cross-process lock.
  */
-export async function readStoredDelegation(storePath: string): Promise<{ documentId: number; revision: number; content: string } | undefined> {
+type StoredDelegation = StoredCheckpoint & { inputCheckpoint?: NonNullable<DelegationTransfer["inputCheckpoint"]> };
+
+export async function readStoredDelegation(storePath: string, transferInputs = false): Promise<StoredDelegation | undefined> {
   if (!existsSync(storePath)) return undefined;
   const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
   try {
@@ -123,34 +127,44 @@ export async function readStoredDelegation(storePath: string): Promise<{ documen
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
       );
       if (documents === undefined) return undefined;
-      // A source input checkpoint is not transferred yet, even when empty or
-      // retired. Never sweep its only durable copy as an ordinary handoff.
-      const inputCheckpoint = await tx.get<{ id: number }>(
-        "SELECT id FROM live_documents WHERE kind = ? LIMIT 1", JSON.stringify("carto.delegate-input-checkpoint"),
-      );
-      if (inputCheckpoint !== undefined) throw new Error("A delegate input checkpoint is awaiting transfer; the generation store was preserved.");
       // Pi JSON-encodes indexed strings, including document kinds and keys.
-      const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
-        "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify("carto.delegation"),
-      );
-      if (rows.length === 0) return undefined;
-      const doc = rows[0];
-      if (rows.length !== 1 || doc === undefined || doc.scope_kind !== "conversation" || doc.owner_id !== 1 || doc.family !== 0 || doc.key_value !== JSON.stringify("") || doc.retired_at !== null) {
-        throw new Error("Ambiguous delegation document; the generation store was preserved.");
+      const readDoc = async (kind: string, label: string): Promise<StoredCheckpoint | undefined> => {
+        const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
+          "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify(kind),
+        );
+        if (rows.length === 0) return undefined;
+        const doc = rows[0];
+        if (rows.length !== 1 || doc === undefined || doc.scope_kind !== "conversation" || doc.owner_id !== 1 || doc.family !== 0 || doc.key_value !== JSON.stringify("") || doc.retired_at !== null) {
+          throw new Error(`Ambiguous ${label} document; the generation store was preserved.`);
+        }
+        const revision = await tx.get<{ seq: number; kind: string; version: number; content: string }>(
+          "SELECT seq, kind, version, content FROM live_document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", doc.id,
+        );
+        if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
+          throw new Error(`Unsupported ${label} checkpoint; the generation store was preserved.`);
+        }
+        return { documentId: doc.id, revision: revision.seq, content: revision.content };
+      };
+      const checkpoint = await readDoc("carto.delegate-input-checkpoint", "delegate input checkpoint");
+      if (checkpoint !== undefined && !transferInputs) throw new Error("A delegate input checkpoint is awaiting transfer; the generation store was preserved.");
+      const handoff = await readDoc("carto.delegation", "delegation");
+      if (handoff === undefined) {
+        if (checkpoint !== undefined) throw new Error("Delegate input checkpoint lacks a handoff; the generation store was preserved.");
+        return undefined;
       }
-      const revision = await tx.get<{ seq: number; kind: string; version: number; content: string }>(
-        "SELECT seq, kind, version, content FROM live_document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", doc.id,
-      );
-      if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
-        throw new Error("Unsupported delegation checkpoint; the generation store was preserved.");
-      }
-      // An acknowledged handoff leaves an empty current document. It has no
-      // return to transfer; reject any other unexpected shape as before.
-      const value: unknown = JSON.parse(revision.content);
+      const value: unknown = JSON.parse(handoff.content);
       if (value !== null && typeof value === "object" && !Array.isArray(value) &&
-          Object.keys(value).length === 1 && (value as { active?: unknown }).active === null) return undefined;
-      parseReturnedDelegation(revision.content);
-      return { documentId: doc.id, revision: revision.seq, content: revision.content };
+          Object.keys(value).length === 1 && (value as { active?: unknown }).active === null && checkpoint === undefined) return undefined;
+      const active = parseReturnedDelegation(handoff.content).active;
+      if (active === null || active.phase !== "returned") throw new Error("Invalid delegation; the generation store was preserved.");
+      if (checkpoint === undefined) return handoff;
+      const barrier = await readDoc("carto.delegate-main-barrier", "delegate source barrier");
+      if (barrier === undefined || checkpoint.documentId === handoff.documentId || barrier.documentId === handoff.documentId) {
+        throw new Error("Delegate input checkpoint lacks its source barrier; the generation store was preserved.");
+      }
+      const inputCheckpoint = { ...checkpoint, barrier };
+      validateInputTransfer(inputCheckpoint, active.input.id);
+      return { ...handoff, inputCheckpoint };
     });
   } finally {
     await database.close();
@@ -198,9 +212,10 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
         throw new Error("Delegation transfer does not match the collapse journal; all generation files were preserved.");
       }
       if (existsSync(discard.store)) {
-        const stored = await readStoredDelegation(discard.store);
+        const stored = await readStoredDelegation(discard.store, transfer?.inputCheckpoint !== undefined);
         const expected = transfer === undefined ? undefined : {
           documentId: transfer.documentId, revision: transfer.revision, content: transfer.content,
+          ...(transfer.inputCheckpoint === undefined ? {} : { inputCheckpoint: transfer.inputCheckpoint }),
         };
         if (JSON.stringify(stored ?? null) !== JSON.stringify(expected ?? null)) {
           throw new Error("Delegation record changed or was not transferred; all generation files were preserved.");
@@ -632,6 +647,8 @@ export interface CollapseOptions {
   carriedTexts?: readonly string[];
   /** Exact Chat identities of handed-on inputs, when known. */
   carriedChatIds?: readonly string[];
+  /** Dormant: transfer a source checkpoint; caller must have stopped all writers. Replay is not implemented. */
+  transferDelegateInputs?: boolean;
 }
 
 export interface CollapseReport {
@@ -679,7 +696,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   const live = discovered[0];
   if (live === undefined) throw new Error("No live generation exists to collapse.");
   if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
-  const storedDelegation = await readStoredDelegation(live.store);
+  const storedDelegation = await readStoredDelegation(live.store, options.transferDelegateInputs === true);
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
   const archive = await brain.readArchive();
   const generation = newGenerationId(new Date(now));
@@ -765,6 +782,20 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // A handed-on record stays in the body, not also the head. Prefer its exact
   // identity; carriedTexts is retained for older callers without identities.
   const handedOn = new Set<string>(options.carriedChatIds ?? []);
+  if (storedDelegation?.inputCheckpoint !== undefined) {
+    const active = parseReturnedDelegation(storedDelegation.content).active;
+    if (active === null) throw new Error("The checkpoint has no returned handoff; the generation store was preserved.");
+    const checkpoint = validateInputTransfer(storedDelegation.inputCheckpoint, active.input.id);
+    for (const input of checkpoint.inputs) {
+      const data = input.entry.data;
+      if (input.entry.kind !== "carto.user" || data === null || typeof data !== "object" || Array.isArray(data) || typeof data.chatRecordId !== "string") continue;
+      const chat = refreshed.chat.find((record) => record.id === data.chatRecordId);
+      if (chat === undefined || chat.author !== "user" || chat.text !== userText(input.content)) {
+        throw new Error("A checkpointed Chat identity conflicts with the Brain; the generation store was preserved.");
+      }
+      handedOn.add(chat.id);
+    }
+  }
   for (const text of options.carriedTexts ?? []) {
     const record = [...next.chat].reverse().find((candidate) => candidate.author === "user" && candidate.text === text && !handedOn.has(candidate.id));
     if (record !== undefined) handedOn.add(record.id);

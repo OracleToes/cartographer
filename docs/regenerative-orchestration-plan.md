@@ -67,10 +67,14 @@ its unanswered inputs still require host handling. Before the recovery abort,
 a dormant transaction checkpoints the active run's and inbox's input content,
 submission identity and entry metadata in the source generation, with replay
 reuse and refusal of ambiguous input or queued context writes. The host must
-seal input admission during capture and recovery. Collapse refuses to delete a
-store with this checkpoint because transfer and replay are not yet implemented;
-it preserves data rather than pretending the return path is complete. It
-preserves partial project work and does not cross background boundaries. The
+seal input admission during capture and recovery. An explicit, dormant collapse
+path now transfers the checkpoint with its matching handoff using the existing
+Brain journal and verifies the source barrier and both documents. Placement is
+atomic in the destination; conflicts preserve both copies. Ordinary collapse
+still refuses a checkpoint, and session opening refuses one after placement:
+replay and ordering with return admission remain unimplemented. This preserves
+data rather than pretending the return path is complete. Recovery preserves
+partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.
 A dormant main-only Pi generation hook now holds requests in the source while a
