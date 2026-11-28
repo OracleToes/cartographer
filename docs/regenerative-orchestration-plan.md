@@ -22,8 +22,8 @@ task work changes the real project and shared Atlas/Ledger rather than a
 speculative branch; every task return normally performs a full main collapse;
 and a task overflow preserves partial work and sends main an honest system
 notice. Archive grace advances normally on each main return collapse, even when
-returns are close together. Task-local collapse and other unresolved boundaries
-remain decisions, not assumptions.
+returns are close together. Other unresolved boundaries remain decisions, not
+assumptions.
 
 ## Decisions recorded during refinement
 
@@ -112,10 +112,17 @@ proposal text; unresolved details are not implicitly decided by them.
   specification if needed, and delegates the next step. Work already done
   remains in the project. The person retains the normal ability to steer or
   interrupt a delegate.
+- **Context-limit return.** When a delegate approaches its context limit, Carto
+  forces a return to main rather than collapsing the delegate's context to
+  continue. Trigger this before the limit and reserve room for a required report
+  of work done, remaining work and uncertainty. Main reassesses and may delegate
+  another focused task. A report cannot be guaranteed if, for example, an
+  unexpected overflow prevents it: preserve partial work and tell main the
+  report is missing rather than inventing one. The threshold, reserve and
+  enforcement mechanism remain to be designed and tested.
 
-**Next unanswered question:** when a delegate is approaching its context limit,
-should it collapse its own context and continue the task, or return to main
-with its progress so main can decide what to do next?
+**Next unanswered question:** when a delegate returns, should a background job
+it started keep running for main to manage, or should Carto stop it?
 
 ## 1. Recommendation in one sentence
 
@@ -581,9 +588,10 @@ These are proposals/questions, not decisions attributed to the person:
 5. **Task inputs and controls:** exact eligible selected entry types, snapshots
    vs references, shared Atlas/Ledger visibility, missing/stale references,
    message routing, pause, cancel, interruption, wipe, exit and task view.
-6. **Task-local collapse and jobs:** how local Chat, pins and shared archive
-   interact across a local collapse; avoid accidentally advancing main archive
-   grace. Define shell/job ownership and survival across task return.
+6. **Task context and jobs:** context-limit return replaces local collapse as
+   the continuation at the warning; other task-local boundaries, including
+   Chat, pins and archive handling, still need design. Define shell/job
+   ownership and survival across task return.
 7. **Reports and grammar:** exact report/message schema and separation; verify
    GBNF enforcement and forced tool/report behavior on the actual installed
    pi-ai/llama-swap/llama.cpp route, including durable replay. Installed pi-ai
