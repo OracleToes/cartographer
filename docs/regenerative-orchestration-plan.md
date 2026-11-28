@@ -103,8 +103,12 @@ still refuses an outstanding checkpoint, and ordinary session opening refuses
 one after placement. A dormant staging helper places the preserved inputs as
 ordered user-context entries before return admission using Pi transactional
 writes; it preserves content and entry metadata but does not reproduce Pi's
-original steer/follow-up submissions. Checked receipt and checkpoint clear only
-after the return is answered. A dormant destination preparation now composes
+original steer/follow-up submissions. Admission and acknowledgement also check
+Pi's derived active context for the staged contributions and recheck its bounds
+and receipt on the transaction line; omitted or edited inputs block. The host
+must still seal context writers from staging through answer and acknowledgement,
+and prevent other request hooks from changing the inputs. Checked receipt and
+checkpoint clear only after the return is answered. A dormant destination preparation now composes
 transfer placement, resumable staging and return admission; retry reuses the
 admitted request, and acknowledgement still requires a completed answer. The
 existing direct-session transfer placement is shared, but direct opening still

@@ -797,6 +797,46 @@ test("checkpoint staging is resumable, ordered, and cleared only after the retur
   }
 });
 
+test("delegate return preserves a staged input omitted or edited in Pi context", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, factory } = fauxSetup();
+  const barrier = createDelegateMainBarrier();
+  const registry = createRegistry(); registry.install(barrier);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier], compaction: { enabled: false } } });
+    await main.commit(async (tx) => {
+      const handoff = await tx.doc(DelegationDoc, main.id);
+      prepareDelegation(handoff, { id: "handoff", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(handoff, "handoff", { kind: "person-ended", reason: "" });
+      const saved = await tx.doc(DelegateInputCheckpointDoc, main.id);
+      saved.handoffId = "handoff";
+      saved.inputs = [{ submissionId: 7, placement: "queued", whenBusy: "followUp", content: "preserve", entry: { kind: "pi.user" } }];
+    }, BACKGROUND_CONTEXT);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), true);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), false);
+    const entry = (await main.context(BACKGROUND_CONTEXT)).entries.find((item) => item.kind === "pi.user");
+    const edit = async (change) => {
+      const write = await main.submit({ type: "write", entry: { kind: "test.context-edit", edits: [{ target: entry.id, ...change }] } }, BACKGROUND_CONTEXT);
+      assert.equal((await write.wait(BACKGROUND_CONTEXT)).status, "done");
+    };
+    await edit({ action: "omit" });
+    await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /absent or edited/);
+    assert.equal(faux.state.callCount, 0, "an omitted input never reaches a return request");
+    assert.equal((await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT)).handoffId, "handoff");
+    await edit({ action: "replace", messages: entry.model });
+    faux.setResponses([factory(() => fauxAssistantMessage("reconciled"))]);
+    const id = await admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT);
+    assert.equal((await (await harness.submission(id, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    await edit({ action: "replace", messages: [{ role: "user", content: "changed", timestamp: 1 }] });
+    await assert.rejects(acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), /absent or edited/);
+    assert.equal((await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT)).handoffId, "handoff");
+    await edit({ action: "replace", messages: entry.model });
+    assert.equal(await acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), true);
+  } finally { await harness.close(BACKGROUND_CONTEXT); await cleanup(); }
+});
+
 test("a collapsed return is admitted once and retained until main answers", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, ref, captured, factory } = fauxSetup();

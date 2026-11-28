@@ -9,7 +9,7 @@ import { ROOT_CONVERSATION_ID, type Conversation, type Harness, type SubmissionI
 import type { BrainStore } from "./brain-store.js";
 import { DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation, type Delegation } from "./delegation-record.js";
 import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
-import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc, requireStagedDelegateInputs, stageNextDelegateInput } from "./delegate-input-replay.js";
+import { captureStagedDelegateContext, clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc, requireStagedDelegateContext, requireStagedDelegateInputs, stageNextDelegateInput } from "./delegate-input-replay.js";
 
 type Returned = Extract<Delegation, { phase: "returned" }>;
 
@@ -78,6 +78,7 @@ export function renderDelegationReturn(active: Returned): string {
 
 /** Admit exactly one input per return in this generation; retain the record. */
 export async function admitDelegationReturn(conversation: Conversation, id: string, context: Context): Promise<SubmissionId> {
+  const proof = await captureStagedDelegateContext(conversation, id, context);
   return conversation.commit(async (tx) => {
     const record = await tx.doc(DelegationDoc, conversation.id);
     const active = returned(record.active, id);
@@ -86,7 +87,7 @@ export async function admitDelegationReturn(conversation: Conversation, id: stri
     if (marker.sourceId !== null || (marker.admittedId !== null && marker.admittedId !== returnId)) {
       throw new Error("Delegation return cannot be admitted in its source generation or over a conflicting admission.");
     }
-    await requireStagedDelegateInputs(tx, conversation.id, id);
+    await requireStagedDelegateContext(tx, conversation.id, id, proof);
     const submission = await conversation.submit(tx, {
       type: "input", content: renderDelegationReturn(active), requestId: returnId, whenBusy: "reject",
       entry: { kind: "carto.delegate-return", data: { delegationId: active.input.id, provenance: active.result.kind } },
@@ -147,6 +148,7 @@ export async function prepareDelegationDestination(
 export async function acknowledgeDelegationReturn(
   conversation: Conversation, id: string, submissionId: SubmissionId, context: Context,
 ): Promise<boolean> {
+  const proof = await captureStagedDelegateContext(conversation, id, context);
   return conversation.commit(async (tx) => {
     const submission = await tx.submission(submissionId);
     const record = await tx.doc(DelegationDoc, conversation.id);
@@ -159,6 +161,7 @@ export async function acknowledgeDelegationReturn(
         submission.requestId !== returnId || submission.status !== "done") {
       throw new Error("The matching delegation return has not been answered; the handoff was preserved.");
     }
+    await requireStagedDelegateContext(tx, conversation.id, id, proof);
     if (await requireStagedDelegateInputs(tx, conversation.id, id)) {
       const checkpoint = await tx.doc(DelegateInputCheckpointDoc, conversation.id);
       const receipt = await tx.doc(DelegateInputReplayDoc, conversation.id);

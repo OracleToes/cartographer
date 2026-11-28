@@ -1,7 +1,8 @@
 /** Dormant staging of preserved main inputs before the delegate return is answered. */
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
-import { defineDoc, InboxDoc, LiveDoc, type Conversation, type ConversationId, type SubmissionId, type Tx, type UserInput } from "@earendil-works/pi-durable";
+import { defineDoc, InboxDoc, LiveDoc, type Conversation, type ConversationId, type EntryId, type SubmissionId, type Tx, type UserInput } from "@earendil-works/pi-durable";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint, type InputCheckpoint } from "./delegate-inputs.js";
 import { DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
 
@@ -67,6 +68,66 @@ export async function requireStagedDelegateInputs(tx: Tx, mainId: ConversationId
     throw new Error("Delegate input staging is incomplete; the checkpoint was preserved.");
   }
   return true;
+}
+
+/** Bounds and receipt for a Pi-derived context check; not a writer lock. */
+export type StagedDelegateContext = { tail: EntryId | undefined; head: EntryId | undefined; fingerprint: string };
+
+/**
+ * Check that every staged input is actually still visible, unedited, in Pi's
+ * derived context. A raw entry and a done write submission alone are not proof:
+ * a later Pi edit or head reset can omit or replace their contributions. The
+ * caller must seal all destination context writers from staging through the
+ * answer and acknowledgement, and prevent other request hooks changing it.
+ * Bounds and receipt are checked again on the transaction line; they detect
+ * changes but cannot lock external writers or prove what the model received.
+ */
+export async function captureStagedDelegateContext(main: Conversation, id: string, context: Context): Promise<StagedDelegateContext | undefined> {
+  const before = await main.commit(async (tx) => {
+    if (!await requireStagedDelegateInputs(tx, main.id, id)) return undefined;
+    const checked = await validateReceipt(tx, main.id, id);
+    const entries: EntryId[] = [];
+    for (const recorded of checked.receipt.submissions) {
+      const submission = await tx.submission(recorded as SubmissionId);
+      if (submission?.type !== "write" || submission.status !== "done") throw new Error("A staged delegate input is unavailable; it was preserved.");
+      entries.push(submission.entry);
+    }
+    return {
+      tail: await tx.latestEntryId(main.id), head: (await tx.latestHeadMarker(main.id))?.id,
+      fingerprint: JSON.stringify([checked.checkpoint, checked.receipt]), entries,
+      inputs: JSON.parse(JSON.stringify(checked.checkpoint.inputs)) as InputCheckpoint["inputs"],
+    };
+  }, context);
+  if (before === undefined) return undefined;
+  const view = await main.context(context, before.tail === undefined ? undefined : { at: before.tail });
+  if (view.head?.id !== before.head || view.entries.length !== view.contributions.length) {
+    throw new Error("Staged delegate input context changed; it was preserved.");
+  }
+  for (const [index, entryId] of before.entries.entries()) {
+    const positions = view.entries.flatMap((entry, position) => entry.id === entryId ? [position] : []);
+    const contribution = positions.length === 1 ? view.contributions[positions[0]!] : undefined;
+    const input = before.inputs[index]!;
+    if (contribution?.length !== 1 || contribution[0]?.role !== "user" || !isDeepStrictEqual(contribution[0].content, input.content)) {
+      throw new Error("A staged delegate input is absent or edited in the active context; it was preserved.");
+    }
+  }
+  const proof = { tail: before.tail, head: before.head, fingerprint: before.fingerprint };
+  await main.commit((tx) => requireStagedDelegateContext(tx, main.id, id, proof), context);
+  return proof;
+}
+
+/** Recheck the captured Pi context's bounds and receipt on the commit line. */
+export async function requireStagedDelegateContext(tx: Tx, mainId: ConversationId, id: string, proof: StagedDelegateContext | undefined): Promise<void> {
+  if (proof === undefined) {
+    if (await requireStagedDelegateInputs(tx, mainId, id)) throw new Error("Delegate input staging changed; it was preserved.");
+    return;
+  }
+  if (!await requireStagedDelegateInputs(tx, mainId, id)) throw new Error("Delegate input staging changed; it was preserved.");
+  const checked = await validateReceipt(tx, mainId, id);
+  if (JSON.stringify([checked.checkpoint, checked.receipt]) !== proof.fingerprint ||
+      await tx.latestEntryId(mainId) !== proof.tail || (await tx.latestHeadMarker(mainId))?.id !== proof.head) {
+    throw new Error("Staged delegate input context changed; it was preserved.");
+  }
 }
 
 /**
