@@ -881,7 +881,8 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // What is leaving the Brain: every record carrying a mark, with its action.
   // The writes below take each one out of the Brain, because an applied mark is
   // a mark gone and, for archive, the record is a Brain record no longer (§4.1).
-  const leaving = markedForCollapse(refreshed);
+  const recordMarks = prepareCollapseRecordMarks(refreshed, now);
+  const leaving = recordMarks.leaving;
   // What is leaving the old store (§3.1, §3.4).
   //
   // An ephemeral item survives a collapse only if it is pinned (§3.1), and a pin
@@ -917,10 +918,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // §4.1). The same writes go into the transaction below, so what is rendered
   // and what is committed are the same Brain.
   const writes: { write: BrainWrite; now: number }[] = collapseEphemeralDeletionWrites(refreshed, now);
-  for (const record of leaving) {
-    writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
-    writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });
-  }
+  writes.push(...recordMarks.writes);
   // A pinned file is read again here, at the collapse, so the head holds the
   // file as it now stands rather than a quotation of an earlier read (§5.1,
   // §5.5). A pinned `read` result is made true the same way (§5.5): its text
@@ -999,7 +997,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     ...(storedDelegation === undefined ? {} : { delegationTransfer: { source: live.generation, destination: generation, ...storedDelegation } satisfies DelegationTransfer }),
     expected: { brain: refreshed, archive },
     incoming: [
-      ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),
+      ...recordMarks.incoming,
       ...swept,
     ],
     now,
@@ -1053,6 +1051,21 @@ interface LeavingRecord {
   id: string;
   action: "archive" | "delete";
   incoming?: IncomingItem;
+}
+
+/** Prepare the ordinary record-mark writes and archive items without mutating the Brain. */
+export function prepareCollapseRecordMarks(brain: CartoBrain, now: number): {
+  leaving: LeavingRecord[];
+  writes: Array<{ write: BrainWrite; now: number }>;
+  incoming: IncomingItem[];
+} {
+  const leaving = markedForCollapse(brain);
+  const writes: Array<{ write: BrainWrite; now: number }> = [];
+  for (const record of leaving) {
+    writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
+    writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });
+  }
+  return { leaving, writes, incoming: leaving.flatMap((record) => record.incoming === undefined ? [] : [record.incoming]) };
 }
 
 /**

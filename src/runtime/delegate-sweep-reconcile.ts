@@ -1,11 +1,13 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
+import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, PinnedEphemeral } from "../domain/records.js";
 import { ephemeralItemId, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
+import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
 import { prepareReturnSweepMarks, verifyReturnSweepFrozenPins, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
@@ -135,4 +137,18 @@ export async function prepareReturnSweepWithSourceHead(
   const head = captureReturnSweepHead(root, generation, views);
   const plan = await prepareReturnSweepWithInputsAndPinRefresh(root, tx, mainId, id, views, generation, brain, new Set(head.chatIds), head.pins, now);
   return { ...plan, sourceHeadDigest: head.digest };
+}
+
+/**
+ * Add record marks and archive restores to the prospective source-head plan.
+ * This still lacks Atlas freshness, destination/recovery integration and writer
+ * sealing. In particular, pending child restores have no destination yet.
+ */
+export async function prepareReturnSweepWithRecords(
+  root: string, tx: Tx, mainId: ConversationId, id: string, views: readonly ReturnSweepView[], generation: string,
+  brain: CartoBrain, archive: Archive, now: number,
+) {
+  const plan = await prepareReturnSweepWithSourceHead(root, tx, mainId, id, views, generation, brain, now);
+  const records = prepareReturnSweepRecords(brain, archive, plan.incoming, plan.writes, now);
+  return { ...plan, ...records };
 }

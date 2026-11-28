@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
+import { prepareReturnSweepRecords } from "../dist/runtime/delegate-sweep-records.js";
 import { handleOf } from "../dist/domain/handles.js";
 
 function tempBrain() {
@@ -157,6 +158,46 @@ test("applying a record's mark now moves it to the archive or deletes it, in one
   } finally {
     cleanup();
   }
+});
+
+test("return record planning matches the Brain sweep and refuses overwriting archive or restored records", async () => {
+  const { path, cleanup } = tempBrain();
+  const store = await openBrain(path);
+  try {
+    await store.apply({ kind: "chat.record", record: chat("old", "restore me", at(1)) }, at(1));
+    await store.applyRecordAction({ kind: "chat", id: "old", action: "archive", generation: "gen-old", now: at(2) });
+    await store.applyArchive({ kind: "mark", id: "record:chat:old", action: "restore", author: "user" });
+    await store.archiveEphemeral({ id: "past-work", layer: "ephemeral", ephemeral: { kind: "personMessage", text: "later" } }, "gen-old", at(2));
+    await store.applyArchive({ kind: "mark", id: "past-work", action: "restore", author: "user" });
+    for (const id of ["archive", "delete"]) {
+      await store.apply({ kind: "chat.record", record: chat(id, id, at(3)) }, at(3));
+      await store.apply({ kind: "mark.set", target: "chat", id, action: id, author: "user" }, at(4));
+    }
+    const expected = { brain: await store.read(), archive: await store.readArchive() };
+    const incoming = [{ id: "live-work", layer: "ephemeral", ephemeral: { kind: "plainText", text: "delegate work" } }];
+    const original = structuredClone(expected);
+    const plan = prepareReturnSweepRecords(expected.brain, expected.archive, incoming, [], at(5));
+    assert.deepEqual(expected, original, "planning does not mutate either snapshot");
+    assert.deepEqual(plan.nextBrain.chat.map((record) => record.id), ["old"]);
+    assert.ok(plan.incoming.some((item) => item.id === "record:chat:archive" && item.record.value.mark === undefined));
+    assert.ok(!plan.incoming.some((item) => item.id === "record:chat:delete"));
+    assert.deepEqual(plan.pendingEphemeralRestores.map((item) => item.id), ["past-work"]);
+    assert.throws(() => prepareReturnSweepRecords(expected.brain, expected.archive, [incoming[0], incoming[0]], [], at(5)), /archive identity conflicts/);
+    assert.throws(() => prepareReturnSweepRecords(expected.brain, expected.archive, [{ ...incoming[0], id: "past-work" }], [], at(5)), /archive identity conflicts/);
+    const colliding = structuredClone(expected.brain);
+    colliding.chat.push(chat("old", "different", at(1)));
+    assert.throws(() => prepareReturnSweepRecords(colliding, expected.archive, incoming, [], at(5)), /restore conflicts with the Brain/);
+    const repeated = structuredClone(expected.brain);
+    repeated.chat.push(repeated.chat[0]);
+    assert.throws(() => prepareReturnSweepRecords(repeated, expected.archive, incoming, [], at(5)), /Ambiguous Brain record/);
+    await store.beginCollapse("gen-source", "gen-next");
+    const applied = await store.applyCollapse({ source: "gen-source", generation: "gen-next", expected, writes: plan.writes, incoming: plan.incoming, now: at(5) });
+    assert.deepEqual(applied.brain, plan.nextBrain);
+    assert.deepEqual(applied.restored, plan.restored);
+    assert.equal(applied.archive.items.find((item) => item.id === "past-work").restorePending, true);
+    assert.ok(applied.archive.items.some((item) => item.id === "record:chat:archive"));
+    assert.ok(applied.archive.items.some((item) => item.id === "live-work"));
+  } finally { await store.close(); cleanup(); }
 });
 
 test("a corrupt Brain document throws; it never reads as empty", async () => {

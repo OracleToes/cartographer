@@ -226,9 +226,15 @@ visible in the old head but is not part of the captured Pi body; the planner
 blocks rather than lose it. An explicit deletion mark still wins. Archiving such
 an item with enough original data for restoration remains unfinished. This is a
 return-planning guard only, not a change to direct collapse. A future host must
-independently establish provenance and recheck all captured state; full record
-reconciliation, sealed reads and atomic journal binding remain open. These reads
-do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
+independently establish provenance and recheck all captured state. A dormant
+record planner now reuses ordinary collapse's record-mark preparation and
+archive-restore logic, returning prospective writes, incoming records, the
+resulting Brain and ephemeral restores requiring separate destinations. It
+refuses archive identity collisions and record restores over existing records.
+The Brain transaction remains responsible for the real sweep, archive grace and
+pending restore acknowledgement. Atlas freshness, source authentication, sealed
+reads and atomic journal binding remain open; this plan authorizes no deletion.
+A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be
