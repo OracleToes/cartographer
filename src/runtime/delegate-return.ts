@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID, type Conversation, type ConversationId, type Harness, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
 import type { BrainStore } from "./brain-store.js";
+import type { ArchivedItem } from "../domain/archive.js";
 import { DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation, type Delegation } from "./delegation-record.js";
 import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
 import { captureStagedDelegateContext, clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc, requireStagedDelegateContext, requireStagedDelegateInputs, stageNextDelegateInput } from "./delegate-input-replay.js";
@@ -133,9 +134,12 @@ export async function admitDelegationReturn(conversation: Conversation, id: stri
 }
 
 /**
- * Resume destination placement, checkpoint staging and return admission in
- * that order. A partial staging receipt survives restart; an existing admitted
- * request is reused. The returned submission is not acknowledged here: retain
+ * Resume destination placement, pending archive restoration, checkpoint
+ * staging and return admission in that order. Pending restores require the
+ * host's restoration callback; a missing or incomplete callback blocks. If
+ * staging or admission already started, newly pending restores block rather
+ * than being appended out of order. A partial staging receipt survives
+ * restart; an existing admitted request is reused. The returned submission is not acknowledged here: retain
  * the handoff and checkpoint until acknowledgeDelegationReturn verifies it was
  * answered. A failed or unanswered run must be handled by the host.
  *
@@ -146,6 +150,7 @@ export async function admitDelegationReturn(conversation: Conversation, id: stri
  */
 export async function prepareDelegationDestination(
   brain: BrainStore, harness: Harness, main: Conversation, generation: string, id: string, context: Context,
+  restorePending?: (items: readonly ArchivedItem[]) => Promise<void>,
 ): Promise<SubmissionId> {
   if (main.id !== ROOT_CONVERSATION_ID) throw new Error("Delegation destination requires main.");
   const transfer = await brain.readDelegationTransfer();
@@ -167,10 +172,22 @@ export async function prepareDelegationDestination(
     else if (clearedInputCheckpoint(checkpoint) && !clearedInputReplay(replay)) {
       throw new Error("Delegate input staging lacks its checkpoint; it was preserved.");
     }
-    return { admitted: barrier.admittedId !== null, checkpoint: !clearedInputCheckpoint(checkpoint) };
+    return { admitted: barrier.admittedId !== null, checkpoint: !clearedInputCheckpoint(checkpoint), staged: !clearedInputReplay(replay) };
   }, context);
+  const pending = (await brain.readArchive()).items.filter((item) => item.restorePending === true);
+  if (pending.length !== 0) {
+    if (state.admitted || state.staged) throw new Error("A pending archive restore appeared after return staging; all data was preserved.");
+    if (restorePending === undefined) throw new Error("Pending archive restores need a destination before return admission.");
+    await restorePending(pending);
+    if ((await brain.readArchive()).items.some((item) => item.restorePending === true)) {
+      throw new Error("Pending archive restores remain unplaced; the return was not admitted.");
+    }
+  }
   if (!state.admitted && state.checkpoint) {
     while (await stageNextDelegateInput(main, id, context)) { /* one durable input at a time */ }
+  }
+  if ((await brain.readArchive()).items.some((item) => item.restorePending === true)) {
+    throw new Error("A pending archive restore appeared during return staging; all data was preserved.");
   }
   return admitDelegationReturn(main, id, context);
 }

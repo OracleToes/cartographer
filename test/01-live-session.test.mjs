@@ -34,6 +34,7 @@ import {
   closeLiveSession,
   interruptRun,
   openLiveSession,
+  prepareDelegateSessionDestination,
   restoreEphemeral,
   restoreDelegateEphemeral,
   sessionTranscript,
@@ -835,6 +836,57 @@ test("delegate input checkpoints transfer with the handoff and survive interrupt
   }
 });
 
+test("pending archive restores precede delegate return admission and retry safely", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  const barrier = createDelegateMainBarrier();
+  const registry = createRegistry(); registry.install(barrier);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier], compaction: { enabled: false } } });
+    await main.commit(async (tx) => {
+      const handoff = await tx.doc(DelegationDoc, main.id);
+      prepareDelegation(handoff, { id: "restore-handoff", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(handoff, "restore-handoff", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    for (const [entryId, conversationId, text] of [[10, 1, "main restored"], [11, 2, "child restored"]]) {
+      const item = { id: `gen-old:${entryId}:x0`, layer: "ephemeral", ephemeral: {
+        kind: "personMessage", text, model: [{ role: "user", content: text, timestamp: 1 }],
+        source: { version: 1, generation: "gen-old", conversationId, entryId, entryKind: "carto.user" },
+      } };
+      await brain.archiveEphemeral(item, "gen-old", 1);
+      await brain.applyArchive({ kind: "mark", id: item.id, action: "restore", author: "user" });
+    }
+    await brain.beginCollapse("gen-old", "gen-destination");
+    await brain.applyCollapse({ source: "gen-old", generation: "gen-destination", expected: { brain: await brain.read(), archive: await brain.readArchive() }, writes: [], incoming: [], now: 2 });
+    await brain.recoverCollapseJournal(async (journal) => assert.equal(journal.committed, true));
+    const session = { brain, harness, conversation: main, generation: "gen-destination" };
+    await assert.rejects(prepareDelegationDestination(brain, harness, main, session.generation, "restore-handoff", BACKGROUND_CONTEXT), /Pending archive restores/);
+    const interruptedBrain = { ...brain, applyArchive: async (write) => {
+      if (write.kind === "restore-complete") throw new Error("crash before restore acknowledgement");
+      return brain.applyArchive(write);
+    } };
+    await assert.rejects(prepareDelegateSessionDestination({ ...session, brain: interruptedBrain }, "restore-handoff"), /crash before restore acknowledgement/);
+    assert.equal(faux.state.callCount, 0, "the return does not run after a failed restore");
+    assert.equal((await brain.readArchive()).items.filter((item) => item.restorePending).length, 2);
+    faux.setResponses([factory(() => fauxAssistantMessage("return answered"))]);
+    const id = await prepareDelegateSessionDestination(session, "restore-handoff");
+    assert.equal((await (await harness.submission(id, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal((await brain.readArchive()).items.length, 0);
+    const mainRestored = (await main.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.kind === "carto.restored");
+    assert.equal(mainRestored.length, 1, "main placement is reused after interruption");
+    assert.equal(mainRestored[0].model[0].content, "main restored");
+    const routes = await harness.snapshot(DelegateRestoreRoutesDoc, main.id, BACKGROUND_CONTEXT);
+    const child = await harness.conversation(routes.routes[0].destinationId, BACKGROUND_CONTEXT);
+    assert.equal((await child.context(BACKGROUND_CONTEXT)).entries.find((entry) => entry.kind === "carto.restored").model[0].content, "child restored");
+    assert.match(JSON.stringify(captured[0]), /main restored/);
+    assert.doesNotMatch(JSON.stringify(captured[0]), /child restored/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
 test("checkpoint staging is resumable, ordered, and cleared only after the return is answered", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, ref, captured, factory } = fauxSetup();
@@ -860,6 +912,8 @@ test("checkpoint staging is resumable, ordered, and cleared only after the retur
     }, BACKGROUND_CONTEXT);
     await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /staging receipt/);
     assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), true);
+    const unexpectedRestore = { ...brain, readArchive: async () => ({ version: 1, items: [{ restorePending: true }] }) };
+    await assert.rejects(prepareDelegationDestination(unexpectedRestore, harness, main, "gen-destination", "handoff", BACKGROUND_CONTEXT, async () => {}), /after return staging/);
     await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /staging is incomplete/);
     assert.equal(faux.state.callCount, 0, "staging entries do not start inference");
     await harness.close(BACKGROUND_CONTEXT); await db.close();

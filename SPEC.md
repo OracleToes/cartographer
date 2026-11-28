@@ -750,8 +750,13 @@ source generation and conversation. It reuses Pi request IDs and checks actual
 entries, active contributions, the mapping and the exact archive snapshot before
 acknowledging; retries after interrupted acknowledgement reuse the destination.
 It does not resume the original delegate, seal writers, or run automatically on
-startup. The multi-conversation collapse guard still applies to destinations, and
-legacy items cannot be distinguished from rows whose provenance was lost. The conversion rejects
+startup. A composed destination helper places pending main and child restores
+before staging checkpoint inputs and admitting the return; unresolved restores
+block admission, and restores appearing after staging block rather than being
+inserted out of order. It compares the archive snapshot at acknowledgement and
+requires the host to seal writers and install the barrier. The multi-conversation
+collapse guard still applies to destinations, and legacy items cannot be
+distinguished from rows whose provenance was lost. The conversion rejects
 ambiguous calls and unsupported multi-message contributions. Image-only user
 inputs are prepared as a single person-message item with an `[image]` display
 label and their complete Pi message retained for restoration. The archive editor

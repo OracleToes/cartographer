@@ -73,7 +73,7 @@ import {
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { createInferenceAdmission } from "./inference-admission.js";
 import { RestDoc } from "./sleep-task.js";
-import { placeDelegationTransfer } from "./delegate-return.js";
+import { placeDelegationTransfer, prepareDelegationDestination } from "./delegate-return.js";
 import { ensureDelegateRestoreDestination, requireDelegateRestoreDestination } from "./delegate-conversation.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
@@ -1024,7 +1024,7 @@ export async function interruptRun(session: LiveSession): Promise<boolean> {
  * The caller must keep context writers sealed through archive acknowledgement;
  * these checks detect changes but do not lock Pi or the Brain.
  */
-export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
+export async function restoreEphemeral(session: Pick<LiveSession, "conversation">, item: ArchivedItem): Promise<boolean> {
   const ephemeral = item.ephemeral;
   if (ephemeral === undefined) return false;
   // Legacy rows have no source. New return-sweep rows must prove they came
@@ -1146,7 +1146,7 @@ async function restoreEphemeralToConversation(conversation: Conversation, item: 
  * The host must seal main and child admissions, context and Brain/archive
  * writers across the entire operation; idle checks do not provide that lock.
  */
-export async function restoreDelegateEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
+export async function restoreDelegateEphemeral(session: Pick<LiveSession, "brain" | "harness" | "conversation">, item: ArchivedItem): Promise<boolean> {
   const source: unknown = item.ephemeral?.source;
   if (item.layer !== "ephemeral" || item.record !== undefined || item.restorePending !== true || item.mark?.action !== "restore" ||
       !Array.isArray(item.ephemeral?.model) || item.ephemeral.model.length === 0 ||
@@ -1168,6 +1168,45 @@ export async function restoreDelegateEphemeral(session: LiveSession, item: Archi
   } catch {
     return false;
   }
+}
+
+/**
+ * Restore committed archive items before staging a delegation return. Callers
+ * must seal all destination and archive writers; the per-item checks and
+ * cross-store acknowledgements detect conflicts but are not locks. An invalid
+ * or unsupported item blocks the return and remains in the archive.
+ */
+export async function restorePendingDelegationEphemera(
+  session: Pick<LiveSession, "brain" | "harness" | "conversation">, items: readonly ArchivedItem[],
+): Promise<void> {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (item.layer !== "ephemeral" || item.record !== undefined || item.ephemeral === undefined ||
+        item.restorePending !== true || item.mark?.action !== "restore" || ids.has(item.id)) {
+      throw new Error("Invalid pending archive restore; the delegation return was preserved.");
+    }
+    ids.add(item.id);
+    const matches = (await session.brain.readArchive()).items.filter((candidate) => candidate.id === item.id);
+    if (matches.length !== 1 || !isDeepStrictEqual(matches[0], item)) throw new Error("A pending archive restore changed; the delegation return was preserved.");
+    const source: unknown = item.ephemeral.source;
+    const main = source === undefined || (source !== null && typeof source === "object" && !Array.isArray(source) &&
+      (source as { conversationId?: unknown }).conversationId === ROOT_CONVERSATION_ID);
+    if (main) {
+      if (!await restoreEphemeral(session, item)) throw new Error("A main archive restore could not be placed; the delegation return was preserved.");
+      const result = await session.brain.applyArchive({ kind: "restore-complete", id: item.id, expected: item });
+      if (result.refused || result.item === undefined) throw new Error("A main archive restore changed before acknowledgement; the delegation return was preserved.");
+    } else if (!await restoreDelegateEphemeral(session, item)) {
+      throw new Error("A child archive restore could not be placed; the delegation return was preserved.");
+    }
+  }
+}
+
+/** Compose the dormant destination path; this does not install barriers or seal writers. */
+export async function prepareDelegateSessionDestination(
+  session: Pick<LiveSession, "brain" | "harness" | "conversation" | "generation">, id: string,
+) {
+  return prepareDelegationDestination(session.brain, session.harness, session.conversation, session.generation, id, BACKGROUND_CONTEXT,
+    (items) => restorePendingDelegationEphemera(session, items));
 }
 
 export async function sessionTranscript(session: LiveSession) {

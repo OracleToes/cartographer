@@ -357,9 +357,13 @@ remove the return guard. A dormant child-restore helper can place a committed
 pending item into an ownerless passive Pi conversation, using a persistent map
 and source marker to reuse the same destination on retry. It verifies the Pi
 entries and derived contributions, then compares the archive snapshot before
-acknowledging. It cannot resume the original task, does not run on startup, and
-requires sealed writers. Its added conversation remains protected by the ordinary
-collapse guard. Host routing and end-to-end crash-safe recovery remain unfinished.
+acknowledging. A composed destination helper places pending main and child
+restores before checkpoint staging and return admission, blocking if restoration
+fails or a pending restore appears after staging. Retries reuse previously
+placed Pi entries; this requires the host to install its barrier and seal all
+destination and archive writers. It cannot resume the original task or run on
+startup. Its added conversation remains protected by the ordinary collapse
+guard. Host routing and end-to-end crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.
