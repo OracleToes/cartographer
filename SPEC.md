@@ -759,6 +759,18 @@ input was already admitted. The host must perform the return collapse and handle
 interrupts and recovery before exposing it. Capture's selected tools are
 restricted to read/search names and the report tool; this is not a sandbox.
 
+A dormant evidence helper can fingerprint an explicit list of regular files and
+recheck those fingerprints using Carto's file-scope rules. It distinguishes
+changed inputs from unavailable or invalid evidence, detects content changes
+even when timestamps are restored, and notices a symlink target change. It
+retains no file contents. A matching check means only that the listed inputs
+matched at the time they were checked: it does not establish that they were
+actually assessed, that the dependency list is complete, or that behavior
+conforms. Missing, inaccessible, out-of-scope or unstable reads are unknown,
+not proof of conformance. The reads are not an atomic filesystem snapshot;
+callers must recheck before relying on evidence and handle concurrent changes.
+This helper is not yet an evidence store or an orchestration workflow.
+
 A session-local inference admission gate serializes Pi's `stream`,
 `streamSimple` and `streamDeferred` calls across conversations in that session;
 the corresponding `complete`, `completeSimple` and `fetchDeferred` convenience

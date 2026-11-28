@@ -64,8 +64,13 @@ already-admitted child or solve crash-safe interruption. The host must still
 perform return collapse and handle interrupts and recovery; Pi's terminate
 control alone does not stop a mixed tool round. These pieces reuse Pi's owned
 conversations, schema validation and commit semantics, but are not yet a
-complete delegate runtime or UI. Orchestration
-recovery, the parser pilot, capture workflow and controls remain to be built.
+complete delegate runtime or UI. A dormant file-evidence helper fingerprints
+an explicit list of regular inputs and rechecks content and resolved target,
+using Carto's existing path guard. Missing, unstable or invalid inputs are
+unknown, not conforming; a match is limited to those inputs at the check and
+is not proof that they were assessed or that the list is complete. It is not
+an evidence store or an atomic project snapshot. Orchestration recovery, the
+parser pilot, capture workflow and controls remain to be built.
 
 ## Decisions recorded during refinement
 
