@@ -795,10 +795,15 @@ For a delegate-authored report it prepares the report's exact required main
 message as one agent Chat record in the same prospective sweep writes, with an
 identity derived from source generation and handoff. Conflicting Brain or
 archived Chat identities block rather than being overwritten. Person-ended and
-failure returns produce no invented delegate Chat. This prepares neither the
-system notice for a failure nor exactly-once delivery: the real journalled
-commit and recovery still need integration. The plan uses the original Brain as
-the expected commit snapshot and does not write freshness separately. These filesystem reads are not atomic or locked; archived
+failure returns produce no invented delegate Chat. The Brain collapse transaction
+can optionally bind that report Chat to the transferred handoff: it checks the
+source, message, identity, existing records and exactly one matching write, and
+commits the Chat, transfer and journal together. Recovery refuses cleanup if
+that committed Chat changed or disappeared. This opt-in binding is not a proof
+of a complete sweep, source authenticity or permission to delete a multi-
+conversation source; it is not yet used by an orchestration host. A system
+notice for a failure and end-to-end delivery remain unfinished. The plan uses
+the original Brain as the expected commit snapshot and does not write freshness separately. These filesystem reads are not atomic or locked; archived
 Atlas restores retain ordinary collapse's existing freshness ordering. The plan
 neither advances archive grace nor commits; writer sealing, child restore and
 journal integration remain unfinished. The return path

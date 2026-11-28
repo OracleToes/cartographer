@@ -29,7 +29,7 @@
  * overwritten in place.
  */
 import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
-import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
+import { delegateReturnChat, parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
 import { validateDelegateSourceSeal } from "./delegate-source-seal.js";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
@@ -340,6 +340,12 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       throw new Error("Invalid delegation transfer; recovery data was preserved.");
     }
     const active = parseReturnedDelegation(value.content).active;
+    if (value.returnChat !== undefined) {
+      if (active === null || value.returnChat === null || typeof value.returnChat !== "object" ||
+          JSON.stringify(delegateReturnChat(value.content, active.input.id, value.source, value.returnChat.createdAt)) !== JSON.stringify(value.returnChat)) {
+        throw new Error("Invalid delegation return Chat; recovery data was preserved.");
+      }
+    }
     if (value.sourceSeal !== undefined) validateDelegateSourceSeal(value.sourceSeal, value.source);
     if (value.inputCheckpoint !== undefined) {
       if (active === null || value.inputCheckpoint === null || value.inputCheckpoint.documentId === value.documentId || value.inputCheckpoint.barrier?.documentId === value.documentId) {
@@ -418,7 +424,14 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       if (journal === undefined) return;
       // Hold SQLite's write lock while reconciling files: two recoveries must
       // not delete files after either has cleared and replaced the journal.
-      await recover(journal, await readTransferFrom(tx));
+      const transfer = await readTransferFrom(tx);
+      if (journal.committed && transfer?.returnChat !== undefined) {
+        const matches = (await readFrom(tx)).chat.filter((record) => record.id === transfer.returnChat!.id);
+        if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(transfer.returnChat)) {
+          throw new Error("Committed delegate return Chat changed; recovery data was preserved.");
+        }
+      }
+      await recover(journal, transfer);
       await tx.run("DELETE FROM collapse_journal WHERE id = 1");
     }),
     readDelegationTransfer: () => readTransferFrom(database),
@@ -526,6 +539,27 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         const archive = await readArchiveFrom(tx);
         if (JSON.stringify(brain) !== JSON.stringify(change.expected.brain) || JSON.stringify(archive) !== JSON.stringify(change.expected.archive)) {
           throw new Error("Brain or archive changed during collapse; refusing to commit a stale snapshot.");
+        }
+        const transferChat = change.delegationTransfer?.returnChat;
+        if (transferChat !== undefined) {
+          const transfer = change.delegationTransfer!;
+          const active = parseReturnedDelegation(transfer.content).active;
+          const expectedChat = active === null ? undefined : delegateReturnChat(transfer.content, active.input.id, change.source, change.now);
+          if (expectedChat === undefined || JSON.stringify(expectedChat) !== JSON.stringify(transferChat) ||
+              brain.chat.some((item) => item.id === expectedChat.id) ||
+              [...archive.items, ...change.incoming].some((item) => item.record?.kind === "chat" && item.record.value.id === expectedChat.id)) {
+            throw new Error("Delegate return Chat conflicts with the handoff or existing records; the sweep was not committed.");
+          }
+          const touching = change.writes.filter(({ write }) => {
+            if (write.kind === "chat.record") return write.record.id === expectedChat.id;
+            if (write.kind === "chat.update") return write.id === expectedChat.id;
+            if ((write.kind === "delete" || write.kind === "mark.set" || write.kind === "mark.clear") && write.target === "chat") return write.id === expectedChat.id;
+            return false;
+          });
+          if (touching.length !== 1 || touching[0]?.write.kind !== "chat.record" ||
+              JSON.stringify(touching[0].write.record) !== JSON.stringify(expectedChat) || touching[0].now !== change.now) {
+            throw new Error("Delegate return Chat write is missing or conflicts; the sweep was not committed.");
+          }
         }
         for (const step of change.writes) brain = applyWrite(brain, step.write, step.now);
         // A record marked for archive leaves the Brain here (§4.1): the mark is

@@ -1,5 +1,4 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
-import { createHash } from "node:crypto";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
@@ -8,7 +7,7 @@ import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.js";
 import { ephemeralItemId, prepareCollapseFreshness, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
-import { DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
+import { delegateReturnChat, DelegationDoc } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
@@ -154,18 +153,13 @@ export async function prepareReturnSweepWithSourceHead(
 export function prepareDelegateReturnChat(
   content: string, id: string, generation: string, brain: CartoBrain, archive: Archive, now: number,
 ): ChatRecord | undefined {
-  const active = parseReturnedDelegation(content).active;
-  if (active?.phase !== "returned" || active.input.id !== id || !/^gen-[\w-]+$/.test(generation) || !Number.isFinite(now)) {
-    throw new Error("Invalid return Chat source; the handoff was preserved.");
-  }
-  if (active.result.kind !== "delegate") return undefined;
-  const digest = createHash("sha256").update(id).digest("hex");
-  const recordId = `chat:delegate-return:${generation}:${digest}`;
-  if (brain.chat.some((record) => record.id === recordId) || archive.items.some((item) =>
-    item.record?.kind === "chat" && item.record.value.id === recordId)) {
+  const record = delegateReturnChat(content, id, generation, now);
+  if (record === undefined) return undefined;
+  if (brain.chat.some((item) => item.id === record.id) || archive.items.some((item) =>
+    item.record?.kind === "chat" && item.record.value.id === record.id)) {
     throw new Error("Delegate return Chat identity already exists; the handoff was preserved.");
   }
-  return { id: recordId, author: "agent", text: active.result.report.mainMessage, createdAt: now, updatedAt: now };
+  return record;
 }
 
 /**

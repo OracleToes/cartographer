@@ -5,7 +5,9 @@
  * Returned handoffs cross a collapse via the Brain's temporary transfer record.
  * Unfinished or ambiguous handoffs remain in their source store.
  */
+import { createHash } from "node:crypto";
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { ChatRecord } from "../domain/records.js";
 import type { DelegateSourceSeal } from "./delegate-source-seal.js";
 
 export type DelegateRole = "capture" | "implementation" | "verification";
@@ -43,6 +45,8 @@ export type DelegationTransfer = StoredCheckpoint & {
   /** Dormant change detector; it does not authorize multi-conversation deletion. */
   sourceSeal?: DelegateSourceSeal;
   inputCheckpoint?: StoredCheckpoint & { barrier: StoredCheckpoint };
+  /** Optional report message committed with this sweep; not a deletion permit. */
+  returnChat?: ChatRecord;
 };
 
 /** Fail closed on unexpected shape; preserve the original bytes for comparison. */
@@ -60,6 +64,17 @@ export function parseReturnedDelegation(content: string): DelegationRecord {
   if (active.result === null || typeof active.result !== "object") throw new Error("Invalid delegation return.");
   returnDelegation(check, active.input.id, active.result);
   return value as DelegationRecord;
+}
+
+/** Derive a report's main Chat without writing it or inventing a failure report. */
+export function delegateReturnChat(content: string, id: string, generation: string, now: number): ChatRecord | undefined {
+  const active = parseReturnedDelegation(content).active;
+  if (active?.phase !== "returned" || active.input.id !== id || !/^gen-[\w-]+$/.test(generation) || !Number.isFinite(now)) {
+    throw new Error("Invalid return Chat source; the handoff was preserved.");
+  }
+  if (active.result.kind !== "delegate") return undefined;
+  const digest = createHash("sha256").update(id).digest("hex");
+  return { id: `chat:delegate-return:${generation}:${digest}`, author: "agent", text: active.result.report.mainMessage, createdAt: now, updatedAt: now };
 }
 
 export const DelegationDoc = defineDoc<DelegationRecord>({

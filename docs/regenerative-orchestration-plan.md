@@ -310,10 +310,13 @@ existing projection, excluding checkpointed Chat identities. For a reported
 return it now plans the exact required main message as an agent Chat write in
 the prospective sweep and projection, keyed by source generation and handoff;
 identity conflicts in Brain or archived Chat block. Person-ended and failed
-returns do not invent delegate speech. This does not yet commit or deliver the
-message exactly once, nor prepare the failure notice: journal/host integration
-remains necessary. It leaves the original Brain untouched for use as the expected
-commit snapshot. Freshness
+returns do not invent delegate speech. The existing Brain collapse transaction
+can now optionally bind this Chat to the transfer and commit it with the sweep
+and journal. It rejects a mismatched, duplicate, missing or conflicting write,
+and committed recovery checks the retained Chat before cleanup. The binding is
+not a source-deletion permit, and an orchestration host does not yet use it;
+a failure notice and end-to-end report delivery still need integration. It leaves
+the original Brain untouched for use as the expected commit snapshot. Freshness
 for restored Atlas records follows ordinary collapse's existing ordering; these
 filesystem observations are neither atomic nor locked. The Brain transaction
 remains responsible for the real sweep, archive grace and pending restore

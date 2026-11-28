@@ -7,6 +7,8 @@ import test from "node:test";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { prepareReturnSweepRecords } from "../dist/runtime/delegate-sweep-records.js";
+import { delegateReturnChat, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
+import { applyWrite } from "../dist/domain/brain.js";
 import { handleOf } from "../dist/domain/handles.js";
 
 function tempBrain() {
@@ -197,6 +199,58 @@ test("return record planning matches the Brain sweep and refuses overwriting arc
     assert.equal(applied.archive.items.find((item) => item.id === "past-work").restorePending, true);
     assert.ok(applied.archive.items.some((item) => item.id === "record:chat:archive"));
     assert.ok(applied.archive.items.some((item) => item.id === "live-work"));
+  } finally { await store.close(); cleanup(); }
+});
+
+test("report Chat commits with its handoff and sweep and remains checked during recovery", async () => {
+  const { path, cleanup } = tempBrain();
+  let store = await openBrain(path);
+  try {
+    await store.apply({ kind: "chat.record", record: chat("old", "restore me", at(1)) }, at(1));
+    await store.applyRecordAction({ kind: "chat", id: "old", action: "archive", generation: "gen-old", now: at(2) });
+    await store.applyArchive({ kind: "mark", id: "record:chat:old", action: "restore", author: "user" });
+    const expected = { brain: await store.read(), archive: await store.readArchive() };
+    const handoff = { active: null };
+    prepareDelegation(handoff, { id: "delegate:9", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+    startDelegation(handoff, "delegate:9", 2);
+    const report = { status: "done", findings: "found", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "Exact report message" };
+    returnDelegation(handoff, "delegate:9", { kind: "delegate", report });
+    const content = JSON.stringify(handoff);
+    const returnChat = delegateReturnChat(content, "delegate:9", "gen-source", at(5));
+    const chatStep = { write: { kind: "chat.record", record: returnChat }, now: at(5) };
+    const recordSource = applyWrite(expected.brain, chatStep.write, chatStep.now);
+    const plan = prepareReturnSweepRecords(recordSource, expected.archive, [], [], at(5));
+    const transfer = { source: "gen-source", destination: "gen-next", documentId: 1, revision: 1, content, returnChat };
+    const change = { source: "gen-source", generation: "gen-next", expected, writes: [chatStep, ...plan.writes], incoming: plan.incoming, delegationTransfer: transfer, now: at(5) };
+    await store.beginCollapse(change.source, change.generation);
+    await assert.rejects(store.applyCollapse({ ...change, writes: [] }), /return Chat write is missing/);
+    await assert.rejects(store.applyCollapse({ ...change, writes: [chatStep, chatStep] }), /return Chat write is missing/);
+    await assert.rejects(store.applyCollapse({ ...change, delegationTransfer: { ...transfer, returnChat: { ...returnChat, text: "forged" } } }), /return Chat conflicts/);
+    await assert.rejects(store.applyCollapse({ ...change, incoming: [{ id: "conflict", layer: "record", record: { kind: "chat", value: returnChat } }] }), /return Chat conflicts/);
+    assert.deepEqual(await store.read(), expected.brain);
+    assert.equal((await store.readCollapseJournal()).committed, false);
+    assert.equal(await store.readDelegationTransfer(), undefined);
+    const applied = await store.applyCollapse(change);
+    assert.deepEqual(applied.brain, plan.nextBrain, "projection planning and committed Chat order agree");
+    assert.deepEqual(applied.brain.chat.map((record) => record.id), [returnChat.id, "old"]);
+    assert.equal((await store.readCollapseJournal()).committed, true);
+    assert.deepEqual(await store.readDelegationTransfer(), transfer);
+    await store.close();
+    store = await openBrain(path);
+    await assert.rejects(store.applyCollapse(change), /no matching uncommitted journal/);
+    assert.equal((await store.read()).chat.filter((record) => record.id === returnChat.id).length, 1);
+    await store.apply({ kind: "chat.update", id: returnChat.id, text: "changed", updatedAt: at(5) }, at(5));
+    await assert.rejects(store.recoverCollapseJournal(async () => { throw new Error("must not reach cleanup"); }), /return Chat changed/);
+    assert.equal((await store.readCollapseJournal()).committed, true);
+    await store.apply({ kind: "chat.update", id: returnChat.id, text: returnChat.text, updatedAt: at(5) }, at(5));
+    await assert.rejects(store.recoverCollapseJournal(async () => { throw new Error("simulated crash before cleanup"); }), /simulated crash/);
+    assert.equal((await store.readCollapseJournal()).committed, true);
+    await store.recoverCollapseJournal(async (journal, retained) => {
+      assert.equal(journal.committed, true);
+      assert.deepEqual(retained, transfer);
+    });
+    assert.equal(await store.readCollapseJournal(), undefined);
+    assert.deepEqual(await store.readDelegationTransfer(), transfer);
   } finally { await store.close(); cleanup(); }
 });
 
