@@ -127,10 +127,14 @@ proposal text; unresolved details are not implicitly decided by them.
 - **Mode switch while a delegate is active.** When the person requests a switch
   from orchestration to direct mode during an active delegation, show a warning
   with yes/no choices, operable by click or keyboard; the keyboard defaults to
-  no. The consequence of accepting the warning remains to be clarified.
+  no. Yes ends the delegate immediately and switches to direct mode; no cancels
+  the switch. The existing rules for a person-ended task apply: no final delegate
+  reporting turn, optional person-authored reason, preserved partial work and
+  surviving background jobs.
 
-**Next unanswered question:** does accepting that warning end the delegate
-immediately and switch modes, or wait for it to return before switching?
+**Next unanswered question:** should existing projects open in direct mode by
+default, with orchestration enabled explicitly, or enable orchestration by
+default?
 
 ## 1. Recommendation in one sentence
 
