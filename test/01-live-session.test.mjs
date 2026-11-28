@@ -52,6 +52,7 @@ import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEn
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
+import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -246,6 +247,54 @@ test("return sweep captures each Pi context with its own head and edits", async 
     const tail = captured[0].tail;
     await main.fork(tail, { ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT);
     await assert.rejects(captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), /Forked conversation sweep is unsupported/);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("return sweep recognizes only proven main person Chat duplicates", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const main = session.conversation;
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    const write = (conversation, entry) => conversation.submit({ type: "write", entry }, BACKGROUND_CONTEXT);
+    const user = (content) => [{ role: "user", content, timestamp: 1 }];
+    const record = (id, text) => ({ id, author: "user", text, createdAt: 1, updatedAt: 1 });
+    const records = [record("exact-a", "same text"), record("exact-b", "same text"), record("legacy", "legacy text"),
+      record("duplicate", "duplicated identity"), record("image", "image text"), record("mismatch", "record text"),
+      record("edited", "edited legacy"), record("later", "later edit")];
+    await write(main, { kind: "carto.user", data: { chatRecordId: "exact-a" }, model: user("same text") });
+    await write(main, { kind: "carto.user", data: { chatRecordId: "exact-b" }, model: user("same text") });
+    await write(child, { kind: "carto.user", data: { chatRecordId: "exact-a" }, model: user("same text") });
+    await write(main, { kind: "legacy", model: user("legacy text") });
+    for (let i = 0; i < 2; i++) await write(main, { kind: "carto.user", data: { chatRecordId: "duplicate" }, model: user("duplicated identity") });
+    await write(main, { kind: "carto.user", data: { chatRecordId: "image" }, model: user([{ type: "text", text: "image text" }, { type: "image", data: "YQ==", mimeType: "image/png" }]) });
+    await write(main, { kind: "carto.user", data: { chatRecordId: "mismatch" }, model: user("different live text") });
+    await write(main, { kind: "legacy-edited", model: user("old legacy") });
+    await write(main, { kind: "legacy-later", model: user("old later") });
+    const before = await main.context(BACKGROUND_CONTEXT);
+    const edited = before.entries.find((entry) => entry.kind === "legacy-edited");
+    const later = before.entries.find((entry) => entry.kind === "legacy-later");
+    for (const [entry, id, text] of [[edited, "edited", "edited legacy"], [later, "later", "later edit"]]) {
+      await write(main, { kind: "carto.edit-chat", data: { entry: String(entry.id), item: ephemeralItemId(session.generation, entry.id, "x0"), recordId: id },
+        edits: [{ target: entry.id, action: "replace", messages: user(text) }] });
+    }
+    await write(main, { kind: "external.edit", edits: [{ target: later.id, action: "replace", messages: user("later edit") }] });
+    const views = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
+    const prepared = prepareReturnSweepArchive(views, session.generation, records, new Set(["exact-a", "legacy"]));
+    assert.deepEqual(prepared.chatDuplicates.map((item) => item.recordId).sort(), ["edited", "exact-a", "exact-b"]);
+    assert.equal(prepared.parts.filter((part) => part.item.ephemeral?.text === "same text").length, 1);
+    assert.equal(prepared.parts.find((part) => part.item.ephemeral?.text === "same text").conversationId, child.id);
+    for (const text of ["legacy text", "image text", "different live text", "later edit"]) assert.ok(prepared.parts.some((part) => part.item.ephemeral?.text === text), text);
+    assert.equal(prepared.parts.filter((part) => part.item.ephemeral?.text === "duplicated identity").length, 2);
+    const image = prepared.parts.find((part) => part.item.ephemeral?.text === "image text");
+    assert.equal(image.item.ephemeral.model[0].content[1].type, "image");
+    const duplicateRecords = prepareReturnSweepArchive(views, session.generation, [...records, record("exact-a", "same text")], new Set());
+    assert.ok(duplicateRecords.parts.some((part) => part.entryData?.chatRecordId === "exact-a" && part.conversationId === main.id));
+    assert.throws(() => prepareReturnSweepArchive(views.filter(({ conversation }) => conversation.id !== main.id), session.generation, records, new Set()), /exactly one main/);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();

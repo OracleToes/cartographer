@@ -148,10 +148,15 @@ retain it when explicitly written. Main restoration now refuses child or
 malformed source provenance; legacy rows without it retain their old behavior
 and cannot be distinguished from a row whose provenance was lost. The helper
 rejects duplicate or missing call identities, multi-message entries and
-image-only user inputs rather than guessing. The actual return path does not
-archive the prepared items, deduplicate Chat or remove the return guard. Child
-restoration, identity-aware Chat deduplication and crash-safe journal
-integration are still needed. The submission scan guards the immediate-end and restart-recovery aborts,
+image-only user inputs rather than guessing. A further dormant preparation
+reuses Carto's Chat bindings to exclude only uniquely identified main person
+messages whose text matches a Brain Chat record and whose content is text-only.
+Child messages, attachments and ambiguous or legacy text matches remain; a latest
+Carto Chat edit can identify an otherwise legacy entry. Agent Chat calls,
+checkpoint reconciliation, pins and deletion marks still need handling. The
+actual return path does not archive the prepared items or remove the return
+guard. Child restoration and crash-safe journal integration remain unfinished.
+The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.
 

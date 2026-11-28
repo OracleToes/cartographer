@@ -738,10 +738,15 @@ a restore to main refuses a child source or malformed provenance, leaving it
 in the archive. This is not a child restore facility and cannot distinguish a
 legacy item from one whose provenance was lost. The conversion rejects
 ambiguous calls, unsupported multi-message contributions and image-only user
-input. Chat deduplication and child restoration are not implemented. The
-return path does not persist these prepared items, detect every kind of
-concurrent write, or replace the guard: its caller must seal all writers throughout capture and
-subsequent handling. Restart retries this
+input. A dormant preparation step excludes a main person contribution only
+when its explicit, unique Chat identity and text match one Brain Chat record
+and the contribution contains no non-text parts. It retains child input,
+attachments and ambiguous or legacy text matches; it also recognizes a proven
+latest Carto Chat edit on a legacy entry. This does not handle agent Chat calls,
+checkpointed inputs, pins, deletion marks or child restoration. The return path
+does not use or persist these prepared items, detect every kind of concurrent
+write, or replace the guard: its caller must seal all writers throughout capture
+and subsequent handling. Restart retries this
 placement without replacing a conflicting document. An empty acknowledged
 handoff needs no transfer. An unfinished, retired, ambiguous or unsupported
 handoff instead prevents collapse; its source is preserved. These checks assume
