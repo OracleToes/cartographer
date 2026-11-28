@@ -1,11 +1,12 @@
 # Orchestration mode: proposed plan
 
-**Status: proposed plan, not implementation or a change to `SPEC.md`.** This
-records the person's decisions and an approach to building them; unresolved
-choices and feasibility checks are explicitly marked. Implementation should first
-update the specification to reflect the agreed behavior, then land in tested,
-coherent stages. No parallel models or concurrent agents: this is a sequential
-context switch on hardware that can run only one model at a time.
+**Status: earlier proposed plan, not implementation or a change to `SPEC.md`.**
+The proposed [regenerative orchestration revision](regenerative-orchestration-plan.md)
+supersedes this plan's proposed approach for discussion, not the person's recorded
+decisions. Those decisions are carried into the revision; unresolved choices
+remain unresolved until the person decides. This original is retained for context.
+No parallel models or concurrent agents: this is a sequential context switch on
+hardware that can run only one model at a time.
 
 ## Intended behavior
 
