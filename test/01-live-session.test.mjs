@@ -42,14 +42,14 @@ import { collapse, ephemeralItemId, generationPaths, prepareReturnSweepParts, re
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
-import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
+import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, DelegateChildIdentityDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
-import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
+import { endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
@@ -1014,7 +1014,8 @@ test("delegate context boundary reserves a reporting request and holds further w
     const mainExtension = defineExtension({ name: "limit-main", tools: [createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture, limit], tools: [read] } } })] });
     const registry = createRegistry();
     for (const extension of [mainExtension, capture, limit, DelegateReportExtension]) registry.install(extension);
-    harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+    const storage = new MemoryStorage();
+    harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
     const report = { status: "partial", findings: "read the result", changes: "none", checks: "none", uncertainty: "not assessed", remaining: "continue", mainMessage: "context limit" };
     try {
       const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
@@ -1056,17 +1057,81 @@ test("delegate context boundary reserves a reporting request and holds further w
         await main.commit(async (tx) => { (await tx.doc(DelegateLimitDoc, child.id)).taskId = ownerId; }, BACKGROUND_CONTEXT);
         await assert.rejects(main.commit((tx) => hasDelegateLimitMarker(tx, main.id, child.id, ownerId, handoff.input.id), BACKGROUND_CONTEXT), /marker conflicts/);
         await main.commit(async (tx) => { (await tx.doc(DelegateLimitDoc, child.id)).taskId = marker.taskId; }, BACKGROUND_CONTEXT);
-        await child.abort(BACKGROUND_CONTEXT);
+        const queued = await child.submit({ type: "input", content: "Keep this follow-up", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+        await assert.rejects(endDelegateAtContextLimit(harness, main, { scanSubmissions: async () => { throw new Error("scan unavailable"); } }, handoff.input.id, BACKGROUND_CONTEXT), /scan unavailable/);
+        assert.equal((await queued.status(BACKGROUND_CONTEXT)).status, "queued");
+        assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.cause, "context-limit");
+        const checkpoint = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+        assert.equal(checkpoint.inputs.find((input) => input.submissionId === queued.id).content, "Keep this follow-up");
+        assert.equal(await endDelegateAtContextLimit(harness, main, storage, handoff.input.id, BACKGROUND_CONTEXT), true);
         assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+        assert.equal((await queued.status(BACKGROUND_CONTEXT)).status, "unanswered");
+        assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint);
         const result = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result;
         assert.equal(result.kind, "failure");
         assert.match(result.explanation, /estimated context reporting threshold and ended without a report/);
-        assert.match(result.explanation, /aborted/);
       }
     } finally {
       await harness.close(BACKGROUND_CONTEXT);
       await cleanup();
     }
+  }
+});
+
+test("context-limit stop recovers from durable intent before scheduling resumes", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  let harness, notifyBlocked;
+  const blocked = new Promise((resolve) => { notifyBlocked = resolve; });
+  const limit = createDelegateLimitExtension({ model: ref, window: 2, reserveTokens: 1, harness: () => harness, onBlocked: notifyBlocked });
+  const read = defineTool({ name: "read", description: "A blocked read", parameters: obj({}), replay: "safe", execute: async () => { throw new Error("must not run"); } });
+  const capture = defineExtension({ name: "recover-limit-read", tools: [read] });
+  const delegate = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture, limit], tools: [read] } } });
+  const mainExtension = defineExtension({ name: "recover-limit-main", tools: [delegate] });
+  const barrier = createDelegateMainBarrier();
+  const registry = createRegistry();
+  for (const extension of [mainExtension, capture, limit, barrier, DelegateReportExtension]) registry.install(extension);
+  const path = join(root, ".brain", "limit-end.sqlite");
+  let database = await openNodeSqliteDatabase(path);
+  let storage = await SqliteStorage.open(database, { prefix: "live_" });
+  harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension, barrier], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "capture", instruction: "Inspect", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("read", {}, { id: "blocked-read" })], { stopReason: "toolUse" }),
+    ]);
+    const initial = await main.submit({ type: "input", content: "Keep the main request" }, BACKGROUND_CONTEXT);
+    await blocked;
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
+    const queued = await child.submit({ type: "input", content: "Keep the child follow-up", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    assert.equal(await requestContextLimitDelegateEnd(main, active.input.id, BACKGROUND_CONTEXT), true);
+    await harness.close(BACKGROUND_CONTEXT); await database.close();
+    database = await openNodeSqliteDatabase(path);
+    storage = await SqliteStorage.open(database, { prefix: "live_" });
+    harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
+    main = await harness.root(BACKGROUND_CONTEXT);
+    assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
+    assert.equal(await recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), false);
+    assert.equal(await recoverContextLimitDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), true);
+    const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.equal(saved.inputs.find((input) => input.submissionId === initial.id).content, "Keep the main request");
+    assert.equal(saved.inputs.find((input) => input.submissionId === queued.id).content, "Keep the child follow-up");
+    const result = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result;
+    assert.equal(result.kind, "failure");
+    assert.match(result.explanation, /estimated context reporting threshold/);
+    assert.equal((await (await harness.submission(queued.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal(faux.state.callCount, 2, "recovery never restarted delegate inference");
+    const state = { active: { phase: "running", input: active.input, conversationId: child.id } };
+    requestContextLimitEnd(state, active.input.id);
+    requestDelegationEnd(state, active.input.id, "stop by person");
+    finishDelegationEnd(state, active.input.id);
+    assert.deepEqual(state.active.result, { kind: "person-ended", reason: "stop by person" });
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
+    await database.close().catch(() => undefined);
+    await cleanup();
   }
 });
 

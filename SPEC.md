@@ -800,7 +800,16 @@ execution guard. If the child settles without a report after the marker, the
 dormant delegation tool checks its handoff, owner, generation and cutoff entry
 before identifying the estimated reporting threshold in the failure; it still
 retains Pi's unanswered reason and detail when present. An inconsistent marker
-is not used to invent a result. The host must select and retain the extension, ensure no other
+is not used to invent a result. A dormant system-stop path can record a distinct
+context-limit ending intent for a verified later request, checkpoint main and
+child inputs, scan for earlier unanswered child inputs, and only then abort the
+child and record a missing-report failure. Recovery handles that intent before
+scheduling resumes, retaining the checkpoint; a person's explicit end takes
+precedence and keeps person provenance. A failed checkpoint or scan preserves
+the intent and does not abort. The host must supply the actual storage, seal
+input admission, invoke this path only for its held-request notification, and
+handle return collapse and replay. The transaction cannot itself prove the hook
+is still holding the request or lock external writers. The host must select and retain the extension, ensure no other
 hook removes its guidance, supply the correct model/window/reserve, stop and
 reconcile held or recovered work, and preserve person inputs. It is not wired
 into orchestration and does not guarantee a report or safe return. Both delegation and delegate report require a

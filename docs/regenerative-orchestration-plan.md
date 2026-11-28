@@ -112,8 +112,16 @@ If a delegate settles without a report after the marker, the dormant delegation
 tool checks the marker against the child, owner, generation task and cutoff entry,
 then identifies the estimated threshold in its failure while retaining Pi's
 unanswered reason and detail. A conflicting marker blocks that attribution and
-preserves the handoff; this does not checkpoint or abort a held child.
-Recovery preserves partial project work and does not cross background boundaries. The
+preserves the handoff. A dormant system-stop path now records a distinct
+context-limit ending intent for a verified later request, reuses the input
+checkpoint and unanswered-input scan before aborting the child, and records a
+missing-report failure. Paused-scheduler recovery reuses the existing owner
+chain and checkpoint recovery, retaining system provenance. A person's explicit
+end takes precedence and retains person provenance. The host must invoke this
+only for its held-request notification, seal admissions, provide the actual
+storage and perform return collapse and input replay. The transaction checks a
+later request but cannot prove the hook is still holding it, and does not lock
+external writers. Recovery preserves partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.
 A dormant main-only Pi generation hook now holds requests in the source while a

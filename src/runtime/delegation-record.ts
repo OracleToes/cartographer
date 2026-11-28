@@ -31,7 +31,7 @@ export type DelegationReturn =
 export type Delegation =
   | { phase: "prepared"; input: DelegationInput }
   | { phase: "running"; input: DelegationInput; conversationId: number }
-  | { phase: "ending"; input: DelegationInput; conversationId: number | null; reason: string }
+  | { phase: "ending"; input: DelegationInput; conversationId: number | null; reason: string; cause?: "context-limit" }
   | { phase: "returned"; input: DelegationInput; conversationId: number | null; result: DelegationReturn };
 export type DelegationRecord = { active: Delegation | null };
 
@@ -99,23 +99,45 @@ export function startDelegation(record: DelegationRecord, id: string, conversati
   record.active = { phase: "running", input: active.input, conversationId };
 }
 
+export const CONTEXT_LIMIT_FAILURE = "Delegate reached its estimated context reporting threshold and ended without a report.";
+
 /** An ending intent blocks late reports and survives interruption before abort completes. */
 export function requestDelegationEnd(record: DelegationRecord, id: string, reason: string): void {
   if (typeof reason !== "string") throw new Error("The person's reason must be text.");
   const active = record.active;
   if (active === null || active.input.id !== id || active.phase === "returned") throw new Error("Delegation is not active.");
   if (active.phase === "ending") {
-    if (active.reason !== reason) throw new Error("The delegation is already ending with a different reason.");
+    if (active.cause === "context-limit") {
+      // A person's explicit stop takes precedence over the system intent.
+      record.active = { phase: "ending", input: active.input, conversationId: active.conversationId, reason };
+      return;
+    }
+    if (active.cause !== undefined || active.reason !== reason) throw new Error("The delegation is already ending with a different reason.");
     return;
   }
   record.active = { phase: "ending", input: active.input, conversationId: active.phase === "running" ? active.conversationId : null, reason };
+}
+
+/** Record a system stop only after the caller verifies the held boundary. */
+export function requestContextLimitEnd(record: DelegationRecord, id: string): void {
+  const active = record.active;
+  if (active === null || active.input.id !== id) throw new Error("Delegation is not active.");
+  if (active.phase === "ending" && active.cause === "context-limit" && active.reason === CONTEXT_LIMIT_FAILURE) return;
+  if (active.phase !== "running") throw new Error("Delegation is not running at the context boundary.");
+  record.active = { phase: "ending", input: active.input, conversationId: active.conversationId, reason: CONTEXT_LIMIT_FAILURE, cause: "context-limit" };
 }
 
 /** Call only after the delegate's ordinary work has stopped. */
 export function finishDelegationEnd(record: DelegationRecord, id: string): void {
   const active = record.active;
   if (active === null || active.input.id !== id || active.phase !== "ending") throw new Error("Delegation is not ending.");
-  record.active = { phase: "returned", input: active.input, conversationId: active.conversationId, result: { kind: "person-ended", reason: active.reason } };
+  if (active.cause !== undefined && (active.cause !== "context-limit" || active.reason !== CONTEXT_LIMIT_FAILURE)) {
+    throw new Error("Invalid delegation ending intent; it was preserved.");
+  }
+  const result: DelegationReturn = active.cause === "context-limit"
+    ? { kind: "failure", explanation: CONTEXT_LIMIT_FAILURE }
+    : { kind: "person-ended", reason: active.reason };
+  record.active = { phase: "returned", input: active.input, conversationId: active.conversationId, result };
 }
 
 export function returnDelegation(record: DelegationRecord, id: string, result: DelegationReturn): void {

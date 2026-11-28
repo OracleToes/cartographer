@@ -2,7 +2,8 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
 import { LiveDoc, type Conversation, type ConversationId, type Harness, type Storage, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { DelegationDoc, finishDelegationEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
+import { CONTEXT_LIMIT_FAILURE, DelegationDoc, finishDelegationEnd, requestContextLimitEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
+import { DelegateLimitDoc, hasDelegateLimitMarker } from "./delegate-limit.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, parseInputCheckpoint } from "./delegate-inputs.js";
 
@@ -43,12 +44,21 @@ export async function requestImmediateDelegateEnd(main: Conversation, id: string
   }, context);
 }
 
-async function completeEnd(main: Conversation, id: string, context: Context): Promise<void> {
+type EndCause = "person" | "context-limit";
+
+function matchesEnd(active: Delegation | null, id: string, cause: EndCause): active is Extract<Delegation, { phase: "ending" }> {
+  return active?.input.id === id && active.phase === "ending" &&
+    (cause === "person" ? active.cause === undefined : active.cause === "context-limit" && active.reason === CONTEXT_LIMIT_FAILURE);
+}
+
+async function completeEnd(main: Conversation, id: string, cause: EndCause, context: Context): Promise<void> {
   await main.commit(async (tx) => {
     const record = await tx.doc(DelegationDoc, main.id);
     const active = record.active;
     if (active?.input.id !== id) throw new Error("The ending handoff changed; it was preserved.");
-    if (active.phase === "returned" && active.result.kind === "person-ended") return;
+    if (active.phase === "returned" && (cause === "person" ? active.result.kind === "person-ended" :
+        active.result.kind === "failure" && active.result.explanation === CONTEXT_LIMIT_FAILURE)) return;
+    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
     finishDelegationEnd(record, id);
   }, context);
 }
@@ -60,10 +70,10 @@ async function completeEnd(main: Conversation, id: string, context: Context): Pr
  * the checkpoint blocks abort. A caller must supply the Harness's own storage
  * and seal new admissions throughout this sequence; this is not a global lock.
  */
-async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, context: Context): Promise<void> {
+async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, cause: EndCause, context: Context): Promise<void> {
   const before = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
-    if (active?.input.id !== id || active.phase !== "ending") throw new Error("The ending handoff changed; it was preserved.");
+    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
     const owned = await ownedHandoff(tx, main.id, active);
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
     parseInputCheckpoint(content, id);
@@ -72,7 +82,7 @@ async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<S
   const unanswered = before.childId === null ? [] : await findUnansweredDelegateInputs(storage, before.childId, before.ownerId, context);
   await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
-    if (active?.input.id !== id || active.phase !== "ending") throw new Error("The ending handoff changed; it was preserved.");
+    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
     const owned = await ownedHandoff(tx, main.id, active);
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
     if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || content !== before.content) {
@@ -94,21 +104,66 @@ async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<S
 /** Seal main and child admission first; a failed checkpoint or abort leaves the intent recoverable. */
 export async function endDelegateNow(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, reason: string, context: Context): Promise<boolean> {
   if (!await requestImmediateDelegateEnd(main, id, reason, context)) return false;
+  return stopEndingDelegate(harness, main, storage, id, "person", context);
+}
+
+async function stopEndingDelegate(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, cause: EndCause, context: Context): Promise<boolean> {
   const ending = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
-    if (active?.input.id !== id || active.phase !== "ending") throw new Error("The ending handoff changed; it was preserved.");
+    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
     const owned = await ownedHandoff(tx, main.id, active);
     await checkpointDelegateInputs(tx, main.id, id);
     return owned;
   }, context);
-  await verifyCheckpointedChildInputs(main, storage, id, context);
+  await verifyCheckpointedChildInputs(main, storage, id, cause, context);
   if (ending.childId !== null) {
     const child = await harness.conversation(ending.childId, context);
     if (child === undefined) throw new Error("The delegate conversation is unavailable; the ending intent was preserved.");
     await child.abort(context); // Do not cross background-task boundaries.
   }
-  await completeEnd(main, id, context);
+  await completeEnd(main, id, cause, context);
   return true;
+}
+
+/**
+ * The host must invoke this only for its held-request notification and seal
+ * admissions. The transaction checks a later request and a verified marker;
+ * it cannot prove that the hook is still holding it or lock outside writers.
+ */
+export async function requestContextLimitDelegateEnd(main: Conversation, id: string, context: Context): Promise<boolean> {
+  return main.commit(async (tx) => {
+    const record = await tx.doc(DelegationDoc, main.id);
+    const active = record.active;
+    if (active?.input.id !== id) throw new Error("No matching active delegation.");
+    if (active.phase === "returned" || (active.phase === "ending" && active.cause === undefined)) return false;
+    const owned = await ownedHandoff(tx, main.id, active);
+    if (owned.childId === null || !await hasDelegateLimitMarker(tx, main.id, owned.childId, owned.ownerId, id)) {
+      throw new Error("No verified delegate context boundary; the handoff was preserved.");
+    }
+    if (active.phase === "ending") {
+      if (!matchesEnd(active, id, "context-limit")) throw new Error("Invalid delegation ending intent; it was preserved.");
+      return true;
+    }
+    if (active.phase !== "running") throw new Error("Delegate is not running at the context boundary.");
+    const marker = await tx.doc(DelegateLimitDoc, owned.childId);
+    const live = await tx.doc(LiveDoc, owned.childId);
+    const task = live.run?.taskId === undefined ? undefined : await tx.task(live.run.taskId);
+    const checkpoint = task?.state.status === "running" ? task.state.checkpoint : undefined;
+    if (task?.kind !== "pi.generation" || task.conversationId !== owned.childId || task.abortRequested ||
+        checkpoint === null || typeof checkpoint !== "object" || Array.isArray(checkpoint) || checkpoint.phase !== "request" ||
+        !Number.isSafeInteger(checkpoint.cutoff) || (checkpoint.cutoff as number) < 1 ||
+        (task.id === marker.taskId && checkpoint.cutoff === marker.cutoff)) {
+      throw new Error("The delegate has no later held request; the handoff was preserved.");
+    }
+    requestContextLimitEnd(record, id);
+    return true;
+  }, context);
+}
+
+/** Seal input admission before invoking; a failed checkpoint or scan never aborts. */
+export async function endDelegateAtContextLimit(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, context: Context): Promise<boolean> {
+  if (!await requestContextLimitDelegateEnd(main, id, context)) return false;
+  return stopEndingDelegate(harness, main, storage, id, "context-limit", context);
 }
 
 /**
@@ -119,10 +174,31 @@ export async function endDelegateNow(harness: Harness, main: Conversation, stora
  * and collapse before allowing new inference.
  */
 export async function recoverImmediateDelegateEnd(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, context: Context): Promise<boolean> {
+  return recoverEnd(harness, main, storage, "person", context);
+}
+
+/** As for person-end recovery, but retain system-failure provenance. */
+export async function recoverContextLimitDelegateEnd(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, context: Context): Promise<boolean> {
+  return recoverEnd(harness, main, storage, "context-limit", context);
+}
+
+async function recoverEnd(harness: Harness, main: Conversation, storage: Pick<Storage, "scanSubmissions">, cause: EndCause, context: Context): Promise<boolean> {
   if ((await harness.inspect(context)).scheduling !== "paused") throw new Error("Delegate-end recovery requires a paused scheduler.");
   const state = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
     if (active?.phase !== "ending") return null;
+    if (cause === "person" && active.cause === "context-limit") return null;
+    if (cause === "context-limit" && active.cause === undefined) return null;
+    if ((cause === "person" && active.cause !== undefined) ||
+        (cause === "context-limit" && (active.cause !== "context-limit" || active.reason !== CONTEXT_LIMIT_FAILURE))) {
+      throw new Error("Invalid delegation ending intent; it was preserved.");
+    }
+    if (cause === "context-limit") {
+      const owned = await ownedHandoff(tx, main.id, active);
+      if (owned.childId === null || !await hasDelegateLimitMarker(tx, main.id, owned.childId, owned.ownerId, active.input.id)) {
+        throw new Error("No verified delegate context boundary; the handoff was preserved.");
+      }
+    }
     const owner = await ownedHandoff(tx, main.id, active);
     const ownerTask = await tx.task(owner.ownerId);
     if (ownerTask === undefined) throw new Error("The delegate owner is missing; the ending intent was preserved.");
@@ -146,11 +222,11 @@ export async function recoverImmediateDelegateEnd(harness: Harness, main: Conver
     return { id: active.input.id, runId };
   }, context);
   if (state === null) return false;
-  await verifyCheckpointedChildInputs(main, storage, state.id, context);
+  await verifyCheckpointedChildInputs(main, storage, state.id, cause, context);
   if (state.runId !== null) {
     await harness.abortTask(state.runId, context); // Does not enable scheduling.
     await harness.waitForTask(state.runId, context); // Enables it after the mark is durable.
   }
-  await completeEnd(main, state.id, context);
+  await completeEnd(main, state.id, cause, context);
   return true;
 }
