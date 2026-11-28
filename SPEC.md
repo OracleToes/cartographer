@@ -791,8 +791,14 @@ that omits any conversation or was captured before another appeared. This is not
 a lock or proof of the supplied contributions. The composed prospective plan
 also prepares ordinary Atlas freshness writes before record marks and renders
 the next head with the ordinary projection, excluding checkpointed Chat IDs.
-It uses the original Brain as the expected commit snapshot and does not write
-freshness separately. These filesystem reads are not atomic or locked; archived
+For a delegate-authored report it prepares the report's exact required main
+message as one agent Chat record in the same prospective sweep writes, with an
+identity derived from source generation and handoff. Conflicting Brain or
+archived Chat identities block rather than being overwritten. Person-ended and
+failure returns produce no invented delegate Chat. This prepares neither the
+system notice for a failure nor exactly-once delivery: the real journalled
+commit and recovery still need integration. The plan uses the original Brain as
+the expected commit snapshot and does not write freshness separately. These filesystem reads are not atomic or locked; archived
 Atlas restores retain ordinary collapse's existing freshness ordering. The plan
 neither advances archive grace nor commits; writer sealing, child restore and
 journal integration remain unfinished. The return path

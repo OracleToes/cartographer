@@ -306,8 +306,14 @@ resulting Brain and ephemeral restores requiring separate destinations. It
 refuses archive identity collisions and record restores over existing records.
 The composed planner now also prepares ordinary Atlas freshness writes before
 record-mark preparation and renders the prospective head through Carto's
-existing projection, excluding checkpointed Chat identities. It leaves the
-original Brain untouched for use as the expected commit snapshot. Freshness
+existing projection, excluding checkpointed Chat identities. For a reported
+return it now plans the exact required main message as an agent Chat write in
+the prospective sweep and projection, keyed by source generation and handoff;
+identity conflicts in Brain or archived Chat block. Person-ended and failed
+returns do not invent delegate speech. This does not yet commit or deliver the
+message exactly once, nor prepare the failure notice: journal/host integration
+remains necessary. It leaves the original Brain untouched for use as the expected
+commit snapshot. Freshness
 for restored Atlas records follows ordinary collapse's existing ordering; these
 filesystem observations are neither atomic nor locked. The Brain transaction
 remains responsible for the real sweep, archive grace and pending restore

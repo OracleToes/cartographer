@@ -1,12 +1,14 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
+import { createHash } from "node:crypto";
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
 import { projectContext } from "../domain/projection.js";
 import type { Archive } from "../domain/archive.js";
-import type { CartoBrain, PinnedEphemeral } from "../domain/records.js";
+import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.js";
 import { ephemeralItemId, prepareCollapseFreshness, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
+import { DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
@@ -142,11 +144,38 @@ export async function prepareReturnSweepWithSourceHead(
 }
 
 /**
+ * Prepare the required main Chat message from a reported return. This is a
+ * write for the sweep transaction, not an independent delivery or an
+ * exactly-once protocol. The generation and handoff together define its ID;
+ * an existing Brain or archive Chat identity is a conflict, not permission to
+ * overwrite or duplicate it. Person-ended and failure returns have no report
+ * message and must not be turned into invented delegate speech.
+ */
+export function prepareDelegateReturnChat(
+  content: string, id: string, generation: string, brain: CartoBrain, archive: Archive, now: number,
+): ChatRecord | undefined {
+  const active = parseReturnedDelegation(content).active;
+  if (active?.phase !== "returned" || active.input.id !== id || !/^gen-[\w-]+$/.test(generation) || !Number.isFinite(now)) {
+    throw new Error("Invalid return Chat source; the handoff was preserved.");
+  }
+  if (active.result.kind !== "delegate") return undefined;
+  const digest = createHash("sha256").update(id).digest("hex");
+  const recordId = `chat:delegate-return:${generation}:${digest}`;
+  if (brain.chat.some((record) => record.id === recordId) || archive.items.some((item) =>
+    item.record?.kind === "chat" && item.record.value.id === recordId)) {
+    throw new Error("Delegate return Chat identity already exists; the handoff was preserved.");
+  }
+  return { id: recordId, author: "agent", text: active.result.report.mainMessage, createdAt: now, updatedAt: now };
+}
+
+/**
  * Prepare the next head alongside record marks and archive restores, reusing
  * ordinary collapse's Atlas freshness and projection. The original Brain must
  * be used as the expected commit snapshot; freshness is a prospective write,
  * not a separate mutation. Pending checkpoint Chat identities stay out of the
- * head. The person name must be the one resolved for the destination session.
+ * head. A delegate report's required main Chat is prepared as a Brain write in
+ * the same plan; no message is fabricated for an early end or failure. The
+ * person name must be the one resolved for the destination session.
  * This is not a journalled commit, a writer lock or permission to delete the
  * source; hidden source-head metadata still needs independent authentication,
  * and pending child restores still have no destination.
@@ -159,8 +188,13 @@ export async function prepareReturnSweepWithRecords(
   let refreshed = brain;
   for (const step of freshness) refreshed = applyWrite(refreshed, step.write, step.now);
   const plan = await prepareReturnSweepWithSourceHead(root, tx, mainId, id, views, generation, refreshed, now);
-  const records = prepareReturnSweepRecords(refreshed, archive, plan.incoming, plan.writes, now);
+  const returnChat = prepareDelegateReturnChat(JSON.stringify(await tx.doc(DelegationDoc, mainId)), id, generation, brain, archive, now);
+  const chatWrite = returnChat === undefined ? [] : [{ write: { kind: "chat.record" as const, record: returnChat }, now }];
+  // Match BrainStore.applyCollapse ordering: planned writes precede archive
+  // record restores, so the rendered Chat order must do the same.
+  const recordSource = returnChat === undefined ? refreshed : applyWrite(refreshed, chatWrite[0]!.write, now);
+  const records = prepareReturnSweepRecords(recordSource, archive, plan.incoming, plan.writes, now);
   const chat = new Set(records.nextBrain.chat.filter((record) => !plan.pendingChatIds.has(record.id)).map((record) => record.id));
   const projection = projectContext(records.nextBrain, plan.fileTexts, person, { chat });
-  return { ...plan, ...records, writes: [...freshness, ...records.writes], projection };
+  return { ...plan, ...records, writes: [...freshness, ...chatWrite, ...records.writes], returnChat, projection };
 }

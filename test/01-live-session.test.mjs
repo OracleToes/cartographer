@@ -1681,6 +1681,31 @@ test("person-ended delegate stops its in-flight work without a final report", as
     assert.ok(complete.projection.chatIds.includes("restored"));
     assert.match(complete.projection.text, /restored chat/);
     assert.equal(complete.projection.ephemeralItems.find(({ item }) => item.id === "old:1:r").item.text, "export const answer = 42;\n");
+    assert.equal(complete.returnChat, undefined, "a person-ended return invents no delegate message");
+    // Exercise report planning over the same verified owner and checkpoint.
+    // This is a prospective write, not a committed Chat or a completed return.
+    const report = { status: "partial", findings: "found", changes: "none", checks: "not run", uncertainty: "unknown", remaining: "continue", mainMessage: "The delegate's exact message" };
+    await main.commit(async (tx) => { (await tx.doc(DelegationDoc, main.id)).active.result = { kind: "delegate", report }; }, BACKGROUND_CONTEXT);
+    const prepareReport = (sourceBrain = planningBrain, sourceArchive = archive) => main.commit((tx) =>
+      prepareReturnSweepWithRecords(root, tx, main.id, active.input.id, currentViews, "gen-end", sourceBrain, sourceArchive, 1, "Person"), BACKGROUND_CONTEXT);
+    const reported = await prepareReport();
+    assert.equal(reported.returnChat.author, "agent");
+    assert.equal(reported.returnChat.text, report.mainMessage);
+    assert.equal(reported.writes.filter((step) => step.write.kind === "chat.record" && step.write.record.id === reported.returnChat.id).length, 1);
+    assert.equal(reported.nextBrain.chat.filter((record) => record.id === reported.returnChat.id).length, 1);
+    assert.ok(reported.projection.chatIds.includes(reported.returnChat.id));
+    assert.match(reported.projection.text, /The delegate's exact message/);
+    assert.equal((await prepareReport()).returnChat.id, reported.returnChat.id, "replanning keeps the identity");
+    assert.deepEqual(planningBrain, beforePlan, "planning does not write Chat prematurely");
+    const conflictingBrain = structuredClone(planningBrain);
+    conflictingBrain.chat.push(reported.returnChat);
+    await assert.rejects(prepareReport(conflictingBrain), /return Chat identity already exists/);
+    const conflictingArchive = structuredClone(archive);
+    conflictingArchive.items.push({ id: "other-archive-id", layer: "record", record: { kind: "chat", value: reported.returnChat }, sweptAtGeneration: "gen-old", sweptAtCollapse: 1, sweptAt: 1 });
+    await assert.rejects(prepareReport(planningBrain, conflictingArchive), /return Chat identity already exists/);
+    await main.commit(async (tx) => { (await tx.doc(DelegationDoc, main.id)).active.result = { kind: "failure", explanation: "No report available" }; }, BACKGROUND_CONTEXT);
+    assert.equal((await prepareReport()).returnChat, undefined, "a failure cannot fabricate the missing report message");
+    await main.commit(async (tx) => { (await tx.doc(DelegationDoc, main.id)).active.result = { kind: "person-ended", reason: "" }; }, BACKGROUND_CONTEXT);
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
