@@ -119,9 +119,17 @@ entries, and unrelated child entries can be mixed into the main sweep. The
 existing direct-mode behavior must not be silently changed. Before exposing
 orchestration, make the return sweep conversation-aware, preserve the appropriate
 per-conversation archive data and head boundaries, and test actual main and child
-stores through collapse and recovery. Do not put the child's transcript in main's
-context. Also guard against destroying a source generation with child inputs
-that were already withdrawn before checkpointing.
+stores through collapse and recovery. Pi's SQLite storage open runs migrations,
+including writes, even when the Harness is read-only, so it cannot simply be
+opened over Carto's read-only source to derive contexts. Archive restoration
+currently targets main and needs provenance-aware handling; the current sweep's
+text-based Chat deduplication can suppress unrelated child input. Do not put the
+child's transcript in main's context. As an interim fail-closed measure, return
+collapse now rejects sources containing additional conversations, and recovery
+preserves an older committed return sweep's multi-conversation source and journal.
+This does not recover a source already deleted, or make a return sweep usable.
+Also guard against destroying a source generation with child inputs that were
+already withdrawn before checkpointing.
 
 ## Decisions recorded during refinement
 

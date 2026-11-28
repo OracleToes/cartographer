@@ -1,6 +1,6 @@
 import "./agent-reminder.mjs";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -37,7 +37,7 @@ import {
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera, readStoredDelegation } from "../dist/runtime/collapse.js";
+import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera, readStoredDelegation, recoverCollapse } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
@@ -169,6 +169,59 @@ test("a returned handoff survives crashes after sweep and after destination plac
     assert.deepEqual(await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT), restored);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("return collapse and old committed recovery preserve a multi-conversation Pi source", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  let closed = false;
+  try {
+    await session.conversation.submit({ type: "write", entry: { kind: "test.main", model: [{ role: "user", content: "main before child", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    await child.submit({ type: "write", entry: { kind: "test.child-reset", head: "self", model: [{ role: "user", content: "child after reset", timestamp: 2 }] } }, BACKGROUND_CONTEXT);
+    await session.conversation.commit(async (tx) => {
+      const handoff = await tx.doc(DelegationDoc, session.conversation.id);
+      prepareDelegation(handoff, { id: "guarded", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(handoff, "guarded", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    const source = session.generation;
+    const sourcePaths = generationPaths(root, source);
+    await closeLiveSession(session); closed = true;
+    const handoff = await readStoredDelegation(sourcePaths.store);
+    await assert.rejects(collapse(root, brain), /multiple conversations.*preserved/);
+    assert.equal(await brain.readCollapseJournal(), undefined);
+    assert.deepEqual((await brain.readArchive()).items, []);
+    assert.equal(existsSync(sourcePaths.store), true);
+
+    // Model a journal committed by an older version before source cleanup.
+    const destination = "gen-20261116T030000Z-returnguard";
+    const destinationPaths = generationPaths(root, destination);
+    await brain.beginCollapse(source, destination);
+    copyFileSync(sourcePaths.markdown, destinationPaths.markdown);
+    copyFileSync(sourcePaths.sidecar, destinationPaths.sidecar);
+    const db = await openNodeSqliteDatabase(destinationPaths.store); await db.close();
+    await brain.applyCollapse({ source, generation: destination, delegationTransfer: { source, destination, ...handoff },
+      expected: { brain: await brain.read(), archive: await brain.readArchive() }, writes: [], incoming: [], now: Date.now() });
+    const journal = await brain.readCollapseJournal();
+    const transfer = await brain.readDelegationTransfer();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(recoverCollapse(root, brain), /multiple conversations.*preserved/);
+      assert.deepEqual(await brain.readCollapseJournal(), journal);
+      assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+      assert.equal(existsSync(sourcePaths.store), true);
+      assert.equal(existsSync(destinationPaths.store), true);
+    }
+    const sourceDb = await openNodeSqliteDatabase(sourcePaths.store, { mode: "read-only" });
+    try {
+      const entries = await sourceDb.all("SELECT record FROM live_entries ORDER BY id");
+      assert.match(JSON.stringify(entries), /main before child/);
+      assert.match(JSON.stringify(entries), /child after reset/);
+    } finally { await sourceDb.close(); }
+  } finally {
+    if (!closed) await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });

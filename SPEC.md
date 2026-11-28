@@ -719,7 +719,12 @@ unanswered return stays recorded.
 A returned handoff crosses a full collapse: its exact source document is copied
 into a temporary Brain transfer record in the same transaction as the collapse
 sweep, verified against the source before deletion, then restored to the new
-main conversation before the transfer is acknowledged. Restart retries this
+main conversation before the transfer is acknowledged. Until conversation-aware
+sweep and recovery are implemented, a returned handoff with any additional Pi
+conversation refuses collapse before the sweep; recovery also refuses to delete
+a multi-conversation source of an older committed return sweep. The source and
+journal remain available for recovery. This guard requires stopped source writers
+and does not repair a source already deleted by an older version. Restart retries this
 placement without replacing a conflicting document. An empty acknowledged
 handoff needs no transfer. An unfinished, retired, ambiguous or unsupported
 handoff instead prevents collapse; its source is preserved. These checks assume
