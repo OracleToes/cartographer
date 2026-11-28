@@ -755,9 +755,18 @@ retain their normal semantics. The initial delegate input is admitted in a Pi
 transaction that checks the same running handoff and its task-owned child; if
 the handoff has already returned, no new child input is admitted. Replays reuse
 the same request ID. This admission check does not itself stop a child whose
-input was already admitted. The host must perform the return collapse and handle
-interrupts and recovery before exposing it. Capture's selected tools are
-restricted to read/search names and the report tool; this is not a sandbox.
+input was already admitted. A dormant immediate-end control records the person's
+reason (including a blank one) as a durable ending intent before aborting the
+child's ordinary Pi work. It commits a person-ended return only after that work
+has stopped; a report racing the ending intent cannot replace it. Recovery of
+an ending intent requires a paused Pi scheduler and aborts the owning main run
+before scheduling resumes, preserving its unanswered input for the host to
+handle. It does not roll back project changes or stop independent background
+jobs. This is not itself a main-inference barrier: in ordinary operation Pi
+may start a queued main input after the delegation tool terminates. The host
+must gate that inference, route controls, handle unanswered and queued inputs,
+perform return collapse and complete recovery before exposing this. Capture's selected tools
+are restricted to read/search names and the report tool; this is not a sandbox.
 
 A dormant evidence helper can fingerprint an explicit list of regular files and
 recheck those fingerprints using Carto's file-scope rules. It distinguishes

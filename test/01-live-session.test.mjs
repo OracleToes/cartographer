@@ -9,6 +9,7 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { InboxDoc, Harness, MemoryStorage, createRegistry, defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai";
@@ -46,6 +47,7 @@ import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/del
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
+import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -496,6 +498,106 @@ test("mixed delegation and report rounds cannot create or return a handoff", asy
     assert.deepEqual(handoff.result, { kind: "delegate", report });
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("person-ended delegate stops its in-flight work without a final report", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const hold = defineTool({ name: "hold", description: "Hold until interrupted", parameters: obj({}), replay: "safe", execute: async (_args, _api, context) => {
+    writeFileSync(join(root, "partial-work"), "kept");
+    markStarted();
+    await new Promise((resolve) => {
+      if (context.abortSignal?.aborted) resolve();
+      else context.abortSignal?.addEventListener("abort", resolve, { once: true });
+    });
+    return { output: [{ type: "text", text: "interrupted" }] };
+  } });
+  const worker = defineExtension({ name: "worker-hold", tools: [hold] });
+  const delegate = createDelegateTool({ cwd: root, profiles: { implementation: { extensions: [worker], tools: [hold] } } });
+  const mainExtension = defineExtension({ name: "main-delegate", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })], { stopReason: "toolUse" }),
+    ]);
+    const submission = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    await started;
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    await assert.rejects(recoverImmediateDelegateEnd(harness, main, BACKGROUND_CONTEXT), /paused scheduler/);
+    assert.equal(await endDelegateNow(harness, main, active.input.id, "", BACKGROUND_CONTEXT), true);
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(returned.result, { kind: "person-ended", reason: "" });
+    assert.equal(await endDelegateNow(harness, main, active.input.id, "late", BACKGROUND_CONTEXT), false);
+    assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
+    assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("ending intent recovers before scheduler resumes and preserves unanswered main input", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const hold = defineTool({ name: "hold", description: "Hold until closed", parameters: obj({}), replay: "safe", execute: async (_args, _api, context) => {
+    writeFileSync(join(root, "partial-work"), "kept");
+    markStarted();
+    await new Promise((resolve) => {
+      if (context.abortSignal?.aborted) resolve();
+      else context.abortSignal?.addEventListener("abort", resolve, { once: true });
+    });
+    return { output: [{ type: "text", text: "interrupted" }] };
+  } });
+  const worker = defineExtension({ name: "worker-hold", tools: [hold] });
+  const delegate = createDelegateTool({ cwd: root, profiles: { implementation: { extensions: [worker], tools: [hold] } } });
+  const mainExtension = defineExtension({ name: "main-delegate", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
+  const path = join(root, ".brain", "end-recovery.sqlite");
+  let database = await openNodeSqliteDatabase(path);
+  let harness = await Harness.open(await SqliteStorage.open(database), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })], { stopReason: "toolUse" }),
+    ]);
+    const submission = await main.submit({ type: "input", content: "Keep this request" }, BACKGROUND_CONTEXT);
+    await started;
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
+    assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
+    await assert.rejects(requestImmediateDelegateEnd(main, active.input.id, "different", BACKGROUND_CONTEXT), /different reason/);
+    const lateReport = { status: "done", findings: "none", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
+    await assert.rejects(main.commit(async (tx) => returnDelegation(await tx.doc(DelegationDoc, main.id), active.input.id, { kind: "delegate", report: lateReport }), BACKGROUND_CONTEXT), /cannot return/);
+    await harness.close(BACKGROUND_CONTEXT);
+    await database.close();
+    database = await openNodeSqliteDatabase(path);
+    harness = await Harness.open(await SqliteStorage.open(database), { models, registry }, BACKGROUND_CONTEXT);
+    main = await harness.root(BACKGROUND_CONTEXT);
+    assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
+    assert.equal(await recoverImmediateDelegateEnd(harness, main, BACKGROUND_CONTEXT), true);
+    const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(returned.result, { kind: "person-ended", reason: "stop now" });
+    assert.equal((await (await harness.submission(submission.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
+    assert.equal(faux.state.callCount, 2, "no model restarted during recovery");
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
+    await database.close().catch(() => undefined);
     await cleanup();
   }
 });

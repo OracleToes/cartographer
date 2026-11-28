@@ -24,7 +24,7 @@ export async function ensureDelegateConversation(
   if (owner === undefined || owner.conversationId !== mainId) throw new Error("Delegate owner does not belong to the main conversation.");
   const record = await tx.doc(DelegationDoc, mainId);
   const active = record.active;
-  if (active === null || active.input.id !== delegationId ||
+  if (active === null || active.input.id !== delegationId || active.phase === "ending" ||
       (active.phase === "returned" && active.result.kind !== "delegate")) {
     throw new Error("Delegation is not available for this owner.");
   }
@@ -69,7 +69,7 @@ export async function admitDelegateInput(
       conversation.owner.taskId !== ownerId) {
     throw new Error("Delegate input does not match its owned handoff; no input was admitted.");
   }
-  if (active.phase === "returned") return null;
+  if (active.phase === "returned" || active.phase === "ending") return null;
   return child.submit(tx, {
     type: "input", content: JSON.stringify(active.input), requestId: `carto.delegate-input:${ownerId}`,
   });

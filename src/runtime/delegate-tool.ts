@@ -46,7 +46,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
                  record.active.input.instruction !== input.instruction || record.active.input.doneWhen !== input.doneWhen) {
           throw new Error("Another delegation is already recorded; it was preserved.");
         }
-        return record.active?.phase === "returned";
+        return record.active?.phase === "returned" || record.active?.phase === "ending";
       }, context);
       if (!alreadyReturned) {
         const guidance = args.role === "capture"
@@ -56,7 +56,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
             : "Verify the focused task and report the checks actually performed, results, gaps and uncertainty.";
         const childId = await api.commit(async (tx) => {
           const active = (await tx.doc(DelegationDoc, api.conversationId)).active;
-          if (active?.input.id === id && active.phase === "returned") return null;
+          if (active?.input.id === id && (active.phase === "returned" || active.phase === "ending")) return null;
           return ensureDelegateConversation(tx, api.conversationId, api.taskId, id, {
             model, cwd: options.cwd,
             instructions: `${guidance} Return via delegate_report. Do not invent findings, changes or checks.`,
@@ -64,12 +64,12 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
             tools: [...profile.tools, DelegateReportTool],
           });
         }, context);
-        if (childId === null) return { output: [{ type: "text" as const, text: "Delegation returned; main must collapse and reconcile the handoff." }], control: { terminate: true } };
+        if (childId === null) return { output: [{ type: "text" as const, text: "Delegation is ending or returned; the host must stop it and collapse before main continues." }], control: { terminate: true } };
         await api.details({ conversationId: childId }, context);
         const child = await api.conversation(childId, context);
         if (child === undefined) throw new Error("The delegate conversation is unavailable; the handoff was preserved.");
         const submissionId = await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, id, child), context);
-        if (submissionId === null) return { output: [{ type: "text" as const, text: "Delegation returned; main must collapse and reconcile the handoff." }], control: { terminate: true } };
+        if (submissionId === null) return { output: [{ type: "text" as const, text: "Delegation is ending or returned; the host must stop it and collapse before main continues." }], control: { terminate: true } };
         // The invocation-bound handle exposes waits only through submit(). The
         // same request ID retrieves the already-admitted submission, even if
         // the handoff returned between this commit and this lookup.
@@ -81,7 +81,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
         await api.commit(async (tx) => {
           const record = await tx.doc(DelegationDoc, api.conversationId);
           if (record.active === null || record.active.input.id !== id) throw new Error("The delegation handoff changed; it was preserved.");
-          if (record.active.phase !== "returned") {
+          if (record.active.phase !== "returned" && record.active.phase !== "ending") {
             const explanation = settled.status === "unanswered"
               ? `Delegate ended without a report (${settled.reason}).`
               : "Delegate ended without a report.";
@@ -89,7 +89,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
           }
         }, context);
       }
-      return { output: [{ type: "text" as const, text: "Delegation returned; main must collapse and reconcile the handoff." }], control: { terminate: true } };
+      return { output: [{ type: "text" as const, text: "Delegation is ending or returned; the host must stop it and collapse before main continues." }], control: { terminate: true } };
     },
   });
 }

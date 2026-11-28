@@ -36,7 +36,7 @@ export const DelegateReportTool = defineTool({
       }
       const record = await tx.doc(DelegationDoc, child.owner.conversationId);
       const active = record.active;
-      if (active === null || active.phase === "prepared" || active.conversationId !== child.id) {
+      if (active === null || active.phase === "prepared" || active.phase === "ending" || active.conversationId !== child.id) {
         throw new Error("The delegate does not match the active handoff; the report was not recorded.");
       }
       if (active.phase === "returned") {

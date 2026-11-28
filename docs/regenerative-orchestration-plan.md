@@ -59,9 +59,14 @@ model-issued assistant entry with exactly that one call. Nested callers are
 disallowed. Other calls in a mixed round may still run normally; rejecting the
 delegation does not roll them back. Initial child input admission now checks
 the handoff and child ownership in the same Pi transaction, refusing to start
-new work after a return; replay uses the same request ID. It does not stop an
-already-admitted child or solve crash-safe interruption. The host must still
-perform return collapse and handle interrupts and recovery; Pi's terminate
+new work after a return; replay uses the same request ID. A dormant immediate-end
+control now records the person's reason as an ending intent, aborts the child's
+ordinary Pi work, then records a person-ended return. A restart helper requires
+Pi scheduling to remain paused and aborts the owning main run before resuming;
+its unanswered inputs still require host handling. It preserves partial project
+work and does not cross background boundaries. The host must still route the
+control, gate main inference (including a queued input after termination),
+handle unanswered and queued inputs, and perform return collapse; Pi's terminate
 control alone does not stop a mixed tool round. These pieces reuse Pi's owned
 conversations, schema validation and commit semantics, but are not yet a
 complete delegate runtime or UI. A dormant file-evidence helper fingerprints

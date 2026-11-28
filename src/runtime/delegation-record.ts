@@ -30,6 +30,7 @@ export type DelegationReturn =
 export type Delegation =
   | { phase: "prepared"; input: DelegationInput }
   | { phase: "running"; input: DelegationInput; conversationId: number }
+  | { phase: "ending"; input: DelegationInput; conversationId: number | null; reason: string }
   | { phase: "returned"; input: DelegationInput; conversationId: number | null; result: DelegationReturn };
 export type DelegationRecord = { active: Delegation | null };
 
@@ -90,9 +91,28 @@ export function startDelegation(record: DelegationRecord, id: string, conversati
   record.active = { phase: "running", input: active.input, conversationId };
 }
 
+/** An ending intent blocks late reports and survives interruption before abort completes. */
+export function requestDelegationEnd(record: DelegationRecord, id: string, reason: string): void {
+  if (typeof reason !== "string") throw new Error("The person's reason must be text.");
+  const active = record.active;
+  if (active === null || active.input.id !== id || active.phase === "returned") throw new Error("Delegation is not active.");
+  if (active.phase === "ending") {
+    if (active.reason !== reason) throw new Error("The delegation is already ending with a different reason.");
+    return;
+  }
+  record.active = { phase: "ending", input: active.input, conversationId: active.phase === "running" ? active.conversationId : null, reason };
+}
+
+/** Call only after the delegate's ordinary work has stopped. */
+export function finishDelegationEnd(record: DelegationRecord, id: string): void {
+  const active = record.active;
+  if (active === null || active.input.id !== id || active.phase !== "ending") throw new Error("Delegation is not ending.");
+  record.active = { phase: "returned", input: active.input, conversationId: active.conversationId, result: { kind: "person-ended", reason: active.reason } };
+}
+
 export function returnDelegation(record: DelegationRecord, id: string, result: DelegationReturn): void {
   const active = record.active;
-  if (active === null || active.input.id !== id || active.phase === "returned") throw new Error("Delegation cannot return.");
+  if (active === null || active.input.id !== id || active.phase === "returned" || active.phase === "ending") throw new Error("Delegation cannot return.");
   if (result.kind === "delegate") {
     if (active.phase !== "running") throw new Error("A delegate report requires a running delegation.");
     if (!["done", "partial", "blocked", "unverified"].includes(result.report.status)) throw new Error("Invalid delegate report status.");
