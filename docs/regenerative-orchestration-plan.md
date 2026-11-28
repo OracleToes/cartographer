@@ -125,9 +125,8 @@ proposal text; unresolved details are not implicitly decided by them.
   it merely because the task ended. Job ownership and handoff mechanics still
   need design, including making the job and its status available to main.
 - **Mode default and startup.** Direct mode is the default. Carto remembers the
-  selected mode and restores it on startup rather than resetting to direct mode
-  each time. Whether the selection is per project or global remains to be
-  clarified.
+  selected mode separately for each project and restores that project's mode on
+  startup rather than resetting to direct mode each time.
 - **Mode switch while a delegate is active.** When the person requests a switch
   from orchestration to direct mode during an active delegation, show a warning
   with yes/no choices, operable by click or keyboard; the keyboard defaults to
@@ -136,8 +135,9 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** should Carto remember the selected mode separately
-for each project, or use the same selected mode across projects?
+**Next unanswered question:** when a project reopens in orchestration mode with
+no active task, should Carto immediately start systematic capture, or wait for
+the person to resume it or give it work?
 
 ## 1. Recommendation in one sentence
 
@@ -598,10 +598,9 @@ These are proposals/questions, not decisions attributed to the person:
 3. **Assessment scope:** when should assessment run—on request, after a
    detected change, or as part of an orchestration task—and what evidence is
    adequate to stop at "checked" rather than continue investigating?
-4. **Mode lifecycle:** direct is the default and the selected mode is restored
-   on startup, as decided above; whether that choice is per project or global
-   and other switching details remain open. Mode is independent of edit/read-only
-   and path scope.
+4. **Mode lifecycle:** direct is the default and each project's selected mode is
+   restored on startup, as decided above; other startup and switching details
+   remain open. Mode is independent of edit/read-only and path scope.
 5. **Task inputs and controls:** exact eligible selected entry types, snapshots
    vs references, shared Atlas/Ledger visibility, missing/stale references,
    message routing, pause, cancel, interruption, wipe, exit and task view.
