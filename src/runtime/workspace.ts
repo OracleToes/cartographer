@@ -52,14 +52,16 @@ export function lexicalProjectPath(root: string, path: string): string {
 
 /** Person-owned project settings live outside the agent's Brain projection. */
 export type PathScope = "strict" | "relaxed";
-export interface ProjectSettings { readOnly: boolean; pathScope: PathScope }
+/** Reserved per-project preference; the orchestration runtime is not yet available. */
+export type ExecutionMode = "direct" | "orchestration";
+export interface ProjectSettings { readOnly: boolean; pathScope: PathScope; executionMode: ExecutionMode }
 
 export function readProjectSettings(root: string): ProjectSettings {
   const path = join(root, ".brain", "settings.json");
   let raw: string;
   try { raw = readFileSync(path, "utf8"); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { readOnly: false, pathScope: "strict" };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { readOnly: false, pathScope: "strict", executionMode: "direct" };
     throw error;
   }
   let value: unknown;
@@ -68,15 +70,23 @@ export function readProjectSettings(root: string): ProjectSettings {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid project settings at ${path}.`);
   const data = value as Record<string, unknown>;
   if (data.version !== 1 || (data.readOnly !== undefined && typeof data.readOnly !== "boolean") ||
-      (data.pathScope !== undefined && data.pathScope !== "strict" && data.pathScope !== "relaxed")) {
-    throw new Error(`Invalid project settings at ${path}: expected version 1, a boolean readOnly, and strict or relaxed pathScope.`);
+      (data.pathScope !== undefined && data.pathScope !== "strict" && data.pathScope !== "relaxed") ||
+      (data.executionMode !== undefined && data.executionMode !== "direct" && data.executionMode !== "orchestration")) {
+    throw new Error(`Invalid project settings at ${path}: expected version 1, a boolean readOnly, strict or relaxed pathScope, and direct or orchestration executionMode.`);
   }
-  return { readOnly: data.readOnly === true, pathScope: data.pathScope === "relaxed" ? "relaxed" : "strict" };
+  return {
+    readOnly: data.readOnly === true,
+    pathScope: data.pathScope === "relaxed" ? "relaxed" : "strict",
+    executionMode: data.executionMode === "orchestration" ? "orchestration" : "direct",
+  };
 }
 
 /** Merge and atomically replace the settings file before updating live state. */
 export function writeProjectSettings(root: string, update: Partial<ProjectSettings>): ProjectSettings {
   const next = { ...readProjectSettings(root), ...update };
+  if (next.executionMode !== "direct" && next.executionMode !== "orchestration") {
+    throw new Error("Invalid project settings: executionMode must be direct or orchestration.");
+  }
   const directory = join(root, ".brain");
   const path = join(directory, "settings.json");
   mkdirSync(directory, { recursive: true });

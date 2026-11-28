@@ -32,6 +32,7 @@ import {
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
 import { ephemeralItemId, generationPaths, pinnedFileTexts, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
+import { readProjectSettings, writeProjectSettings } from "../dist/runtime/workspace.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
 const fixture = async ({ inMemoryBrain = false } = {}) => {
@@ -454,6 +455,8 @@ test("project modes persist independently through reopening and collapse", async
   try {
     assert.equal(session.state.readOnly, false);
     assert.equal(session.state.pathScope, "strict");
+    assert.throws(() => setProjectModes(session, { executionMode: "orchestration" }), /not yet available/);
+    assert.equal(readProjectSettings(a.root).executionMode, "direct");
     setProjectModes(session, { readOnly: true });
     setProjectModes(session, { pathScope: "relaxed" });
     other = await openLiveSession({ ...options, root: b.root, brain: b.brain });
@@ -469,13 +472,37 @@ test("project modes persist independently through reopening and collapse", async
     assert.equal(session.state.pathScope, "relaxed");
     setProjectModes(session, { readOnly: false });
     assert.equal(session.state.pathScope, "relaxed");
-    assert.deepEqual(JSON.parse(readFileSync(join(a.root, ".brain", "settings.json"), "utf8")), { version: 1, readOnly: false, pathScope: "relaxed" });
+    assert.deepEqual(JSON.parse(readFileSync(join(a.root, ".brain", "settings.json"), "utf8")), { version: 1, readOnly: false, pathScope: "relaxed", executionMode: "direct" });
     writeFileSync(join(a.root, ".brain", "settings.json"), "invalid");
     assert.throws(() => setProjectModes(session, { readOnly: true }), /Invalid project settings/);
     assert.equal(session.state.readOnly, false);
   } finally {
     await closeLiveSession(session);
     if (other) await closeLiveSession(other);
+    await a.cleanup(); await b.cleanup();
+  }
+});
+
+test("execution mode preference is per project and cannot silently start unfinished orchestration", async () => {
+  const a = await fixture({ inMemoryBrain: true });
+  const b = await fixture({ inMemoryBrain: true });
+  const { models, ref } = fauxSetup();
+  const path = join(a.root, ".brain", "settings.json");
+  try {
+    assert.equal(readProjectSettings(a.root).executionMode, "direct");
+    writeFileSync(path, JSON.stringify({ version: 1, readOnly: true, pathScope: "relaxed" }));
+    assert.equal(readProjectSettings(a.root).executionMode, "direct", "legacy settings remain direct");
+    writeProjectSettings(a.root, { executionMode: "orchestration" });
+    writeProjectSettings(a.root, { readOnly: false });
+    assert.deepEqual(readProjectSettings(a.root), { readOnly: false, pathScope: "relaxed", executionMode: "orchestration" });
+    assert.equal(readProjectSettings(b.root).executionMode, "direct");
+    await assert.rejects(openLiveSession({ root: a.root, brain: a.brain, models, model: ref }), /Orchestration mode is not yet available/);
+    assert.equal(readProjectSettings(a.root).executionMode, "orchestration", "refusing startup does not erase the choice");
+    assert.throws(() => writeProjectSettings(a.root, { executionMode: "other" }), /executionMode/);
+    assert.equal(readProjectSettings(a.root).executionMode, "orchestration");
+    writeFileSync(path, JSON.stringify({ version: 1, executionMode: "other" }));
+    assert.throws(() => readProjectSettings(a.root), /Invalid project settings/);
+  } finally {
     await a.cleanup(); await b.cleanup();
   }
 });

@@ -692,6 +692,21 @@ global configuration outside `.brain` are not touched. A symlink or non-director
 `.brain` is refused, and failures are reported rather than reported as success.
 Deletion is not a guarantee of secure erasure from backups or storage media.
 
+### Orchestration foundation
+
+Direct execution remains Carto's only available execution mode until the
+orchestration runtime is implemented. Project settings reserve a separate
+`executionMode` value, `direct` or `orchestration`; older settings without it
+mean `direct`. The value is project-local and survives restart and collapse,
+independent of read-only and file-scope settings. A `/wipe` removes these
+settings with the rest of `.brain`.
+
+There is not yet a person-facing control to select orchestration. If settings
+already request `orchestration`, Carto refuses to open the session with a clear
+error rather than silently running in direct mode or claiming orchestration is
+active. This storage foundation does not implement delegation, capture, a project
+specification format, or the rest of regenerative coding.
+
 ### 6.1 Read only mode and edit mode
 
 Carto is always in one of two modes. A toggle in the workspace switches between

@@ -153,6 +153,9 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   const now = () => options.now?.() ?? Date.now();
   ensureBrainDirectory(root);
   const projectSettings = readProjectSettings(root);
+  if (projectSettings.executionMode === "orchestration") {
+    throw new Error("Orchestration mode is not yet available; this project cannot open in orchestration mode.");
+  }
 
   // Generation: reuse the live one (crash recovery reopens identical bytes),
   // or build a new one from the Brain — which is authoritative.
@@ -867,7 +870,8 @@ export interface PauseOutcome {
  * the agent did not ask for.
  */
 /** Persist first so a failed write never silently changes the active mode. */
-export function setProjectModes(session: LiveSession, update: Partial<ProjectSettings>): ProjectSettings {
+export function setProjectModes(session: LiveSession, update: Partial<Pick<ProjectSettings, "readOnly" | "pathScope">>): ProjectSettings {
+  if ("executionMode" in update) throw new Error("Orchestration mode is not yet available.");
   const settings = writeProjectSettings(session.root, update);
   session.state.readOnly = settings.readOnly;
   session.state.pathScope = settings.pathScope;

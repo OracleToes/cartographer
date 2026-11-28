@@ -25,6 +25,15 @@ notice. Archive grace advances normally on each main return collapse, even when
 returns are close together. Other unresolved boundaries remain decisions, not
 assumptions.
 
+## Implementation progress
+
+The first foundation reserves and validates a per-project execution-mode
+preference in `.brain/settings.json`, defaulting legacy settings to direct. It
+is not an orchestration implementation: no UI enables it, and an attempt to
+open a project whose settings request orchestration fails explicitly rather
+than silently using direct mode. The parser pilot, sequential delegation,
+capture, controls and recovery remain to be built.
+
 ## Decisions recorded during refinement
 
 The person asked that answers be recorded and committed as the discussion
