@@ -120,9 +120,14 @@ proposal text; unresolved details are not implicitly decided by them.
   unexpected overflow prevents it: preserve partial work and tell main the
   report is missing rather than inventing one. The threshold, reserve and
   enforcement mechanism remain to be designed and tested.
+- **Jobs outlive delegate return.** A background job started by a delegate keeps
+  running when the delegate returns, so main can manage it; Carto does not stop
+  it merely because the task ended. Job ownership and handoff mechanics still
+  need design, including making the job and its status available to main.
 
-**Next unanswered question:** when a delegate returns, should a background job
-it started keep running for main to manage, or should Carto stop it?
+**Next unanswered question:** if the person switches from orchestration mode to
+  direct mode while a delegate is active, should Carto end the delegation
+  immediately or wait for it to return first?
 
 ## 1. Recommendation in one sentence
 
@@ -467,9 +472,10 @@ The main agent maintains the map and user conversation; the runtime carries
 handoffs, not the model's private claims of success. One inference admission
 point/lease covers all roles, not merely one task UI: no second active model
 request while another is running, including wakeups, interruption and restart.
-Shell jobs are not model agents, but their ownership and persistence still need
-a decision. Model changes, if used, are sequential swaps on the same hardware;
-no special models are required by this design.
+Shell jobs are not model agents. Delegate-started background jobs remain
+running across task return, as decided above; their ownership and handoff need
+design. Model changes, if used, are sequential swaps on the same hardware; no
+special models are required by this design.
 
 1. **Understand, capture and define.** Main reads the project contract if one
    exists, distinguishes the person's request, current behavior, gaps and
@@ -591,7 +597,7 @@ These are proposals/questions, not decisions attributed to the person:
 6. **Task context and jobs:** context-limit return replaces local collapse as
    the continuation at the warning; other task-local boundaries, including
    Chat, pins and archive handling, still need design. Define shell/job
-   ownership and survival across task return.
+   ownership and the handoff of jobs that survive task return.
 7. **Reports and grammar:** exact report/message schema and separation; verify
    GBNF enforcement and forced tool/report behavior on the actual installed
    pi-ai/llama-swap/llama.cpp route, including durable replay. Installed pi-ai
