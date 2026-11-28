@@ -747,7 +747,10 @@ from external side effects or recovery of them.
 A dormant delegation tool composes these pieces using Pi's task ownership and
 request-ID replay: it prepares one handoff, creates or reuses its child, submits
 the focused request once, and records a missing-report failure if the child
-finishes without reporting. Both delegation and delegate report require a
+finishes without reporting. If Pi settles the delegate input unanswered, that
+failure retains Pi's reason and any provided detail, including a provider's
+context-overflow error, rather than replacing it with a fabricated report. This
+does not itself enforce a near-limit report or detect every overflow. Both delegation and delegate report require a
 sole model-issued tool call in their round, checked against Pi's durable task
 and assistant entry before making the handoff. Mixed or nested calls cannot
 start delegation or commit a report. Other calls in a rejected mixed round

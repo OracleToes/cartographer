@@ -96,7 +96,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
           if (record.active === null || record.active.input.id !== id) throw new Error("The delegation handoff changed; it was preserved.");
           if (record.active.phase !== "returned" && record.active.phase !== "ending") {
             const explanation = settled.status === "unanswered"
-              ? `Delegate ended without a report (${settled.reason}).`
+              ? `Delegate ended without a report (${settled.reason}${settled.detail === undefined ? "" : `: ${typeof settled.detail === "string" ? settled.detail : JSON.stringify(settled.detail)}`}).`
               : "Delegate ended without a report.";
             returnDelegation(record, id, { kind: "failure", explanation });
           }

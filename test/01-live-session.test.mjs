@@ -866,6 +866,34 @@ test("a delegate ending without a report records a failure rather than inventing
   }
 });
 
+test("a delegate overflow returns Pi's failure detail without inventing a report", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const delegate = createDelegateTool({ cwd: root });
+  const mainExtension = defineExtension({ name: "test-main-overflow", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension);
+  registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Do work", doneWhen: "Report" }, { id: "delegate-call" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "prompt exceeds the available context size" }),
+    ]);
+    const submitted = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.equal(handoff.result.kind, "failure");
+    assert.match(handoff.result.explanation, /without a report.*model_error.*prompt exceeds the available context size/);
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
 test("delegate reports and missing reports stay distinct", () => {
   const input = { id: "task-1", role: "implementation", instruction: "Fix the issue", doneWhen: "Report changes" };
   const report = { status: "blocked", findings: "Unexpected behavior", changes: "none", checks: "not run", uncertainty: "impact unknown", remaining: "ask the person", mainMessage: "Blocked" };

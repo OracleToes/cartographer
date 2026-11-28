@@ -78,7 +78,9 @@ writes; it preserves content and entry metadata but does not reproduce Pi's
 original steer/follow-up submissions. Checked receipt and checkpoint clear only
 after the return is answered. Host admission sealing, control routing, and
 end-to-end ordering still need integration. This preserves data rather than
-pretending the return path is complete. Recovery preserves
+pretending the return path is complete. A missing-report failure now carries
+Pi's unanswered reason and detail, including a provider overflow message when
+provided; this is not near-limit enforcement. Recovery preserves
 partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.
