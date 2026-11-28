@@ -15,6 +15,7 @@ import { personChatBindings, userText } from "../domain/chat-identity.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -353,7 +354,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     if (live?.run === undefined) {
       for (const item of (await options.brain.readArchive()).items) {
         if (item.restorePending === true && item.mark?.action === "restore" && await restoreEphemeral(session, item)) {
-          await options.brain.applyArchive({ kind: "restore-complete", id: item.id });
+          await options.brain.applyArchive({ kind: "restore-complete", id: item.id, expected: item });
         }
       }
     }
@@ -1015,7 +1016,11 @@ export async function interruptRun(session: LiveSession): Promise<boolean> {
  *
  * New archive rows retain the original Pi messages. A result is accompanied by
  * its call because Pi drops orphan results; a fresh call id avoids collisions.
- * Legacy rows without enough metadata are refused rather than lost.
+ * Legacy rows without enough metadata are refused rather than lost. Pi's
+ * request-ID deduplication does not compare write contents, so retries check
+ * the actual entries and Pi-derived contributions before reporting success.
+ * The caller must keep context writers sealed through archive acknowledgement;
+ * these checks detect changes but do not lock Pi or the Brain.
  */
 export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
   const ephemeral = item.ephemeral;
@@ -1062,6 +1067,19 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
   } else {
     return false;
   }
+  const legacyUser = !Array.isArray(ephemeral.model) || ephemeral.model.length === 0;
+  const matchesMessage = (actual: unknown, expected: Message): boolean => {
+    // Legacy text-only archive rows did not retain their original timestamp.
+    // A retry may reconstruct a different timestamp, but no other extra data.
+    if (legacyUser && expected.role === "user") {
+      if (actual === null || typeof actual !== "object" || Array.isArray(actual)) return false;
+      const value = actual as Record<string, unknown>;
+      return Object.keys(value).every((key) => ["role", "content", "timestamp"].includes(key)) &&
+        value.role === "user" && typeof value.timestamp === "number" && isDeepStrictEqual(value.content, expected.content);
+    }
+    return isDeepStrictEqual(actual, expected);
+  };
+  const requestId = (index: number) => `carto.restore:${item.id}${model.length === 1 ? "" : `:${index}`}`;
   try {
     // Separate entries retain normal Context/sweep identity for the paired
     // call and result. Deterministic request ids make a partial retry safe.
@@ -1069,14 +1087,39 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
       const submission = await session.conversation.submit(
         {
           type: "write",
-          requestId: `carto.restore:${item.id}${model.length === 1 ? "" : `:${index}`}`,
+          requestId: requestId(index),
           entry: { kind: "carto.restored", data: { archiveId: item.id }, model: [message] },
         },
         BACKGROUND_CONTEXT,
       );
       if ((await submission.wait(BACKGROUND_CONTEXT)).status !== "done") return false;
     }
-    return true;
+    const inspect = async (tx: import("@earendil-works/pi-durable").Tx) => {
+      const entries: EntryId[] = [];
+      for (const [index, message] of model.entries()) {
+        const submission = await tx.submissionByRequest(session.conversation.id, requestId(index));
+        if (submission?.type !== "write" || submission.conversationId !== session.conversation.id || submission.status !== "done") {
+          throw new Error("Restored submission conflicts with its archive item.");
+        }
+        const entry = await tx.entry(submission.entry);
+        if (entry?.conversationId !== session.conversation.id || entry.kind !== "carto.restored" ||
+            !isDeepStrictEqual(entry.data, { archiveId: item.id }) || entry.model?.length !== 1 || !matchesMessage(entry.model[0], message)) {
+          throw new Error("Restored entry conflicts with its archive item.");
+        }
+        entries.push(entry.id);
+      }
+      return { entries, tail: await tx.latestEntryId(session.conversation.id), head: (await tx.latestHeadMarker(session.conversation.id))?.id };
+    };
+    const before = await session.conversation.commit(inspect, BACKGROUND_CONTEXT);
+    const view = await session.conversation.context(BACKGROUND_CONTEXT, before.tail === undefined ? undefined : { at: before.tail });
+    if (view.head?.id !== before.head || view.entries.length !== view.contributions.length) return false;
+    for (const [index, entryId] of before.entries.entries()) {
+      const positions = view.entries.flatMap((entry, position) => entry.id === entryId ? [position] : []);
+      const messages = positions.length === 1 ? view.contributions[positions[0]!] : undefined;
+      if (messages?.length !== 1 || !matchesMessage(messages[0], model[index]!)) return false;
+    }
+    const after = await session.conversation.commit(inspect, BACKGROUND_CONTEXT);
+    return isDeepStrictEqual(before, after);
   } catch {
     // A conversation that will not take the write — it is closing, or busy in a
     // way that refuses one — leaves the item in the archive rather than losing

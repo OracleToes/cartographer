@@ -893,7 +893,7 @@ test("restoring an ephemeral returns it to the archive's absence and the live co
     const restored = await store.applyArchive({ kind: "restore", id: item.id });
     assert.equal(restored.item?.ephemeral?.kind, "personMessage", "it comes back as the kind it was");
     assert.equal((await store.readArchive()).items.length, 1, "the source stays until the live context acknowledges it");
-    await store.applyArchive({ kind: "restore-complete", id: item.id });
+    await store.applyArchive({ kind: "restore-complete", id: item.id, expected: restored.item });
     assert.equal((await store.readArchive()).items.length, 0, "the acknowledgement removes the source");
     // It went back to the live context, which the store is not: the Brain holds
     // no pin for it, because restoring does not also pin (§3.3).
@@ -945,8 +945,18 @@ test("a collapse keeps an ephemeral restore in the archive until acknowledgement
       await store.applyArchive({ kind: "mark", id: item.id, action: "restore", author: "user" });
       const report = await collapse(root, store);
       assert.equal(report.restored.some((candidate) => candidate.id === item.id), true);
-      assert.equal((await store.readArchive()).items.some((candidate) => candidate.id === item.id), true);
-      await store.applyArchive({ kind: "restore-complete", id: item.id });
+      const pending = (await store.readArchive()).items.find((candidate) => candidate.id === item.id);
+      assert.equal(pending.restorePending, true);
+      await store.applyArchive({ kind: "pin", id: item.id, pinned: "user" });
+      const conflict = await store.applyArchive({ kind: "restore-complete", id: item.id, expected: pending });
+      assert.equal(conflict.refused, true, "a changed archive item is never removed by an old acknowledgement");
+      const changed = (await store.readArchive()).items.find((candidate) => candidate.id === item.id);
+      assert.equal(changed.pinned, "user");
+      assert.equal(changed.restorePending, true);
+      await store.applyArchive({ kind: "mark", id: item.id, action: null, author: "user" });
+      assert.equal((await store.applyArchive({ kind: "restore-complete", id: item.id, expected: changed })).refused, true, "a withdrawn mark also blocks the stale acknowledgement");
+      const current = (await store.readArchive()).items.find((candidate) => candidate.id === item.id);
+      await store.applyArchive({ kind: "restore-complete", id: item.id, expected: current });
       assert.equal((await store.readArchive()).items.some((candidate) => candidate.id === item.id), false);
     } finally {
       await store.close();

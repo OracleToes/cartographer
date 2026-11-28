@@ -921,8 +921,14 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           return;
         }
       }
-      await brain.applyArchive({ kind: pending.record === undefined ? "restore-complete" : "restore", id });
-      pushStatus(pending.record === undefined ? "put an item back into the live context" : "restored a record to the Brain");
+      const completion = pending.record === undefined
+        ? await brain.applyArchive({ kind: "restore-complete", id, expected: pending })
+        : await brain.applyArchive({ kind: "restore", id });
+      if (completion.refused || completion.item === undefined) {
+        pushStatus("archive item changed or disappeared during restore; no stale archive acknowledgement was made");
+      } else {
+        pushStatus(pending.record === undefined ? "put an item back into the live context" : "restored a record to the Brain");
+      }
       await refreshArchive();
       await rebuildTranscript();
       await refreshSidebar();

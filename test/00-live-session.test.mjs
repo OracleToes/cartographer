@@ -625,6 +625,15 @@ test("ephemeral restore puts the actual text in model context, is idempotent, an
     const indices = view.entries.map((entry, index) => entry.kind === "carto.restored" ? index : -1).filter((index) => index >= 0);
     assert.equal(indices.length, 1);
     assert.equal(view.contributions[indices[0]][0].content, "actual restored content");
+    const collision = { ...item, id: "collision" };
+    const unrelated = await session.conversation.submit({ type: "write", requestId: "carto.restore:collision",
+      entry: { kind: "carto.restored", data: { archiveId: "collision" }, model: [{ role: "user", content: "different content", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    assert.equal((await unrelated.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(await restoreEphemeral(session, collision), false, "Pi deduplication cannot make an unrelated write count as a restore");
+    const omit = await session.conversation.submit({ type: "write", entry: { kind: "test.omit-restored",
+      edits: [{ target: view.entries[indices[0]].id, action: "omit" }] } }, BACKGROUND_CONTEXT);
+    assert.equal((await omit.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(await restoreEphemeral(session, item), false, "an omitted contribution cannot acknowledge the archive copy");
     assert.equal(await restoreEphemeral(session, { ...item, id: "unsupported", ephemeral: { kind: "toolResult", text: "must not disappear" } }), false);
   } finally {
     await closeLiveSession(session);

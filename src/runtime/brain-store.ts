@@ -222,8 +222,8 @@ export type ArchiveWrite =
   | { kind: "pin"; id: string; pinned: "user" | "agent" | null }
   | { kind: "mark"; id: string; action: "restore" | "delete" | null; author: "user" | "agent" }
   | { kind: "restore"; id: string }
-  /** A restored ephemeral has been durably placed in its destination. */
-  | { kind: "restore-complete"; id: string }
+  /** A restored ephemeral was placed from this exact archive snapshot. */
+  | { kind: "restore-complete"; id: string; expected: ArchivedItem }
   | { kind: "drop"; id: string };
 
 /**
@@ -617,8 +617,12 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           // The caller must place it in the live store before acknowledging it.
           return { archive: current, item, refused: false };
         }
-        if (write.kind === "restore-complete" && item.layer !== "ephemeral") {
-          return { archive: current, refused: true };
+        if (write.kind === "restore-complete" && (item.layer !== "ephemeral" ||
+            write.expected.id !== write.id || JSON.stringify(item) !== JSON.stringify(write.expected))) {
+          // The live write and Brain acknowledgement are separate commits. An
+          // edit, pin or withdrawn mark in between must not be deleted by a
+          // stale acknowledgement, even if the archive ID is unchanged.
+          return { archive: current, item, refused: true };
         }
         const archive = { ...current, items: current.items.filter((candidate) => candidate.id !== item.id) };
         if (write.kind === "restore") {

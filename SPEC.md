@@ -225,6 +225,13 @@ Restoring puts an entry back where it came from, as its original type: a Brain
 record returns to the Brain and so to the head, and an ephemeral item returns to
 the live context. It does not also pin; a pin is a separate action either party
 can take. A restored attachment that no longer resolves is marked stale.
+For an ephemeral restore, the archive copy remains until Pi's placed entries
+and active contributions match the restored item. Pi's request-ID retry alone
+does not prove the content matches. The archive acknowledgement also compares
+the exact item that was restored: an intervening edit, pin or mark change
+preserves the newer copy rather than deleting it by ID. These checks do not lock
+context or archive writers across the two stores; a conflict can leave both
+copies for recovery.
 
 Restoring is a person action, and the person's alone. The agent does not know
 the archive exists. Anything swept is, to the agent, gone forever: it has no

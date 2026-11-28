@@ -55,6 +55,12 @@ The foundations are still dormant and incomplete. An audit of the installed Pi
   particular, Pi can withdraw queued input, and throwing a generation hook is
   not a fail-closed barrier. These checks are not a writer lock; source and
   destination sealing and end-to-end recovery remain unimplemented.
+- Shared ephemeral restoration checks Pi's actual written entries and derived
+  contributions rather than trusting request-ID deduplication, and its Brain
+  acknowledgement compares the restored archive snapshot before deletion. This
+  also protects direct mode. These cross-store checks are not a writer seal;
+  changed or omitted content remains for recovery, and child destinations are
+  still not implemented.
 
 This audit does not prove every custom guard necessary or complete; future host
 integration must re-evaluate them against the then-installed Pi APIs rather than
