@@ -721,8 +721,14 @@ placement without replacing a conflicting document. An unfinished, retired,
 ambiguous or unsupported handoff instead prevents collapse; its source is
 preserved. These checks assume the existing collapse lifecycle: the caller has
 stopped writers to the generation; they are not a cross-process writer lock.
-The record is not wired to model execution or UI and does not imply isolation,
-report delivery, or recovery of external side effects.
+A separate, dormant transaction helper can attach a prepared handoff to a
+new task-owned Pi conversation, setting an explicit model, working directory
+and focused instructions, and selecting no extensions or tools. Creation,
+configuration and the transition to running commit together. A retry by the
+same owning task reuses the recorded child; mismatched ownership or ambiguous
+children are refused. This helper does not submit work or deliver a report and
+is not exposed as an orchestration feature. It does not imply isolation from
+external side effects or recovery of them.
 
 A session-local inference admission gate serializes Pi's `stream`,
 `streamSimple` and `streamDeferred` calls across conversations in that session;

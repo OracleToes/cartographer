@@ -9,7 +9,8 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { InboxDoc } from "@earendil-works/pi-durable";
+import { InboxDoc, Harness, MemoryStorage, createRegistry, defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
@@ -40,6 +41,7 @@ import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
+import { ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -188,6 +190,63 @@ test("a separate Pi conversation runs with its own context and no inherited tool
     assert.match(JSON.stringify((await child.context(BACKGROUND_CONTEXT)).messages), /separate response/);
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("delegate creation is atomic, replay-safe and task-owned with an isolated agent", async () => {
+  const { root: cwd, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  const input = { id: "delegate-1", role: "capture", instruction: "Inspect this entry", doneWhen: "Report sources" };
+  let childId;
+  const agent = { model: ref, cwd, instructions: "Only answer the focused request." };
+  const tool = defineTool({
+    name: "make_delegate",
+    description: "Exercise task-owned delegate creation.",
+    parameters: obj({}),
+    replay: "safe",
+    execute: async (_args, api, context) => {
+      await assert.rejects(api.commit(async (tx) => {
+        await ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id, agent);
+        throw new Error("rollback before commit");
+      }, context), /rollback before commit/);
+      childId = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id, agent), context);
+      const replayed = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id, agent), context);
+      assert.equal(replayed, childId);
+      await assert.rejects(api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, "wrong-id", agent), context), /not available/);
+      const child = await api.conversation(childId, context);
+      const submitted = await child.submit({ type: "input", content: input.instruction, requestId: "focused-request" }, context);
+      assert.equal((await submitted.wait(context)).status, "done");
+      return { output: [{ type: "text", text: "Delegate answered." }] };
+    },
+  });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: "test-delegation", tools: [tool] }));
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd, instructions: "Main private instructions.", compaction: { enabled: false } } });
+    await main.commit(async (tx) => prepareDelegation(await tx.doc(DelegationDoc, main.id), input), BACKGROUND_CONTEXT);
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("make_delegate", {}, { id: "delegate-call" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage("focused answer")),
+      factory(() => fauxAssistantMessage("main resumed")),
+    ]);
+    const submitted = await main.submit({ type: "input", content: "Main private request." }, BACKGROUND_CONTEXT);
+    assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const record = await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT);
+    assert.equal(record.active.phase, "running");
+    assert.equal(record.active.conversationId, childId);
+    const child = await harness.conversation(childId, BACKGROUND_CONTEXT);
+    const resolved = await child.agent(BACKGROUND_CONTEXT);
+    assert.deepEqual(resolved.tools, []);
+    assert.deepEqual(resolved.extensions, []);
+    assert.equal(resolved.compaction.enabled, false);
+    assert.match(JSON.stringify(captured[1]), /Inspect this entry/);
+    assert.doesNotMatch(JSON.stringify(captured[1]), /Main private request/);
+    assert.match(JSON.stringify((await child.context(BACKGROUND_CONTEXT)).messages), /focused answer/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
     await cleanup();
   }
 });
