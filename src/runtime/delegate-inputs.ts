@@ -68,9 +68,9 @@ export function validateInputTransfer(value: NonNullable<DelegationTransfer["inp
  * no retained content; its submission still identifies the loss. Pi exposes
  * this scan on Storage, not Tx, so call outside a Session commit. The caller
  * must provide the same storage as the Harness, verify child/owner identity and
- * seal writers before scanning through the later checkpoint/abort. This is not
- * integrated into the checkpoint, and an existing checkpoint may already hold
- * some of the returned inputs. It does not decide whether to replay or recover.
+ * seal admission through checkpoint, scan and abort. The low-level checkpoint
+ * does not call this scan; an existing checkpoint may already hold some of the
+ * returned inputs. This function does not decide whether to replay or recover.
  */
 export async function findUnansweredDelegateInputs(
   storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,

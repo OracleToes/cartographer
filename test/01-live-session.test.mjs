@@ -876,7 +876,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
   const mainExtension = defineExtension({ name: "main-delegate", tools: [delegate] });
   const registry = createRegistry();
   registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
-  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const storage = new MemoryStorage();
+  const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
   try {
     const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
     faux.setResponses([
@@ -889,12 +890,19 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
     const pending = await child.submit({ type: "input", content: "Keep my follow-up", whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } } }, BACKGROUND_CONTEXT);
     const pendingWrite = await child.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "unhandled write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
-    await assert.rejects(recoverImmediateDelegateEnd(harness, main, BACKGROUND_CONTEXT), /paused scheduler/);
-    await assert.rejects(endDelegateNow(harness, main, active.input.id, "", BACKGROUND_CONTEXT), /queued context write/);
+    await assert.rejects(recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), /paused scheduler/);
+    await assert.rejects(endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), /queued context write/);
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
     assert.equal((await pending.status(BACKGROUND_CONTEXT)).status, "queued");
     assert.equal(await pendingWrite.abort(BACKGROUND_CONTEXT), "aborted");
-    assert.equal(await endDelegateNow(harness, main, active.input.id, "", BACKGROUND_CONTEXT), true);
+    await assert.rejects(endDelegateNow(harness, main, { scanSubmissions: async () => { throw new Error("scan unavailable"); } }, active.input.id, "", BACKGROUND_CONTEXT), /scan unavailable/);
+    assert.equal((await pending.status(BACKGROUND_CONTEXT)).status, "queued", "a failed scan does not abort the child");
+    assert.equal((await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT)).handoffId, active.input.id);
+    // A retry after a crash past the abort must recognize the input already
+    // recorded in the pre-abort checkpoint, rather than treating it as lost.
+    await child.abort(BACKGROUND_CONTEXT);
+    assert.equal((await pending.status(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), true);
     const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
     assert.deepEqual(saved.inputs.find((input) => input.submissionId === pending.id), {
       submissionId: pending.id, placement: "queued", whenBusy: "followUp", content: "Keep my follow-up", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } },
@@ -904,7 +912,7 @@ test("person-ended delegate stops its in-flight work without a final report", as
     await main.waitForIdle(BACKGROUND_CONTEXT);
     const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.deepEqual(returned.result, { kind: "person-ended", reason: "" });
-    assert.equal(await endDelegateNow(harness, main, active.input.id, "late", BACKGROUND_CONTEXT), false);
+    assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
   } finally {
@@ -955,7 +963,12 @@ test("Pi submission scan detects withdrawn child input across restart without in
     assert.deepEqual(found.map((submission) => submission.id), [withdrawn.id]);
     assert.equal(found[0].reason, "aborted");
     assert.equal(found[0].entry, undefined);
-    assert.equal((await stillQueued.status(BACKGROUND_CONTEXT)).status, "queued");
+    const blocked = new RegExp(`Delegate input ${withdrawn.id} was unanswered before checkpoint`);
+    await assert.rejects(endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), blocked);
+    assert.equal((await stillQueued.status(BACKGROUND_CONTEXT)).status, "queued", "no further child input was withdrawn");
+    const checkpoint = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.ok(checkpoint.inputs.some((input) => input.submissionId === stillQueued.id));
+    assert.equal(checkpoint.inputs.some((input) => input.submissionId === withdrawn.id), false);
     await harness.close(BACKGROUND_CONTEXT); await database.close();
     database = await openNodeSqliteDatabase(path);
     storage = await SqliteStorage.open(database, { prefix: "live_" });
@@ -965,7 +978,10 @@ test("Pi submission scan detects withdrawn child input across restart without in
     const persisted = await findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
     assert.deepEqual(persisted.map((submission) => submission.id), [withdrawn.id]);
     assert.equal(persisted[0].entry, undefined, "the scan does not invent discarded inbox content");
+    await assert.rejects(recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), blocked);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint);
     assert.equal((await (await harness.submission(stillQueued.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "queued");
+    assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
   } finally {
     await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
@@ -997,7 +1013,8 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
   registry.install(barrier);
   const path = join(root, ".brain", "end-recovery.sqlite");
   let database = await openNodeSqliteDatabase(path);
-  let harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
+  let storage = await SqliteStorage.open(database, { prefix: "live_" });
+  let harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
   try {
     let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension, barrier], compaction: { enabled: false } } });
     faux.setResponses([
@@ -1028,11 +1045,12 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     await harness.close(BACKGROUND_CONTEXT);
     await database.close();
     database = await openNodeSqliteDatabase(path);
-    harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
+    storage = await SqliteStorage.open(database, { prefix: "live_" });
+    harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
     main = await harness.root(BACKGROUND_CONTEXT);
     assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
-    assert.equal(await recoverImmediateDelegateEnd(harness, main, BACKGROUND_CONTEXT), true);
+    assert.equal(await recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), true);
     const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.deepEqual(returned.result, { kind: "person-ended", reason: "stop now" });
     assert.equal((await (await harness.submission(submission.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");

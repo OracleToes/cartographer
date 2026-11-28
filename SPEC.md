@@ -801,12 +801,17 @@ conversations while capturing and keep it stopped through recovery; the
 checkpoint is not an admission lock. A separate dormant helper can scan Pi's
 child submission records for earlier unanswered inputs, excluding the delegate's
 own initial task input. Pi may already have discarded a withdrawn queued input's
-content, so this detection does not recover it. The storage-level scan is outside
-Pi's transaction API and is not yet integrated into checkpoint or abort; the host
-must verify ownership, seal writers, compare against any existing checkpoint and
-resolve earlier inputs before aborting further work. A retry of an existing
-checkpoint keeps its pre-abort copy. This recovery checkpoint does not yet route
-person controls.
+content, so this detection does not recover it. Pi's storage-level scan is outside
+its transaction API. The dormant immediate-end and restart-recovery paths scan
+after checkpointing and before abort, then recheck the handoff, checkpoint and
+scanned records in a Pi transaction. An unanswered child input absent from the
+checkpoint, a scan failure or conflicting data prevents further abort; any
+checkpointed inputs and ending intent remain for recovery. A previously
+checkpointed input that later becomes unanswered is not mistaken for missing.
+The host must pass the actual storage backing that Harness and seal admissions
+through checkpoint, scan and abort; these checks are not a lock, and the lower-level
+checkpoint helper alone does not do this scan. A retry of an existing checkpoint
+keeps its pre-abort copy. These helpers do not yet route person controls.
 A dormant, explicit collapse path can transfer the checkpoint together with its
 matching returned handoff through the existing Brain journal. It verifies the
 source handoff, checkpoint and source barrier before deleting the old store,

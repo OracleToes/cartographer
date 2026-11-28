@@ -77,13 +77,15 @@ content, submission identity and entry metadata in the source generation,
 excluding the delegate's own initial task instruction. It validates child
 ownership, reuses the snapshot on retry, and refuses ambiguous inputs or queued
 context writes. The host must seal both conversations' input admission during
-capture and recovery. A separate dormant helper scans Pi's storage-level child
-submission records for unanswered inputs, including withdrawn queue items; it
-is not integrated with checkpointing or abort, and Pi may already have discarded
-their content. Pi's transaction API does not expose a submission scan, so the
-host must seal writers across the scan and checkpoint, verify it is using the
-same storage, and reconcile results with any existing checkpoint. Detection is
-not recovery. An explicit, dormant collapse
+capture and recovery. A dormant helper scans Pi's storage-level child submission
+records for unanswered inputs, including withdrawn queue items. The immediate-end
+and restart-recovery paths now use it after checkpointing and before abort,
+compare the results against the saved checkpoint, and recheck the observed records
+and ownership in a Pi transaction. Pi's transaction API does not expose a
+submission scan, so the host must seal admissions across checkpoint, scan and
+abort, and provide the actual storage used by the Harness. The checkpoint helper
+alone does not scan. A missing input blocks further abort, but Pi may already have
+discarded its content: detection is not recovery. An explicit, dormant collapse
 path now transfers the checkpoint with its matching handoff using the existing
 Brain journal and verifies the source barrier and both documents. Placement is
 atomic in the destination; conflicts preserve both copies. Ordinary collapse
@@ -141,9 +143,9 @@ its caller must seal all writers, since the checks are not a lock and do not
 cover inbox or task changes. It does not archive, persist captured views or
 remove the return guard. Tool-result pairing, stable archive provenance,
 Chat deduplication, restoration, and crash-safe journal integration are still
-needed. The submission scan is not yet a checkpoint guard and does not
-reconstruct withdrawn content or provide a resolution workflow;
-multi-conversation source deletion remains guarded.
+needed. The submission scan guards the immediate-end and restart-recovery aborts,
+but not other checkpoint callers; it does not reconstruct withdrawn content or
+provide a resolution workflow. Multi-conversation source deletion remains guarded.
 
 ## Decisions recorded during refinement
 
