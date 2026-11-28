@@ -347,6 +347,9 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       }
     }
     if (value.sourceSeal !== undefined) validateDelegateSourceSeal(value.sourceSeal, value.source);
+    if (value.sourceHeadDigest !== undefined && (value.sourceSeal === undefined || typeof value.sourceHeadDigest !== "string" || !/^[0-9a-f]{64}$/.test(value.sourceHeadDigest))) {
+      throw new Error("Invalid delegate source head digest; recovery data was preserved.");
+    }
     if (value.inputCheckpoint !== undefined) {
       if (active === null || value.inputCheckpoint === null || value.inputCheckpoint.documentId === value.documentId || value.inputCheckpoint.barrier?.documentId === value.documentId) {
         throw new Error("Invalid delegate input transfer; recovery data was preserved.");
@@ -599,6 +602,9 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
           }
           const active = parseReturnedDelegation(transfer.content).active;
           if (transfer.sourceSeal !== undefined) validateDelegateSourceSeal(transfer.sourceSeal, transfer.source);
+          if (transfer.sourceHeadDigest !== undefined && (transfer.sourceSeal === undefined || typeof transfer.sourceHeadDigest !== "string" || !/^[0-9a-f]{64}$/.test(transfer.sourceHeadDigest))) {
+            throw new Error("Invalid delegate source head digest; the sweep was not committed.");
+          }
           if (transfer.inputCheckpoint !== undefined) {
             if (active === null || transfer.inputCheckpoint.documentId === transfer.documentId || transfer.inputCheckpoint.barrier?.documentId === transfer.documentId) {
               throw new Error("Invalid delegate input transfer; the sweep was not committed.");

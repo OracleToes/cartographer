@@ -44,6 +44,8 @@ export type DelegationTransfer = StoredCheckpoint & {
   destination: string;
   /** Dormant change detector; it does not authorize multi-conversation deletion. */
   sourceSeal?: DelegateSourceSeal;
+  /** Optional projection-byte change detector, used only with a source seal. */
+  sourceHeadDigest?: string;
   inputCheckpoint?: StoredCheckpoint & { barrier: StoredCheckpoint };
   /** Optional report message committed with this sweep; not a deletion permit. */
   returnChat?: ChatRecord;

@@ -35,7 +35,7 @@ import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord,
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
-import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { contextDirectory, projectionBytesDigest, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay } from "./delegate-input-replay.js";
@@ -263,6 +263,14 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
           const current = await captureDelegateSourceSeal(discard.store, journal.source);
           if (current.digest !== transfer.sourceSeal.digest) {
             throw new Error("Delegate source changed after its seal; all generation files were preserved.");
+          }
+        }
+        if (transfer?.sourceHeadDigest !== undefined) {
+          let digest: string;
+          try { digest = projectionBytesDigest(readFileSync(discard.markdown), readFileSync(discard.sidecar)); }
+          catch { throw new Error("Delegate source projection is unavailable; all generation files were preserved."); }
+          if (digest !== transfer.sourceHeadDigest) {
+            throw new Error("Delegate source projection changed after capture; all generation files were preserved.");
           }
         }
         // An older journal may have swept the wrong range, even when no

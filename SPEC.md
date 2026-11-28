@@ -812,7 +812,14 @@ and barrier with their stored revisions, and rechecks the projection and Brain
 snapshots. It returns those snapshots for later commit; it does not establish a
 lock, authenticate hidden sidecar fields, or prove that the Harness uses the
 specified SQLite store. The host must ensure that relationship and seal writers;
-project-file observations and ABA changes remain unprotected. The return path
+project-file observations and ABA changes remain unprotected. A caller may also
+commit the captured projection digest with the source seal in the transfer and
+Brain journal. Committed recovery checks both projection files against that
+digest while the source store remains; missing or changed files preserve the
+source, destination and journal. It cannot check files already removed by a
+previous cleanup, prove their original authenticity or prevent later writes.
+The multi-conversation guard remains in force, and the orchestration host does
+not yet use this optional receipt. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this

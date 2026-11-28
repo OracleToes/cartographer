@@ -5,10 +5,17 @@
  * the generation; deleted whole when the generation ends. A crash
  * reopens the identical bytes.
  */
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import type { Projection } from "../domain/projection.js";
+
+/** Fingerprint exact frozen projection bytes; this detects changes, not provenance. */
+export function projectionBytesDigest(markdown: Buffer, sidecar: Buffer): string {
+  return createHash("sha256").update("carto-return-head-v1\0").update(String(markdown.length)).update("\0").update(markdown)
+    .update(String(sidecar.length)).update("\0").update(sidecar).digest("hex");
+}
 
 export interface SnapshotPaths {
   directory: string;

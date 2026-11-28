@@ -1,10 +1,10 @@
 /** Dormant source-head capture for prospective return reconciliation. */
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { generationPaths } from "./collapse.js";
+import { projectionBytesDigest } from "./projection-files.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
 export type ReturnSweepHead = { chatIds: string[]; pins: PinnedEphemeral[]; digest: string };
@@ -87,7 +87,6 @@ export function captureReturnSweepHead(root: string, generation: string, views: 
   } else if (markdown.split("\n").some((line) => /^Pinned — what .+ kept in front of you$/.test(line))) {
     throw new Error("Frozen pin rows are missing; the source was preserved.");
   }
-  const digest = createHash("sha256").update("carto-return-head-v1\0").update(String(markdownBytes.length)).update("\0").update(markdownBytes)
-    .update(String(sidecarBytes.length)).update("\0").update(sidecarBytes).digest("hex");
+  const digest = projectionBytesDigest(markdownBytes, sidecarBytes);
   return { chatIds: [...chatIds], pins: structuredClone(pins), digest };
 }

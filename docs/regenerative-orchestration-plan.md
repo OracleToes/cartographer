@@ -339,8 +339,14 @@ rechecks projection and Brain/archive snapshots. It returns those values togethe
 but does not journal them, prove the Harness is backed by the named store, or
 protect against ABA changes and filesystem races. The host must ensure the
 backing-store relationship and seal writers; a SQLite read snapshot is not a
-lock. Hidden sidecar authentication and transaction/journal integration remain
-necessary. The actual return path does not archive the prepared items or
+lock. The captured projection digest can optionally be retained with a source
+seal in the transferred handoff and Brain journal; committed recovery refuses
+cleanup if either source projection file is missing or its bytes changed while
+the source store remains. Cleanup already begun without the source is still
+idempotent. This detects later changes, not initial sidecar authenticity, and
+is not used by a host or a permit to bypass the multi-conversation guard. Hidden
+sidecar authentication and full sweep/journal integration remain necessary. The
+actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or

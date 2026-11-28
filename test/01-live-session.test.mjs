@@ -18,7 +18,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@ear
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf, rebuildHandles } from "../dist/domain/handles.js";
 import { projectContext } from "../dist/domain/projection.js";
-import { writeSnapshot } from "../dist/runtime/projection-files.js";
+import { projectionBytesDigest, writeSnapshot } from "../dist/runtime/projection-files.js";
 import { personChatBindings } from "../dist/domain/chat-identity.js";
 import { archivedEphemeralText, editArchivedEphemeral } from "../dist/domain/archive-editor.js";
 import { applyWrite } from "../dist/domain/brain.js";
@@ -147,7 +147,9 @@ test("a returned handoff survives crashes after sweep and after destination plac
     const originalPath = generationPaths(root, original).store;
     const interrupted = { ...brain, applyCollapse: async (change) => {
       const sourceSeal = await captureDelegateSourceSeal(originalPath, original);
-      await brain.applyCollapse({ ...change, delegationTransfer: { ...change.delegationTransfer, sourceSeal } });
+      const paths = generationPaths(root, original);
+      const sourceHeadDigest = projectionBytesDigest(readFileSync(paths.markdown), readFileSync(paths.sidecar));
+      await brain.applyCollapse({ ...change, delegationTransfer: { ...change.delegationTransfer, sourceSeal, sourceHeadDigest } });
       throw new Error("crash after sweep");
     } };
     await assert.rejects(collapse(root, interrupted), /crash after sweep/);
@@ -169,6 +171,20 @@ test("a returned handoff survives crashes after sweep and after destination plac
       }
       await sourceDb.run("UPDATE live_durable_metadata SET next_seq = ? WHERE singleton = 1", metadata.next_seq);
     } finally { await sourceDb.close(); }
+    const sourceFiles = generationPaths(root, original);
+    const sidecar = readFileSync(sourceFiles.sidecar);
+    writeFileSync(sourceFiles.sidecar, Buffer.concat([sidecar, Buffer.from(" ")]));
+    await assert.rejects(recoverCollapse(root, brain), /source projection changed after capture/);
+    assert.deepEqual(await brain.readCollapseJournal(), journal);
+    assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+    assert.equal(existsSync(originalPath), true);
+    assert.equal(existsSync(generationPaths(root, transfer.destination).store), true);
+    writeFileSync(sourceFiles.sidecar, sidecar);
+    const markdown = readFileSync(sourceFiles.markdown);
+    rmSync(sourceFiles.markdown);
+    await assert.rejects(recoverCollapse(root, brain), /source projection is unavailable/);
+    assert.deepEqual(await brain.readCollapseJournal(), journal);
+    writeFileSync(sourceFiles.markdown, markdown);
     const interruptedCleanup = { ...brain, recoverCollapseJournal: (recover) => brain.recoverCollapseJournal(async (...args) => {
       await recover(...args); throw new Error("crash after source cleanup");
     }) };
@@ -653,6 +669,8 @@ test("return collapse and old committed recovery preserve a multi-conversation P
       const change = { source, generation: receiptDestination, delegationTransfer: transfer,
         expected: { brain: await receiptBrain.read(), archive: await receiptBrain.readArchive() }, writes: [], incoming: [], now: 1 };
       await assert.rejects(receiptBrain.applyCollapse({ ...change, delegationTransfer: { ...transfer, sourceSeal: { ...seal, digest: "invalid" } } }), /Invalid delegate source seal/);
+      await assert.rejects(receiptBrain.applyCollapse({ ...change, delegationTransfer: { ...transfer, sourceHeadDigest: "invalid" } }), /Invalid delegate source head digest/);
+      await assert.rejects(receiptBrain.applyCollapse({ ...change, delegationTransfer: { ...transfer, sourceSeal: undefined, sourceHeadDigest: "0".repeat(64) } }), /Invalid delegate source head digest/);
       assert.equal((await receiptBrain.readCollapseJournal()).committed, false);
       assert.equal(await receiptBrain.readDelegationTransfer(), undefined);
       await receiptBrain.applyCollapse(change);
