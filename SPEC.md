@@ -853,7 +853,15 @@ request identities, so retries do not duplicate entries. Return admission refuse
 an incomplete or inconsistent staging; only an answered return clears the
 checkpoint and staging receipt together. The host must seal other admissions
 while staging and integrate the ordering with person controls before exposing
-orchestration. A dormant main-conversation
+orchestration. A separate dormant source-checkpoint inspection resolves saved
+submission identities against the matching returned handoff, owner, child and
+source barrier, checking captured view bounds and placed entries and their active
+contributions. Queued inputs are checked against Pi's inbox when present; when
+abort has withdrawn one, the result explicitly says that its checkpoint content
+cannot be independently verified. Pi submission status is reported without
+assuming a completed run means the delegation was fully answered. The caller
+must keep all source writers sealed; inspection does not decide archival or
+replay, commit a sweep, or permit deletion. A dormant main-conversation
 generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for

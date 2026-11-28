@@ -55,6 +55,7 @@ import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js";
+import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -1307,6 +1308,34 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
       { submissionId: childQueued.id, placement: "queued", whenBusy: "followUp", content: childInput, entry: { kind: "carto.user", data: { chatRecordId: "chat:child" } } },
     ] });
     assert.equal((await (await harness.submission(childQueued.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");
+    const views = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
+    const inspect = (captured = views) => main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, captured), BACKGROUND_CONTEXT);
+    const linked = await inspect();
+    const mainEntry = (await (await harness.submission(submission.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).entry;
+    assert.deepEqual(linked, [
+      { submissionId: submission.id, conversationId: main.id, placement: "placed", status: "unanswered", entryId: mainEntry, active: true, contentVerified: true },
+      { submissionId: queued.id, conversationId: main.id, placement: "queued", status: "queued", entryId: null, active: false, contentVerified: true },
+      { submissionId: steering.id, conversationId: main.id, placement: "queued", status: "queued", entryId: null, active: false, contentVerified: true },
+      { submissionId: childQueued.id, conversationId: child.id, placement: "queued", status: "unanswered", entryId: null, active: false, contentVerified: false },
+    ]);
+    const changedView = structuredClone(views);
+    const mainView = changedView.find((view) => view.conversation.id === main.id).view;
+    const entryIndex = mainView.entries.findIndex((entry) => entry.id === mainEntry);
+    mainView.contributions[entryIndex][0].content = "different active content";
+    await assert.rejects(inspect(changedView), /active checkpoint input was edited/);
+    const changedBounds = structuredClone(views);
+    changedBounds[0].tail += 1;
+    await assert.rejects(inspect(changedBounds), /view bounds or identity changed/);
+    await assert.rejects(inspect(views.filter((view) => view.conversation.id !== child.id)), /missing an owned conversation/);
+    await main.commit(async (tx) => { (await tx.doc(DelegateInputCheckpointDoc, main.id)).inputs[0].content = "conflict"; }, BACKGROUND_CONTEXT);
+    await assert.rejects(inspect(), /placed input conflicts/);
+    await main.commit(async (tx) => {
+      const saved = await tx.doc(DelegateInputCheckpointDoc, main.id);
+      saved.inputs = structuredClone(checkpoint.inputs);
+      saved.inputs[1].content[0].text = "conflict";
+    }, BACKGROUND_CONTEXT);
+    await assert.rejects(inspect(), /queued input conflicts/);
+    await main.commit(async (tx) => { (await tx.doc(DelegateInputCheckpointDoc, main.id)).inputs = structuredClone(checkpoint.inputs); }, BACKGROUND_CONTEXT);
     await main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT);
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "replay never replaces the pre-abort snapshot");
     await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);
@@ -1318,6 +1347,8 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
     main = await harness.root(BACKGROUND_CONTEXT);
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "checkpoint survives another restart");
+    const reopenedViews = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
+    assert.deepEqual(await main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, reopenedViews), BACKGROUND_CONTEXT), linked);
     await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);
   } finally {
     await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);

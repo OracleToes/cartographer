@@ -7,7 +7,7 @@ import { requireSoleDelegateCall } from "./delegate-round.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, parseInputCheckpoint } from "./delegate-inputs.js";
 
 /** Verify the actual Pi task and owned child, not just an ID in the document. */
-async function ownedHandoff(tx: Tx, mainId: ConversationId, active: Delegation): Promise<{ ownerId: TaskId; childId: ConversationId | null }> {
+export async function ownedHandoff(tx: Tx, mainId: ConversationId, active: Delegation): Promise<{ ownerId: TaskId; childId: ConversationId | null }> {
   const match = /^delegate:([1-9][0-9]*)$/.exec(active.input.id);
   const number = match === null ? NaN : Number(match[1]);
   if (!Number.isSafeInteger(number)) throw new Error("The delegation owner identity is invalid; it was preserved.");

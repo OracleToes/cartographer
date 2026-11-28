@@ -161,8 +161,16 @@ mark handling. A dormant planner now classifies pin, delete and Chat-duplicate
 candidates and reuses the ordinary collapse deletion writes. It blocks child
 pins from main, unproven pins, conflicting current main pins and image-bearing
 pins. Older main pins need identities checked against the source snapshot;
-deletions override pins. This is not a commit or a source-deletion permit:
-checkpoint reconciliation, file-pin refresh and transaction/journal integration
+deletions override pins. A dormant source-checkpoint inspection now resolves each
+saved submission on Pi's transaction line against the returned handoff, owned
+child, source barrier and captured view bounds. It checks placed entries and
+active contributions without text-based identity guessing, and checks queued
+content while Pi still retains it. An already withdrawn queued input is explicitly
+reported as unverifiable against Pi because only the checkpoint retains its
+content. It reports Pi status rather than assuming a completed submission means
+the delegation was fully answered. Its caller must seal all writers; it makes
+no archive or replay decision. This is not a commit or a source-deletion permit:
+checkpoint reconciliation policy, file-pin refresh and transaction/journal integration
 remain necessary. The actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
