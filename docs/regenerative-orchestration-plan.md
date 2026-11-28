@@ -34,8 +34,9 @@ proposal text; unresolved details are not implicitly decided by them.
 - **Separate authorship and work.** Main writes or updates the specification,
   then delegates implementation to a different context. When the person's
   request is clear, main updates the specification and delegates immediately,
-  without a spec-diff approval stop. A worker that finds a spec gap reports it
-  back to main rather than editing the specification itself.
+  without a general spec-diff approval stop. The separate confirmation rule for
+  replacing existing behavior below applies. A worker that finds a spec gap
+  reports it back to main rather than editing the specification itself.
 - **Capture existing projects incrementally and deeply.** Capture the behavior
   relevant to work as Carto encounters it, rather than requiring a whole-project
   capture before work starts. Trace the depth of that behavior and where a change
@@ -79,14 +80,17 @@ proposal text; unresolved details are not implicitly decided by them.
     can be promoted to dictated. A lack of objection is not acceptance, and
     acceptance alone is not dictation. How these statuses are represented in
     the chosen standard and the mechanics of promotion remain open.
-- **Changing observed behavior.** When a requested feature would change an
+- **Replacing existing behavior.** When a requested feature would change an
   observed behavior, main flags the consequence and asks the person before
-  changing it. This decision is not an automatic promotion or acceptance of
-  the observed behavior.
+  changing it. The person extended this to replacement of accepted or dictated
+  behavior: the agent distinguishes which status applies and asks the person to
+  confirm the change. This is not automatic promotion or acceptance of observed
+  behavior. Whether an explicit request to replace the identified behavior
+  already counts as confirmation, or requires a separate question, remains open.
 
-**Next unanswered question:** if a requested feature would incidentally change
-an accepted behavior that the person did not explicitly request changing,
-should main similarly flag it and ask before making the change?
+**Next unanswered question:** if the person explicitly asks to replace a named
+existing behavior with a specific alternative, does that request itself count as
+confirmation, or should main still ask separately before proceeding?
 
 ## 1. Recommendation in one sentence
 
@@ -279,8 +283,10 @@ establish intended behavior or the person's acceptance. The person's current
 instruction outranks the contract; a contradiction is surfaced and resolved,
 not silently settled in favor of a stale document. An agent should ask when a
 consequential ambiguity needs the person's decision; a draft assumption must be
-marked as such. Clear requests do not require a spec-diff approval stop before
-main delegates work. This proposal does not add an approval queue to direct Carto.
+marked as such. Clear requests do not require a general spec-diff approval stop
+before main delegates work; replacement of existing behavior has the separate
+confirmation rule above. This proposal does not add an approval queue to direct
+Carto.
 
 There must be **one authority per behavior**. For a project already using
 `SPEC.md`, including Carto itself, no automatic migration or duplicate authoritative
@@ -440,7 +446,8 @@ no special models are required by this design.
    task, and writes the definition itself from the findings and the person's
    decisions. Observed behavior remains distinct from accepted or dictated
    behavior. With a clear request, main updates the spec and delegates work
-   without an approval stop; it does not replace or regenerate the project
+   without a general spec-diff approval stop, subject to the separate rule for
+   replacing existing behavior. It does not replace or regenerate the project
    merely to adopt a format.
 2. **Identify candidates.** Use parsed behavior IDs, resolved definitions and
    resources, recorded fingerprints, and relevant project changes to find
