@@ -1,18 +1,22 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
-import type { ConversationId, Tx } from "@earendil-works/pi-durable";
+import { isDeepStrictEqual } from "node:util";
+import type { Context } from "@earendil-works/chord/context";
+import { ROOT_CONVERSATION_ID, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
 import { projectContext } from "../domain/projection.js";
 import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.js";
-import { ephemeralItemId, prepareCollapseFreshness, prepareCollapsePinRefresh } from "./collapse.js";
+import { ephemeralItemId, generationPaths, prepareCollapseFreshness, prepareCollapsePinRefresh, readStoredDelegation } from "./collapse.js";
+import type { BrainStore } from "./brain-store.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
-import { delegateReturnChat, DelegationDoc } from "./delegation-record.js";
+import { delegateReturnChat, DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
 import { prepareReturnSweepMarks, verifyReturnSweepFrozenPins, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
-import type { ReturnSweepView } from "./delegate-sweep-view.js";
+import { captureReturnSweepViews, type ReturnSweepView } from "./delegate-sweep-view.js";
+import { captureDelegateSourceSeal } from "./delegate-source-seal.js";
 
 /**
  * Make a prospective plan, not a source-deletion permit. The views must come
@@ -191,4 +195,48 @@ export async function prepareReturnSweepWithRecords(
   const chat = new Set(records.nextBrain.chat.filter((record) => !plan.pendingChatIds.has(record.id)).map((record) => record.id));
   const projection = projectContext(records.nextBrain, plan.fileTexts, person, { chat });
   return { ...plan, ...records, writes: [...freshness, ...chatWrite, ...records.writes], returnChat, projection };
+}
+
+/**
+ * Capture a prospective return plan together with source and Brain snapshots.
+ * The host must pass the Harness opened on this exact generation store, stop
+ * its work and seal all admissions, withdrawals, context, Brain, archive,
+ * projection, settings and project-file writers through eventual handling.
+ * Pi's public Harness API does not expose a backing-store path to verify that
+ * relationship. The two source seals and head/Brain comparisons detect changes
+ * during capture but are not locks, cannot detect every ABA change, and do not
+ * authenticate hidden sidecar data or arbitrary project-file observations.
+ * This does not commit, journal, establish a deletion permit, or replace the
+ * multi-conversation guard. The host must recheck and bind all inputs at commit.
+ */
+export async function captureReturnSweepPlan(
+  root: string, brain: BrainStore, harness: Harness, generation: string, id: string, now: number, person: string, context: Context,
+) {
+  if (!/^gen-[\w-]+$/.test(generation)) throw new Error("Invalid return-sweep generation; the source was preserved.");
+  const path = generationPaths(root, generation).store;
+  const expected = { brain: await brain.read(), archive: await brain.readArchive() };
+  const sourceSeal = await captureDelegateSourceSeal(path, generation);
+  const views = await captureReturnSweepViews(harness, context);
+  const captured = await harness.commit(async (tx) => {
+    const plan = await prepareReturnSweepWithRecords(root, tx, ROOT_CONVERSATION_ID, id, views, generation, expected.brain, expected.archive, now, person);
+    return {
+      plan,
+      handoff: JSON.stringify(await tx.doc(DelegationDoc, ROOT_CONVERSATION_ID)),
+      checkpoint: JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, ROOT_CONVERSATION_ID)),
+      barrier: JSON.stringify(await tx.doc(DelegateMainBarrierDoc, ROOT_CONVERSATION_ID)),
+    };
+  }, context);
+  const stored = await readStoredDelegation(path, true);
+  if (stored?.inputCheckpoint === undefined || !isDeepStrictEqual(JSON.parse(stored.content), JSON.parse(captured.handoff)) ||
+      !isDeepStrictEqual(JSON.parse(stored.inputCheckpoint.content), JSON.parse(captured.checkpoint)) ||
+      !isDeepStrictEqual(JSON.parse(stored.inputCheckpoint.barrier.content), JSON.parse(captured.barrier))) {
+    throw new Error("Return-sweep source documents conflict with the Pi capture; the source was preserved.");
+  }
+  const head = captureReturnSweepHead(root, generation, views);
+  if (head.digest !== captured.plan.sourceHeadDigest) throw new Error("Return-sweep projection changed during capture; the source was preserved.");
+  const after = { brain: await brain.read(), archive: await brain.readArchive() };
+  if (!isDeepStrictEqual(expected, after)) throw new Error("Brain or archive changed during return-sweep capture; the source was preserved.");
+  const finalSeal = await captureDelegateSourceSeal(path, generation);
+  if (!isDeepStrictEqual(sourceSeal, finalSeal)) throw new Error("Return-sweep source changed during capture; the source was preserved.");
+  return { ...captured.plan, expected, sourceSeal, stored };
 }

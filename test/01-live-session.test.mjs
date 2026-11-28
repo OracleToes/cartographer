@@ -60,7 +60,7 @@ import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
-import { prepareReturnSweepWithInputs, prepareReturnSweepWithInputsAndPinRefresh, prepareReturnSweepWithRecords } from "../dist/runtime/delegate-sweep-reconcile.js";
+import { captureReturnSweepPlan, prepareReturnSweepWithInputs, prepareReturnSweepWithInputsAndPinRefresh, prepareReturnSweepWithRecords } from "../dist/runtime/delegate-sweep-reconcile.js";
 import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
 import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc, hasDelegateLimitMarker } from "../dist/runtime/delegate-limit.js";
 
@@ -1557,7 +1557,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
   const mainExtension = defineExtension({ name: "main-delegate", tools: [delegate] });
   const registry = createRegistry();
   registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
-  const storage = new MemoryStorage();
+  const database = await openNodeSqliteDatabase(generationPaths(root, "gen-end").store);
+  const storage = await SqliteStorage.open(database, { prefix: "live_" });
   const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
   try {
     const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
@@ -1706,11 +1707,40 @@ test("person-ended delegate stops its in-flight work without a final report", as
     await main.commit(async (tx) => { (await tx.doc(DelegationDoc, main.id)).active.result = { kind: "failure", explanation: "No report available" }; }, BACKGROUND_CONTEXT);
     assert.equal((await prepareReport()).returnChat, undefined, "a failure cannot fabricate the missing report message");
     await main.commit(async (tx) => { (await tx.doc(DelegationDoc, main.id)).active.result = { kind: "person-ended", reason: "" }; }, BACKGROUND_CONTEXT);
+    // Capture the plan against the actual SQLite generation and Brain, then
+    // introduce a source write between planning and the second seal.
+    for (const record of planningBrain.chat) await brain.apply({ kind: "chat.record", record }, 1);
+    for (const file of planningBrain.files) {
+      await brain.apply({ kind: "file.pin", path: file.path, pinned: file.pinned }, file.createdAt);
+      if (file.stale) await brain.apply({ kind: "file.stale", path: file.path, stale: true }, 1);
+    }
+    for (const pin of planningBrain.ephemera) await brain.apply({ kind: "ephemeral.pin", item: pin }, 1);
+    for (const id of planningBrain.ephemeralDeletes) await brain.apply({ kind: "ephemeral.delete-mark", id, marked: true }, 1);
+    for (const node of planningBrain.atlas) await brain.apply({ kind: "atlas.upsert", node }, 1);
+    await brain.apply({ kind: "chat.record", record: oldChat }, 1);
+    await brain.applyRecordAction({ kind: "chat", id: oldChat.id, action: "archive", generation: "gen-old", now: 1 });
+    await brain.applyArchive({ kind: "mark", id: "record:chat:restored", action: "restore", author: "user" });
+    const capturedPlan = await captureReturnSweepPlan(root, brain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
+    assert.equal(capturedPlan.sourceSeal.source, "gen-end");
+    assert.deepEqual(JSON.parse(capturedPlan.stored.inputCheckpoint.content), saved);
+    assert.deepEqual(capturedPlan.expected.brain, await brain.read());
+    assert.equal(capturedPlan.returnChat, undefined);
+    let archiveReads = 0;
+    const racingBrain = { ...brain, readArchive: async () => {
+      if (++archiveReads === 2) {
+        const extra = await child.submit({ type: "write", entry: { kind: "test.late-source-write", model: [{ role: "user", content: "must not be missed", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+        assert.equal((await extra.wait(BACKGROUND_CONTEXT)).status, "done");
+      }
+      return brain.readArchive();
+    } };
+    await assert.rejects(captureReturnSweepPlan(root, racingBrain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /source changed during capture/);
+    assert.equal(await brain.readCollapseJournal(), undefined, "capture does not start a collapse or delete the source");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
+    await database.close();
     await cleanup();
   }
 });

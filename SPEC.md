@@ -806,7 +806,13 @@ notice for a failure and end-to-end delivery remain unfinished. The plan uses
 the original Brain as the expected commit snapshot and does not write freshness separately. These filesystem reads are not atomic or locked; archived
 Atlas restores retain ordinary collapse's existing freshness ordering. The plan
 neither advances archive grace nor commits; writer sealing, child restore and
-journal integration remain unfinished. The return path
+journal integration remain unfinished. A dormant capture wrapper obtains this
+plan between logical Pi-store fingerprints, compares the Pi handoff, checkpoint
+and barrier with their stored revisions, and rechecks the projection and Brain
+snapshots. It returns those snapshots for later commit; it does not establish a
+lock, authenticate hidden sidecar fields, or prove that the Harness uses the
+specified SQLite store. The host must ensure that relationship and seal writers;
+project-file observations and ABA changes remain unprotected. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this

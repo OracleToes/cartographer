@@ -332,11 +332,15 @@ both generations and journal if it changed or cannot be checked. A seal does
 not weaken the multi-conversation guard; transfers without a seal keep their
 existing recovery behavior. If cleanup already removed the source before a
 crash, recovery cannot check it and continues the existing idempotent cleanup.
-This is only a change detector: it is not yet bound to the captured views,
-Brain, projection files or archive plan and never permits source deletion by
-itself. The host must seal writers; a SQLite read snapshot is not a lock. File-pin
-refresh, full checkpoint reconciliation and transaction/journal integration
-remain necessary. The actual return path does not archive the prepared items or
+This is only a change detector and never permits source deletion by itself. A
+dormant wrapper now captures a plan between two such source fingerprints,
+compares the Pi handoff, checkpoint and barrier with stored revisions, and
+rechecks projection and Brain/archive snapshots. It returns those values together
+but does not journal them, prove the Harness is backed by the named store, or
+protect against ABA changes and filesystem races. The host must ensure the
+backing-store relationship and seal writers; a SQLite read snapshot is not a
+lock. Hidden sidecar authentication and transaction/journal integration remain
+necessary. The actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
