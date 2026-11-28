@@ -30,6 +30,7 @@ import { projectContext } from "../domain/projection.js";
 import { personName } from "../domain/person.js";
 import type { CartoBrain } from "../domain/records.js";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import { writeBackOf, type BrainStore } from "./brain-store.js";
 import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord, type EphemeralKind, type IncomingItem } from "../domain/archive.js";
 import type { PinnedEphemeral } from "../domain/records.js";
@@ -121,6 +122,26 @@ const activeCollapses = new Set<string>();
  */
 type StoredDelegation = StoredCheckpoint & { inputCheckpoint?: NonNullable<DelegationTransfer["inputCheckpoint"]> };
 
+/** Read a known latest-only main-conversation Pi document without opening Pi for writes. */
+export async function readStoredMainCheckpoint(tx: SqliteExecutor, kind: string, label: string): Promise<StoredCheckpoint | undefined> {
+  // Pi JSON-encodes indexed strings, including document kinds and keys.
+  const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
+    "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify(kind),
+  );
+  if (rows.length === 0) return undefined;
+  const doc = rows[0];
+  if (rows.length !== 1 || doc === undefined || doc.scope_kind !== "conversation" || doc.owner_id !== 1 || doc.family !== 0 || doc.key_value !== JSON.stringify("") || doc.retired_at !== null) {
+    throw new Error(`Ambiguous ${label} document; the generation store was preserved.`);
+  }
+  const revision = await tx.get<{ seq: number; kind: string; version: number; content: string }>(
+    "SELECT seq, kind, version, content FROM live_document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", doc.id,
+  );
+  if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
+    throw new Error(`Unsupported ${label} checkpoint; the generation store was preserved.`);
+  }
+  return { documentId: doc.id, revision: revision.seq, content: revision.content };
+}
+
 export async function readStoredDelegation(storePath: string, transferInputs = false): Promise<StoredDelegation | undefined> {
   if (!existsSync(storePath)) return undefined;
   const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
@@ -130,24 +151,7 @@ export async function readStoredDelegation(storePath: string, transferInputs = f
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
       );
       if (documents === undefined) return undefined;
-      // Pi JSON-encodes indexed strings, including document kinds and keys.
-      const readDoc = async (kind: string, label: string): Promise<StoredCheckpoint | undefined> => {
-        const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
-          "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify(kind),
-        );
-        if (rows.length === 0) return undefined;
-        const doc = rows[0];
-        if (rows.length !== 1 || doc === undefined || doc.scope_kind !== "conversation" || doc.owner_id !== 1 || doc.family !== 0 || doc.key_value !== JSON.stringify("") || doc.retired_at !== null) {
-          throw new Error(`Ambiguous ${label} document; the generation store was preserved.`);
-        }
-        const revision = await tx.get<{ seq: number; kind: string; version: number; content: string }>(
-          "SELECT seq, kind, version, content FROM live_document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", doc.id,
-        );
-        if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
-          throw new Error(`Unsupported ${label} checkpoint; the generation store was preserved.`);
-        }
-        return { documentId: doc.id, revision: revision.seq, content: revision.content };
-      };
+      const readDoc = (kind: string, label: string) => readStoredMainCheckpoint(tx, kind, label);
       let checkpoint = await readDoc("carto.delegate-input-checkpoint", "delegate input checkpoint");
       const replay = await readDoc("carto.delegate-input-replay", "delegate input staging");
       if (replay !== undefined && !clearedInputReplay(JSON.parse(replay.content))) {

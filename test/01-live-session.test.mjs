@@ -1743,6 +1743,14 @@ test("person-ended delegate stops its in-flight work without a final report", as
     assert.deepEqual(JSON.parse(capturedPlan.stored.inputCheckpoint.content), saved);
     assert.deepEqual(capturedPlan.expected.brain, await brain.read());
     assert.equal(capturedPlan.returnChat, undefined);
+    // A different Harness must not be accepted merely because matching handoff
+    // documents could have been copied into another store.
+    const unrelated = await Harness.open(new MemoryStorage(), { models, registry: createRegistry() }, BACKGROUND_CONTEXT);
+    try {
+      await unrelated.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root } });
+      await assert.rejects(captureReturnSweepPlan(root, brain, unrelated, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /Harness does not match the named source/);
+      assert.deepEqual(await captureDelegateSourceSeal(generationPaths(root, "gen-end").store, "gen-end"), capturedPlan.sourceSeal);
+    } finally { await unrelated.close(BACKGROUND_CONTEXT); }
     let archiveReads = 0;
     const racingBrain = { ...brain, readArchive: async () => {
       if (++archiveReads === 2) {

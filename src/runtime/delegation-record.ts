@@ -89,6 +89,12 @@ export const DelegationDoc = defineDoc<DelegationRecord>({
   checkpointWhen: () => true,
 });
 
+/** A capture challenge is local to the source store and is never transferred. */
+export const DelegateCaptureDoc = defineDoc<{ generation: string | null; challenge: string | null }>({
+  kind: "carto.delegate-capture", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ generation: null, challenge: null }), checkpointWhen: () => true,
+});
+
 /** This source/admission marker is conversation-local and is not transferred by collapse. */
 export const DelegateMainBarrierDoc = defineDoc<{ sourceId: string | null; admittedId: string | null; submissionId: number | null }>({
   kind: "carto.delegate-main-barrier", version: 1, scope: "conversation", history: "latest", fork: "initial",

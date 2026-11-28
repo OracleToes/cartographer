@@ -1,16 +1,18 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
+import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { ROOT_CONVERSATION_ID, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
 import { projectContext } from "../domain/projection.js";
 import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.js";
-import { ephemeralItemId, generationPaths, prepareCollapseFreshness, prepareCollapsePinRefresh, readStoredDelegation } from "./collapse.js";
+import { ephemeralItemId, generationPaths, prepareCollapseFreshness, prepareCollapsePinRefresh, readStoredDelegation, readStoredMainCheckpoint } from "./collapse.js";
 import type { BrainStore } from "./brain-store.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
-import { delegateReturnChat, DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
+import { delegateReturnChat, DelegateCaptureDoc, DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
@@ -201,13 +203,15 @@ export async function prepareReturnSweepWithRecords(
  * Capture a prospective return plan together with source and Brain snapshots.
  * The host must pass the Harness opened on this exact generation store, stop
  * its work and seal all admissions, withdrawals, context, Brain, archive,
- * projection, settings and project-file writers through eventual handling.
- * Pi's public Harness API does not expose a backing-store path to verify that
- * relationship. The two source seals and head/Brain comparisons detect changes
- * during capture but are not locks, cannot detect every ABA change, and do not
- * authenticate hidden sidecar data or arbitrary project-file observations.
- * This does not commit, journal, establish a deletion permit, or replace the
- * multi-conversation guard. The host must recheck and bind all inputs at commit.
+ * projection, settings and project-file writers through eventual handling. A
+ * fresh Pi document challenge is written before capture and checked through a
+ * read-only connection to the named store. This detects an accidentally unrelated
+ * Harness, but not a copied or replaced database, a malicious relay, or a later
+ * path swap. The caller must still ensure the backing-store relationship.
+ * The two source seals and head/Brain comparisons are not locks, cannot detect
+ * every ABA change, and do not authenticate hidden sidecar data or arbitrary
+ * project-file observations. This does not commit, journal, establish a deletion
+ * permit, or replace the multi-conversation guard. Recheck inputs at commit.
  */
 export async function captureReturnSweepPlan(
   root: string, brain: BrainStore, harness: Harness, generation: string, id: string, now: number, person: string, context: Context,
@@ -215,9 +219,33 @@ export async function captureReturnSweepPlan(
   if (!/^gen-[\w-]+$/.test(generation)) throw new Error("Invalid return-sweep generation; the source was preserved.");
   const path = generationPaths(root, generation).store;
   const expected = { brain: await brain.read(), archive: await brain.readArchive() };
+  const challenge = { generation, challenge: randomBytes(32).toString("hex") };
+  await harness.commit(async (tx) => {
+    if (await tx.conversation(ROOT_CONVERSATION_ID) === undefined) throw new Error("Return-sweep Harness has no main conversation; the source was preserved.");
+    const marker = await tx.doc(DelegateCaptureDoc, ROOT_CONVERSATION_ID);
+    if (Object.keys(marker).length !== 2 ||
+        !((marker.generation === null && marker.challenge === null) ||
+          (marker.generation === generation && typeof marker.challenge === "string" && /^[0-9a-f]{64}$/.test(marker.challenge)))) {
+      throw new Error("Return-sweep capture marker conflicts; the source was preserved.");
+    }
+    marker.generation = challenge.generation;
+    marker.challenge = challenge.challenge;
+  }, context);
+  const database = await openNodeSqliteDatabase(path, { mode: "read-only" });
+  try {
+    const storedMarker = await database.transaction((tx) => readStoredMainCheckpoint(tx, DelegateCaptureDoc.definition.kind, "delegate capture"));
+    let value: unknown;
+    try { value = storedMarker === undefined ? undefined : JSON.parse(storedMarker.content); } catch { value = undefined; }
+    if (!isDeepStrictEqual(value, challenge)) throw new Error("Return-sweep Harness does not match the named source; both stores were preserved.");
+  } finally {
+    await database.close();
+  }
   const sourceSeal = await captureDelegateSourceSeal(path, generation);
   const views = await captureReturnSweepViews(harness, context);
   const captured = await harness.commit(async (tx) => {
+    if (!isDeepStrictEqual(JSON.parse(JSON.stringify(await tx.doc(DelegateCaptureDoc, ROOT_CONVERSATION_ID))), challenge)) {
+      throw new Error("Return-sweep capture marker changed; the source was preserved.");
+    }
     const plan = await prepareReturnSweepWithRecords(root, tx, ROOT_CONVERSATION_ID, id, views, generation, expected.brain, expected.archive, now, person);
     return {
       plan,

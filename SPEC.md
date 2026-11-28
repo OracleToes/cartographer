@@ -809,10 +809,14 @@ neither advances archive grace nor commits; writer sealing, child restore and
 journal integration remain unfinished. A dormant capture wrapper obtains this
 plan between logical Pi-store fingerprints, compares the Pi handoff, checkpoint
 and barrier with their stored revisions, and rechecks the projection and Brain
-snapshots. It returns those snapshots for later commit; it does not establish a
-lock, authenticate hidden sidecar fields, or prove that the Harness uses the
-specified SQLite store. The host must ensure that relationship and seal writers;
-project-file observations and ABA changes remain unprotected. A caller may also
+snapshots. Before taking the source fingerprint, it writes a fresh challenge to
+a source-local Pi document and checks the same challenge in the named SQLite
+store. An unrelated Harness is refused; the challenge remains in whichever
+Harness received it even if capture fails. This is not proof against a copied
+or replaced store, a later path swap, or a relay. The host must still ensure the
+backing-store relationship and seal writers. The wrapper returns the snapshots
+for later commit; it does not establish a lock or authenticate hidden sidecar
+fields. Project-file observations and ABA changes remain unprotected. A caller may also
 commit the captured projection digest with the source seal in the transfer and
 Brain journal. Committed recovery checks both projection files against that
 digest while the source store remains; missing or changed files preserve the
