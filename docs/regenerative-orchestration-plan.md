@@ -168,10 +168,17 @@ active contributions without text-based identity guessing, and checks queued
 content while Pi still retains it. An already withdrawn queued input is explicitly
 reported as unverifiable against Pi because only the checkpoint retains its
 content. It reports Pi status rather than assuming a completed submission means
-the delegation was fully answered. Its caller must seal all writers; it makes
-no archive or replay decision. This is not a commit or a source-deletion permit:
-checkpoint reconciliation policy, file-pin refresh and transaction/journal integration
-remain necessary. The actual return path does not archive the prepared items or
+the delegation was fully answered. A dormant reconciliation planner now combines
+that inspection with the existing mark and Chat planner. It keeps all checkpointed
+inputs for replay even when Pi says done, excludes active placed input entries
+from prospective archive candidates by identity, and returns checked explicit
+pending Chat identities for exclusion from the new head. An ambiguous or marked
+Chat record or a pin/deletion mark on a checkpointed source entry blocks rather
+than silently overriding the person's action. Withdrawn queued content remains
+verifiable only against the checkpoint. The planner does not commit a sweep or
+permit source deletion; callers must seal Pi and Brain writers and verify the
+snapshot. File-pin refresh, full checkpoint reconciliation and transaction/journal
+integration remain necessary. The actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or

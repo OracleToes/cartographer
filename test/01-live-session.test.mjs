@@ -56,6 +56,7 @@ import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js"
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
+import { prepareReturnSweepWithInputs } from "../dist/runtime/delegate-sweep-reconcile.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -1104,7 +1105,7 @@ test("mixed delegation and report rounds cannot create or return a handoff", asy
 });
 
 test("person-ended delegate stops its in-flight work without a final report", async () => {
-  const { root, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, ref } = fauxSetup();
   let markStarted;
   const started = new Promise((resolve) => { markStarted = resolve; });
@@ -1158,6 +1159,14 @@ test("person-ended delegate stops its in-flight work without a final report", as
     await main.waitForIdle(BACKGROUND_CONTEXT);
     const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.deepEqual(returned.result, { kind: "person-ended", reason: "" });
+    const returnViews = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
+    const brainSnapshot = await brain.read();
+    brainSnapshot.chat.push({ id: "chat:followup", author: "user", text: "Keep my follow-up", createdAt: 1, updatedAt: 1 });
+    const plan = await main.commit((tx) => prepareReturnSweepWithInputs(tx, main.id, active.input.id, returnViews, "gen-end", brainSnapshot, new Set(), new Set(), 1), BACKGROUND_CONTEXT);
+    assert.equal(plan.checkpointInputs.find((input) => input.submissionId === submission.id).status, "done");
+    assert.equal(plan.pendingItems.length, 1);
+    assert.equal(plan.pendingItems[0].ephemeral.text, "Start");
+    assert.ok(!plan.incoming.some((item) => item.id === plan.pendingItems[0].id));
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
@@ -1237,7 +1246,7 @@ test("Pi submission scan detects withdrawn child input across restart without in
 });
 
 test("ending intent recovers before scheduler resumes and preserves unanswered main input", async () => {
-  const { root, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, ref } = fauxSetup();
   let markStarted;
   const started = new Promise((resolve) => { markStarted = resolve; });
@@ -1318,6 +1327,33 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
       { submissionId: steering.id, conversationId: main.id, placement: "queued", status: "queued", entryId: null, active: false, contentVerified: true },
       { submissionId: childQueued.id, conversationId: child.id, placement: "queued", status: "unanswered", entryId: null, active: false, contentVerified: false },
     ]);
+    const sweepBrain = await brain.read();
+    sweepBrain.chat = [
+      ["chat:original", "Keep this request"], ["chat:queued", "Queued with image"], ["chat:child", "Delegate follow-up"],
+    ].map(([id, text]) => ({ id, text, author: "user", createdAt: 1, updatedAt: 1 }));
+    const prepare = (state = sweepBrain) => main.commit((tx) => prepareReturnSweepWithInputs(tx, main.id, active.input.id, views, "gen-return", state, new Set(), new Set(), 1), BACKGROUND_CONTEXT);
+    const reconciled = await prepare();
+    assert.deepEqual(reconciled.checkpointInputs, linked);
+    assert.deepEqual([...reconciled.pendingChatIds], ["chat:original", "chat:queued", "chat:child"]);
+    assert.equal(reconciled.pendingChatDuplicates.length, 1);
+    assert.equal(reconciled.pendingChatDuplicates[0].entryId, mainEntry);
+    assert.ok(!reconciled.incoming.some((item) => item.ephemeral?.source?.entryId === mainEntry));
+    assert.ok(!reconciled.chatDuplicates.some((item) => item.entryId === mainEntry));
+    const pinConflict = structuredClone(sweepBrain);
+    pinConflict.ephemera.push({ id: ephemeralItemId("gen-return", mainEntry, "x0"), kind: "personMessage", text: "Keep this request", pinned: "user", createdAt: 1 });
+    await assert.rejects(prepare(pinConflict), /input has a pin or deletion mark/);
+    const deleteConflict = structuredClone(sweepBrain);
+    deleteConflict.ephemeralDeletes = [ephemeralItemId("gen-return", mainEntry, "x0")];
+    await assert.rejects(prepare(deleteConflict), /input has a pin or deletion mark/);
+    const chatConflict = structuredClone(sweepBrain);
+    chatConflict.chat[1].mark = { action: "delete", author: "user" };
+    await assert.rejects(prepare(chatConflict), /record conflicts or is marked/);
+    const duplicateChat = structuredClone(sweepBrain);
+    duplicateChat.chat.push(duplicateChat.chat[0]);
+    await assert.rejects(prepare(duplicateChat), /record conflicts or is marked/);
+    const ambiguous = structuredClone(sweepBrain);
+    ambiguous.chat.push({ id: "ambiguous", text: "A steer", author: "user", createdAt: 1, updatedAt: 1 });
+    await assert.rejects(prepare(ambiguous), /ambiguous Chat identity/);
     const changedView = structuredClone(views);
     const mainView = changedView.find((view) => view.conversation.id === main.id).view;
     const entryIndex = mainView.entries.findIndex((entry) => entry.id === mainEntry);

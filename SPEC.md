@@ -860,9 +860,18 @@ contributions. Queued inputs are checked against Pi's inbox when present; when
 abort has withdrawn one, the result explicitly says that its checkpoint content
 cannot be independently verified. Pi submission status is reported without
 assuming a completed run means the delegation was fully answered. The caller
-must keep all source writers sealed; inspection does not decide archival or
-replay, commit a sweep, or permit deletion. A dormant main-conversation
-generation hook holds an old generation's
+must keep all source writers sealed; inspection itself does not decide archival
+or replay. A further dormant planner combines that inspection with the return
+sweep's mark and Chat checks: checkpointed inputs remain destined for replay,
+even when Pi says done, and an active placed input's exact entry is excluded
+from archive candidates. It identifies pending Chat records only by explicit,
+unique identity and matching text, returning those IDs for exclusion from the
+new head. An ambiguous or marked pending Chat, or a pin or deletion mark on a
+checkpointed source entry, blocks the plan instead of overriding the person's
+action or replaying deleted data. A withdrawn queued input remains dependent on
+the checkpoint as its only content copy. This plan does not commit a sweep or
+permit deletion; source and Brain writers must remain sealed through its use.
+A dormant main-conversation generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for
 collapse; it cannot be released by admitting the return in the source
