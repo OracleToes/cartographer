@@ -104,8 +104,14 @@ one after placement. A dormant staging helper places the preserved inputs as
 ordered user-context entries before return admission using Pi transactional
 writes; it preserves content and entry metadata but does not reproduce Pi's
 original steer/follow-up submissions. Checked receipt and checkpoint clear only
-after the return is answered. Host admission sealing, control routing, and
-end-to-end ordering still need integration. This preserves data rather than
+after the return is answered. A dormant destination preparation now composes
+transfer placement, resumable staging and return admission; retry reuses the
+admitted request, and acknowledgement still requires a completed answer. The
+existing direct-session transfer placement is shared, but direct opening still
+refuses a pending checkpoint. The host must install the main barrier and seal
+other admissions and unrelated work; Pi's transactional staging may enable
+scheduling. Host admission sealing, control routing, and end-to-end ordering
+still need integration. This preserves data rather than
 pretending the return path is complete. A missing-report failure now carries
 Pi's unanswered reason and detail, including a provider overflow message when
 provided. A separate dormant context-limit extension uses Pi's approximate

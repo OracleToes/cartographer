@@ -5,12 +5,59 @@
  */
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
-import type { Conversation, SubmissionId } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type Conversation, type Harness, type SubmissionId } from "@earendil-works/pi-durable";
+import type { BrainStore } from "./brain-store.js";
 import { DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation, type Delegation } from "./delegation-record.js";
-import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
-import { DelegateInputReplayDoc, requireStagedDelegateInputs } from "./delegate-input-replay.js";
+import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
+import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc, requireStagedDelegateInputs, stageNextDelegateInput } from "./delegate-input-replay.js";
 
 type Returned = Extract<Delegation, { phase: "returned" }>;
+
+/**
+ * Place a committed Brain transfer in its destination before acknowledging it.
+ * This is shared with ordinary session opening. A retry after Pi placement
+ * compares both copies; a conflict preserves the transfer. It does not stage
+ * inputs or admit a model request. The caller must keep the destination paused
+ * and all admissions sealed while placing and acknowledging the transfer.
+ */
+export async function placeDelegationTransfer(
+  brain: BrainStore, harness: Harness, main: Conversation, generation: string, context: Context,
+): Promise<void> {
+  const transfer = await brain.readDelegationTransfer();
+  if (transfer === undefined) return;
+  if (main.id !== ROOT_CONVERSATION_ID || transfer.destination !== generation) throw new Error("Delegation transfer belongs to another generation; it was preserved.");
+  const expected = parseReturnedDelegation(transfer.content);
+  const expectedInputs = transfer.inputCheckpoint === undefined ? undefined :
+    validateInputTransfer(transfer.inputCheckpoint, expected.active!.input.id);
+  const existing = await harness.snapshot(DelegationDoc, main.id, context);
+  const existingInputs = await harness.snapshot(DelegateInputCheckpointDoc, main.id, context);
+  const existingReplay = await harness.snapshot(DelegateInputReplayDoc, main.id, context);
+  if (!clearedInputReplay(existingReplay)) throw new Error("Destination delegate input staging conflicts with the transfer; both were preserved.");
+  if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expected)) {
+    throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
+  }
+  if (existingInputs !== undefined && JSON.stringify(existingInputs) !== JSON.stringify(expectedInputs)) {
+    throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
+  }
+  await main.commit(async (tx) => {
+    const replay = await tx.doc(DelegateInputReplayDoc, main.id);
+    if (!clearedInputReplay(replay)) throw new Error("Destination delegate input staging conflicts with the transfer; both were preserved.");
+    const target = await tx.doc(DelegationDoc, main.id);
+    if (existing !== undefined ? JSON.stringify(target) !== JSON.stringify(expected) : target.active !== null) {
+      throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
+    }
+    target.active = expected.active;
+    if (expectedInputs !== undefined) {
+      const targetInputs = await tx.doc(DelegateInputCheckpointDoc, main.id);
+      if (existingInputs !== undefined ? JSON.stringify(targetInputs) !== JSON.stringify(expectedInputs) : !clearedInputCheckpoint(targetInputs)) {
+        throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
+      }
+      targetInputs.handoffId = expectedInputs.handoffId;
+      targetInputs.inputs = expectedInputs.inputs;
+    }
+  }, context);
+  await brain.acknowledgeDelegationTransfer(transfer);
+}
 
 function returned(active: Delegation | null, id: string): Returned {
   if (active === null || active.phase !== "returned" || active.input.id !== id) {
@@ -51,6 +98,49 @@ export async function admitDelegationReturn(conversation: Conversation, id: stri
     marker.submissionId = submission;
     return submission;
   }, context);
+}
+
+/**
+ * Resume destination placement, checkpoint staging and return admission in
+ * that order. A partial staging receipt survives restart; an existing admitted
+ * request is reused. The returned submission is not acknowledged here: retain
+ * the handoff and checkpoint until acknowledgeDelegationReturn verifies it was
+ * answered. A failed or unanswered run must be handled by the host.
+ *
+ * The host must install the main barrier, seal all other destination admissions
+ * and ensure no unrelated work can run. Pi transactional submissions enable
+ * scheduling, so a paused scheduler alone is not a lock. This function does not
+ * perform or authorize a source collapse, nor seal other processes.
+ */
+export async function prepareDelegationDestination(
+  brain: BrainStore, harness: Harness, main: Conversation, generation: string, id: string, context: Context,
+): Promise<SubmissionId> {
+  if (main.id !== ROOT_CONVERSATION_ID) throw new Error("Delegation destination requires main.");
+  const transfer = await brain.readDelegationTransfer();
+  if (transfer !== undefined && parseReturnedDelegation(transfer.content).active?.input.id !== id) {
+    throw new Error("Delegation transfer does not match the destination return; it was preserved.");
+  }
+  await placeDelegationTransfer(brain, harness, main, generation, context);
+  const state = await main.commit(async (tx) => {
+    const active = returned((await tx.doc(DelegationDoc, main.id)).active, id);
+    const barrier = await tx.doc(DelegateMainBarrierDoc, main.id);
+    if (Object.keys(barrier).length !== 3 || barrier.sourceId !== null ||
+        (barrier.admittedId === null) !== (barrier.submissionId === null) ||
+        (barrier.admittedId !== null && barrier.admittedId !== delegationReturnId(active))) {
+      throw new Error("Delegation destination barrier conflicts; the handoff was preserved.");
+    }
+    const checkpoint = await tx.doc(DelegateInputCheckpointDoc, main.id);
+    const replay = await tx.doc(DelegateInputReplayDoc, main.id);
+    if (barrier.admittedId !== null) await requireStagedDelegateInputs(tx, main.id, id);
+    else if (clearedInputCheckpoint(checkpoint) && !clearedInputReplay(replay)) {
+      throw new Error("Delegate input staging lacks its checkpoint; it was preserved.");
+    }
+    return { admitted: barrier.admittedId !== null, checkpoint: !clearedInputCheckpoint(checkpoint) };
+  }, context);
+  if (!state.admitted && state.checkpoint) {
+    while (await stageNextDelegateInput(main, id, context)) { /* one durable input at a time */ }
+  }
+  return admitDelegationReturn(main, id, context);
 }
 
 /** Clear only the handoff whose own input was successfully answered by main. */

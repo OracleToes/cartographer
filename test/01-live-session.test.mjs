@@ -48,7 +48,7 @@ import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, DelegateChildIdentityDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
-import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
+import { acknowledgeDelegationReturn, admitDelegationReturn, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
@@ -742,7 +742,7 @@ test("delegate input checkpoints transfer with the handoff and survive interrupt
 });
 
 test("checkpoint staging is resumable, ordered, and cleared only after the return is answered", async () => {
-  const { root, cleanup } = await fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, ref, captured, factory } = fauxSetup();
   const barrier = createDelegateMainBarrier();
   const registry = createRegistry(); registry.install(barrier);
@@ -772,19 +772,17 @@ test("checkpoint staging is resumable, ordered, and cleared only after the retur
     db = await openNodeSqliteDatabase(path);
     harness = await Harness.open(await SqliteStorage.open(db, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
     main = await harness.root(BACKGROUND_CONTEXT);
-    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), true);
-    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), false);
-    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), false);
-    const users = (await main.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.model?.[0]?.role === "user");
-    assert.deepEqual(users.map((entry) => entry.model[0].content), ["first", image]);
-    assert.deepEqual(users[0].data, { chatRecordId: "person:first" });
-    assert.equal((await harness.snapshot(DelegateInputReplayDoc, main.id, BACKGROUND_CONTEXT)).submissions.length, 2);
     let markStarted;
     const started = new Promise((resolve) => { markStarted = resolve; });
     const hold = new Promise((resolve) => { release = resolve; });
     faux.setResponses([factory(async () => { markStarted(); await hold; return fauxAssistantMessage("reconciled"); })]);
-    const id = await admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT);
+    const id = await prepareDelegationDestination(brain, harness, main, "gen-destination", "handoff", BACKGROUND_CONTEXT);
     await started;
+    assert.equal(await prepareDelegationDestination(brain, harness, main, "gen-destination", "handoff", BACKGROUND_CONTEXT), id, "recovery reuses the admitted request");
+    const users = (await main.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.model?.[0]?.role === "user");
+    assert.deepEqual(users.slice(0, 2).map((entry) => entry.model[0].content), ["first", image]);
+    assert.deepEqual(users[0].data, { chatRecordId: "person:first" });
+    assert.equal((await harness.snapshot(DelegateInputReplayDoc, main.id, BACKGROUND_CONTEXT)).submissions.length, 2);
     await assert.rejects(acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), /not been answered/);
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint);
     release();

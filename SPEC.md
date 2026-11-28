@@ -919,9 +919,14 @@ and entry kinds and data; the saved queue modes remain checkpoint provenance,
 not new Pi steering submissions. It uses transactional Pi write admissions and
 request identities, so retries do not duplicate entries. Return admission refuses
 an incomplete or inconsistent staging; only an answered return clears the
-checkpoint and staging receipt together. The host must seal other admissions
-while staging and integrate the ordering with person controls before exposing
-orchestration. A separate dormant source-checkpoint inspection resolves saved
+checkpoint and staging receipt together. A dormant destination preparation
+composes transfer placement, resumable staging and return admission in that
+order; a retry reuses an admitted request, and it does not acknowledge an
+unanswered return. Direct session opening shares the transfer placement but
+still refuses an outstanding checkpoint. The host must install the main barrier,
+seal other admissions and unrelated work, and integrate the ordering with person
+controls before exposing orchestration. Pi's transactional staging can enable
+scheduling, so a paused scheduler alone does not provide that seal. A separate dormant source-checkpoint inspection resolves saved
 submission identities against the matching returned handoff, owner, child and
 source barrier, checking captured view bounds and placed entries and their active
 contributions. Queued inputs are checked against Pi's inbox when present; when

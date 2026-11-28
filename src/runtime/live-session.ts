@@ -59,7 +59,7 @@ import {
   type CollapseReport,
 } from "./collapse.js";
 import { snapshotPaths, writeSnapshot } from "./projection-files.js";
-import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
+import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc } from "./delegate-input-replay.js";
 import {
   appendCollapseLog,
@@ -70,7 +70,7 @@ import {
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { createInferenceAdmission } from "./inference-admission.js";
 import { RestDoc } from "./sleep-task.js";
-import { DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
+import { placeDelegationTransfer } from "./delegate-return.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
@@ -267,42 +267,9 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
-    // A committed collapse retains the handoff in the Brain until this
-    // conversation has durably accepted the same value. A crash after the Pi
-    // commit retries the comparison rather than writing a second report.
-    const transfer = await options.brain.readDelegationTransfer();
-    if (transfer !== undefined) {
-      if (transfer.destination !== generation) throw new Error("Delegation transfer belongs to another generation; it was preserved.");
-      const expected = parseReturnedDelegation(transfer.content);
-      const expectedInputs = transfer.inputCheckpoint === undefined ? undefined :
-        validateInputTransfer(transfer.inputCheckpoint, expected.active!.input.id);
-      const existing = await harness.snapshot(DelegationDoc, conversation.id, BACKGROUND_CONTEXT);
-      const existingInputs = await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT);
-      const existingReplay = await harness.snapshot(DelegateInputReplayDoc, conversation.id, BACKGROUND_CONTEXT);
-      if (!clearedInputReplay(existingReplay)) throw new Error("Destination delegate input staging conflicts with the transfer; both were preserved.");
-      if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expected)) {
-        throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
-      }
-      if (existingInputs !== undefined && JSON.stringify(existingInputs) !== JSON.stringify(expectedInputs)) {
-        throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
-      }
-      await conversation.commit(async (tx) => {
-        const target = await tx.doc(DelegationDoc, conversation.id);
-        if (existing !== undefined ? JSON.stringify(target) !== JSON.stringify(expected) : target.active !== null) {
-          throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
-        }
-        target.active = expected.active;
-        if (expectedInputs !== undefined) {
-          const targetInputs = await tx.doc(DelegateInputCheckpointDoc, conversation.id);
-          if (existingInputs !== undefined ? JSON.stringify(targetInputs) !== JSON.stringify(expectedInputs) : targetInputs.handoffId !== null || targetInputs.inputs.length !== 0) {
-            throw new Error("Destination delegate input checkpoint conflicts with the transfer; both were preserved.");
-          }
-          targetInputs.handoffId = expectedInputs.handoffId;
-          targetInputs.inputs = expectedInputs.inputs;
-        }
-      }, BACKGROUND_CONTEXT);
-      await options.brain.acknowledgeDelegationTransfer(transfer);
-    }
+    // A committed transfer remains in the Brain until Pi has durably accepted
+    // the same handoff and checkpoint; retry compares instead of duplicating.
+    await placeDelegationTransfer(options.brain, harness, conversation, generation, BACKGROUND_CONTEXT);
     const pendingInputs = await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT);
     const pendingReplay = await harness.snapshot(DelegateInputReplayDoc, conversation.id, BACKGROUND_CONTEXT);
     if (!clearedInputCheckpoint(pendingInputs) || !clearedInputReplay(pendingReplay)) {
