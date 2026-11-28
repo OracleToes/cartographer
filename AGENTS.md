@@ -14,6 +14,10 @@ brought with you.
 The person is `OracleToes`. They own this project. When their word and this file
 disagree, their word wins and this file is wrong until it is fixed.
 
+**Person's testing instruction:** Do not run tests unless code changes. For
+code-changing stages, follow the end-of-stage `npm test` procedure below;
+documentation-only stages are committed and pushed without running tests.
+
 ## 1. Authority
 
 From highest to lowest:
@@ -141,8 +145,9 @@ person it is done. While the stage is in progress — reading, deciding, editing
 nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no one-off test,
 no probe.** Tests and builds are not sanity checks, not iterative aids, not ways to
 help you write code. The build is only ever the first step inside `npm test`; it is
-never run on its own. The build and the tests happen strictly once, at the very end
-of the stage, right before you stop to tell the person the work is done.
+never run on its own. When code changes, the build and tests happen strictly
+once, at the very end of the stage, right before you stop to tell the person the
+work is done. Do not run tests for documentation-only stages.
 
 Pushes are not only at the end. Commit and push as you go mid-stage if needed — a
 push mid-stage is how work survives a workspace reset, and it implies no verification:
@@ -152,24 +157,26 @@ and are ready to report done, is fixed:
 1. **Make every edit you expect the stage to need.** Read the code first.
    Make surgical edits to existing files; never overwrite or rewrite entire
    files without the person's express permission.
-2. **Run `npm test` — the only command the stage holds.** It builds the project,
-   then runs the whole suite. That run must finish in **10 seconds, in total**.
+2. **If code changed, run `npm test` — the only test command.** It builds the
+   project, then runs the whole suite. That run must finish in **10 seconds, in total**.
    The suite aborts at 10 seconds and tells you it is taking too long — a suite
    that exceeds 10 seconds is a failure, not a pass, and the fix is to improve
    the slow test or drop the worst offender, then re-run — never to shorten
    the budget, never to run a partial suite, never to add a per-test exemption.
    One-off tests and probes are forbidden at any point before this run.
-3. **Commit and push.** Once the suite is green.
-4. **Report.** The build happens inside `npm test`, so a green `npm test` is both
-   the gate and the proof. Never report done on an unverified tree.
+3. **Commit and push.** Once the suite is green if code changed; otherwise,
+   commit and push without testing.
+4. **Report.** For code changes, a green `npm test` is the build and test gate;
+   never report them done without it. For documentation-only work, say tests
+   were not run.
 5. **If a test fails or the suite overruns the budget, fix it, re-run `npm test`,
-   and repeat.** Never report done on a failing or unmeasured run.
+   and repeat.** Never report code changes done on a failing or unmeasured run.
 
 Never run the build, `tsc`, a test, a one-off test, or a probe in the middle of a
 stage, or as a check on your progress while working. Reading the code is how you
-know what will work; the build and tests, run together inside `npm test` at the
-very end, are how you prove it. Never end a turn with an unpushed commit or a
-dirty tree.
+know what will work; when code changes, the build and tests, run together inside
+`npm test` at the very end, are how you prove it. Never end a turn with an
+unpushed commit or a dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
 warning, and the person cannot see anything that is not pushed. A push
@@ -182,7 +189,8 @@ Tests exist to catch breaks. They are not evidence of intent and not a
 substitute for reading the code.
 
 - **The only test command is `npm test`.** It builds the project and runs the
-  whole suite. It runs once, at the end of the stage, after every edit is made.
+  whole suite. If code changes, it runs once at the end of the stage, after every
+  edit is made. Do not run it when no code changed.
   One-off tests, partial runs, and probes are forbidden mid-turn, mid-stage, and
   mid-slice. The agent never runs `node --test`, `npm run build`, `tsc`, or any
   other build/test command by hand.
@@ -211,7 +219,7 @@ substitute for reading the code.
 ## 9. Do not
 
 - Do not overwrite entire files without the person's express permission. Make surgical edits to specific sections; whole-file replacement risks wiping existing functionality, comments, and structure.
-- Do not run the build, `tsc`, the suite, a one-off test, a probe, or any checkwhile a stage is in progress — mid-turn, mid-stage, mid-slice. The only testcommand in the workflow is `npm test` run once at the end of the stage.
+- Do not run the build, `tsc`, the suite, a one-off test, a probe, or any check while a stage is in progress — mid-turn, mid-stage, mid-slice. The only test command in the workflow is `npm test`, run once at the end of a code-changing stage and not run when no code changed.
 - Do not use a probe to replace a test, or a test to replace reading the code.
 - Do not build what `@earendil-works/pi-tui`, `pi-durable`, or `pi-ai` already
   provide.

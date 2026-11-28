@@ -43,9 +43,11 @@ proposal text; unresolved details are not implicitly decided by them.
   structured specification becomes the specification of record. During an
   incremental transition, the structured specification takes over each captured
   part, while the old specification remains authoritative for parts not yet
-  captured. Discrepancies still require discussion before being written into the
-  structured specification. This decision does not itself transition Carto's
-  `SPEC.md`.
+  captured. Keep a mapping in project files linking old specification sections
+  to their structured replacements so the authority boundary is visible, without
+  editing the old specification. Discrepancies still require discussion before
+  being written into the structured specification. This decision does not itself
+  transition Carto's `SPEC.md`.
 - **Separate authorship and work.** Main writes or updates the specification,
   then delegates implementation to a different context. When the person's
   request is clear, main updates the specification and delegates immediately,
@@ -155,9 +157,9 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** should Carto keep a project-file mapping from old
-specification sections to their structured replacements to make the authority
-boundary visible during incremental transition, without editing the old spec?
+**Next unanswered question:** if the old specification changes externally
+while its sections are being captured, how should Carto handle an edit to a
+section that has already transferred to the structured specification?
 
 ## 1. Recommendation in one sentence
 
