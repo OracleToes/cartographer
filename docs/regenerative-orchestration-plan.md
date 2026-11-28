@@ -98,8 +98,17 @@ after the return is answered. Host admission sealing, control routing, and
 end-to-end ordering still need integration. This preserves data rather than
 pretending the return path is complete. A missing-report failure now carries
 Pi's unanswered reason and detail, including a provider overflow message when
-provided; this is not near-limit enforcement. Recovery preserves
-partial project work and does not cross background boundaries. The
+provided. A separate dormant context-limit extension uses Pi's approximate
+context estimator and a host-supplied model/window/reserve policy. It commits a
+handoff, generation and request-cutoff marker at the threshold, adds reporting
+guidance for that request and its retries, blocks new non-report calls, and
+holds later requests for host abort. It is not connected to the delegation tool
+or controls. The estimate can overshoot; the model may ignore the guidance or
+fail. Pi recovery can replay an already-recorded tool intent without calling
+beforeTool, and other hooks could replace the guidance. The host must control
+extension selection and ordering, policy, recovery and input preservation;
+this foundation alone does not guarantee forced reporting or a safe return.
+Recovery preserves partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.
 A dormant main-only Pi generation hook now holds requests in the source while a

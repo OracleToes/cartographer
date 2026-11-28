@@ -787,7 +787,19 @@ the focused request once, and records a missing-report failure if the child
 finishes without reporting. If Pi settles the delegate input unanswered, that
 failure retains Pi's reason and any provided detail, including a provider's
 context-overflow error, rather than replacing it with a fabricated report. This
-does not itself enforce a near-limit report or detect every overflow. Both delegation and delegate report require a
+does not itself enforce a near-limit report or detect every overflow. A separate
+dormant context-limit extension can estimate a child's request using Pi's token
+estimator and a host-supplied model window and reserve. At the threshold it
+commits a handoff, generation-task and request-cutoff marker before asking the
+model to report. Retries of that request receive the same guidance; a later
+request is held until the host aborts it. A tool hook blocks new non-report
+calls after the marker. The estimate is approximate, a large result can already
+overshoot, and the model may not report. Pi can replay a tool with an already
+recorded intent without rerunning the hook, so this is not a universal tool
+execution guard. The host must select and retain the extension, ensure no other
+hook removes its guidance, supply the correct model/window/reserve, stop and
+reconcile held or recovered work, and preserve person inputs. It is not wired
+into orchestration and does not guarantee a report or safe return. Both delegation and delegate report require a
 sole model-issued tool call in their round, checked against Pi's durable task
 and assistant entry before making the handoff. Mixed or nested calls cannot
 start delegation or commit a report. Other calls in a rejected mixed round

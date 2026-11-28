@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import { InboxDoc, Harness, MemoryStorage, createRegistry, defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { InboxDoc, LiveDoc, Harness, MemoryStorage, createRegistry, defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { obj } from "@earendil-works/pi-schema";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -58,6 +58,7 @@ import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
 import { prepareReturnSweepWithInputs } from "../dist/runtime/delegate-sweep-reconcile.js";
 import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
+import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc } from "../dist/runtime/delegate-limit.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -995,6 +996,63 @@ test("the delegation tool runs a focused capture using Carto's existing scoped r
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();
+  }
+});
+
+test("delegate context boundary reserves a reporting request and holds further work", async () => {
+  for (const obeys of [true, false]) {
+    const { root, cleanup } = await fixture();
+    const { faux, models, ref, captured, factory } = fauxSetup();
+    let harness, notifyBlocked, reads = 0;
+    const blocked = new Promise((resolve) => { notifyBlocked = resolve; });
+    const limit = createDelegateLimitExtension({ model: ref, window: 2000, reserveTokens: 1000, harness: () => harness, onBlocked: notifyBlocked });
+    const read = defineTool({ name: "read", description: "Read a long result", parameters: obj({}), replay: "safe", execute: async () => {
+      reads++;
+      return { output: [{ type: "text", text: "x".repeat(8000) }] };
+    } });
+    const capture = defineExtension({ name: "limit-read", tools: [read] });
+    const mainExtension = defineExtension({ name: "limit-main", tools: [createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture, limit], tools: [read] } } })] });
+    const registry = createRegistry();
+    for (const extension of [mainExtension, capture, limit, DelegateReportExtension]) registry.install(extension);
+    harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+    const report = { status: "partial", findings: "read the result", changes: "none", checks: "none", uncertainty: "not assessed", remaining: "continue", mainMessage: "context limit" };
+    try {
+      const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+      faux.setResponses([
+        factory(() => fauxAssistantMessage([fauxToolCall("delegate", { role: "capture", instruction: "Inspect", doneWhen: "Report" }, { id: "limit-delegate" })], { stopReason: "toolUse" })),
+        factory(() => fauxAssistantMessage([fauxToolCall("read", {}, { id: "initial-read" })], { stopReason: "toolUse" })),
+        factory(() => fauxAssistantMessage([fauxToolCall(obeys ? "delegate_report" : "read", obeys ? report : {}, { id: "limit-call" })], { stopReason: "toolUse" })),
+      ]);
+      const submitted = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+      if (!obeys) await blocked;
+      else assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+      const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+      const marker = await harness.snapshot(DelegateLimitDoc, handoff.conversationId, BACKGROUND_CONTEXT);
+      assert.equal(marker.handoffId, handoff.input.id);
+      assert.ok(marker.taskId > 0 && marker.cutoff > 0);
+      assert.doesNotMatch(JSON.stringify(captured[1]), /Context is approaching its limit/);
+      assert.match(JSON.stringify(captured[2]), /Context is approaching its limit/);
+      assert.equal(reads, 1, "non-report work after the boundary is blocked");
+      assert.equal(faux.state.callCount, 3, "a later request does not reach the provider");
+      if (obeys) {
+        assert.deepEqual(handoff.result, { kind: "delegate", report });
+      } else {
+        assert.equal(handoff.phase, "running");
+        const child = await harness.conversation(handoff.conversationId, BACKGROUND_CONTEXT);
+        const policy = { model: ref, window: 2000, reserveTokens: 1000 };
+        const heldTask = (await harness.snapshot(LiveDoc, child.id, BACKGROUND_CONTEXT)).run.taskId;
+        assert.notEqual(heldTask, marker.taskId, "Pi advances to a new generation after the tool round");
+        assert.equal(await main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, policy), BACKGROUND_CONTEXT), "hold");
+        await assert.rejects(main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, { ...policy, model: { ...ref, modelId: "other" } }), BACKGROUND_CONTEXT), /request or model changed/);
+        await assert.rejects(main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, { ...policy, reserveTokens: 2000 }), BACKGROUND_CONTEXT), /Invalid delegate context-limit policy/);
+        await child.abort(BACKGROUND_CONTEXT);
+        assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+        assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result.kind, "failure");
+      }
+    } finally {
+      await harness.close(BACKGROUND_CONTEXT);
+      await cleanup();
+    }
   }
 });
 
