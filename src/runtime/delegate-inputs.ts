@@ -1,4 +1,5 @@
 /** Dormant source-generation checkpoint for inputs before delegate recovery aborts main. */
+import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type Cursor, type Storage, type SubmissionRecord, type TaskId, type Tx } from "@earendil-works/pi-durable";
@@ -100,7 +101,8 @@ export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({
 /**
  * Call inside the Pi transaction before abort. The host must seal input
  * admission to main and child through capture and recovery; this checkpoint
- * is not a lock. A retry retains the original snapshot.
+ * is not a lock. A retry retains the original snapshot, but refuses new or
+ * changed live and queued inputs instead of aborting them without a copy.
  */
 export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, id: string): Promise<void> {
   const active = (await tx.doc(DelegationDoc, mainId)).active;
@@ -109,12 +111,13 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
   if (active?.input.id !== id || (active.phase !== "ending" && active.phase !== "returned") || barrier.sourceId !== id) {
     throw new Error("Input checkpoint requires the matching source handoff; all inputs were preserved.");
   }
+  let previous: InputCheckpoint | undefined;
   if (saved.handoffId !== null) {
     if (saved.handoffId !== id) throw new Error("Another input checkpoint exists; it was preserved.");
-    parseInputCheckpoint(JSON.stringify(saved), id);
-    return;
+    previous = parseInputCheckpoint(JSON.stringify(saved), id);
+  } else if (!Array.isArray(saved.inputs) || saved.inputs.length !== 0 || Object.keys(saved).length !== 2) {
+    throw new Error("Invalid empty input checkpoint; it was preserved.");
   }
-  if (!Array.isArray(saved.inputs) || saved.inputs.length !== 0) throw new Error("Invalid empty input checkpoint; it was preserved.");
   const inputs: CapturedInput[] = [];
   const capture = async (conversationId: ConversationId, initialRequest?: string) => {
     const live = await tx.doc(LiveDoc, conversationId);
@@ -122,7 +125,9 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
     if (live.run === undefined && (live.runFailure?.inputs.length ?? 0) > 0) {
       for (const failedId of live.runFailure?.inputs ?? []) {
         const failed = await tx.submission(failedId);
-        if (initialRequest === undefined || failed?.type !== "input" || failed.conversationId !== conversationId || failed.status !== "unanswered" || failed.requestId !== initialRequest) {
+        const wasCaptured = previous?.inputs.some((input) => input.submissionId === failedId) === true;
+        if (failed?.type !== "input" || failed.conversationId !== conversationId || failed.status !== "unanswered" ||
+            (!wasCaptured && (initialRequest === undefined || failed.requestId !== initialRequest))) {
           throw new Error("A run already ended without an input checkpoint; its inputs were preserved for recovery.");
         }
       }
@@ -180,6 +185,17 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
   inputs.sort((left, right) => left.submissionId - right.submissionId);
   if (new Set(inputs.map((input) => input.submissionId)).size !== inputs.length) {
     throw new Error("Duplicate input identity in main; all inputs were preserved.");
+  }
+  if (previous !== undefined) {
+    const captured = new Map(previous.inputs.map((input) => [input.submissionId, input]));
+    for (const input of inputs) {
+      if (!isDeepStrictEqual(input, captured.get(input.submissionId))) {
+        throw new Error("A live or queued input changed after checkpoint; all inputs were preserved.");
+      }
+    }
+    // Inputs withdrawn by an earlier abort need not still be live or queued;
+    // their original checkpoint remains the only retained content.
+    return;
   }
   saved.handoffId = id;
   saved.inputs = inputs;

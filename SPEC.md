@@ -879,7 +879,9 @@ their submission identities, full input content and entry metadata, in a
 source-generation checkpoint. The delegate's own initial task instruction is
 not a person input and is not carried. A running delegate must have a verified
 task owner and child identity. Repeating capture for the same handoff retains
-the original copy. A missing or inconsistent input, a previously failed run
+the original copy but checks current active and queued inputs against it; a new
+or changed input blocks rather than being withdrawn without a copy. A missing
+or inconsistent input, a previously failed run
 whose inputs were not captured, or a queued context write stops capture rather
 than silently dropping it. The host must stop new input admission to both
 conversations while capturing and keep it stopped through recovery; the
@@ -889,7 +891,7 @@ delegate's own initial task input. Pi may already have discarded a withdrawn
 queued input's content, so this detection does not recover it. Pi's storage-level
 scan is outside its transaction API. The dormant immediate-end and restart-recovery
 paths scan after checkpointing and before abort, then recheck the handoff,
-checkpoint and scanned records in a Pi transaction. An unanswered main or child
+checkpoint, live runs, inboxes and scanned records in a Pi transaction. An unanswered main or child
 input absent from the checkpoint, a scan failure or conflicting data prevents
 further abort; any checkpointed inputs and ending intent remain for recovery.
 This conservative scan also blocks on older unanswered main inputs even if they

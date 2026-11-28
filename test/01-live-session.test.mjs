@@ -1335,6 +1335,18 @@ test("delegate barrier holds a queued child follow-up after its report", async (
     await main.commit(async (tx) => { (await tx.doc(DelegateMainBarrierDoc, main.id)).admittedId = "unexpected"; }, BACKGROUND_CONTEXT);
     await assert.rejects(checkpointReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT), /requires the source barrier/);
     await main.commit(async (tx) => { (await tx.doc(DelegateMainBarrierDoc, main.id)).admittedId = null; }, BACKGROUND_CONTEXT);
+    // Simulate a broken host admission seal after checkpointing and after the
+    // first storage scan: queued inputs are not part of an unanswered scan.
+    let late;
+    const racingStorage = { scanSubmissions: async (...args) => {
+      const page = await storage.scanSubmissions(...args);
+      if (late === undefined) late = await child.submit({ type: "input", content: "late input", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+      return page;
+    } };
+    await assert.rejects(checkpointReturnedDelegateInputs(main, racingStorage, active.input.id, BACKGROUND_CONTEXT), /input changed after checkpoint/);
+    assert.equal((await late.status(BACKGROUND_CONTEXT)).status, "queued");
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), saved);
+    await assert.rejects(checkpointReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT), /input changed after checkpoint/);
     await child.abort(BACKGROUND_CONTEXT);
     assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal((await mainInput.wait(BACKGROUND_CONTEXT)).status, "done");

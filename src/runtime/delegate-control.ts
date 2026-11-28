@@ -99,6 +99,10 @@ async function verifyCheckpointedInputs(
     if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || content !== before.content || barrier !== before.barrier) {
       throw new Error("The delegate input checkpoint, barrier or owner changed during verification; it was preserved.");
     }
+    // A storage scan finds already-unanswered submissions, not newly queued or
+    // running ones. Recheck Pi's live runs and inboxes on the transaction line
+    // before abort so an admission after the saved checkpoint cannot be lost.
+    await checkpointDelegateInputs(tx, main.id, id);
     const captured = new Set(parseInputCheckpoint(content, id).inputs.map((input) => input.submissionId));
     for (const submission of unanswered) {
       const current = await tx.submission(submission.id);

@@ -118,8 +118,11 @@ submission records for unanswered inputs, including withdrawn queue items; the
 child scan excludes the delegate's own task instruction. The immediate-end and
 restart-recovery paths use them after checkpointing and before abort, compare the
 results against the saved checkpoint, and recheck the observed records and
-ownership in a Pi transaction. Pi's transaction API does not expose a submission
-scan, so the host must seal admissions across checkpoint, scan and abort, and
+ownership in a Pi transaction. The recheck also compares current live and queued
+inputs to the original checkpoint, refusing new or changed inputs even when a
+storage scan has not marked them unanswered. A retry still retains the original
+copy and tolerates captured inputs withdrawn by an earlier abort. Pi's transaction
+API does not expose a submission scan, so the host must seal admissions across checkpoint, scan and abort, and
 provide the actual storage used by the Harness. The checkpoint helper alone does
 not scan. A missing input blocks further abort, but Pi may already have discarded
 its content: detection is not recovery. Older unanswered main inputs also block
