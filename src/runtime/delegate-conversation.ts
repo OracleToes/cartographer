@@ -10,6 +10,26 @@ import { DelegationDoc, startDelegation } from "./delegation-record.js";
 /** The same Pi request identity is used for admission, retry and recovery scans. */
 export const delegateInputRequestId = (ownerId: TaskId): string => `carto.delegate-input:${ownerId}`;
 
+/** Receipt written atomically with the delegate's initial Pi admission. */
+export const DelegateInitialInputDoc = defineDoc<{ ownerId: number | null; handoffId: string | null; submissionId: number | null }>({
+  kind: "carto.delegate-initial-input", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ ownerId: null, handoffId: null, submissionId: null }), checkpointWhen: () => true,
+});
+
+/** Resolve the receipt against Pi's request index; an unmarked collision is never an instruction. */
+export async function delegateInitialInput(tx: Tx, childId: ConversationId, ownerId: TaskId, handoffId: string): Promise<SubmissionId | undefined> {
+  const receipt = await tx.doc(DelegateInitialInputDoc, childId);
+  const existing = await tx.submissionByRequest(childId, delegateInputRequestId(ownerId));
+  if (Object.keys(receipt).length === 3 && receipt.ownerId === null && receipt.handoffId === null && receipt.submissionId === null && existing === undefined) return undefined;
+  if (Object.keys(receipt).length !== 3 || receipt.ownerId !== ownerId || receipt.handoffId !== handoffId ||
+      !Number.isSafeInteger(receipt.submissionId) || receipt.submissionId === null || receipt.submissionId <= 0 ||
+      existing?.type !== "input" || existing.conversationId !== childId || existing.id !== receipt.submissionId ||
+      existing.requestId !== delegateInputRequestId(ownerId)) {
+    throw new Error("Delegate initial input receipt or request identity conflicts; the source was preserved.");
+  }
+  return existing.id;
+}
+
 /** Durable link checked by the child request barrier; not a substitute for task ownership. */
 export const DelegateChildIdentityDoc = defineDoc<{ mainId: number | null; ownerId: number | null; handoffId: string | null }>({
   kind: "carto.delegate-child-identity", version: 1, scope: "conversation", history: "latest", fork: "initial",
@@ -179,7 +199,14 @@ export async function admitDelegateInput(
     throw new Error("Delegate input does not match its owned handoff; no input was admitted.");
   }
   if (active.phase === "returned" || active.phase === "ending") return null;
-  return child.submit(tx, {
+  const prior = await delegateInitialInput(tx, child.id, ownerId, delegationId);
+  if (prior !== undefined) return prior;
+  const receipt = await tx.doc(DelegateInitialInputDoc, child.id);
+  const submissionId = await child.submit(tx, {
     type: "input", content: JSON.stringify(active.input), requestId: delegateInputRequestId(ownerId),
   });
+  receipt.ownerId = ownerId;
+  receipt.handoffId = delegationId;
+  receipt.submissionId = submissionId;
+  return submissionId;
 }

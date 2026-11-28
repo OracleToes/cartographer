@@ -129,8 +129,11 @@ ownership, reuses the snapshot on retry, and refuses ambiguous inputs or queued
 context writes. The host must seal both conversations' input admission during
 capture and recovery. Dormant helpers scan Pi's storage-level main and child
 submission records for unanswered inputs, including withdrawn queue items; the
-child scan excludes the delegate's own task instruction. The immediate-end and
-restart-recovery paths use them after checkpointing and before abort, compare the
+verification excludes only the delegate's own task instruction after checking
+its admission receipt and Pi request index on the transaction line. Admission
+commits that receipt with the new submission, and refuses an unmarked request
+ID collision; old or conflicting receipts block instead of guessing. The immediate-end and
+restart-recovery paths use the scans after checkpointing and before abort, compare the
 results against the saved checkpoint, and recheck the observed records and
 ownership in a Pi transaction. The recheck also compares current live and queued
 inputs to the original checkpoint, refusing new or changed inputs even when a

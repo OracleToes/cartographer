@@ -920,8 +920,13 @@ and assistant entry before making the handoff. Mixed or nested calls cannot
 start delegation or commit a report. Other calls in a rejected mixed round
 retain their normal semantics. The initial delegate input is admitted in a Pi
 transaction that checks the same running handoff and its task-owned child; if
-the handoff has already returned, no new child input is admitted. Replays reuse
-the same request ID. This admission check does not itself stop a child whose
+the handoff has already returned, no new child input is admitted. A receipt
+binding the owner, handoff and Pi submission is committed with the first input;
+replays reuse that identity. An existing request ID without its matching receipt
+blocks rather than being mistaken for the instruction. Input checkpoint and
+unanswered scans exempt only that verified child submission, not a matching
+request ID alone. Old or conflicting source data without the receipt is preserved
+for recovery. This admission check does not itself stop a child whose
 input was already admitted. The report extension also installs a dormant
 child-only request barrier: an explicitly identified task-owned child may
 request the model only while its matching main handoff is running. After the

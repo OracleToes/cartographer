@@ -48,14 +48,14 @@ import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, parseReturnedDelegation, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
-import { admitDelegateInput, DelegateChildIdentityDoc, DelegateRestoreOriginDoc, DelegateRestoreRoutesDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
+import { admitDelegateInput, DelegateChildIdentityDoc, DelegateInitialInputDoc, DelegateRestoreOriginDoc, DelegateRestoreRoutesDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn, delegationReturnId, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { checkpointReturnedDelegateInputs, endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd, verifyReturnedDelegateInputs } from "../dist/runtime/delegate-control.js";
-import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
@@ -1171,6 +1171,9 @@ test("a returned handoff prevents admission of a not-yet-started delegate", asyn
       childId = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id,
         { model: ref, cwd, instructions: "Do not start after return." }), context);
       const child = await api.conversation(childId, context);
+      const collision = await api.commit((tx) => tx.createSubmission({ type: "input", conversationId: childId, requestId: `carto.delegate-input:${api.taskId}`, status: "unanswered", reason: "aborted" }), context);
+      await assert.rejects(api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, input.id, child), context), /initial input receipt or request identity conflicts/);
+      assert.equal((await api.commit((tx) => tx.submission(collision.id), context)).status, "unanswered", "the unrelated submission is preserved");
       await api.commit(async (tx) => returnDelegation(await tx.doc(DelegationDoc, api.conversationId), input.id, { kind: "person-ended", reason: "" }), context);
       assert.equal(await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, input.id, child), context), null);
       return { output: [{ type: "text", text: "Stopped." }] };
@@ -1937,9 +1940,7 @@ test("Pi submission scan detects withdrawn main and child inputs across restart 
     assert.equal(await withdrawn.abort(BACKGROUND_CONTEXT), "aborted");
     assert.equal((await withdrawn.status(BACKGROUND_CONTEXT)).entry, undefined, "Pi never placed the withdrawn input");
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "", BACKGROUND_CONTEXT), true);
-    const ownerId = Number(active.input.id.slice("delegate:".length));
-    const scan = () => target === "main" ? findUnansweredInputs(storage, main.id, BACKGROUND_CONTEXT) :
-      findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    const scan = () => findUnansweredInputs(storage, conversation.id, BACKGROUND_CONTEXT);
     const found = await scan();
     assert.deepEqual(found.map((submission) => submission.id), [withdrawn.id]);
     assert.equal(found[0].reason, "aborted");
@@ -2020,6 +2021,12 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     await main.commit(async (tx) => { (await tx.doc(DelegateChildIdentityDoc, child.id)).handoffId = "wrong"; }, BACKGROUND_CONTEXT);
     await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /child ownership conflicts/);
     await main.commit(async (tx) => { (await tx.doc(DelegateChildIdentityDoc, child.id)).handoffId = active.input.id; }, BACKGROUND_CONTEXT);
+    const initialReceipt = await harness.snapshot(DelegateInitialInputDoc, child.id, BACKGROUND_CONTEXT);
+    assert.ok(initialReceipt.submissionId > 0);
+    await main.commit(async (tx) => { (await tx.doc(DelegateInitialInputDoc, child.id)).handoffId = "wrong"; }, BACKGROUND_CONTEXT);
+    await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /initial input receipt or request identity conflicts/);
+    assert.equal((await childQueued.status(BACKGROUND_CONTEXT)).status, "queued");
+    await main.commit(async (tx) => { (await tx.doc(DelegateInitialInputDoc, child.id)).handoffId = active.input.id; }, BACKGROUND_CONTEXT);
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(requestImmediateDelegateEnd(main, active.input.id, "different", BACKGROUND_CONTEXT), /different reason/);
     const lateReport = { status: "done", findings: "none", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };

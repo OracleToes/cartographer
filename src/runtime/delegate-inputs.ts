@@ -4,7 +4,7 @@ import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type Cursor, type Storage, type SubmissionRecord, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegateMainBarrierDoc, DelegationDoc, type DelegationTransfer } from "./delegation-record.js";
-import { DelegateChildIdentityDoc, delegateInputRequestId } from "./delegate-conversation.js";
+import { DelegateChildIdentityDoc, delegateInitialInput } from "./delegate-conversation.js";
 
 export type CapturedInput = {
   submissionId: number;
@@ -86,13 +86,6 @@ export async function findUnansweredInputs(
   return result;
 }
 
-/** The delegate's instruction is not a person input to be replayed. */
-export async function findUnansweredDelegateInputs(
-  storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,
-): Promise<Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>>> {
-  return (await findUnansweredInputs(storage, childId, context)).filter((submission) => submission.requestId !== delegateInputRequestId(ownerId));
-}
-
 export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({
   kind: "carto.delegate-input-checkpoint", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ handoffId: null, inputs: [] }), checkpointWhen: () => true,
@@ -119,7 +112,7 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
     throw new Error("Invalid empty input checkpoint; it was preserved.");
   }
   const inputs: CapturedInput[] = [];
-  const capture = async (conversationId: ConversationId, initialRequest?: string) => {
+  const capture = async (conversationId: ConversationId, initialSubmission?: number) => {
     const live = await tx.doc(LiveDoc, conversationId);
     const inbox = await tx.doc(InboxDoc, conversationId);
     if (live.run === undefined && (live.runFailure?.inputs.length ?? 0) > 0) {
@@ -127,7 +120,7 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
         const failed = await tx.submission(failedId);
         const wasCaptured = previous?.inputs.some((input) => input.submissionId === failedId) === true;
         if (failed?.type !== "input" || failed.conversationId !== conversationId || failed.status !== "unanswered" ||
-            (!wasCaptured && (initialRequest === undefined || failed.requestId !== initialRequest))) {
+            (!wasCaptured && failed.id !== initialSubmission)) {
           throw new Error("A run already ended without an input checkpoint; its inputs were preserved for recovery.");
         }
       }
@@ -137,7 +130,7 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
       if (submission?.type !== "input" || submission.conversationId !== conversationId || submission.status !== "placed") {
         throw new Error("A running input is missing or inconsistent; it was preserved.");
       }
-      if (initialRequest !== undefined && submission.requestId === initialRequest) {
+      if (submission.id === initialSubmission) {
         if (active.phase === "returned") throw new Error("The delegate's report run has not settled; its inputs were preserved.");
         continue;
       }
@@ -158,7 +151,7 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
       if (submission?.type !== "input" || submission.conversationId !== conversationId || submission.status !== "queued") {
         throw new Error("A queued input is missing or inconsistent; it was preserved.");
       }
-      if (initialRequest !== undefined && submission.requestId === initialRequest) continue;
+      if (submission.id === initialSubmission) continue;
       inputs.push({
         submissionId: item.id, placement: "queued", whenBusy: item.mode,
         content: item.content as JsonValue,
@@ -180,7 +173,8 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
     if (owner?.kind !== "pi.tool" || owner.conversationId !== mainId) {
       throw new Error("Delegate owner is unavailable; its inputs were preserved.");
     }
-    await capture(childId, delegateInputRequestId(identity.ownerId as TaskId));
+    const initial = await delegateInitialInput(tx, childId, identity.ownerId as TaskId, id);
+    await capture(childId, initial);
   }
   inputs.sort((left, right) => left.submissionId - right.submissionId);
   if (new Set(inputs.map((input) => input.submissionId)).size !== inputs.length) {

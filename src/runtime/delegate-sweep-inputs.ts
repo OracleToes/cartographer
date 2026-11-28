@@ -1,7 +1,7 @@
 /** Dormant source-checkpoint identity inspection for a prospective return sweep. */
 import { isDeepStrictEqual } from "node:util";
 import { InboxDoc, ROOT_CONVERSATION_ID, type ConversationId, type SubmissionId, type Tx } from "@earendil-works/pi-durable";
-import { DelegateChildIdentityDoc, delegateInputRequestId } from "./delegate-conversation.js";
+import { DelegateChildIdentityDoc, delegateInitialInput } from "./delegate-conversation.js";
 import { ownedHandoff } from "./delegate-control.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
@@ -46,6 +46,7 @@ export async function inspectReturnSweepInputs(
       throw new Error("Return input child identity conflicts with the handoff; the source was preserved.");
     }
   }
+  const initial = owned.childId === null ? undefined : await delegateInitialInput(tx, owned.childId, owned.ownerId, id);
   const saved = parseInputCheckpoint(JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, mainId)), id);
   const byConversation = new Map<number, ReturnSweepView>();
   for (const view of views) {
@@ -76,7 +77,7 @@ export async function inspectReturnSweepInputs(
     if (submission?.type !== "input" || (submission.conversationId !== mainId && submission.conversationId !== owned.childId)) {
       throw new Error("A checkpoint submission is missing or belongs to another conversation; the source was preserved.");
     }
-    if (submission.requestId === delegateInputRequestId(owned.ownerId)) {
+    if (submission.conversationId === owned.childId && submission.id === initial) {
       throw new Error("The delegate's initial instruction is not a checkpointed person input; the source was preserved.");
     }
     if (input.placement === "queued") {

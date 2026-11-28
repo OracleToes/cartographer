@@ -5,7 +5,8 @@ import { LiveDoc, ROOT_CONVERSATION_ID, type Conversation, type ConversationId, 
 import { CONTEXT_LIMIT_FAILURE, DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, parseReturnedDelegation, requestContextLimitEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
 import { DelegateLimitDoc, hasDelegateLimitMarker } from "./delegate-limit.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
-import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs, parseInputCheckpoint } from "./delegate-inputs.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredInputs, parseInputCheckpoint } from "./delegate-inputs.js";
+import { delegateInitialInput } from "./delegate-conversation.js";
 
 /** Verify the actual Pi task and owned child, not just an ID in the document. */
 export async function ownedHandoff(tx: Tx, mainId: ConversationId, active: Delegation): Promise<{ ownerId: TaskId; childId: ConversationId | null }> {
@@ -85,10 +86,11 @@ async function verifyCheckpointedInputs(
     }
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
     parseInputCheckpoint(content, id);
-    return { ...owned, content, barrier: JSON.stringify(barrier) };
+    const initial = owned.childId === null ? undefined : await delegateInitialInput(tx, owned.childId, owned.ownerId, id);
+    return { ...owned, initial, content, barrier: JSON.stringify(barrier) };
   }, context);
   const mainUnanswered = await findUnansweredInputs(storage, main.id, context);
-  const childUnanswered = before.childId === null ? [] : await findUnansweredDelegateInputs(storage, before.childId, before.ownerId, context);
+  const childUnanswered = before.childId === null ? [] : await findUnansweredInputs(storage, before.childId, context);
   const unanswered = [...mainUnanswered, ...childUnanswered];
   await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
@@ -96,7 +98,8 @@ async function verifyCheckpointedInputs(
     const owned = await ownedHandoff(tx, main.id, active);
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
     const barrier = JSON.stringify(await tx.doc(DelegateMainBarrierDoc, main.id));
-    if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || content !== before.content || barrier !== before.barrier) {
+    const initial = owned.childId === null ? undefined : await delegateInitialInput(tx, owned.childId, owned.ownerId, id);
+    if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || initial !== before.initial || content !== before.content || barrier !== before.barrier) {
       throw new Error("The delegate input checkpoint, barrier or owner changed during verification; it was preserved.");
     }
     // A storage scan finds already-unanswered submissions, not newly queued or
@@ -109,6 +112,7 @@ async function verifyCheckpointedInputs(
       if (!isDeepStrictEqual(current, submission)) {
         throw new Error("A delegate submission changed during verification; it was preserved.");
       }
+      if (submission.conversationId === owned.childId && submission.id === initial) continue;
       if (!captured.has(submission.id)) {
         const label = submission.conversationId === main.id ? "Main" : "Delegate";
         throw new Error(`${label} input ${submission.id} was unanswered before checkpoint; its content may no longer be available. Recovery must resolve it before abort.`);
