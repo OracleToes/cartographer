@@ -337,11 +337,14 @@ crash, recovery cannot check it and continues the existing idempotent cleanup.
 This is only a change detector and never permits source deletion by itself. A
 dormant wrapper now captures a plan between two such source fingerprints,
 compares the Pi handoff, checkpoint and barrier with stored revisions, and
-rechecks projection and Brain/archive snapshots. Before fingerprinting, the
-wrapper writes a fresh challenge into a Pi source document and compares it with
-the named store through a read-only SQLite connection. This catches an
-accidentally unrelated Harness; it writes the challenge even if later capture
-fails, and cannot rule out database copies, replacement, relay or a subsequent
+rechecks projection and Brain/archive snapshots. Pi inspection rejects unfinished
+tasks and queued or placed submissions before and after capture, including
+background work and queued writes. These are point-in-time checks, not a pause
+or writer lock. Before fingerprinting, the wrapper writes a fresh challenge into
+a Pi source document and compares it with the named store through a read-only
+SQLite connection. This catches an accidentally unrelated Harness; once written,
+the challenge remains even if later capture fails. It cannot rule out database
+copies, replacement, relay or a subsequent
 path swap. The wrapper returns its values together but does not journal them or
 protect against ABA changes and filesystem races. The host must ensure the
 backing-store relationship and seal writers; a SQLite read snapshot is not a

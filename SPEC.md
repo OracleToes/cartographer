@@ -822,12 +822,14 @@ plan between logical Pi-store fingerprints, compares the Pi handoff, checkpoint
 and barrier with their stored revisions, and rechecks the projection and Brain
 snapshots. Before taking the source fingerprint, it writes a fresh challenge to
 a source-local Pi document and checks the same challenge in the named SQLite
-store. An unrelated Harness is refused; the challenge remains in whichever
-Harness received it even if capture fails. This is not proof against a copied
+store. An unrelated Harness is refused; once written, the challenge remains in
+whichever Harness received it even if capture fails. This is not proof against a copied
 or replaced store, a later path swap, or a relay. The host must still ensure the
 backing-store relationship and seal writers. The wrapper returns the snapshots
-for later commit; it does not establish a lock or authenticate hidden sidecar
-fields. Project-file observations and ABA changes remain unprotected. A caller may also
+for later commit; Pi inspection rejects unfinished source tasks or submissions,
+including background tasks and queued writes, before and after capture. These
+point-in-time checks do not stop scheduling, establish a lock, or authenticate
+hidden sidecar fields. Project-file observations and ABA changes remain unprotected. A caller may also
 commit the captured projection digest with the source seal in the transfer and
 Brain journal. Committed recovery checks both projection files against that
 digest while the source store remains; missing or changed files preserve the

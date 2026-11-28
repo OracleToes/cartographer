@@ -1679,6 +1679,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
     const pending = await child.submit({ type: "input", content: "Keep my follow-up", whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } } }, BACKGROUND_CONTEXT);
     const pendingWrite = await child.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "unhandled write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
+    assert.ok((await harness.inspect(BACKGROUND_CONTEXT)).submissions.some((item) => item.id === pendingWrite.id && item.status === "queued"));
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
     await assert.rejects(recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), /paused scheduler/);
     await assert.rejects(endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), /queued context write/);
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
@@ -1848,6 +1850,15 @@ test("person-ended delegate stops its in-flight work without a final report", as
       return brain.readArchive();
     } };
     await assert.rejects(captureReturnSweepPlan(root, racingBrain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /source changed during capture/);
+    let taskArchiveReads = 0;
+    const taskRacingBrain = { ...brain, readArchive: async () => {
+      if (++taskArchiveReads === 2) {
+        await main.commit((tx) => tx.createTask(SleepTask, { seconds: 600 }, { ownership: { kind: "conversation" }, background: true }), BACKGROUND_CONTEXT);
+      }
+      return brain.readArchive();
+    } };
+    await assert.rejects(captureReturnSweepPlan(root, taskRacingBrain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
+    assert.ok((await harness.inspect(BACKGROUND_CONTEXT)).tasks.some(({ record }) => record.kind === "carto.sleep" && record.background), "background work remains in the source");
     assert.equal(await brain.readCollapseJournal(), undefined, "capture does not start a collapse or delete the source");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");

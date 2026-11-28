@@ -17,7 +17,7 @@ import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
 import { prepareReturnSweepMarks, verifyReturnSweepFrozenPins, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
-import { captureReturnSweepViews, type ReturnSweepView } from "./delegate-sweep-view.js";
+import { captureReturnSweepViews, requireReturnSweepQuiescence, type ReturnSweepView } from "./delegate-sweep-view.js";
 import { captureDelegateSourceSeal } from "./delegate-source-seal.js";
 
 /**
@@ -208,6 +208,8 @@ export async function prepareReturnSweepWithRecords(
  * read-only connection to the named store. This detects an accidentally unrelated
  * Harness, but not a copied or replaced database, a malicious relay, or a later
  * path swap. The caller must still ensure the backing-store relationship.
+ * Pi inspection rejects unfinished tasks and submissions before and after
+ * capture, including background work and queued writes; it is not a lock.
  * The two source seals and head/Brain comparisons are not locks, cannot detect
  * every ABA change, and do not authenticate hidden sidecar data or arbitrary
  * project-file observations. This does not commit, journal, establish a deletion
@@ -218,6 +220,7 @@ export async function captureReturnSweepPlan(
 ) {
   if (!/^gen-[\w-]+$/.test(generation)) throw new Error("Invalid return-sweep generation; the source was preserved.");
   const path = generationPaths(root, generation).store;
+  await requireReturnSweepQuiescence(harness, context);
   const expected = { brain: await brain.read(), archive: await brain.readArchive() };
   const challenge = { generation, challenge: randomBytes(32).toString("hex") };
   await harness.commit(async (tx) => {
@@ -264,6 +267,7 @@ export async function captureReturnSweepPlan(
   if (head.digest !== captured.plan.sourceHeadDigest) throw new Error("Return-sweep projection changed during capture; the source was preserved.");
   const after = { brain: await brain.read(), archive: await brain.readArchive() };
   if (!isDeepStrictEqual(expected, after)) throw new Error("Brain or archive changed during return-sweep capture; the source was preserved.");
+  await requireReturnSweepQuiescence(harness, context);
   const finalSeal = await captureDelegateSourceSeal(path, generation);
   if (!isDeepStrictEqual(sourceSeal, finalSeal)) throw new Error("Return-sweep source changed during capture; the source was preserved.");
   return { ...captured.plan, expected, sourceSeal, stored };

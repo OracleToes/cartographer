@@ -31,6 +31,19 @@ export async function captureReturnSweepBounds(tx: Tx): Promise<Bounds[]> {
 export type ReturnSweepView = { conversation: ConversationRecord; tail: EntryId | undefined; view: ContextView };
 
 /**
+ * A source with any unfinished task or submission may still contain work that
+ * the view does not capture, including sleeping background tasks and queued
+ * writes. Pi's inspection is a point-in-time check, not a scheduler pause or a
+ * writer lock. The host must stop and seal admissions and work independently.
+ */
+export async function requireReturnSweepQuiescence(harness: Harness, context: Context): Promise<void> {
+  const inspection = await harness.inspect(context);
+  if (inspection.scheduling === "closing" || inspection.tasks.length !== 0 || inspection.submissions.length !== 0) {
+    throw new Error("Return sweep has unfinished tasks or submissions; the source was preserved.");
+  }
+}
+
+/**
  * Read each conversation through Pi's own context derivation, preserving its
  * raw active entries and per-entry edited contributions. Does not archive or
  * transfer anything. The host must stop *all* source writers (including inbox
