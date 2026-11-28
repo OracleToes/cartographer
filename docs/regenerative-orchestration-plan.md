@@ -67,8 +67,11 @@ proposal text; unresolved details are not implicitly decided by them.
   call for early return. The normal agent's controls apply to an active delegate:
   `SPEC.md` §9 defines steer, follow-up, interrupt, pause and cancel, including
   partial in-flight tool results. Do not invent an automatic interruption on a
-  normal message. How early return obtains and delivers a partial report when
-  possible, and handles an unavailable report, still needs specification.
+  normal message. The person can steer the delegate to report if desired, or
+  use a command to end the delegation immediately; the UI prompts for a reason,
+  which may be blank. Immediate end does not give the delegate an extra reporting
+  turn or require a report. Preserve partial work and do not invent a report.
+  The handling and destination of the optional reason still need specification.
 - **Behavior provenance and promotion.** Keep these distinctions:
   - **Dictated:** a feature, build, or implementation requested by the person,
     or behavior promoted to dictated.
@@ -90,9 +93,9 @@ proposal text; unresolved details are not implicitly decided by them.
   confirmation is needed. Incidental changes not covered by that request still
   need to be flagged and confirmed.
 
-**Next unanswered question:** when the person calls a delegate back early,
-should it get a final opportunity to report its partial work before returning,
-when possible, or should control return immediately to main?
+**Next unanswered question:** should the optional reason for ending a delegate
+be delivered to main along with the fact that the person ended it, so main can
+reconcile the partial work?
 
 ## 1. Recommendation in one sentence
 
@@ -478,14 +481,18 @@ no special models are required by this design.
    changes or explicitly none; checks and outcomes or explicitly not run;
    gaps/assumptions; remaining work; and done/partial/blocked/unverified
    status. The required message is distinct from task-local Chat. Grammar
-   enforcement remains a feasibility gate (§9), not a promise.
-6. **Return and reconcile.** Persist the report or failure, deliver the one
-   required main Chat message exactly once, then perform a full main collapse:
-   normal sweep, pending marks, pin refresh and archive grace. Resume main with
-   the report and current Brain; main checks project/spec changes and evidence,
-   resolves questions and updates Atlas/Ledger before delegating again. Do not
-   transfer task-local conversation into main. A stale input/report is labeled
-   and re-assessed; it cannot certify the changed contract.
+   enforcement remains a feasibility gate (§9), not a promise. A person-commanded
+   immediate end is different: it does not wait for a final reporting turn.
+6. **Return and reconcile.** On ordinary report return, persist the report and
+   deliver the required main Chat message exactly once, then perform a full main
+   collapse: normal sweep, pending marks, pin refresh and archive grace. Resume
+   main with the report and current Brain; main checks project/spec changes and
+   evidence, resolves questions and updates Atlas/Ledger before delegating
+   again. An immediate end also returns through the normal main collapse, but
+   without demanding a report or a fabricated delegate message; its optional
+   reason handling remains open. Do not transfer task-local conversation into
+   main. A stale input/report is labeled and
+   re-assessed; it cannot certify the changed contract.
 7. **Failures remain real.** On overflow, a system message tells main to
    investigate and stitch a continuation; no fabricated report or success.
    Interruption, provider failure, unavailable grammar or failed collapse must
