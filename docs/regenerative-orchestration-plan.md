@@ -89,7 +89,15 @@ proposal text; unresolved details are not implicitly decided by them.
   remains stopped until a message or resume, while a timed sleep remains durable
   across restart and can wake on its timer. Once main is running without an active
   task, it should seek systematic capture. Existing unknown intent remains
-  unknown; capture alone does not authorize implementation changes.
+  unknown; capture alone does not authorize implementation changes except for
+  the agreed correction of conflicts with accepted or dictated specification
+  described below.
+- **Idle capture finds a spec conflict.** If idle capture finds code conflicting
+  with an accepted or dictated specification, Carto fixes it without waiting for
+  the person to request the fix, and main raises it with the person. Assess the
+  conflict rather than assuming a capture finding is proof. This authorization
+  concerns correcting that conflict; unrelated incidental behavior changes
+  still follow the confirmation rule below.
 - **Verification is chosen by main.** Main decides when a separate verification
   context is needed; it need not run after every implementation task, so several
   changes can proceed before verification. Results must distinguish checks
@@ -159,9 +167,8 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** if idle capture finds code that conflicts with an
-accepted or dictated specification, should main ask the person before fixing
-it, or may it delegate a fix without being asked?
+**Next unanswered question:** should main raise an idle-capture conflict as soon
+as it finds it, or after the implementation delegate reports the outcome?
 
 ## 1. Recommendation in one sentence
 
