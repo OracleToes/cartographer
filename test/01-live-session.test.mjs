@@ -1459,14 +1459,36 @@ test("person-ended delegate stops its in-flight work without a final report", as
       { id: "old:1:r", kind: "readResult", text: "old read", pinned: "user", createdAt: 1, entity: { callId: "read-1", tool: "read", path: "src/verify-me.ts" } },
       { id: "old:2:r", kind: "readResult", text: "keep last read", pinned: "user", createdAt: 1, entity: { callId: "read-2", tool: "read", path: "missing.txt" } },
       { id: "old:3:r", kind: "readResult", text: "delete me", pinned: "user", createdAt: 1, entity: { callId: "read-3", tool: "read", path: "src/verify-me.ts" } },
+      { id: "old:4:x0", kind: "plainText", text: "earlier frozen work", pinned: "user", createdAt: 2 },
     ];
     withPins.ephemeralDeletes = ["old:3:r"];
     const savedPins = structuredClone(withPins);
-    const frozenPins = structuredClone(withPins.ephemera.slice(0, 2));
-    const preparePinRefresh = (savedHead = frozenPins) => main.commit((tx) => prepareReturnSweepWithInputsAndPinRefresh(root, tx, main.id, active.input.id, returnViews, "gen-end", withPins, new Set(), savedHead, 1), BACKGROUND_CONTEXT);
+    const frozenPins = structuredClone(withPins.ephemera.filter((pin) => pin.id !== "old:3:r"));
+    const preparePinRefresh = (savedHead = frozenPins, snapshot = withPins) => main.commit((tx) => prepareReturnSweepWithInputsAndPinRefresh(root, tx, main.id, active.input.id, returnViews, "gen-end", snapshot, new Set(), savedHead, 1), BACKGROUND_CONTEXT);
     const alteredHead = structuredClone(frozenPins);
     alteredHead[0].entity.path = "other.txt";
     await assert.rejects(preparePinRefresh(alteredHead), /frozen head/);
+    const changedFrozenText = structuredClone(withPins);
+    changedFrozenText.ephemera.find((pin) => pin.id === "old:4:x0").text = "different work";
+    await assert.rejects(preparePinRefresh(frozenPins, changedFrozenText), /conflicts with its frozen head/);
+    const changedIdentity = structuredClone(withPins);
+    changedIdentity.ephemera.find((pin) => pin.id === "old:4:x0").createdAt = 9;
+    await assert.rejects(preparePinRefresh(frozenPins, changedIdentity), /conflicts with its frozen head/);
+    const changedEntity = structuredClone(withPins);
+    changedEntity.ephemera.find((pin) => pin.id === "old:4:x0").entity = { callId: "unexpected" };
+    await assert.rejects(preparePinRefresh(frozenPins, changedEntity), /conflicts with its frozen head/);
+    const changedAuthor = structuredClone(withPins);
+    changedAuthor.ephemera.find((pin) => pin.id === "old:4:x0").pinned = "agent";
+    await preparePinRefresh(frozenPins, changedAuthor);
+    const unpinned = structuredClone(withPins);
+    unpinned.ephemera = unpinned.ephemera.filter((pin) => pin.id !== "old:4:x0");
+    await assert.rejects(preparePinRefresh(frozenPins, unpinned), /unpinned frozen item/);
+    unpinned.ephemeralDeletes.push("old:4:x0");
+    await preparePinRefresh(frozenPins, unpinned);
+    const imageHead = structuredClone(frozenPins);
+    imageHead[2].containsImage = true;
+    await assert.rejects(preparePinRefresh(imageHead), /conflicts with its frozen head/);
+    await assert.rejects(preparePinRefresh([...frozenPins, frozenPins[2]]), /duplicate frozen pin/);
     const refreshedPlan = await preparePinRefresh();
     assert.deepEqual(withPins, savedPins, "pin preparation does not mutate the Brain");
     assert.equal(refreshedPlan.fileTexts.get("src/verify-me.ts"), "export const answer = 42;\n");

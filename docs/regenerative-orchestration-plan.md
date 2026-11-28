@@ -215,9 +215,16 @@ and fingerprints both byte streams. A wrapper uses those captured items and Chat
 IDs in prospective reconciliation. This does not authenticate hidden sidecar IDs,
 Chat membership or pin call metadata: the projection does not contain them.
 A digest can detect later changes but cannot establish initial authenticity or
-seal writers. A future host must independently establish provenance and recheck
-all captured state; full record reconciliation, sealed reads and atomic journal
-binding remain open. These reads do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
+seal writers. The prospective pin-refresh path now compares every retained frozen
+item's kind, text, creation time and entity to the Brain, allowing repinning by
+a different author. A frozen item removed from the Brain by unpinning remains
+visible in the old head but is not part of the captured Pi body; the planner
+blocks rather than lose it. An explicit deletion mark still wins. Archiving such
+an item with enough original data for restoration remains unfinished. This is a
+return-planning guard only, not a change to direct collapse. A future host must
+independently establish provenance and recheck all captured state; full record
+reconciliation, sealed reads and atomic journal binding remain open. These reads
+do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be

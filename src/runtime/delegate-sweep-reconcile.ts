@@ -6,7 +6,7 @@ import { ephemeralItemId, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
-import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
+import { prepareReturnSweepMarks, verifyReturnSweepFrozenPins, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
 /**
@@ -102,7 +102,9 @@ export async function prepareReturnSweepWithInputs(
  * Extend the same prospective plan with ordinary collapse's file and pinned
  * read refresh. `mainHeadPins` must be taken from the verified source sidecar,
  * not inferred from the Brain; path aliases and transient handles that cannot
- * be proved identical are refused. Seal Pi, Brain, project files, sidecar and
+ * be proved identical are refused. Retained frozen items must match the Brain;
+ * an unpinned frozen item blocks until it can be safely archived, unless it
+ * has an explicit deletion mark. Seal Pi, Brain, project files, sidecar and
  * settings through planning and commit. These reads are not atomic and do not
  * bind the plan to the source seal, journal or head. This helper neither commits
  * a sweep nor permits source deletion.
@@ -111,6 +113,7 @@ export async function prepareReturnSweepWithInputsAndPinRefresh(
   root: string, tx: Tx, mainId: ConversationId, id: string, views: readonly ReturnSweepView[], generation: string,
   brain: CartoBrain, headChatIds: ReadonlySet<string>, mainHeadPins: readonly PinnedEphemeral[], now: number,
 ) {
+  verifyReturnSweepFrozenPins(brain, mainHeadPins);
   const plan = await prepareReturnSweepWithInputs(tx, mainId, id, views, generation, brain, headChatIds, new Set(mainHeadPins.map((pin) => pin.id)), now);
   verifyReturnSweepReadPins(brain, plan.pinned, mainHeadPins);
   const refresh = prepareCollapsePinRefresh(root, brain, now);

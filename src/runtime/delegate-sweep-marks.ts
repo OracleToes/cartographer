@@ -19,6 +19,41 @@ function hasImage(model: unknown): boolean {
 }
 
 /**
+ * Reconcile frozen items against the current Brain before a prospective sweep.
+ * An unpinned head item is still visible but is absent from the Pi body. The
+ * sweep cannot yet archive it with its original messages, so block instead of
+ * silently losing it. An explicit deletion wins. A pin may change author after
+ * unpinning and re-pinning; its source identity and content must not change.
+ * This comparison does not authenticate hidden sidecar metadata or replace the
+ * checks on current Pi parts. Callers must seal all writers.
+ */
+export function verifyReturnSweepFrozenPins(brain: CartoBrain, mainHeadPins: readonly PinnedEphemeral[]): void {
+  const deleted = new Set(brain.ephemeralDeletes ?? []);
+  const held = new Map<string, PinnedEphemeral>();
+  for (const pin of brain.ephemera) {
+    if (pin.pinned === undefined) continue;
+    if (held.has(pin.id)) throw new Error("Duplicate pin identity; the source was preserved.");
+    held.set(pin.id, pin);
+  }
+  const seen = new Set<string>();
+  for (const previous of mainHeadPins) {
+    if (previous === null || typeof previous !== "object" || typeof previous.id !== "string" || !previous.id || seen.has(previous.id)) {
+      throw new Error("Invalid or duplicate frozen pin identity; the source was preserved.");
+    }
+    seen.add(previous.id);
+    if (deleted.has(previous.id)) continue;
+    const pin = held.get(previous.id);
+    if (pin === undefined) throw new Error("An unpinned frozen item cannot yet be safely archived; the source was preserved.");
+    if (pin.kind !== previous.kind || pin.text !== previous.text || pin.createdAt !== previous.createdAt ||
+        pin.containsImage || previous.containsImage || pin.entity?.callId !== previous.entity?.callId ||
+        pin.entity?.tool !== previous.entity?.tool || pin.entity?.path !== previous.entity?.path ||
+        (pin.entity === undefined) !== (previous.entity === undefined)) {
+      throw new Error("A pin conflicts with its frozen head; the source was preserved.");
+    }
+  }
+}
+
+/**
  * Verify read-result pins against already classified main parts or items from
  * the source generation's verified frozen sidecar. Paths must match exactly:
  * a read made through a transient F handle cannot safely be resolved from the

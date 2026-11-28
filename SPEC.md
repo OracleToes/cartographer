@@ -762,7 +762,13 @@ not authenticate their hidden IDs or read-call metadata. The digest detects
 later byte changes; it is not a lock or proof of original authenticity. The
 host must independently establish that provenance, seal all writers and
 recheck the files before any eventual commit. Missing, malformed or inconsistent
-heads block the prospective plan. The return path
+heads block the prospective plan. Prospective pin refresh also compares every
+retained frozen item's kind, text, creation time and entity metadata with the
+Brain, while allowing its pin author to change. A frozen item that has been
+unpinned is still visible in the head but is absent from the Pi body; until it
+can be safely archived, the planner refuses it rather than silently losing it.
+An explicit deletion still wins. This check does not authenticate the sidecar
+or change direct collapse. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this
