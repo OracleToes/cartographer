@@ -52,13 +52,15 @@ async function completeEnd(main: Conversation, id: string, context: Context): Pr
   }, context);
 }
 
-/** Invoke immediately after the durable intent; a failed abort leaves it recoverable. */
+/** Seal main and child admission first; a failed checkpoint or abort leaves the intent recoverable. */
 export async function endDelegateNow(harness: Harness, main: Conversation, id: string, reason: string, context: Context): Promise<boolean> {
   if (!await requestImmediateDelegateEnd(main, id, reason, context)) return false;
   const ending = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
     if (active?.input.id !== id || active.phase !== "ending") throw new Error("The ending handoff changed; it was preserved.");
-    return ownedHandoff(tx, main.id, active);
+    const owned = await ownedHandoff(tx, main.id, active);
+    await checkpointDelegateInputs(tx, main.id, id);
+    return owned;
   }, context);
   if (ending.childId !== null) {
     const child = await harness.conversation(ending.childId, context);

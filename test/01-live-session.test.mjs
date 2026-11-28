@@ -790,8 +790,20 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const submission = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
     await started;
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
+    const pending = await child.submit({ type: "input", content: "Keep my follow-up", whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } } }, BACKGROUND_CONTEXT);
+    const pendingWrite = await child.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "unhandled write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
     await assert.rejects(recoverImmediateDelegateEnd(harness, main, BACKGROUND_CONTEXT), /paused scheduler/);
+    await assert.rejects(endDelegateNow(harness, main, active.input.id, "", BACKGROUND_CONTEXT), /queued context write/);
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
+    assert.equal((await pending.status(BACKGROUND_CONTEXT)).status, "queued");
+    assert.equal(await pendingWrite.abort(BACKGROUND_CONTEXT), "aborted");
     assert.equal(await endDelegateNow(harness, main, active.input.id, "", BACKGROUND_CONTEXT), true);
+    const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.deepEqual(saved.inputs.find((input) => input.submissionId === pending.id), {
+      submissionId: pending.id, placement: "queued", whenBusy: "followUp", content: "Keep my follow-up", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } },
+    });
+    assert.equal((await pending.status(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
     await main.waitForIdle(BACKGROUND_CONTEXT);
     const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;

@@ -66,8 +66,10 @@ Pi starts on the report boundary. A missing or inconsistent identity also holds;
 the host must retain the extension, stop the held run and preserve the input,
 and a request already past the hook still needs cancellation. This is not the
 person-input routing or recovery implementation. A dormant immediate-end
-control now records the person's reason as an ending intent, aborts the child's
-ordinary Pi work, then records a person-ended return. A restart helper requires
+control now records the person's reason as an ending intent, checkpoints both
+conversations' pending inputs before aborting the child's ordinary Pi work,
+then records a person-ended return. If checkpointing fails, it leaves the
+ending intent and inputs intact for recovery rather than aborting them. A restart helper requires
 Pi scheduling to remain paused and aborts the owning main run before resuming;
 its unanswered inputs still require host handling. Before the recovery abort,
 a dormant transaction checkpoints active main and delegate run and inbox input

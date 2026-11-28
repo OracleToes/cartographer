@@ -769,8 +769,10 @@ unanswered child inputs before deleting the source generation. The barrier is
 not an atomic cancellation of a request that already passed it, and does not
 implement person-input routing. A dormant immediate-end control records the person's
 reason (including a blank one) as a durable ending intent before aborting the
-child's ordinary Pi work. It commits a person-ended return only after that work
-has stopped; a report racing the ending intent cannot replace it. Recovery of
+child's ordinary Pi work. With admissions sealed, it checkpoints pending main and
+child inputs before that abort; a checkpoint failure leaves the ending intent
+and inputs in place instead of withdrawing them. It commits a person-ended return
+only after that work has stopped; a report racing the ending intent cannot replace it. Recovery of
 an ending intent requires a paused Pi scheduler and aborts the owning main run
 before scheduling resumes, preserving its unanswered input for the host to
 handle. It does not roll back project changes or stop independent background
