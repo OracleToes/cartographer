@@ -81,8 +81,11 @@ person-ended reasons and missing-report failures; it is not a scheduler or an
 end-to-end recovery protocol. A returned handoff now crosses the full collapse
 through a transfer record committed with the Brain sweep, verified before source
 deletion, and restored into the next conversation before acknowledgement.
-Unfinished or ambiguous records block collapse instead. This assumes generation
-writers have stopped and does not implement cross-process locking. Pi stream
+Unfinished or ambiguous records block collapse instead. Returned handoffs also
+reject unknown or missing fields at every record, input, result and report level:
+placement copies the active handoff, so accepting unknown top-level data could
+otherwise silently discard it. This assumes generation writers have stopped and
+does not implement cross-process locking. Pi stream
 requests and deferred polls within one live session now pass through a single
 inference admission queue, including cancellation before dispatch. Polls do not
 protect against provider-side inference between submission and polling; other

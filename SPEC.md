@@ -849,8 +849,11 @@ does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this
 placement without replacing a conflicting document. An empty acknowledged
-handoff needs no transfer. An unfinished, retired, ambiguous or unsupported
-handoff instead prevents collapse; its source is preserved. These checks assume
+handoff needs no transfer. A returned handoff with unknown or missing fields
+at the record, handoff, input, result or report level is unsupported: collapse
+and transfer refuse it rather than dropping data during placement. An
+unfinished, retired, ambiguous or unsupported handoff prevents collapse; its
+source is preserved. These checks assume
 the existing collapse lifecycle: the caller has
 stopped writers to the generation; they are not a cross-process writer lock.
 A separate, dormant transaction helper can attach a prepared handoff to a

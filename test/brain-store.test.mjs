@@ -223,6 +223,7 @@ test("report Chat commits with its handoff and sweep and remains checked during 
     const transfer = { source: "gen-source", destination: "gen-next", documentId: 1, revision: 1, content, returnChat };
     const change = { source: "gen-source", generation: "gen-next", expected, writes: [chatStep, ...plan.writes], incoming: plan.incoming, delegationTransfer: transfer, now: at(5) };
     await store.beginCollapse(change.source, change.generation);
+    await assert.rejects(store.applyCollapse({ ...change, delegationTransfer: { ...transfer, content: JSON.stringify({ ...handoff, futureData: { keep: true } }) } }), /Invalid delegation record/);
     await assert.rejects(store.applyCollapse({ ...change, writes: [] }), /return Chat write is missing/);
     await assert.rejects(store.applyCollapse({ ...change, writes: [chatStep, chatStep] }), /return Chat write is missing/);
     await assert.rejects(store.applyCollapse({ ...change, delegationTransfer: { ...transfer, returnChat: { ...returnChat, text: "forged" } } }), /return Chat conflicts/);

@@ -240,7 +240,6 @@ test("JobsView, Sidebar, and JumpOverlay wire the jobs book cleanly", async () =
   try {
     await startJob(table, { command: REPL_CMD, label: "dev harness", waitMs: 2000 });
     await sendJob(table, { handle: "J1", input: "hi", source: "user", waitMs: 0 });
-    await new Promise((resolve) => setTimeout(resolve, 120));
 
     const view = new JobsView();
     const events = [];

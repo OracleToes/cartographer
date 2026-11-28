@@ -54,16 +54,32 @@ export type DelegationTransfer = StoredCheckpoint & {
 /** Fail closed on unexpected shape; preserve the original bytes for comparison. */
 export function parseReturnedDelegation(content: string): DelegationRecord {
   const value: unknown = JSON.parse(content);
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid delegation record.");
+  const exact = (item: unknown, keys: readonly string[]): boolean =>
+    item !== null && typeof item === "object" && !Array.isArray(item) &&
+    Object.keys(item).length === keys.length && keys.every((key) => Object.hasOwn(item, key));
+  if (!exact(value, ["active"])) throw new Error("Invalid delegation record; it was preserved.");
   const active = (value as DelegationRecord).active;
   if (active === null || typeof active !== "object" || active.phase !== "returned") {
     throw new Error("Collapse cannot transfer an unfinished delegation record.");
   }
+  if (!exact(active, ["phase", "input", "conversationId", "result"]) ||
+      !exact(active.input, ["id", "role", "instruction", "doneWhen"]) ||
+      active.result === null || typeof active.result !== "object" || Array.isArray(active.result)) {
+    throw new Error("Unsupported delegation record fields; it was preserved.");
+  }
+  if (active.result.kind === "delegate") {
+    if (!exact(active.result, ["kind", "report"]) ||
+        !exact(active.result.report, ["status", "findings", "changes", "checks", "uncertainty", "remaining", "mainMessage"])) {
+      throw new Error("Unsupported delegate report fields; it was preserved.");
+    }
+  } else if (active.result.kind === "person-ended") {
+    if (!exact(active.result, ["kind", "reason"])) throw new Error("Unsupported delegation return fields; it was preserved.");
+  } else if (active.result.kind === "failure") {
+    if (!exact(active.result, ["kind", "explanation"])) throw new Error("Unsupported delegation return fields; it was preserved.");
+  }
   const check: DelegationRecord = { active: null };
-  if (active.input === null || typeof active.input !== "object") throw new Error("Invalid delegation input.");
   prepareDelegation(check, active.input);
   if (active.conversationId !== null) startDelegation(check, active.input.id, active.conversationId);
-  if (active.result === null || typeof active.result !== "object") throw new Error("Invalid delegation return.");
   returnDelegation(check, active.input.id, active.result);
   return value as DelegationRecord;
 }

@@ -47,7 +47,7 @@ import { collapse, ephemeralItemId, generationPaths, prepareReturnSweepParts, re
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
-import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
+import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, parseReturnedDelegation, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, DelegateChildIdentityDoc, DelegateRestoreOriginDoc, DelegateRestoreRoutesDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn, delegationReturnId, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
@@ -94,7 +94,7 @@ const blockOf = (messages) => messages.find((message) => message.role === "user"
 const flatten = (messages) => JSON.stringify(messages);
 
 // Independent cases own separate projects and harnesses.
-test.describe("live session (continued)", { concurrency: 2 }, () => {
+test.describe("live session (continued)", { concurrency: 3 }, () => {
 test("delegation handoff is durable within a generation and preserves report provenance", async () => {
   const { root, brain, cleanup } = await fixture();
   const { models, ref } = fauxSetup();
@@ -119,6 +119,12 @@ test("delegation handoff is durable within a generation and preserves report pro
     await assert.rejects(commit((record) => returnDelegation(record, "task-1", { kind: "failure", explanation: "late" })), /cannot return/);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
     const original = generationPaths(root, session.generation).store;
+    await commit((record) => { record.futureData = { keep: "unknown field" }; });
+    await assert.rejects(collapseLiveSession(session, options, "person collapse"), /Invalid delegation record/);
+    assert.equal(existsSync(original), true, "unsupported handoff data keeps its source");
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).futureData, { keep: "unknown field" });
+    assert.equal(await brain.readCollapseJournal(), undefined);
+    await commit((record) => { delete record.futureData; });
     session = (await collapseLiveSession(session, options, "person collapse")).session;
     assert.equal(existsSync(original), false);
     assert.equal(await brain.readCollapseJournal(), undefined);
@@ -2180,6 +2186,17 @@ test("delegate reports and missing reports stay distinct", () => {
   prepareDelegation(failed, input);
   returnDelegation(failed, input.id, { kind: "failure", explanation: "overflow prevented a report" });
   assert.deepEqual(failed.active.result, { kind: "failure", explanation: "overflow prevented a report" });
+  assert.deepEqual(parseReturnedDelegation(JSON.stringify(record)), record);
+  assert.deepEqual(parseReturnedDelegation(JSON.stringify(failed)), failed);
+  for (const changed of [
+    { ...record, extra: "root" },
+    { active: { ...record.active, extra: "handoff" } },
+    { active: { ...record.active, input: { ...record.active.input, extra: "input" } } },
+    { active: { ...record.active, result: { ...record.active.result, extra: "result" } } },
+    { active: { ...record.active, result: { ...record.active.result, report: { ...record.active.result.report, extra: "report" } } } },
+    { active: { ...failed.active, result: { ...failed.active.result, extra: "failure" } } },
+    { active: { ...failed.active, result: { kind: "person-ended", reason: "", extra: "reason" } } },
+  ]) assert.throws(() => parseReturnedDelegation(JSON.stringify(changed)), /preserved/);
 });
 
 test("the bash tool runs through the conversation's environment: a real command, real stdout", async () => {
