@@ -792,6 +792,17 @@ export interface CollapseReport {
   deleted: readonly string[];
 }
 
+/** Clear pending ephemeral deletions and their pins in the collapse transaction. */
+export function collapseEphemeralDeletionWrites(brain: CartoBrain, now: number): Array<{ write: BrainWrite; now: number }> {
+  const pins = new Set(brain.ephemera.filter((item) => item.pinned !== undefined).map((item) => item.id));
+  const writes: Array<{ write: BrainWrite; now: number }> = [];
+  for (const id of new Set(brain.ephemeralDeletes ?? [])) {
+    writes.push({ write: { kind: "ephemeral.delete-mark", id, marked: false }, now });
+    if (pins.has(id)) writes.push({ write: { kind: "ephemeral.unpin", id }, now });
+  }
+  return writes;
+}
+
 /**
  * Collapse: refresh the Brain's freshness marks, render the frozen projection
  * for the new generation, move what is leaving into the archive, delete the
@@ -862,11 +873,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // that is archived or deleted is not in the head it was swept out of (§2,
   // §4.1). The same writes go into the transaction below, so what is rendered
   // and what is committed are the same Brain.
-  const writes: { write: BrainWrite; now: number }[] = [];
-  for (const id of deletions) {
-    writes.push({ write: { kind: "ephemeral.delete-mark", id, marked: false }, now });
-    if (pins.has(id)) writes.push({ write: { kind: "ephemeral.unpin", id }, now });
-  }
+  const writes: { write: BrainWrite; now: number }[] = collapseEphemeralDeletionWrites(refreshed, now);
   for (const record of leaving) {
     writes.push({ write: { kind: "mark.clear", target: record.kind, id: record.id }, now });
     writes.push({ write: { kind: "delete", target: record.kind, id: record.id }, now });

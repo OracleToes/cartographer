@@ -18,6 +18,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@ear
 import { openBrain } from "../dist/runtime/brain-store.js";
 import { handleOf } from "../dist/domain/handles.js";
 import { personChatBindings } from "../dist/domain/chat-identity.js";
+import { applyWrite } from "../dist/domain/brain.js";
 import {
   applyOmitNow,
   applyRecordActionNow,
@@ -53,6 +54,7 @@ import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDel
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
+import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -345,6 +347,62 @@ test("return sweep preserves chat calls and deduplicates only proven main agent 
     assert.equal(resultParts.parts.filter((part) => part.item.ephemeral?.text?.endsWith(" result")).length, 2);
     const direct = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
     assert.ok(!direct.some((item) => item.ephemeral?.kind === "toolCall" && item.ephemeral.text.startsWith("chat ")), "direct-mode conversion remains unchanged");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("return sweep reconciles pins and deletions without carrying child work into main", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const main = session.conversation;
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    const write = (conversation, entry) => conversation.submit({ type: "write", entry }, BACKGROUND_CONTEXT);
+    const user = (content) => [{ role: "user", content, timestamp: 1 }];
+    await write(main, { kind: "test.work", model: [fauxAssistantMessage([fauxText("main pin"), fauxText("main delete"), fauxText("main archive")])] });
+    await write(main, { kind: "carto.user", data: { chatRecordId: "chat-delete" }, model: user("chat delete") });
+    await write(main, { kind: "carto.user", data: { chatRecordId: "chat-keep" }, model: user("chat keep") });
+    await write(main, { kind: "test.image", model: user([{ type: "text", text: "image pin" }, { type: "image", data: "YQ==", mimeType: "image/png" }]) });
+    await write(child, { kind: "test.child", model: user("child delete") });
+    await write(child, { kind: "test.child", model: user("child archive") });
+    const views = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
+    const all = prepareReturnSweepParts(views, session.generation);
+    const item = (text) => all.find((part) => part.item.ephemeral?.text === text).item;
+    const pin = (text) => ({ id: item(text).id, kind: item(text).ephemeral.kind, text, pinned: "user", createdAt: 1 });
+    const initial = await brain.read();
+    initial.chat = ["delete", "keep"].map((suffix) => ({ id: `chat-${suffix}`, author: "user", text: `chat ${suffix}`, createdAt: 1, updatedAt: 1 }));
+    initial.ephemera = [pin("main pin"), pin("main delete"), pin("child delete"), { id: "old:1:x0", kind: "plainText", text: "earlier main pin", pinned: "user", createdAt: 1 }];
+    initial.ephemeralDeletes = [item("main delete").id, item("child delete").id, item("chat delete").id];
+    const before = structuredClone(initial);
+    const plan = prepareReturnSweepMarks(views, session.generation, initial, new Set(), new Set(["old:1:x0"]), 5);
+    assert.deepEqual(initial, before, "preparation does not mutate the Brain");
+    assert.deepEqual(plan.pinned.map((part) => part.item.ephemeral.text), ["main pin"]);
+    assert.deepEqual(plan.deleted.map((part) => part.item.ephemeral.text).sort(), ["chat delete", "child delete", "main delete"]);
+    assert.deepEqual(plan.chatDuplicates.map((part) => part.recordId), ["chat-keep"]);
+    assert.ok(plan.incoming.some((value) => value.ephemeral.text === "main archive"));
+    assert.ok(plan.incoming.some((value) => value.ephemeral.text === "child archive"));
+    assert.ok(plan.incoming.some((value) => value.ephemeral.text === "image pin"));
+    assert.ok(!plan.incoming.some((value) => ["main pin", "main delete", "child delete", "chat delete", "chat keep"].includes(value.ephemeral.text)));
+    let after = initial;
+    for (const step of plan.writes) after = applyWrite(after, step.write, step.now);
+    assert.deepEqual(after.ephemeralDeletes, []);
+    assert.deepEqual(after.ephemera.map((value) => value.id).sort(), [item("main pin").id, "old:1:x0"].sort());
+    const childPinned = structuredClone(initial);
+    childPinned.ephemeralDeletes = childPinned.ephemeralDeletes.filter((id) => id !== item("child delete").id);
+    assert.throws(() => prepareReturnSweepMarks(views, session.generation, childPinned, new Set(), new Set(["old:1:x0"]), 5), /child pin/);
+    assert.throws(() => prepareReturnSweepMarks(views, session.generation, initial, new Set(), new Set(), 5), /no proven main source/);
+    const mismatch = structuredClone(initial);
+    mismatch.ephemera[0].text = "different";
+    assert.throws(() => prepareReturnSweepMarks(views, session.generation, mismatch, new Set(), new Set(["old:1:x0"]), 5), /conflicts/);
+    const image = structuredClone(initial);
+    image.ephemera.push(pin("image pin"));
+    assert.throws(() => prepareReturnSweepMarks(views, session.generation, image, new Set(), new Set(["old:1:x0"]), 5), /contains an image/);
+    const repeated = structuredClone(initial);
+    repeated.ephemera.push(repeated.ephemera[0]);
+    assert.throws(() => prepareReturnSweepMarks(views, session.generation, repeated, new Set(), new Set(["old:1:x0"]), 5), /Duplicate pin/);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();

@@ -157,9 +157,14 @@ includes Chat calls (without changing the direct sweep), retaining child calls
 and results. It identifies only simple main calls whose exact call ID and text
 match one agent Chat record; extra arguments, call metadata or ambiguous records
 prevent deduplication. Full candidate parts remain available for subsequent
-mark handling. Checkpoint reconciliation, pins and deletion marks still need
-handling. The actual return path does not archive the prepared items or remove the return
-guard. Child restoration and crash-safe journal integration remain unfinished.
+mark handling. A dormant planner now classifies pin, delete and Chat-duplicate
+candidates and reuses the ordinary collapse deletion writes. It blocks child
+pins from main, unproven pins, conflicting current main pins and image-bearing
+pins. Older main pins need identities checked against the source snapshot;
+deletions override pins. This is not a commit or a source-deletion permit:
+checkpoint reconciliation, file-pin refresh and transaction/journal integration
+remain necessary. The actual return path does not archive the prepared items or
+remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.
