@@ -193,7 +193,13 @@ test("return record planning matches the Brain sweep and refuses overwriting arc
     repeated.chat.push(repeated.chat[0]);
     assert.throws(() => prepareReturnSweepRecords(repeated, expected.archive, incoming, [], at(5)), /Ambiguous Brain record/);
     await store.beginCollapse("gen-source", "gen-next");
-    const applied = await store.applyCollapse({ source: "gen-source", generation: "gen-next", expected, writes: plan.writes, incoming: plan.incoming, now: at(5) });
+    const change = { source: "gen-source", generation: "gen-next", expected, writes: plan.writes, incoming: plan.incoming, now: at(5) };
+    await assert.rejects(store.applyCollapse({ ...change, destinationHeadDigest: "invalid" }), /Invalid collapse destination head receipt/);
+    assert.deepEqual(await store.read(), expected.brain, "a bad head receipt rolls back the sweep");
+    assert.equal((await store.readCollapseJournal()).committed, false);
+    assert.equal(await store.readCollapseHead(), undefined);
+    const applied = await store.applyCollapse({ ...change, destinationHeadDigest: "a".repeat(64) });
+    assert.deepEqual(await store.readCollapseHead(), { generation: "gen-next", digest: "a".repeat(64) });
     assert.deepEqual(applied.brain, plan.nextBrain);
     assert.deepEqual(applied.restored, plan.restored);
     assert.equal(applied.archive.items.find((item) => item.id === "past-work").restorePending, true);

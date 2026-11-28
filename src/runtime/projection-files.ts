@@ -38,11 +38,8 @@ export function snapshotPaths(root: string, generation: string): SnapshotPaths {
   };
 }
 
-/** Atomic: temp file, then rename. Either both files exist or neither does, for a reader that checks both. */
-export function writeSnapshot(root: string, generation: string, projection: Projection, createdAt: number): SnapshotPaths {
-  const paths = snapshotPaths(root, generation);
-  const tempMarkdown = `${paths.markdown}.tmp-${process.pid}`;
-  const tempSidecar = `${paths.sidecar}.tmp-${process.pid}`;
+/** The exact bytes of the normal frozen projection, including its hidden sidecar fields. */
+export function snapshotBytes(generation: string, projection: Projection, createdAt: number): { markdown: Buffer; sidecar: Buffer } {
   const sidecar = {
     generation,
     createdAt,
@@ -53,8 +50,17 @@ export function writeSnapshot(root: string, generation: string, projection: Proj
     chat: projection.chatIds,
     ephemeralItems: projection.ephemeralItems ?? [],
   };
-  writeFileSync(tempMarkdown, projection.text, { mode: 0o644 });
-  writeFileSync(tempSidecar, `${JSON.stringify(sidecar, null, 2)}\n`, { mode: 0o644 });
+  return { markdown: Buffer.from(projection.text, "utf8"), sidecar: Buffer.from(`${JSON.stringify(sidecar, null, 2)}\n`, "utf8") };
+}
+
+/** Write each snapshot file via a temporary file and rename. */
+export function writeSnapshot(root: string, generation: string, projection: Projection, createdAt: number): SnapshotPaths {
+  const paths = snapshotPaths(root, generation);
+  const tempMarkdown = `${paths.markdown}.tmp-${process.pid}`;
+  const tempSidecar = `${paths.sidecar}.tmp-${process.pid}`;
+  const bytes = snapshotBytes(generation, projection, createdAt);
+  writeFileSync(tempMarkdown, bytes.markdown, { mode: 0o644 });
+  writeFileSync(tempSidecar, bytes.sidecar, { mode: 0o644 });
   renameSync(tempMarkdown, paths.markdown);
   renameSync(tempSidecar, paths.sidecar);
   return paths;

@@ -80,6 +80,8 @@ export interface BrainStore {
   readArchiveCounts(): Promise<{ total: number; pinned: number }>;
   /** Durable cross-store collapse intent and commit status, if cleanup is pending. */
   readCollapseJournal(): Promise<CollapseJournal | undefined>;
+  /** Creator's digest of the most recently committed collapse destination head, if available. */
+  readCollapseHead(): Promise<{ generation: string; digest: string } | undefined>;
   /** Reserve a transition before creating the next generation's files. */
   beginCollapse(source: string, destination: string, validate?: () => void): Promise<void>;
   /** Serialize filesystem recovery with other journal writers, clearing only after success. */
@@ -136,6 +138,7 @@ const ARCHIVE_TABLE =
 /** The collapse counters, so grace can be counted and the archive survives a restart. */
 const COUNTER_TABLE = "CREATE TABLE IF NOT EXISTS archive_counter (id INTEGER PRIMARY KEY CHECK (id = 1), collapses INTEGER NOT NULL)";
 const COLLAPSE_JOURNAL_TABLE = "CREATE TABLE IF NOT EXISTS collapse_journal (id INTEGER PRIMARY KEY CHECK (id = 1), source TEXT NOT NULL, destination TEXT NOT NULL, owner_pid INTEGER NOT NULL, committed INTEGER NOT NULL CHECK (committed IN (0, 1)))";
+const COLLAPSE_HEAD_TABLE = "CREATE TABLE IF NOT EXISTS collapse_head (id INTEGER PRIMARY KEY CHECK (id = 1), generation TEXT NOT NULL, digest TEXT NOT NULL)";
 const CHAT_EDIT_TABLE = "CREATE TABLE IF NOT EXISTS chat_edit_journal (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
 const DELEGATION_TRANSFER_TABLE = "CREATE TABLE IF NOT EXISTS delegation_transfer (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
 const ARCHIVE_INSERT =
@@ -194,6 +197,8 @@ export interface CollapseChange {
   source: string;
   /** Source handoff to retain in the sweep transaction, if present. */
   delegationTransfer?: DelegationTransfer;
+  /** Destination bytes as rendered by the snapshot creator, committed with the sweep. */
+  destinationHeadDigest?: string;
   /** State used to build the snapshot; reject concurrent edits rather than commit a stale head. */
   expected: { brain: CartoBrain; archive: Archive };
 
@@ -266,6 +271,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
   await database.exec(ARCHIVE_TABLE);
   await database.exec(COUNTER_TABLE);
   await database.exec(COLLAPSE_JOURNAL_TABLE);
+  await database.exec(COLLAPSE_HEAD_TABLE);
   await database.exec(CHAT_EDIT_TABLE);
   await database.exec(DELEGATION_TRANSFER_TABLE);
   await database.exec("INSERT OR IGNORE INTO archive_counter (id, collapses) VALUES (1, 0)");
@@ -415,6 +421,13 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       await tx.run("DELETE FROM chat_edit_journal WHERE id = 1");
     }),
     readCollapseJournal: () => readJournalFrom(database),
+    readCollapseHead: async () => {
+      const row = await database.get<{ generation: string; digest: string }>("SELECT generation, digest FROM collapse_head WHERE id = 1");
+      if (row !== undefined && (!/^gen-[\w-]+$/.test(row.generation) || !/^[0-9a-f]{64}$/.test(row.digest))) {
+        throw new Error("Invalid collapse head receipt; recovery data was preserved.");
+      }
+      return row === undefined ? undefined : { generation: row.generation, digest: row.digest };
+    },
     beginCollapse: (source, destination, validate) => database.transaction(async (tx) => {
       await requireNoPendingEdit(tx);
       if (await readJournalFrom(tx) !== undefined) throw new Error("A collapse is already in progress or awaiting recovery.");
@@ -612,6 +625,17 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
             validateInputTransfer(transfer.inputCheckpoint, active.input.id);
           }
           await tx.run("INSERT INTO delegation_transfer (id, document) VALUES (1, ?)", JSON.stringify(transfer));
+        }
+        // The creator's destination head digest is committed with the sweep,
+        // never inferred from a later read of the files. Legacy callers leave
+        // no receipt; the previous generation's digest is no longer applicable.
+        if (change.destinationHeadDigest !== undefined &&
+            (!/^gen-[\w-]+$/.test(change.generation) || !/^[0-9a-f]{64}$/.test(change.destinationHeadDigest))) {
+          throw new Error("Invalid collapse destination head receipt; the sweep was not committed.");
+        }
+        await tx.run("DELETE FROM collapse_head WHERE id = 1");
+        if (change.destinationHeadDigest !== undefined) {
+          await tx.run("INSERT INTO collapse_head (id, generation, digest) VALUES (1, ?, ?)", change.generation, change.destinationHeadDigest);
         }
         // Commit the handoff in the same transaction as the sweep. Recovery can
         // now prove whether the old store was archived before removing it.

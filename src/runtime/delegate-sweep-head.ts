@@ -1,15 +1,63 @@
 /** Dormant source-head capture for prospective return reconciliation. */
 import { readFileSync } from "node:fs";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { defineDoc, ROOT_CONVERSATION_ID, type Tx } from "@earendil-works/pi-durable";
+import type { Projection } from "../domain/projection.js";
 import type { PinnedEphemeral } from "../domain/records.js";
 import { generationPaths } from "./collapse.js";
-import { projectionBytesDigest } from "./projection-files.js";
+import { projectionBytesDigest, snapshotBytes } from "./projection-files.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
 export type ReturnSweepHead = { chatIds: string[]; pins: PinnedEphemeral[]; digest: string };
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const kinds = new Set(["toolCall", "reasoning", "plainText", "readResult", "toolResult", "personMessage"]);
+
+/** The projection creator's immutable receipt; absence never authorizes a sweep. */
+export const DelegateHeadReceiptDoc = defineDoc<{ generation: string | null; digest: string | null }>({
+  kind: "carto.delegate-head-receipt", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ generation: null, digest: null }), checkpointWhen: () => true,
+});
+
+/**
+ * The trusted snapshot creator calls this with the projection it just rendered,
+ * never with values reconstructed from existing files. It verifies both files
+ * against the normal serializer and records their digest in Pi. A crash before
+ * the receipt, later snapshot rewrite, or legacy generation remains unproven.
+ * Writers and path replacement must be sealed by the host; this is not a lock.
+ */
+export async function recordDelegateHeadReceipt(tx: Tx, root: string, generation: string, projection: Projection, createdAt: number): Promise<void> {
+  if (!/^gen-[\w-]+$/.test(generation) || !Number.isFinite(createdAt) || await tx.conversation(ROOT_CONVERSATION_ID) === undefined) {
+    throw new Error("Invalid source head receipt; the source was preserved.");
+  }
+  const expected = snapshotBytes(generation, projection, createdAt);
+  const paths = generationPaths(root, generation);
+  let markdown: Buffer, sidecar: Buffer;
+  try { markdown = readFileSync(paths.markdown); sidecar = readFileSync(paths.sidecar); }
+  catch { throw new Error("Source projection is unavailable; the source was preserved."); }
+  if (!markdown.equals(expected.markdown) || !sidecar.equals(expected.sidecar)) {
+    throw new Error("Source projection conflicts with its creator's snapshot; the source was preserved.");
+  }
+  await recordDelegateHeadDigest(tx, root, generation, projectionBytesDigest(expected.markdown, expected.sidecar));
+}
+
+/** Install a digest committed by the trusted snapshot creator, never one derived from untrusted files. */
+export async function recordDelegateHeadDigest(tx: Tx, root: string, generation: string, digest: string): Promise<void> {
+  if (!/^gen-[\w-]+$/.test(generation) || !/^[0-9a-f]{64}$/.test(digest) || await tx.conversation(ROOT_CONVERSATION_ID) === undefined) {
+    throw new Error("Invalid source head receipt; the source was preserved.");
+  }
+  const paths = generationPaths(root, generation);
+  let actual: string;
+  try { actual = projectionBytesDigest(readFileSync(paths.markdown), readFileSync(paths.sidecar)); }
+  catch { throw new Error("Source projection is unavailable; the source was preserved."); }
+  if (actual !== digest) throw new Error("Source projection conflicts with its creator's snapshot; the source was preserved.");
+  const receipt = await tx.doc(DelegateHeadReceiptDoc, ROOT_CONVERSATION_ID);
+  if (Object.keys(receipt).length !== 2 ||
+      !((receipt.generation === null && receipt.digest === null) || (receipt.generation === generation && receipt.digest === digest))) {
+    throw new Error("Source head receipt conflicts; the source was preserved.");
+  }
+  receipt.generation = generation;
+  receipt.digest = digest;
+}
 
 /**
  * Capture the actual source projection files and compare its markdown with

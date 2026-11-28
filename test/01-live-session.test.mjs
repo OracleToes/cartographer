@@ -58,7 +58,7 @@ import { checkpointReturnedDelegateInputs, endDelegateAtContextLimit, endDelegat
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
-import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
+import { captureReturnSweepHead, DelegateHeadReceiptDoc, recordDelegateHeadReceipt } from "../dist/runtime/delegate-sweep-head.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
@@ -102,6 +102,9 @@ test("delegation handoff is durable within a generation and preserves report pro
   let session = await openLiveSession(options);
   const input = { id: "task-1", role: "capture", instruction: "Trace the entry point", doneWhen: "Report source and unknowns" };
   try {
+    const initialReceipt = await session.harness.snapshot(DelegateHeadReceiptDoc, session.conversation.id, BACKGROUND_CONTEXT);
+    const initialPaths = generationPaths(root, session.generation);
+    assert.deepEqual(initialReceipt, { generation: session.generation, digest: projectionBytesDigest(readFileSync(initialPaths.markdown), readFileSync(initialPaths.sidecar)) });
     const commit = (action) => session.conversation.commit(async (tx) => action(await tx.doc(DelegationDoc, session.conversation.id)), BACKGROUND_CONTEXT);
     await commit((record) => prepareDelegation(record, input));
     await assert.rejects(collapseLiveSession(session, options, "person collapse"), /unfinished delegation/);
@@ -111,6 +114,7 @@ test("delegation handoff is durable within a generation and preserves report pro
     await commit((record) => startDelegation(record, "task-1", 2));
     await closeLiveSession(session);
     session = await openLiveSession(options);
+    assert.deepEqual(await session.harness.snapshot(DelegateHeadReceiptDoc, session.conversation.id, BACKGROUND_CONTEXT), initialReceipt);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active,
       { phase: "running", input, conversationId: 2 });
     await commit((record) => returnDelegation(record, "task-1", { kind: "person-ended", reason: "" }));
@@ -129,6 +133,10 @@ test("delegation handoff is durable within a generation and preserves report pro
     assert.equal(existsSync(original), false);
     assert.equal(await brain.readCollapseJournal(), undefined);
     assert.equal(await brain.readDelegationTransfer(), undefined);
+    const collapsedPaths = generationPaths(root, session.generation);
+    const collapsedReceipt = { generation: session.generation, digest: projectionBytesDigest(readFileSync(collapsedPaths.markdown), readFileSync(collapsedPaths.sidecar)) };
+    assert.deepEqual(await brain.readCollapseHead(), collapsedReceipt);
+    assert.deepEqual(await session.harness.snapshot(DelegateHeadReceiptDoc, session.conversation.id, BACKGROUND_CONTEXT), collapsedReceipt);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
     await closeLiveSession(session);
     session = await openLiveSession(options);
@@ -201,7 +209,15 @@ test("a returned handoff survives crashes after sweep and after destination plac
     assert.deepEqual(await brain.readCollapseJournal(), journal);
     assert.deepEqual(await brain.readDelegationTransfer(), transfer);
     const interruptedAck = { ...brain, acknowledgeDelegationTransfer: async () => { throw new Error("crash after placement"); } };
+    const destination = generationPaths(root, transfer.destination);
+    const destinationSidecar = readFileSync(destination.sidecar);
+    writeFileSync(destination.sidecar, Buffer.concat([destinationSidecar, Buffer.from(" ")]));
     await assert.rejects(openLiveSession({ ...options, brain: interruptedAck }), /crash after placement/);
+    const checkReceipt = await openNodeSqliteDatabase(destination.store, { mode: "read-only" });
+    try {
+      assert.equal(await checkReceipt.get("SELECT id FROM live_documents WHERE kind = ?", JSON.stringify("carto.delegate-head-receipt")), undefined, "changed destination bytes cannot be re-attested");
+    } finally { await checkReceipt.close(); }
+    writeFileSync(destination.sidecar, destinationSidecar);
     assert.equal(existsSync(generationPaths(root, original).store), false);
     assert.deepEqual(await brain.readDelegationTransfer(), transfer);
     // A conflicting destination must not be overwritten or acknowledged.
@@ -1839,7 +1855,19 @@ test("person-ended delegate stops its in-flight work without a final report", as
     await brain.apply({ kind: "chat.record", record: oldChat }, 1);
     await brain.applyRecordAction({ kind: "chat", id: oldChat.id, action: "archive", generation: "gen-old", now: 1 });
     await brain.applyArchive({ kind: "mark", id: "record:chat:restored", action: "restore", author: "user" });
-    const capturedPlan = await captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
+    const capture = () => captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
+    await assert.rejects(capture(), /source head lacks a matching creator receipt/);
+    await main.commit((tx) => recordDelegateHeadReceipt(tx, root, "gen-end", oldHead, 1), BACKGROUND_CONTEXT);
+    const receipt = await harness.snapshot(DelegateHeadReceiptDoc, main.id, BACKGROUND_CONTEXT);
+    assert.equal(receipt.generation, "gen-end");
+    const altered = structuredClone(oldHead);
+    altered.chatIds.push("unseen-sidecar-id");
+    writeSnapshot(root, "gen-end", altered, 1);
+    await assert.rejects(capture(), /source head lacks a matching creator receipt/);
+    await assert.rejects(main.commit((tx) => recordDelegateHeadReceipt(tx, root, "gen-end", altered, 1), BACKGROUND_CONTEXT), /head receipt conflicts/);
+    writeSnapshot(root, "gen-end", oldHead, 1);
+    await main.commit((tx) => recordDelegateHeadReceipt(tx, root, "gen-end", oldHead, 1), BACKGROUND_CONTEXT);
+    const capturedPlan = await capture();
     assert.equal(capturedPlan.sourceSeal.source, "gen-end");
     assert.deepEqual(JSON.parse(capturedPlan.stored.inputCheckpoint.content), saved);
     assert.deepEqual(capturedPlan.expected.brain, await brain.read());
@@ -2987,8 +3015,9 @@ test("applying a Brain record's mark now moves it out and re-freezes the head, w
     },
     1_700_000_001_000,
   );
-  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  let session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
   try {
+    const receiptBefore = await session.harness.snapshot(DelegateHeadReceiptDoc, session.conversation.id, BACKGROUND_CONTEXT);
     const before = await brain.read();
     const secondHandle = handleOf(before.handles, "atlas", "a2");
     assert.ok(secondHandle !== undefined, "the second note has a handle");
@@ -3007,8 +3036,14 @@ test("applying a Brain record's mark now moves it out and re-freezes the head, w
     assert.ok(!headAfter.includes("First note"), "so it is out of the head the model reads");
     assert.ok(headAfter.includes(`${secondHandle} Second note`), "and the rest of the head is still there, under the handle it had");
 
-    // A rebuild, not a collapse: the generation did not move.
+    // A rebuild, not a collapse: the generation did not move. It cannot
+    // silently replace the original return-sweep provenance on restart.
     assert.equal(session.state.generation, session.generation, "no rotation");
+    const paths = generationPaths(root, session.generation);
+    assert.notEqual(projectionBytesDigest(readFileSync(paths.markdown), readFileSync(paths.sidecar)), receiptBefore.digest);
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+    assert.deepEqual(await session.harness.snapshot(DelegateHeadReceiptDoc, session.conversation.id, BACKGROUND_CONTEXT), receiptBefore);
   } finally {
     await closeLiveSession(session);
     await cleanup();

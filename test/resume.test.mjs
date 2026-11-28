@@ -38,6 +38,9 @@ async function fixture() {
   };
 }
 
+// Each case owns its own project, Brain and provider (and any HTTP server).
+// Overlap them to avoid a serial tail at the end of the full suite.
+test.describe("resume", { concurrency: 3 }, () => {
 test("resumeSession starts an idle agent with a fresh state block and records no person Chat", async () => {
   const { root, brain, cleanup } = await fixture();
   const faux = fauxProvider({
@@ -277,4 +280,5 @@ test("headless /resume starts the agent without sending a person message", async
   } finally {
     await cleanup();
   }
+});
 });

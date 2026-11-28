@@ -15,7 +15,7 @@ import { DelegateInputCheckpointDoc, findUnansweredInputs, parseInputCheckpoint 
 import { verifyReturnedDelegateInputs } from "./delegate-control.js";
 import { delegateReturnChat, DelegateCaptureDoc, DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
-import { captureReturnSweepHead } from "./delegate-sweep-head.js";
+import { captureReturnSweepHead, DelegateHeadReceiptDoc } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
 import { prepareReturnSweepMarks, verifyReturnSweepFrozenPins, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
 import { captureReturnSweepViews, requireReturnSweepQuiescence, type ReturnSweepView } from "./delegate-sweep-view.js";
@@ -217,8 +217,11 @@ export async function prepareReturnSweepWithRecords(
  * and the owned child; unanswered inputs in other captured conversations also
  * block. Pi cannot recover content already discarded from an inbox.
  * The two source seals and head/Brain comparisons are not locks, cannot detect
- * every ABA change, and do not authenticate hidden sidecar data or arbitrary
- * project-file observations. This does not commit, journal, establish a deletion
+ * every ABA change or authenticate arbitrary project-file observations. A
+ * creator receipt binds hidden sidecar bytes only if the trusted creator
+ * recorded its own projection, rather than reconstructing it from disk, and
+ * writers were sealed; copied stores or forged receipts are not ruled out.
+ * This does not commit, journal, establish a deletion
  * permit, or replace the multi-conversation guard. Recheck inputs at commit.
  */
 export async function captureReturnSweepPlan(
@@ -267,18 +270,32 @@ export async function captureReturnSweepPlan(
   await requireMatchingStorage();
   const sourceSeal = await captureDelegateSourceSeal(path, generation);
   const views = await captureReturnSweepViews(harness, context);
+  const initialHead = captureReturnSweepHead(root, generation, views);
   const captured = await harness.commit(async (tx) => {
     if (!isDeepStrictEqual(JSON.parse(JSON.stringify(await tx.doc(DelegateCaptureDoc, ROOT_CONVERSATION_ID))), challenge)) {
       throw new Error("Return-sweep capture marker changed; the source was preserved.");
     }
+    const receipt = JSON.parse(JSON.stringify(await tx.doc(DelegateHeadReceiptDoc, ROOT_CONVERSATION_ID))) as unknown;
+    if (!isDeepStrictEqual(receipt, { generation, digest: initialHead.digest })) {
+      throw new Error("Return-sweep source head lacks a matching creator receipt; the source was preserved.");
+    }
     const plan = await prepareReturnSweepWithRecords(root, tx, ROOT_CONVERSATION_ID, id, views, generation, expected.brain, expected.archive, now, person);
+    if (plan.sourceHeadDigest !== initialHead.digest) throw new Error("Return-sweep projection changed during capture; the source was preserved.");
     return {
       plan,
+      receipt,
       handoff: JSON.stringify(await tx.doc(DelegationDoc, ROOT_CONVERSATION_ID)),
       checkpoint: JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, ROOT_CONVERSATION_ID)),
       barrier: JSON.stringify(await tx.doc(DelegateMainBarrierDoc, ROOT_CONVERSATION_ID)),
     };
   }, context);
+  const receiptDatabase = await openNodeSqliteDatabase(path, { mode: "read-only" });
+  try {
+    const receipt = await receiptDatabase.transaction((tx) => readStoredMainCheckpoint(tx, DelegateHeadReceiptDoc.definition.kind, "delegate head receipt"));
+    let value: unknown;
+    try { value = receipt === undefined ? undefined : JSON.parse(receipt.content); } catch { value = undefined; }
+    if (!isDeepStrictEqual(value, captured.receipt)) throw new Error("Return-sweep head receipt conflicts with the named source; the source was preserved.");
+  } finally { await receiptDatabase.close(); }
   const stored = await readStoredDelegation(path, true);
   if (stored?.inputCheckpoint === undefined || !isDeepStrictEqual(JSON.parse(stored.content), JSON.parse(captured.handoff)) ||
       !isDeepStrictEqual(JSON.parse(stored.inputCheckpoint.content), JSON.parse(captured.checkpoint)) ||

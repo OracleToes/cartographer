@@ -61,7 +61,8 @@ import {
   type CollapseOptions,
   type CollapseReport,
 } from "./collapse.js";
-import { snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { projectionBytesDigest, snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { DelegateHeadReceiptDoc, recordDelegateHeadDigest, recordDelegateHeadReceipt } from "./delegate-sweep-head.js";
 import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc } from "./delegate-input-replay.js";
 import {
@@ -175,6 +176,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     throw new Error("A pending context edit's generation is missing; all remaining data was preserved.");
   }
   let generation: string;
+  let createdSnapshot: { projection: ReturnType<typeof projectContext>; createdAt: number } | undefined;
   if (reconciled.live !== null) {
     generation = reconciled.live.generation;
   } else {
@@ -183,6 +185,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     const brain = await options.brain.read();
     const projection = projectContext(brain, pinnedFileTexts(root, brain), options.person ?? personName());
     writeSnapshot(root, generation, projection, stamp.getTime());
+    createdSnapshot = { projection, createdAt: stamp.getTime() };
   }
   const paths = generationPaths(root, generation);
   const frozenText = await readFile(paths.markdown, "utf8");
@@ -271,6 +274,21 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
+    if (createdSnapshot !== undefined) {
+      const { projection, createdAt } = createdSnapshot;
+      await harness.commit((tx) => recordDelegateHeadReceipt(tx, root, generation, projection, createdAt), BACKGROUND_CONTEXT);
+    } else {
+      // A collapse commits its creator's digest in the Brain with the sweep.
+      // Install it only if the destination still has those exact bytes and no
+      // Pi receipt. Rewritten/legacy heads stay usable in direct mode, but are
+      // not silently re-attested for a prospective return sweep.
+      const head = await options.brain.readCollapseHead();
+      const receipt = await harness.snapshot(DelegateHeadReceiptDoc, conversation.id, BACKGROUND_CONTEXT);
+      if (head?.generation === generation && (receipt === undefined || isDeepStrictEqual(receipt, { generation: null, digest: null }))) {
+        const actual = projectionBytesDigest(await readFile(paths.markdown), await readFile(paths.sidecar));
+        if (actual === head.digest) await harness.commit((tx) => recordDelegateHeadDigest(tx, root, generation, head.digest), BACKGROUND_CONTEXT);
+      }
+    }
     // A committed transfer remains in the Brain until Pi has durably accepted
     // the same handoff and checkpoint; retry compares instead of duplicating.
     await placeDelegationTransfer(options.brain, harness, conversation, generation, BACKGROUND_CONTEXT);

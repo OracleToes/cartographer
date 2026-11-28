@@ -36,7 +36,7 @@ import { applyArchiveMarks, withoutMark, type ArchivedItem, type ArchivedRecord,
 import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
-import { contextDirectory, projectionBytesDigest, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { contextDirectory, projectionBytesDigest, removeSnapshot, snapshotBytes, snapshotPaths, writeSnapshot } from "./projection-files.js";
 import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay } from "./delegate-input-replay.js";
@@ -1015,10 +1015,12 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   // 1c. The Brain writes that record what the sweep did — a mark applied is a
   //     mark gone — plus the moves out of the Brain and the store, and the
   //     archive's expiry, all in one transaction (§2, §3.4).
+  const destinationBytes = snapshotBytes(generation, projection, now);
   const applied = await brain.applyCollapse({
     writes,
     generation,
     source: live.generation,
+    destinationHeadDigest: projectionBytesDigest(destinationBytes.markdown, destinationBytes.sidecar),
     ...(storedDelegation === undefined ? {} : { delegationTransfer: { source: live.generation, destination: generation, ...storedDelegation } satisfies DelegationTransfer }),
     expected: { brain: refreshed, archive },
     incoming: [

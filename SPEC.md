@@ -820,7 +820,17 @@ neither advances archive grace nor commits; writer sealing, child restore and
 journal integration remain unfinished. A dormant capture wrapper obtains this
 plan between logical Pi-store fingerprints, compares the Pi handoff, checkpoint
 and barrier with their stored revisions, and rechecks the projection and Brain
-snapshots. Before taking the source fingerprint, it writes a fresh challenge to
+snapshots. It also requires a source-local receipt matching both projection
+files, checked through the Harness and the named SQLite store. A new direct
+session records this receipt from the projection its creator rendered, not by
+trusting a later file read. An ordinary collapse commits the creator's
+projection-byte digest in the Brain with the sweep; opening its destination
+installs a Pi receipt only when the bytes still match. Missing receipts, changed
+bytes and legacy or rewritten snapshots block prospective return capture; they
+are not silently attested on reopen. A receipt depends on a trusted creator and
+sealed writers, and does not protect against copied stores, forgery or path
+replacement. Direct collapse behavior and the multi-conversation guard are
+unchanged. Before taking the source fingerprint, the wrapper writes a fresh challenge to
 a source-local Pi document and checks the same challenge in the named SQLite
 store. An unrelated Harness is refused; once written, the challenge remains in
 whichever Harness received it even if capture fails. This is not proof against a copied
@@ -837,10 +847,12 @@ Pi's Storage document
 API must return the same fresh capture challenge and document identity as the
 named source; an accidentally unrelated scan storage is refused. The caller
 must still supply the Harness's actual storage: copies, replacement or relays
-can defeat this check, and a scan cannot reconstruct withdrawn content. These
-point-in-time checks do not stop scheduling, establish a lock, or authenticate
-hidden sidecar fields. Project-file observations and
-ABA changes remain unprotected. A caller may also
+can defeat this check, and a scan cannot reconstruct withdrawn content. It does
+not reconcile terminal unanswered context writes or continue submissions and
+their reasons; those remain an unresolved preservation requirement. These
+point-in-time scan and inspection checks do not stop scheduling or establish a
+lock. The head receipt depends on the creator and writer-sealing assumptions
+above; project-file observations and ABA changes remain unprotected. A caller may also
 commit the captured projection digest with the source seal in the transfer and
 Brain journal. Committed recovery checks both projection files against that
 digest while the source store remains; missing or changed files preserve the

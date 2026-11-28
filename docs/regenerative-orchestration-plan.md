@@ -343,7 +343,16 @@ crash, recovery cannot check it and continues the existing idempotent cleanup.
 This is only a change detector and never permits source deletion by itself. A
 dormant wrapper now captures a plan between two such source fingerprints,
 compares the Pi handoff, checkpoint and barrier with stored revisions, and
-rechecks projection and Brain/archive snapshots. Pi inspection rejects unfinished
+rechecks projection and Brain/archive snapshots. It additionally requires a
+creator receipt for both projection files, comparing it through Pi and the named
+SQLite store. A freshly rendered direct-session head records the receipt from
+its creator's projection; ordinary collapse commits the destination's expected
+byte digest with the Brain sweep and opening installs a Pi receipt only for
+matching bytes. Interrupted creation, legacy heads and later rewrites without a
+new trusted receipt block prospective return capture. This is provenance only
+under a trusted creator and sealed writers, not protection against a forged or
+copied store, path replacement, or unsanctioned writers; it is not a journal
+binding for the sweep or permission to delete the source. Pi inspection rejects unfinished
 tasks and queued or placed submissions before and after capture, including
 background work and queued writes. It also reuses the existing unanswered-input
 scan and checkpoint verification for main and the owned child; missing content
@@ -357,16 +366,18 @@ rejecting accidentally unrelated Harnesses or scan stores. Once written, the
 challenge remains even if later capture fails. The host must still supply the
 actual backing storage: copies, replacement, relays, a misleading scan or a
 subsequent path swap are not excluded. The scan cannot reconstruct withdrawn
-content. These are point-in-time checks, not a pause or writer lock. The wrapper returns its values together but does not journal them or
+content and does not reconcile terminal unanswered context writes or continue
+submissions and their reasons. These are point-in-time checks, not a pause or writer lock. The wrapper returns its values together but does not journal them or
 protect against ABA changes and filesystem races. The host must ensure the
 backing-store relationship and seal writers; a SQLite read snapshot is not a
 lock. The captured projection digest can optionally be retained with a source
 seal in the transferred handoff and Brain journal; committed recovery refuses
 cleanup if either source projection file is missing or its bytes changed while
 the source store remains. Cleanup already begun without the source is still
-idempotent. This detects later changes, not initial sidecar authenticity, and
-is not used by a host or a permit to bypass the multi-conversation guard. Hidden
-sidecar authentication and full sweep/journal integration remain necessary. The
+idempotent. This optional transfer digest detects later changes; the separate
+creator receipt supplies conditional initial provenance as described above.
+Neither is used by a host or permits bypassing the multi-conversation guard.
+Writer sealing and full sweep/journal integration remain necessary. The
 actual return path does not archive the prepared items or
 remove the return guard. A dormant child-restore helper can place a committed
 pending item into an ownerless passive Pi conversation, using a persistent map
