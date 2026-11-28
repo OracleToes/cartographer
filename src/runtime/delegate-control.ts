@@ -1,8 +1,8 @@
 /** Dormant immediate-end primitives; the host must control scheduling and return collapse. */
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
-import { LiveDoc, type Conversation, type ConversationId, type Harness, type Storage, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { CONTEXT_LIMIT_FAILURE, DelegationDoc, finishDelegationEnd, requestContextLimitEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
+import { LiveDoc, ROOT_CONVERSATION_ID, type Conversation, type ConversationId, type Harness, type Storage, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { CONTEXT_LIMIT_FAILURE, DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, parseReturnedDelegation, requestContextLimitEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
 import { DelegateLimitDoc, hasDelegateLimitMarker } from "./delegate-limit.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs, parseInputCheckpoint } from "./delegate-inputs.js";
@@ -71,25 +71,33 @@ async function completeEnd(main: Conversation, id: string, cause: EndCause, cont
  * A caller must supply the Harness's own storage and seal new admissions
  * throughout this sequence; this is not a global lock.
  */
-async function verifyCheckpointedInputs(main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, cause: EndCause, context: Context): Promise<void> {
+async function verifyCheckpointedInputs(
+  main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string,
+  accepts: (active: Delegation | null) => boolean, context: Context,
+): Promise<void> {
   const before = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
-    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
+    if (active === null || !accepts(active)) throw new Error("The handoff changed during input verification; it was preserved.");
     const owned = await ownedHandoff(tx, main.id, active);
+    const barrier = await tx.doc(DelegateMainBarrierDoc, main.id);
+    if (Object.keys(barrier).length !== 3 || barrier.sourceId !== id || barrier.admittedId !== null || barrier.submissionId !== null) {
+      throw new Error("The source barrier changed during input verification; it was preserved.");
+    }
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
     parseInputCheckpoint(content, id);
-    return { ...owned, content };
+    return { ...owned, content, barrier: JSON.stringify(barrier) };
   }, context);
   const mainUnanswered = await findUnansweredInputs(storage, main.id, context);
   const childUnanswered = before.childId === null ? [] : await findUnansweredDelegateInputs(storage, before.childId, before.ownerId, context);
   const unanswered = [...mainUnanswered, ...childUnanswered];
   await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
-    if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
+    if (active === null || !accepts(active)) throw new Error("The handoff changed during input verification; it was preserved.");
     const owned = await ownedHandoff(tx, main.id, active);
     const content = JSON.stringify(await tx.doc(DelegateInputCheckpointDoc, main.id));
-    if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || content !== before.content) {
-      throw new Error("The delegate input checkpoint or owner changed during verification; it was preserved.");
+    const barrier = JSON.stringify(await tx.doc(DelegateMainBarrierDoc, main.id));
+    if (owned.ownerId !== before.ownerId || owned.childId !== before.childId || content !== before.content || barrier !== before.barrier) {
+      throw new Error("The delegate input checkpoint, barrier or owner changed during verification; it was preserved.");
     }
     const captured = new Set(parseInputCheckpoint(content, id).inputs.map((input) => input.submissionId));
     for (const submission of unanswered) {
@@ -103,6 +111,37 @@ async function verifyCheckpointedInputs(main: Conversation, storage: Pick<Storag
       }
     }
   }, context);
+}
+
+/**
+ * Checkpoint a normally returned handoff before the host aborts any held main
+ * or child work. This also applies to failure returns. The child report's run
+ * must already have settled; a still-running initial instruction is refused by
+ * checkpointDelegateInputs. Retry keeps the original checkpoint. A failed scan
+ * leaves it intact and does not abort anything. This neither starts nor commits a
+ * collapse; the caller must seal all input admissions, withdrawals and source
+ * work before capture and keep them sealed until source handling is complete.
+ * Pi's Storage scan is not transactionally coupled to the Harness: supply its
+ * actual backing storage and do not treat this as a writer lock.
+ */
+export async function checkpointReturnedDelegateInputs(
+  main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, context: Context,
+): Promise<void> {
+  if (main.id !== ROOT_CONVERSATION_ID) throw new Error("Return checkpoint requires main; the handoff was preserved.");
+  const expected = await main.commit(async (tx) => {
+    const active = (await tx.doc(DelegationDoc, main.id)).active;
+    if (active?.phase !== "returned" || active.input.id !== id) throw new Error("No matching returned handoff; it was preserved.");
+    const content = JSON.stringify({ active });
+    parseReturnedDelegation(content);
+    await ownedHandoff(tx, main.id, active);
+    const barrier = await tx.doc(DelegateMainBarrierDoc, main.id);
+    if (Object.keys(barrier).length !== 3 || barrier.sourceId !== id || barrier.admittedId !== null || barrier.submissionId !== null) {
+      throw new Error("Return checkpoint requires the source barrier; the handoff was preserved.");
+    }
+    await checkpointDelegateInputs(tx, main.id, id);
+    return content;
+  }, context);
+  await verifyCheckpointedInputs(main, storage, id, (active) => JSON.stringify({ active }) === expected, context);
 }
 
 /** Seal main and child admission first; a failed checkpoint or abort leaves the intent recoverable. */
@@ -119,7 +158,7 @@ async function stopEndingDelegate(harness: Harness, main: Conversation, storage:
     await checkpointDelegateInputs(tx, main.id, id);
     return owned;
   }, context);
-  await verifyCheckpointedInputs(main, storage, id, cause, context);
+  await verifyCheckpointedInputs(main, storage, id, (active) => matchesEnd(active, id, cause), context);
   if (ending.childId !== null) {
     const child = await harness.conversation(ending.childId, context);
     if (child === undefined) throw new Error("The delegate conversation is unavailable; the ending intent was preserved.");
@@ -226,7 +265,7 @@ async function recoverEnd(harness: Harness, main: Conversation, storage: Pick<St
     return { id: active.input.id, runId };
   }, context);
   if (state === null) return false;
-  await verifyCheckpointedInputs(main, storage, state.id, cause, context);
+  await verifyCheckpointedInputs(main, storage, state.id, (active) => matchesEnd(active, state.id, cause), context);
   if (state.runId !== null) {
     await harness.abortTask(state.runId, context); // Does not enable scheduling.
     await harness.waitForTask(state.runId, context); // Enables it after the mark is durable.

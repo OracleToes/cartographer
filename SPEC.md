@@ -896,7 +896,15 @@ previously checkpointed input that later becomes unanswered is not mistaken for 
 The host must pass the actual storage backing that Harness and seal admissions
 through checkpoint, scan and abort; these checks are not a lock, and the lower-level
 checkpoint helper alone does not do this scan. A retry of an existing checkpoint
-keeps its pre-abort copy. These helpers do not yet route person controls.
+keeps its pre-abort copy. A separate dormant normal-return helper now validates
+the returned handoff, owner and source barrier, checkpoints main and child
+inputs, and performs the same unanswered-input scan before any host abort. It
+rechecks the returned handoff, barrier, owner and checkpoint around the scan;
+a failure retains the checkpoint and does not abort. The report's initial child
+run must have settled first. The host must seal admissions, withdrawals and
+source work, supply the actual storage, and handle abort, collapse and replay;
+this helper is neither a lock nor an integration of the return path. These
+helpers do not yet route person controls.
 A dormant, explicit collapse path can transfer the checkpoint together with its
 matching returned handoff through the existing Brain journal. It verifies the
 source handoff, checkpoint and source barrier before deleting the old store,

@@ -88,7 +88,14 @@ provide the actual storage used by the Harness. The checkpoint helper alone does
 not scan. A missing input blocks further abort, but Pi may already have discarded
 its content: detection is not recovery. Older unanswered main inputs also block
 unless present in the checkpoint; separately handled inputs have no durable proof
-of recovery here, so this deliberately favors preservation over availability. An explicit, dormant collapse
+of recovery here, so this deliberately favors preservation over availability.
+A dormant normal-return helper now validates the returned handoff, owner and
+source barrier, captures pending inputs and performs the same scan before the
+host aborts held work. It rechecks handoff, barrier, owner and checkpoint around
+the scan, preserves the checkpoint on failure, and refuses to capture while the
+initial report run is still settling. It does not itself stop work or complete
+return collapse: a host must seal admissions, withdrawals and source work,
+provide the matching storage, and coordinate abort, journal and replay. An explicit, dormant collapse
 path now transfers the checkpoint with its matching handoff using the existing
 Brain journal and verifies the source barrier and both documents. Placement is
 atomic in the destination; conflicts preserve both copies. Ordinary collapse

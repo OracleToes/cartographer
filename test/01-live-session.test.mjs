@@ -52,7 +52,7 @@ import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runt
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
-import { endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
+import { checkpointReturnedDelegateInputs, endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
@@ -1218,7 +1218,8 @@ test("delegate barrier holds a queued child follow-up after its report", async (
   const mainExtension = defineExtension({ name: "child-barrier-main", tools: [createDelegateTool({ cwd: root })] });
   const registry = createRegistry();
   registry.install(mainExtension); registry.install(mainBarrier); registry.install(reportExtension);
-  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const storage = new MemoryStorage();
+  const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
   const report = { status: "done", findings: "found", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
   try {
     const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension, mainBarrier], compaction: { enabled: false } } });
@@ -1237,11 +1238,23 @@ test("delegate barrier holds a queued child follow-up after its report", async (
     assert.equal(faux.state.callCount, 2, "the queued child run never reaches the model");
     const beforeAbort = await queued.status(BACKGROUND_CONTEXT);
     assert.equal(beforeAbort.status, "placed", "the held input remains identifiable for host recovery");
-    await main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT);
+    await assert.rejects(checkpointReturnedDelegateInputs(main, { scanSubmissions: async () => { throw new Error("scan unavailable"); } }, active.input.id, BACKGROUND_CONTEXT), /scan unavailable/);
     const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
     assert.deepEqual(saved.inputs.find((input) => input.submissionId === queued.id), {
       submissionId: queued.id, placement: "placed", whenBusy: "followUp", content: "Preserve this follow-up", entry: { kind: "pi.user" },
     });
+    assert.equal((await queued.status(BACKGROUND_CONTEXT)).status, "placed", "a failed scan never aborts the held work");
+    await checkpointReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT);
+    await checkpointReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), saved, "retry keeps the original checkpoint");
+    const changingStorage = { scanSubmissions: async (...args) => {
+      await main.commit(async (tx) => { (await tx.doc(DelegateMainBarrierDoc, main.id)).admittedId = "raced"; }, BACKGROUND_CONTEXT);
+      return storage.scanSubmissions(...args);
+    } };
+    await assert.rejects(checkpointReturnedDelegateInputs(main, changingStorage, active.input.id, BACKGROUND_CONTEXT), /barrier or owner changed/);
+    await main.commit(async (tx) => { (await tx.doc(DelegateMainBarrierDoc, main.id)).admittedId = "unexpected"; }, BACKGROUND_CONTEXT);
+    await assert.rejects(checkpointReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT), /requires the source barrier/);
+    await main.commit(async (tx) => { (await tx.doc(DelegateMainBarrierDoc, main.id)).admittedId = null; }, BACKGROUND_CONTEXT);
     await child.abort(BACKGROUND_CONTEXT);
     assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal((await mainInput.wait(BACKGROUND_CONTEXT)).status, "done");
@@ -1264,7 +1277,8 @@ test("main barrier holds queued inference after a delegate returns and refuses s
   const mainExtension = defineExtension({ name: "barrier-main", tools: [createDelegateTool({ cwd: root })] });
   const registry = createRegistry();
   registry.install(barrier); registry.install(mainExtension); registry.install(DelegateReportExtension);
-  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const storage = new MemoryStorage();
+  const harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
   const report = { status: "done", findings: "observed", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
   try {
     const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier, mainExtension], compaction: { enabled: false } } });
@@ -1275,6 +1289,8 @@ test("main barrier holds queued inference after a delegate returns and refuses s
     ]);
     const first = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
     await childStarted;
+    const withdrawn = await main.submit({ type: "input", content: "Earlier withdrawn request", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    assert.equal(await withdrawn.abort(BACKGROUND_CONTEXT), "aborted");
     const queued = await main.submit({ type: "input", content: "Queued request", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
     release();
     assert.equal((await first.wait(BACKGROUND_CONTEXT)).status, "done");
@@ -1284,6 +1300,10 @@ test("main barrier holds queued inference after a delegate returns and refuses s
     assert.equal((await harness.snapshot(DelegateMainBarrierDoc, main.id, BACKGROUND_CONTEXT)).sourceId, handoff.input.id);
     assert.equal(faux.state.callCount, 2);
     await assert.rejects(admitDelegationReturn(main, handoff.input.id, BACKGROUND_CONTEXT), /source generation/);
+    await assert.rejects(checkpointReturnedDelegateInputs(main, storage, handoff.input.id, BACKGROUND_CONTEXT), new RegExp(`Main input ${withdrawn.id} was unanswered before checkpoint`));
+    const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.ok(saved.inputs.some((input) => input.submissionId === queued.id));
+    assert.equal((await queued.status(BACKGROUND_CONTEXT)).status, "placed", "a failed scan does not abort pending input");
     await main.abort(BACKGROUND_CONTEXT);
     assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal(faux.state.callCount, 2);
