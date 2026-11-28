@@ -85,12 +85,14 @@ proposal text; unresolved details are not implicitly decided by them.
   changing it. The person extended this to replacement of accepted or dictated
   behavior: the agent distinguishes which status applies and asks the person to
   confirm the change. This is not automatic promotion or acceptance of observed
-  behavior. Whether an explicit request to replace the identified behavior
-  already counts as confirmation, or requires a separate question, remains open.
+  behavior. An unambiguous explicit request to replace the identified behavior
+  with a specific alternative counts as approval; no redundant separate
+  confirmation is needed. Incidental changes not covered by that request still
+  need to be flagged and confirmed.
 
-**Next unanswered question:** if the person explicitly asks to replace a named
-existing behavior with a specific alternative, does that request itself count as
-confirmation, or should main still ask separately before proceeding?
+**Next unanswered question:** when the person calls a delegate back early,
+should it get a final opportunity to report its partial work before returning,
+when possible, or should control return immediately to main?
 
 ## 1. Recommendation in one sentence
 
