@@ -5,7 +5,7 @@ import { LiveDoc, type Conversation, type ConversationId, type Harness, type Sto
 import { CONTEXT_LIMIT_FAILURE, DelegationDoc, finishDelegationEnd, requestContextLimitEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
 import { DelegateLimitDoc, hasDelegateLimitMarker } from "./delegate-limit.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
-import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, parseInputCheckpoint } from "./delegate-inputs.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs, parseInputCheckpoint } from "./delegate-inputs.js";
 
 /** Verify the actual Pi task and owned child, not just an ID in the document. */
 export async function ownedHandoff(tx: Tx, mainId: ConversationId, active: Delegation): Promise<{ ownerId: TaskId; childId: ConversationId | null }> {
@@ -66,11 +66,12 @@ async function completeEnd(main: Conversation, id: string, cause: EndCause, cont
 /**
  * The Tx API cannot scan submissions. After checkpointing, inspect Pi's
  * storage outside the Session line, then recheck the handoff, checkpoint and
- * each result on that line. Any earlier unanswered child input not already in
- * the checkpoint blocks abort. A caller must supply the Harness's own storage
- * and seal new admissions throughout this sequence; this is not a global lock.
+ * each result on that line. Any earlier unanswered main or child input not
+ * already in the checkpoint blocks abort; Pi may have discarded its content.
+ * A caller must supply the Harness's own storage and seal new admissions
+ * throughout this sequence; this is not a global lock.
  */
-async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, cause: EndCause, context: Context): Promise<void> {
+async function verifyCheckpointedInputs(main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, cause: EndCause, context: Context): Promise<void> {
   const before = await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
     if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
@@ -79,7 +80,9 @@ async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<S
     parseInputCheckpoint(content, id);
     return { ...owned, content };
   }, context);
-  const unanswered = before.childId === null ? [] : await findUnansweredDelegateInputs(storage, before.childId, before.ownerId, context);
+  const mainUnanswered = await findUnansweredInputs(storage, main.id, context);
+  const childUnanswered = before.childId === null ? [] : await findUnansweredDelegateInputs(storage, before.childId, before.ownerId, context);
+  const unanswered = [...mainUnanswered, ...childUnanswered];
   await main.commit(async (tx) => {
     const active = (await tx.doc(DelegationDoc, main.id)).active;
     if (!matchesEnd(active, id, cause)) throw new Error("The ending handoff changed; it was preserved.");
@@ -95,7 +98,8 @@ async function verifyCheckpointedChildInputs(main: Conversation, storage: Pick<S
         throw new Error("A delegate submission changed during verification; it was preserved.");
       }
       if (!captured.has(submission.id)) {
-        throw new Error(`Delegate input ${submission.id} was unanswered before checkpoint; its content may no longer be available. Recovery must resolve it before abort.`);
+        const label = submission.conversationId === main.id ? "Main" : "Delegate";
+        throw new Error(`${label} input ${submission.id} was unanswered before checkpoint; its content may no longer be available. Recovery must resolve it before abort.`);
       }
     }
   }, context);
@@ -115,7 +119,7 @@ async function stopEndingDelegate(harness: Harness, main: Conversation, storage:
     await checkpointDelegateInputs(tx, main.id, id);
     return owned;
   }, context);
-  await verifyCheckpointedChildInputs(main, storage, id, cause, context);
+  await verifyCheckpointedInputs(main, storage, id, cause, context);
   if (ending.childId !== null) {
     const child = await harness.conversation(ending.childId, context);
     if (child === undefined) throw new Error("The delegate conversation is unavailable; the ending intent was preserved.");
@@ -222,7 +226,7 @@ async function recoverEnd(harness: Harness, main: Conversation, storage: Pick<St
     return { id: active.input.id, runId };
   }, context);
   if (state === null) return false;
-  await verifyCheckpointedChildInputs(main, storage, state.id, cause, context);
+  await verifyCheckpointedInputs(main, storage, state.id, cause, context);
   if (state.runId !== null) {
     await harness.abortTask(state.runId, context); // Does not enable scheduling.
     await harness.waitForTask(state.runId, context); // Enables it after the mark is durable.

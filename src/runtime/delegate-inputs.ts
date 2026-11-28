@@ -63,30 +63,33 @@ export function validateInputTransfer(value: NonNullable<DelegationTransfer["inp
 }
 
 /**
- * Find child inputs Pi has already settled without an answer. A queued input
- * withdrawn before capture no longer appears in the latest inbox and may have
- * no retained content; its submission still identifies the loss. Pi exposes
- * this scan on Storage, not Tx, so call outside a Session commit. The caller
- * must provide the same storage as the Harness, verify child/owner identity and
- * seal admission through checkpoint, scan and abort. The low-level checkpoint
- * does not call this scan; an existing checkpoint may already hold some of the
- * returned inputs. This function does not decide whether to replay or recover.
+ * Find inputs Pi has already settled without an answer. A queued input
+ * withdrawn before capture may have no retained content; its submission still
+ * identifies the loss. Pi exposes this scan on Storage, not Tx, so call outside
+ * a Session commit. The caller must provide the Harness's own storage, verify
+ * conversation identity and seal admission through checkpoint, scan and abort.
+ * This function does not decide whether an input was already recovered.
  */
-export async function findUnansweredDelegateInputs(
-  storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,
+export async function findUnansweredInputs(
+  storage: Pick<Storage, "scanSubmissions">, conversationId: ConversationId, context: Context,
 ): Promise<Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>>> {
   const result: Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>> = [];
   let cursor: Cursor | undefined;
   do {
-    const page = await storage.scanSubmissions({ conversationId: childId, status: "unanswered", order: "ascending" }, 100, cursor, context);
+    const page = await storage.scanSubmissions({ conversationId, status: "unanswered", order: "ascending" }, 100, cursor, context);
     for (const submission of page.items) {
-      if (submission.type === "input" && submission.status === "unanswered" && submission.requestId !== `carto.delegate-input:${ownerId}`) {
-        result.push(submission);
-      }
+      if (submission.type === "input" && submission.status === "unanswered") result.push(submission);
     }
     cursor = page.next;
   } while (cursor !== undefined);
   return result;
+}
+
+/** The delegate's instruction is not a person input to be replayed. */
+export async function findUnansweredDelegateInputs(
+  storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,
+): Promise<Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>>> {
+  return (await findUnansweredInputs(storage, childId, context)).filter((submission) => submission.requestId !== `carto.delegate-input:${ownerId}`);
 }
 
 export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({

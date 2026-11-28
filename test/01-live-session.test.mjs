@@ -53,7 +53,7 @@ import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
-import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs } from "../dist/runtime/delegate-inputs.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
@@ -1550,7 +1550,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
   }
 });
 
-test("Pi submission scan detects withdrawn child input across restart without inventing content", async () => {
+test("Pi submission scan detects withdrawn main and child inputs across restart without inventing content", async () => {
+  for (const target of ["main", "child"]) {
   const { root, cleanup } = await fixture();
   const { faux, models, ref } = fauxSetup();
   let markStarted;
@@ -1582,17 +1583,20 @@ test("Pi submission scan detects withdrawn child input across restart without in
     await started;
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
-    const withdrawn = await child.submit({ type: "input", content: "Previously withdrawn", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
-    const stillQueued = await child.submit({ type: "input", content: "Still queued", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    const conversation = target === "main" ? main : child;
+    const withdrawn = await conversation.submit({ type: "input", content: "Previously withdrawn", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    const stillQueued = await conversation.submit({ type: "input", content: "Still queued", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
     assert.equal(await withdrawn.abort(BACKGROUND_CONTEXT), "aborted");
     assert.equal((await withdrawn.status(BACKGROUND_CONTEXT)).entry, undefined, "Pi never placed the withdrawn input");
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "", BACKGROUND_CONTEXT), true);
     const ownerId = Number(active.input.id.slice("delegate:".length));
-    const found = await findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    const scan = () => target === "main" ? findUnansweredInputs(storage, main.id, BACKGROUND_CONTEXT) :
+      findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    const found = await scan();
     assert.deepEqual(found.map((submission) => submission.id), [withdrawn.id]);
     assert.equal(found[0].reason, "aborted");
     assert.equal(found[0].entry, undefined);
-    const blocked = new RegExp(`Delegate input ${withdrawn.id} was unanswered before checkpoint`);
+    const blocked = new RegExp(`${target === "main" ? "Main" : "Delegate"} input ${withdrawn.id} was unanswered before checkpoint`);
     await assert.rejects(endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), blocked);
     assert.equal((await stillQueued.status(BACKGROUND_CONTEXT)).status, "queued", "no further child input was withdrawn");
     const checkpoint = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
@@ -1604,7 +1608,7 @@ test("Pi submission scan detects withdrawn child input across restart without in
     harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
     main = await harness.root(BACKGROUND_CONTEXT);
     assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
-    const persisted = await findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    const persisted = await scan();
     assert.deepEqual(persisted.map((submission) => submission.id), [withdrawn.id]);
     assert.equal(persisted[0].entry, undefined, "the scan does not invent discarded inbox content");
     await assert.rejects(recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), blocked);
@@ -1616,6 +1620,7 @@ test("Pi submission scan detects withdrawn child input across restart without in
     await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
     await database.close().catch(() => undefined);
     await cleanup();
+  }
   }
 });
 

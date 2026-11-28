@@ -835,7 +835,7 @@ before identifying the estimated reporting threshold in the failure; it still
 retains Pi's unanswered reason and detail when present. An inconsistent marker
 is not used to invent a result. A dormant system-stop path can record a distinct
 context-limit ending intent for a verified later request, checkpoint main and
-child inputs, scan for earlier unanswered child inputs, and only then abort the
+child inputs, scan for earlier unanswered main and child inputs, and only then abort the
 child and record a missing-report failure. Recovery handles that intent before
 scheduling resumes, retaining the checkpoint; a person's explicit end takes
 precedence and keeps person provenance. A failed checkpoint or scan preserves
@@ -881,16 +881,18 @@ the original copy. A missing or inconsistent input, a previously failed run
 whose inputs were not captured, or a queued context write stops capture rather
 than silently dropping it. The host must stop new input admission to both
 conversations while capturing and keep it stopped through recovery; the
-checkpoint is not an admission lock. A separate dormant helper can scan Pi's
-child submission records for earlier unanswered inputs, excluding the delegate's
-own initial task input. Pi may already have discarded a withdrawn queued input's
-content, so this detection does not recover it. Pi's storage-level scan is outside
-its transaction API. The dormant immediate-end and restart-recovery paths scan
-after checkpointing and before abort, then recheck the handoff, checkpoint and
-scanned records in a Pi transaction. An unanswered child input absent from the
-checkpoint, a scan failure or conflicting data prevents further abort; any
-checkpointed inputs and ending intent remain for recovery. A previously
-checkpointed input that later becomes unanswered is not mistaken for missing.
+checkpoint is not an admission lock. Separate dormant helpers can scan Pi's
+main and child submission records for earlier unanswered inputs, excluding the
+delegate's own initial task input. Pi may already have discarded a withdrawn
+queued input's content, so this detection does not recover it. Pi's storage-level
+scan is outside its transaction API. The dormant immediate-end and restart-recovery
+paths scan after checkpointing and before abort, then recheck the handoff,
+checkpoint and scanned records in a Pi transaction. An unanswered main or child
+input absent from the checkpoint, a scan failure or conflicting data prevents
+further abort; any checkpointed inputs and ending intent remain for recovery.
+This conservative scan also blocks on older unanswered main inputs even if they
+were separately handled, because it has no durable proof of that handling. A
+previously checkpointed input that later becomes unanswered is not mistaken for missing.
 The host must pass the actual storage backing that Harness and seal admissions
 through checkpoint, scan and abort; these checks are not a lock, and the lower-level
 checkpoint helper alone does not do this scan. A retry of an existing checkpoint

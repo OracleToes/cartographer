@@ -77,15 +77,18 @@ content, submission identity and entry metadata in the source generation,
 excluding the delegate's own initial task instruction. It validates child
 ownership, reuses the snapshot on retry, and refuses ambiguous inputs or queued
 context writes. The host must seal both conversations' input admission during
-capture and recovery. A dormant helper scans Pi's storage-level child submission
-records for unanswered inputs, including withdrawn queue items. The immediate-end
-and restart-recovery paths now use it after checkpointing and before abort,
-compare the results against the saved checkpoint, and recheck the observed records
-and ownership in a Pi transaction. Pi's transaction API does not expose a
-submission scan, so the host must seal admissions across checkpoint, scan and
-abort, and provide the actual storage used by the Harness. The checkpoint helper
-alone does not scan. A missing input blocks further abort, but Pi may already have
-discarded its content: detection is not recovery. An explicit, dormant collapse
+capture and recovery. Dormant helpers scan Pi's storage-level main and child
+submission records for unanswered inputs, including withdrawn queue items; the
+child scan excludes the delegate's own task instruction. The immediate-end and
+restart-recovery paths use them after checkpointing and before abort, compare the
+results against the saved checkpoint, and recheck the observed records and
+ownership in a Pi transaction. Pi's transaction API does not expose a submission
+scan, so the host must seal admissions across checkpoint, scan and abort, and
+provide the actual storage used by the Harness. The checkpoint helper alone does
+not scan. A missing input blocks further abort, but Pi may already have discarded
+its content: detection is not recovery. Older unanswered main inputs also block
+unless present in the checkpoint; separately handled inputs have no durable proof
+of recovery here, so this deliberately favors preservation over availability. An explicit, dormant collapse
 path now transfers the checkpoint with its matching handoff using the existing
 Brain journal and verifies the source barrier and both documents. Placement is
 atomic in the destination; conflicts preserve both copies. Ordinary collapse
