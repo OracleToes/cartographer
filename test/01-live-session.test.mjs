@@ -60,7 +60,7 @@ import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
-import { prepareReturnSweepWithInputs, prepareReturnSweepWithInputsAndPinRefresh } from "../dist/runtime/delegate-sweep-reconcile.js";
+import { prepareReturnSweepWithInputs, prepareReturnSweepWithInputsAndPinRefresh, prepareReturnSweepWithRecords } from "../dist/runtime/delegate-sweep-reconcile.js";
 import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
 import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc, hasDelegateLimitMarker } from "../dist/runtime/delegate-limit.js";
 
@@ -1513,6 +1513,34 @@ test("person-ended delegate stops its in-flight work without a final report", as
     assert.equal(refreshedBrain.ephemera.find((item) => item.id === "old:1:r").text, "export const answer = 42;\n");
     assert.equal(refreshedBrain.ephemera.find((item) => item.id === "old:2:r").text, "keep last read");
     assert.equal(refreshedBrain.ephemera.some((item) => item.id === "old:3:r"), false, "deletion wins over refresh");
+
+    // The fully composed prospective plan uses the source projection and Pi
+    // checkpoint, ordinary record marks, freshness and the normal renderer.
+    const planningBrain = structuredClone(withPins);
+    planningBrain.atlas = [
+      { id: "outgoing", title: "Old attachment", text: "archive", links: [], attachments: [{ kind: "file", path: "src/verify-me.ts" }], createdAt: 1, updatedAt: 1, mark: { action: "archive", author: "user" } },
+      { id: "fresh", title: "Fresh attachment", text: "stay", links: [], attachments: [{ kind: "file", path: "src/verify-me.ts" }], createdAt: 2, updatedAt: 4_000_000_000_000, stale: true },
+    ];
+    const beforePlan = structuredClone(planningBrain);
+    const oldHeadBrain = structuredClone(planningBrain);
+    oldHeadBrain.ephemera = structuredClone(frozenPins);
+    oldHeadBrain.handles = rebuildHandles(oldHeadBrain);
+    const oldHead = projectContext(oldHeadBrain, new Map(), "Person");
+    writeSnapshot(root, "gen-end", oldHead, 1);
+    const system = await main.submit({ type: "write", entry: { kind: "test.system", model: [{ role: "system", content: "", sections: { "carto-context": oldHead.text }, timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    assert.equal((await system.wait(BACKGROUND_CONTEXT)).status, "done");
+    const currentViews = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
+    const oldChat = { id: "restored", author: "user", text: "restored chat", createdAt: 1, updatedAt: 1 };
+    const archive = { version: 1, items: [{ id: "record:chat:restored", layer: "record", record: { kind: "chat", value: oldChat }, sweptAtGeneration: "gen-old", sweptAtCollapse: 1, sweptAt: 1, mark: { action: "restore", author: "user" } }] };
+    const complete = await main.commit((tx) => prepareReturnSweepWithRecords(root, tx, main.id, active.input.id, currentViews, "gen-end", planningBrain, archive, 1, "Person"), BACKGROUND_CONTEXT);
+    assert.deepEqual(planningBrain, beforePlan, "freshness and projection are prospective, not Brain mutations");
+    assert.equal(complete.incoming.find((item) => item.id === "record:atlas:outgoing").record.value.stale, true);
+    assert.equal(complete.nextBrain.atlas.find((node) => node.id === "fresh").stale, undefined);
+    assert.ok(complete.nextBrain.chat.some((record) => record.id === "chat:followup"));
+    assert.ok(!complete.projection.chatIds.includes("chat:followup"), "checkpointed Chat is replayed, not duplicated in the head");
+    assert.ok(complete.projection.chatIds.includes("restored"));
+    assert.match(complete.projection.text, /restored chat/);
+    assert.equal(complete.projection.ephemeralItems.find(({ item }) => item.id === "old:1:r").item.text, "export const answer = 42;\n");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");

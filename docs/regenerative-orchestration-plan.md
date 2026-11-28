@@ -231,9 +231,15 @@ record planner now reuses ordinary collapse's record-mark preparation and
 archive-restore logic, returning prospective writes, incoming records, the
 resulting Brain and ephemeral restores requiring separate destinations. It
 refuses archive identity collisions and record restores over existing records.
-The Brain transaction remains responsible for the real sweep, archive grace and
-pending restore acknowledgement. Atlas freshness, source authentication, sealed
-reads and atomic journal binding remain open; this plan authorizes no deletion.
+The composed planner now also prepares ordinary Atlas freshness writes before
+record-mark preparation and renders the prospective head through Carto's
+existing projection, excluding checkpointed Chat identities. It leaves the
+original Brain untouched for use as the expected commit snapshot. Freshness
+for restored Atlas records follows ordinary collapse's existing ordering; these
+filesystem observations are neither atomic nor locked. The Brain transaction
+remains responsible for the real sweep, archive grace and pending restore
+acknowledgement. Source authentication, sealed reads and atomic journal binding
+remain open; this plan authorizes no deletion.
 A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key

@@ -1,9 +1,11 @@
 /** Dormant reconciliation of checkpointed inputs with a prospective return sweep. */
 import type { ConversationId, Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
+import { applyWrite } from "../domain/brain.js";
+import { projectContext } from "../domain/projection.js";
 import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, PinnedEphemeral } from "../domain/records.js";
-import { ephemeralItemId, prepareCollapsePinRefresh } from "./collapse.js";
+import { ephemeralItemId, prepareCollapseFreshness, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
@@ -140,15 +142,25 @@ export async function prepareReturnSweepWithSourceHead(
 }
 
 /**
- * Add record marks and archive restores to the prospective source-head plan.
- * This still lacks Atlas freshness, destination/recovery integration and writer
- * sealing. In particular, pending child restores have no destination yet.
+ * Prepare the next head alongside record marks and archive restores, reusing
+ * ordinary collapse's Atlas freshness and projection. The original Brain must
+ * be used as the expected commit snapshot; freshness is a prospective write,
+ * not a separate mutation. Pending checkpoint Chat identities stay out of the
+ * head. The person name must be the one resolved for the destination session.
+ * This is not a journalled commit, a writer lock or permission to delete the
+ * source; hidden source-head metadata still needs independent authentication,
+ * and pending child restores still have no destination.
  */
 export async function prepareReturnSweepWithRecords(
   root: string, tx: Tx, mainId: ConversationId, id: string, views: readonly ReturnSweepView[], generation: string,
-  brain: CartoBrain, archive: Archive, now: number,
+  brain: CartoBrain, archive: Archive, now: number, person: string,
 ) {
-  const plan = await prepareReturnSweepWithSourceHead(root, tx, mainId, id, views, generation, brain, now);
-  const records = prepareReturnSweepRecords(brain, archive, plan.incoming, plan.writes, now);
-  return { ...plan, ...records };
+  const freshness = prepareCollapseFreshness(root, brain, now);
+  let refreshed = brain;
+  for (const step of freshness) refreshed = applyWrite(refreshed, step.write, step.now);
+  const plan = await prepareReturnSweepWithSourceHead(root, tx, mainId, id, views, generation, refreshed, now);
+  const records = prepareReturnSweepRecords(refreshed, archive, plan.incoming, plan.writes, now);
+  const chat = new Set(records.nextBrain.chat.filter((record) => !plan.pendingChatIds.has(record.id)).map((record) => record.id));
+  const projection = projectContext(records.nextBrain, plan.fileTexts, person, { chat });
+  return { ...plan, ...records, writes: [...freshness, ...records.writes], projection };
 }

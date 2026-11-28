@@ -749,6 +749,17 @@ function mtimeOf(root: string, path: string): number | null {
   }
 }
 
+/** Prepare ordinary collapse's Atlas attachment freshness writes without mutating the Brain. */
+export function prepareCollapseFreshness(root: string, brain: CartoBrain, now: number): Array<{ write: BrainWrite; now: number }> {
+  const stale = new Set(staleAtlasNodeIds(brain, (path) => mtimeOf(root, path)));
+  const writes: Array<{ write: BrainWrite; now: number }> = [];
+  for (const node of brain.atlas) {
+    const shouldBeStale = stale.has(node.id);
+    if (shouldBeStale !== (node.stale === true)) writes.push({ write: { kind: "atlas.stale", id: node.id, stale: shouldBeStale }, now });
+  }
+  return writes;
+}
+
 /**
  * Check every Atlas file attachment against the filesystem and apply the
  * resulting collapse-time marks. Must run before the snapshot is rendered,
@@ -756,14 +767,8 @@ function mtimeOf(root: string, path: string): number | null {
  * attachment marks the node stale, a fresh one clears the mark, like a pin.
  */
 export async function refreshFreshness(root: string, brain: CartoBrain, apply: BrainStore["apply"], now: number): Promise<CartoBrain> {
-  const stale = new Set(staleAtlasNodeIds(brain, (path) => mtimeOf(root, path)));
   let next = brain;
-  for (const node of brain.atlas) {
-    const shouldBeStale = stale.has(node.id);
-    const isStale = node.stale === true;
-    if (shouldBeStale === isStale) continue;
-    next = await apply({ kind: "atlas.stale", id: node.id, stale: shouldBeStale }, now);
-  }
+  for (const step of prepareCollapseFreshness(root, brain, now)) next = await apply(step.write, step.now);
   return next;
 }
 

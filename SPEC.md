@@ -776,9 +776,14 @@ or change direct collapse. A dormant record planner now reuses ordinary
 collapse's Brain mark writes and archive restore logic to prepare archived or
 deleted records and a prospective Brain. It rejects conflicting archive IDs and
 record restores rather than overwriting existing data, and separately reports
-ephemeral restores that still need destinations. It neither advances archive
-grace nor commits the plan; Atlas freshness, writer sealing and child restore
-remain unfinished. The return path
+ephemeral restores that still need destinations. The composed prospective plan
+also prepares ordinary Atlas freshness writes before record marks and renders
+the next head with the ordinary projection, excluding checkpointed Chat IDs.
+It uses the original Brain as the expected commit snapshot and does not write
+freshness separately. These filesystem reads are not atomic or locked; archived
+Atlas restores retain ordinary collapse's existing freshness ordering. The plan
+neither advances archive grace nor commits; writer sealing, child restore and
+journal integration remain unfinished. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this
