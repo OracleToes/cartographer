@@ -94,10 +94,17 @@ proposal text; unresolved details are not implicitly decided by them.
   with a specific alternative counts as approval; no redundant separate
   confirmation is needed. Incidental changes not covered by that request still
   need to be flagged and confirmed.
+- **Unexpected behavior change during implementation.** If a delegate discovers
+  that completing its task would change behavior the person did not request, it
+  returns a blocked report to main rather than asking the person directly. Main
+  explains the affected behavior and its status, asks the person, updates the
+  specification if needed, and delegates the next step. Work already done
+  remains in the project. The person retains the normal ability to steer or
+  interrupt a delegate.
 
-**Next unanswered question:** if an implementation delegate discovers that
-finishing would change a behavior not covered by the person's request, should
-it return to main to get the person's decision, or ask the person directly?
+**Next unanswered question:** how should Carto classify a requirement in an
+existing project specification when it cannot establish whether the person
+explicitly requested or accepted it?
 
 ## 1. Recommendation in one sentence
 
