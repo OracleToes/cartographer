@@ -78,12 +78,15 @@ proposal text; unresolved details are not implicitly decided by them.
   - Observed behavior can be promoted to accepted or dictated; accepted behavior
     can be promoted to dictated. A lack of objection is not acceptance, and
     acceptance alone is not dictation. How these statuses are represented in
-    the chosen standard, their effect on changes, and the mechanics of promotion
-    remain open.
+    the chosen standard and the mechanics of promotion remain open.
+- **Changing observed behavior.** When a requested feature would change an
+  observed behavior, main flags the consequence and asks the person before
+  changing it. This decision is not an automatic promotion or acceptance of
+  the observed behavior.
 
-**Next unanswered question:** if a requested feature would change an observed
-behavior, should main flag the consequence and ask the person before changing
-it? That is a recommendation for discussion, not an agreed rule.
+**Next unanswered question:** if a requested feature would incidentally change
+an accepted behavior that the person did not explicitly request changing,
+should main similarly flag it and ask before making the change?
 
 ## 1. Recommendation in one sentence
 
