@@ -15,6 +15,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
+import { createInferenceAdmission } from "../dist/runtime/inference-admission.js";
 import { loadGlobalConfig, saveGlobalConfig, updateConfigModel } from "../dist/runtime/config.js";
 import { runHeadless } from "../dist/runtime/headless.js";
 import { closeLiveSession, openLiveSession, submitInput, switchSessionModel, waitForRunEnd } from "../dist/runtime/live-session.js";
@@ -37,6 +38,44 @@ const fixture = async () => {
     },
   };
 };
+
+test("session inference admission serializes stream methods and cancels waiting requests", async () => {
+  const faux = fauxProvider({ provider: "serial-test", models: [{ id: "one" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const admitted = createInferenceAdmission(models);
+  const model = models.getModel("serial-test", "one");
+  let releaseFirst;
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const hold = new Promise((resolve) => { releaseFirst = resolve; });
+  faux.setResponses([
+    async () => { markStarted(); await hold; return fauxAssistantMessage("first"); },
+    () => fauxAssistantMessage("second"),
+    () => { throw new Error("provider failed"); },
+    () => fauxAssistantMessage("after failure"),
+  ]);
+  const context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+  const first = admitted.streamSimple(model, context);
+  try {
+    await started;
+    const second = admitted.stream(model, context);
+    const abort = new AbortController();
+    const cancelled = admitted.streamSimple(model, context, { signal: abort.signal });
+    abort.abort();
+    assert.equal((await cancelled.result()).stopReason, "aborted");
+    assert.equal(faux.state.callCount, 1, "neither waiting request reached the provider");
+    releaseFirst();
+    assert.equal((await first.result()).stopReason, "stop");
+    assert.equal((await second.result()).stopReason, "stop");
+    assert.equal(faux.state.callCount, 2);
+    const failed = admitted.streamSimple(model, context);
+    const following = admitted.stream(model, context);
+    assert.equal((await failed.result()).stopReason, "error");
+    assert.equal((await following.result()).stopReason, "stop", "a failed request releases the model");
+    assert.equal(faux.state.callCount, 4);
+  } finally { releaseFirst(); }
+});
 
 test("loadGlobalConfig honors modelOverride in memory without touching config.json; updateConfigModel updates only model", async () => {
   const home = mkdtempSync(join(tmpdir(), "carto-config-model-"));

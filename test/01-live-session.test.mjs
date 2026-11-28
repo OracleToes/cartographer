@@ -162,6 +162,36 @@ test("a returned handoff survives crashes after sweep and after destination plac
   }
 });
 
+test("a separate Pi conversation runs with its own context and no inherited tools", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "main-sleep" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxText("separate response")])),
+  ]);
+  const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes" });
+  try {
+    const main = await submitInput(session, "main private context");
+    await main.wait(BACKGROUND_CONTEXT);
+    await waitForRunEnd(session);
+    const child = await session.harness.createConversation({
+      ownership: { kind: "ownerless" },
+      agent: { model: ref, extensions: [], tools: [], instructions: "Answer this focused request only.", cwd: root, compaction: { enabled: false } },
+    }, BACKGROUND_CONTEXT);
+    const sub = await child.submit({ type: "input", content: "delegate specific request" }, BACKGROUND_CONTEXT);
+    assert.equal((await sub.wait(BACKGROUND_CONTEXT)).status, "done");
+    await child.waitForIdle(BACKGROUND_CONTEXT);
+    assert.match(JSON.stringify(captured[0]), /main private context/);
+    assert.match(JSON.stringify(captured[1]), /delegate specific request/);
+    assert.doesNotMatch(JSON.stringify(captured[1]), /main private context/);
+    assert.deepEqual((await child.agent(BACKGROUND_CONTEXT)).tools, []);
+    assert.match(JSON.stringify((await child.context(BACKGROUND_CONTEXT)).messages), /separate response/);
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
 test("delegate reports and missing reports stay distinct", () => {
   const input = { id: "task-1", role: "implementation", instruction: "Fix the issue", doneWhen: "Report changes" };
   const report = { status: "blocked", findings: "Unexpected behavior", changes: "none", checks: "not run", uncertainty: "impact unknown", remaining: "ask the person", mainMessage: "Blocked" };

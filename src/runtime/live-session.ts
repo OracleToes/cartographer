@@ -65,6 +65,7 @@ import {
   type CollapseTrigger,
 } from "./collapse-log.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
+import { createInferenceAdmission } from "./inference-admission.js";
 import { RestDoc } from "./sleep-task.js";
 import { DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
 import { createModelTelemetry } from "./model-telemetry.js";
@@ -226,7 +227,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   // One gate per session, around every model call the session makes (§9).
   // Opened before the harness, so the first request it makes is already gated.
   const freeze = createStreamFreeze();
-  const gatedModels = freeze.gate(options.models, createModelTelemetry(state), () => state.activeModel);
+  const gatedModels = createInferenceAdmission(freeze.gate(options.models, createModelTelemetry(state), () => state.activeModel));
   const jobs = options.jobs ?? createJobTable({ root, now });
 
   let harness: Harness | undefined;

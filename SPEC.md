@@ -721,8 +721,16 @@ placement without replacing a conflicting document. An unfinished, retired,
 ambiguous or unsupported handoff instead prevents collapse; its source is
 preserved. These checks assume the existing collapse lifecycle: the caller has
 stopped writers to the generation; they are not a cross-process writer lock.
-The record is not wired to model execution or UI and does not imply a model
-lease, isolation, report delivery, or recovery of external side effects.
+The record is not wired to model execution or UI and does not imply isolation,
+report delivery, or recovery of external side effects.
+
+A session-local inference admission gate serializes Pi's `stream` and
+`streamSimple` requests across conversations in that session. A request aborted
+while waiting is not sent to the provider; errors release the next request.
+This is a building block, not yet the full orchestration lease: deferred model
+requests, other processes and other sessions are not covered. Orchestration
+must not be enabled until all its inference paths, including recovery, are
+covered and person-facing task controls are implemented.
 
 ### 6.1 Read only mode and edit mode
 
