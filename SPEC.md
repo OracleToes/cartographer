@@ -711,18 +711,18 @@ A dormant handoff-record foundation uses a Pi Durable conversation document in
 the main generation's store. It can record one prepared task, its transition to
 running, and its return as either a delegate-authored report, a person-ended
 reason (which may be blank), or a failure with no report. A second task or an
-invalid transition is refused without replacing the recorded task. The record
-survives reopening that generation. It is not wired to model execution or UI,
-and it does not survive generation collapse by itself: the future handoff
-protocol must reconcile it with the existing cross-store collapse journal before
-using it for real work. Until then, collapse refuses to remove a generation
-containing a delegation document, even a retired or empty one; it preserves the
-store for recovery. A live-session collapse checks before interrupting or closing
-the session, and committed collapse recovery checks the source before deleting
-it. These checks assume the existing collapse lifecycle: the caller has stopped
-writers to the generation; they are not a cross-process writer lock. This record
-does not imply a model lease, isolation, report delivery, or recovery of external
-side effects.
+invalid transition is refused without replacing the recorded task.
+
+A returned handoff crosses a full collapse: its exact source document is copied
+into a temporary Brain transfer record in the same transaction as the collapse
+sweep, verified against the source before deletion, then restored to the new
+main conversation before the transfer is acknowledged. Restart retries this
+placement without replacing a conflicting document. An unfinished, retired,
+ambiguous or unsupported handoff instead prevents collapse; its source is
+preserved. These checks assume the existing collapse lifecycle: the caller has
+stopped writers to the generation; they are not a cross-process writer lock.
+The record is not wired to model execution or UI and does not imply a model
+lease, isolation, report delivery, or recovery of external side effects.
 
 ### 6.1 Read only mode and edit mode
 

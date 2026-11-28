@@ -483,15 +483,18 @@ test("committed collapse recovery preserves a source with a delegation document"
       // before source cleanup; recovery must not guess it was archived.
       const db = await openNodeSqliteDatabase(source.store);
       try {
-        await db.exec("CREATE TABLE live_documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)");
-        await db.run("INSERT INTO live_documents (id, kind) VALUES (?, ?)", 1, JSON.stringify("carto.delegation"));
+        await db.exec("CREATE TABLE live_documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, scope_kind TEXT, owner_id INTEGER, family INTEGER, key_value TEXT, retired_at INTEGER)");
+        await db.exec("CREATE TABLE live_document_revisions (document_id INTEGER, seq INTEGER, kind TEXT, version INTEGER, content TEXT)");
+        await db.run("INSERT INTO live_documents VALUES (?, ?, ?, ?, ?, ?, ?)", 1, JSON.stringify("carto.delegation"), "conversation", 1, 0, JSON.stringify(""), null);
+        const content = JSON.stringify({ active: { phase: "returned", input: { id: "late", role: "capture", instruction: "Inspect", doneWhen: "Report" }, conversationId: null, result: { kind: "person-ended", reason: "" } } });
+        await db.run("INSERT INTO live_document_revisions VALUES (?, ?, ?, ?, ?)", 1, 1, "base", 1, content);
       } finally { await db.close(); }
       throw new Error("simulated crash");
     } };
     await assert.rejects(collapse(root, interrupted), /simulated crash/);
     const journal = await store.readCollapseJournal();
     assert.equal(journal.committed, true);
-    await assert.rejects(recoverCollapse(root, store), /delegation record/);
+    await assert.rejects(recoverCollapse(root, store), /delegation record/i);
     assert.equal(existsSync(source.store), true);
     assert.equal(existsSync(generationPaths(root, journal.destination).store), true);
     assert.deepEqual(await store.readCollapseJournal(), journal);

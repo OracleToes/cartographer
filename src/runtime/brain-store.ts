@@ -29,6 +29,7 @@
  * overwritten in place.
  */
 import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
+import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { Message } from "@earendil-works/pi-ai";
 import type { EntryId } from "@earendil-works/pi-durable";
@@ -80,7 +81,10 @@ export interface BrainStore {
   /** Reserve a transition before creating the next generation's files. */
   beginCollapse(source: string, destination: string, validate?: () => void): Promise<void>;
   /** Serialize filesystem recovery with other journal writers, clearing only after success. */
-  recoverCollapseJournal(recover: (journal: CollapseJournal) => Promise<void>): Promise<void>;
+  recoverCollapseJournal(recover: (journal: CollapseJournal, transfer: DelegationTransfer | undefined) => Promise<void>): Promise<void>;
+  /** Returned handoff retained across a committed collapse until placement. */
+  readDelegationTransfer(): Promise<DelegationTransfer | undefined>;
+  acknowledgeDelegationTransfer(expected: DelegationTransfer): Promise<void>;
   /**
    * Every Chat record that still exists anywhere, in the Brain or the archive.
    * This is a storage query, not the agent's context: archived Chat must not be
@@ -131,6 +135,7 @@ const ARCHIVE_TABLE =
 const COUNTER_TABLE = "CREATE TABLE IF NOT EXISTS archive_counter (id INTEGER PRIMARY KEY CHECK (id = 1), collapses INTEGER NOT NULL)";
 const COLLAPSE_JOURNAL_TABLE = "CREATE TABLE IF NOT EXISTS collapse_journal (id INTEGER PRIMARY KEY CHECK (id = 1), source TEXT NOT NULL, destination TEXT NOT NULL, owner_pid INTEGER NOT NULL, committed INTEGER NOT NULL CHECK (committed IN (0, 1)))";
 const CHAT_EDIT_TABLE = "CREATE TABLE IF NOT EXISTS chat_edit_journal (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
+const DELEGATION_TRANSFER_TABLE = "CREATE TABLE IF NOT EXISTS delegation_transfer (id INTEGER PRIMARY KEY CHECK (id = 1), document TEXT NOT NULL)";
 const ARCHIVE_INSERT =
   "INSERT INTO archive_item (id, swept_at_collapse, swept_at_generation, pinned, document) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET swept_at_collapse = excluded.swept_at_collapse, swept_at_generation = excluded.swept_at_generation, pinned = excluded.pinned, document = excluded.document";
 const ARCHIVE_SELECT = "SELECT document FROM archive_item ORDER BY rowid";
@@ -185,6 +190,8 @@ export interface CollapseChange {
   generation: string;
   /** Its source generation; the pair must match the reserved journal. */
   source: string;
+  /** Source handoff to retain in the sweep transaction, if present. */
+  delegationTransfer?: DelegationTransfer;
   /** State used to build the snapshot; reject concurrent edits rather than commit a stale head. */
   expected: { brain: CartoBrain; archive: Archive };
 
@@ -258,6 +265,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
   await database.exec(COUNTER_TABLE);
   await database.exec(COLLAPSE_JOURNAL_TABLE);
   await database.exec(CHAT_EDIT_TABLE);
+  await database.exec(DELEGATION_TRANSFER_TABLE);
   await database.exec("INSERT OR IGNORE INTO archive_counter (id, collapses) VALUES (1, 0)");
 
   const decode = (document: string): CartoBrain => {
@@ -321,6 +329,18 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     return row === undefined ? undefined : { source: row.source, destination: row.destination, ownerPid: row.owner_pid, committed: row.committed === 1 };
   };
 
+  const readTransferFrom = async (source: SqliteExecutor): Promise<DelegationTransfer | undefined> => {
+    const row = await source.get<{ document: string }>("SELECT document FROM delegation_transfer WHERE id = 1");
+    if (row === undefined) return undefined;
+    const value = JSON.parse(row.document) as DelegationTransfer;
+    if (value === null || typeof value !== "object" || typeof value.source !== "string" || typeof value.destination !== "string" ||
+        !Number.isSafeInteger(value.documentId) || value.documentId < 1 || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.content !== "string") {
+      throw new Error("Invalid delegation transfer; recovery data was preserved.");
+    }
+    parseReturnedDelegation(value.content);
+    return value;
+  };
+
   const readChatEditFrom = async (source: SqliteExecutor): Promise<ContextEditJournal | undefined> => {
     const row = await source.get<{ document: string }>("SELECT document FROM chat_edit_journal WHERE id = 1");
     return row === undefined ? undefined : JSON.parse(row.document) as ContextEditJournal;
@@ -380,6 +400,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
     beginCollapse: (source, destination, validate) => database.transaction(async (tx) => {
       await requireNoPendingEdit(tx);
       if (await readJournalFrom(tx) !== undefined) throw new Error("A collapse is already in progress or awaiting recovery.");
+      if (await readTransferFrom(tx) !== undefined) throw new Error("A delegation transfer is awaiting placement; reopen the session before collapsing.");
       validate?.();
       await tx.run("INSERT INTO collapse_journal (id, source, destination, owner_pid, committed) VALUES (1, ?, ?, ?, 0)", source, destination, process.pid);
     }),
@@ -388,8 +409,16 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       if (journal === undefined) return;
       // Hold SQLite's write lock while reconciling files: two recoveries must
       // not delete files after either has cleared and replaced the journal.
-      await recover(journal);
+      await recover(journal, await readTransferFrom(tx));
       await tx.run("DELETE FROM collapse_journal WHERE id = 1");
+    }),
+    readDelegationTransfer: () => readTransferFrom(database),
+    acknowledgeDelegationTransfer: (expected) => database.transaction(async (tx) => {
+      const current = await readTransferFrom(tx);
+      if (current === undefined) return;
+      if (JSON.stringify(current) !== JSON.stringify(expected)) throw new Error("Delegation transfer changed; it was preserved.");
+      if (await readJournalFrom(tx) !== undefined) throw new Error("Collapse recovery must finish before acknowledging a delegation transfer.");
+      await tx.run("DELETE FROM delegation_transfer WHERE id = 1");
     }),
 
     apply: (writeToApply, now) =>
@@ -518,6 +547,16 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
         );
         await tx.run(UPSERT, JSON.stringify(brain));
         await writeArchiveRows(tx, nextArchive);
+        if (change.delegationTransfer !== undefined) {
+          const transfer = change.delegationTransfer;
+          if (transfer.source !== change.source || transfer.destination !== change.generation ||
+              !Number.isSafeInteger(transfer.documentId) || transfer.documentId < 1 ||
+              !Number.isSafeInteger(transfer.revision) || transfer.revision < 1 || await readTransferFrom(tx) !== undefined) {
+            throw new Error("Invalid or conflicting delegation transfer; the sweep was not committed.");
+          }
+          parseReturnedDelegation(transfer.content);
+          await tx.run("INSERT INTO delegation_transfer (id, document) VALUES (1, ?)", JSON.stringify(transfer));
+        }
         // Commit the handoff in the same transaction as the sweep. Recovery can
         // now prove whether the old store was archived before removing it.
         await tx.run("UPDATE collapse_journal SET committed = 1 WHERE id = 1");

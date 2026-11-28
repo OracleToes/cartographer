@@ -49,7 +49,7 @@ import {
   newGenerationId,
   pinnedFileTexts,
   reconcileGenerations,
-  refuseDelegationStoreDeletion,
+  readStoredDelegation,
   removedPartKeys,
   editedPartValues,
   stablePartKeys,
@@ -66,6 +66,7 @@ import {
 } from "./collapse-log.js";
 import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { RestDoc } from "./sleep-task.js";
+import { DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
@@ -262,6 +263,27 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });
+    // A committed collapse retains the handoff in the Brain until this
+    // conversation has durably accepted the same value. A crash after the Pi
+    // commit retries the comparison rather than writing a second report.
+    const transfer = await options.brain.readDelegationTransfer();
+    if (transfer !== undefined) {
+      if (transfer.destination !== generation) throw new Error("Delegation transfer belongs to another generation; it was preserved.");
+      const expected = parseReturnedDelegation(transfer.content);
+      const existing = await harness.snapshot(DelegationDoc, conversation.id, BACKGROUND_CONTEXT);
+      if (existing === undefined) {
+        await conversation.commit(async (tx) => {
+          const target = await tx.doc(DelegationDoc, conversation.id);
+          if (target.active !== null && JSON.stringify(target) !== JSON.stringify(expected)) {
+            throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
+          }
+          target.active = expected.active;
+        }, BACKGROUND_CONTEXT);
+      } else if (JSON.stringify(existing) !== JSON.stringify(expected)) {
+        throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
+      }
+      await options.brain.acknowledgeDelegationTransfer(transfer);
+    }
     // `harness.root` skips `configure` when reopening an existing generation
     // store, leaving the persisted `pi.agent` stuck on the previous model.
     // Reconcile the persisted model with the configured one immediately so a
@@ -1175,9 +1197,9 @@ export async function collapseLiveSession(
   ceremony: CollapseOptions = {},
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
-  // Refuse before interrupting or closing the live session. The lower-level
-  // collapse checks again after the caller has stopped generation writers.
-  await refuseDelegationStoreDeletion(generationPaths(session.root, session.generation).store);
+  // Refuse an unfinished or ambiguous handoff before interrupting or closing
+  // the session. Collapse checks the checkpoint again after writers have stopped.
+  await readStoredDelegation(generationPaths(session.root, session.generation).store);
   await recoverContextEdit(session);
   const automatic = follow.automatic === true;
   const trigger: CollapseTrigger = !automatic

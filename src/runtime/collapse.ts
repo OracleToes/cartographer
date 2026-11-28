@@ -35,6 +35,7 @@ import type { PinnedEphemeral } from "../domain/records.js";
 import { applyWrite, type BrainWrite } from "../domain/brain.js";
 import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, resolvePinnedFile, resolveReadReference } from "./workspace.js";
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
+import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
 
 export interface GenerationFiles {
   generation: string;
@@ -108,26 +109,38 @@ function unlinkIfExists(path: string): void {
 const activeCollapses = new Set<string>();
 
 /**
- * Until a handoff can cross the collapse journal, preserve any generation
- * containing one. Inspect Pi's document index rather than interpreting its
- * revisions: even a retired or empty document is conservatively retained.
- * The caller must stop generation writers; this is not a cross-process lock.
+ * Read the exact Pi checkpoint in one SQLite snapshot. This document always
+ * checkpoints its changes; an unexpected revision or incarnation is ambiguous
+ * and must not be discarded. The caller must stop generation writers: this
+ * check is not a cross-process lock.
  */
-export async function refuseDelegationStoreDeletion(storePath: string): Promise<void> {
-  if (!existsSync(storePath)) return;
+export async function readStoredDelegation(storePath: string): Promise<{ documentId: number; revision: number; content: string } | undefined> {
+  if (!existsSync(storePath)) return undefined;
   const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
   try {
-    const documents = await database.get<{ name: string }>(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
-    );
-    if (documents === undefined) return;
-    // Pi stores indexed strings as JSON to preserve lone UTF-16 surrogates.
-    const handoff = await database.get<{ id: number }>(
-      "SELECT id FROM live_documents WHERE kind = ? LIMIT 1", JSON.stringify("carto.delegation"),
-    );
-    if (handoff !== undefined) {
-      throw new Error("Collapse cannot remove a generation containing a delegation record; the store was preserved for recovery.");
-    }
+    return await database.transaction(async (tx) => {
+      const documents = await tx.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
+      );
+      if (documents === undefined) return undefined;
+      // Pi JSON-encodes indexed strings, including document kinds and keys.
+      const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
+        "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify("carto.delegation"),
+      );
+      if (rows.length === 0) return undefined;
+      const doc = rows[0];
+      if (rows.length !== 1 || doc === undefined || doc.scope_kind !== "conversation" || doc.owner_id !== 1 || doc.family !== 0 || doc.key_value !== JSON.stringify("") || doc.retired_at !== null) {
+        throw new Error("Ambiguous delegation document; the generation store was preserved.");
+      }
+      const revision = await tx.get<{ seq: number; kind: string; version: number; content: string }>(
+        "SELECT seq, kind, version, content FROM live_document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1", doc.id,
+      );
+      if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
+        throw new Error("Unsupported delegation checkpoint; the generation store was preserved.");
+      }
+      parseReturnedDelegation(revision.content);
+      return { documentId: doc.id, revision: revision.seq, content: revision.content };
+    });
   } finally {
     await database.close();
   }
@@ -140,7 +153,7 @@ export async function refuseDelegationStoreDeletion(storePath: string): Promise<
  */
 export async function recoverCollapse(root: string, brain: BrainStore, finishing = false): Promise<void> {
   if (activeCollapses.has(resolve(root)) && !finishing) throw new Error("A collapse is still running for this project.");
-  await brain.recoverCollapseJournal(async (journal) => {
+  await brain.recoverCollapseJournal(async (journal, transfer) => {
     if (!Number.isSafeInteger(journal.ownerPid) || journal.ownerPid <= 0) throw new Error("Invalid collapse owner; all generation files were preserved.");
     if (journal.ownerPid !== process.pid) {
       let alive = true;
@@ -166,9 +179,23 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
     }
     const discardId = journal.committed ? journal.source : journal.destination;
     const discard = generationPaths(root, discardId);
-    // A committed source might contain a handoff not represented in the
-    // archive. Never delete it merely because the ordinary sweep committed.
-    if (journal.committed) await refuseDelegationStoreDeletion(discard.store);
+    // A committed sweep may delete the source only if any handoff still in it
+    // exactly matches the copy committed with that sweep. A missing source is
+    // possible after cleanup completed but before the journal was cleared.
+    if (journal.committed) {
+      if (transfer !== undefined && (transfer.source !== journal.source || transfer.destination !== journal.destination)) {
+        throw new Error("Delegation transfer does not match the collapse journal; all generation files were preserved.");
+      }
+      if (existsSync(discard.store)) {
+        const stored = await readStoredDelegation(discard.store);
+        const expected = transfer === undefined ? undefined : {
+          documentId: transfer.documentId, revision: transfer.revision, content: transfer.content,
+        };
+        if (JSON.stringify(stored ?? null) !== JSON.stringify(expected ?? null)) {
+          throw new Error("Delegation record changed or was not transferred; all generation files were preserved.");
+        }
+      }
+    }
     // A partially written destination is disposable only before the Brain commit;
     // after commit, the old source is disposable only because the archive owns it.
     unlinkIfExists(discard.store);
@@ -641,7 +668,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   const live = discovered[0];
   if (live === undefined) throw new Error("No live generation exists to collapse.");
   if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
-  await refuseDelegationStoreDeletion(live.store);
+  const storedDelegation = await readStoredDelegation(live.store);
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
   const archive = await brain.readArchive();
   const generation = newGenerationId(new Date(now));
@@ -767,6 +794,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
     writes,
     generation,
     source: live.generation,
+    ...(storedDelegation === undefined ? {} : { delegationTransfer: { source: live.generation, destination: generation, ...storedDelegation } satisfies DelegationTransfer }),
     expected: { brain: refreshed, archive },
     incoming: [
       ...leaving.flatMap((record) => (record.incoming === undefined ? [] : [record.incoming])),

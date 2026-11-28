@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { InboxDoc } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -78,6 +79,8 @@ test("delegation handoff is durable within a generation and preserves report pro
   try {
     const commit = (action) => session.conversation.commit(async (tx) => action(await tx.doc(DelegationDoc, session.conversation.id)), BACKGROUND_CONTEXT);
     await commit((record) => prepareDelegation(record, input));
+    await assert.rejects(collapseLiveSession(session, options, "person collapse"), /unfinished delegation/);
+    assert.equal((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active.phase, "prepared");
     await assert.rejects(commit((record) => prepareDelegation(record, { ...input, id: "task-2" })), /already recorded/);
     await assert.rejects(commit((record) => startDelegation(record, "other", 2)), /not prepared/);
     await commit((record) => startDelegation(record, "task-1", 2));
@@ -91,16 +94,70 @@ test("delegation handoff is durable within a generation and preserves report pro
     await assert.rejects(commit((record) => returnDelegation(record, "task-1", { kind: "failure", explanation: "late" })), /cannot return/);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
     const original = generationPaths(root, session.generation).store;
-    await assert.rejects(collapseLiveSession(session, options, "person collapse"), /delegation record/);
-    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned, "refusal leaves the live session open");
-    await closeLiveSession(session);
-    await assert.rejects(collapse(root, brain), /delegation record/);
-    assert.equal(existsSync(original), true);
+    session = (await collapseLiveSession(session, options, "person collapse")).session;
+    assert.equal(existsSync(original), false);
     assert.equal(await brain.readCollapseJournal(), undefined);
+    assert.equal(await brain.readDelegationTransfer(), undefined);
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
+    await closeLiveSession(session);
     session = await openLiveSession(options);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
   } finally {
     await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("a returned handoff survives crashes after sweep and after destination placement", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  try {
+    await session.conversation.commit(async (tx) => {
+      const record = await tx.doc(DelegationDoc, session.conversation.id);
+      prepareDelegation(record, { id: "return-1", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(record, "return-1", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    const original = session.generation;
+    await closeLiveSession(session);
+    const interrupted = { ...brain, applyCollapse: async (change) => {
+      await brain.applyCollapse(change);
+      throw new Error("crash after sweep");
+    } };
+    await assert.rejects(collapse(root, interrupted), /crash after sweep/);
+    const transfer = await brain.readDelegationTransfer();
+    assert.equal(transfer.source, original);
+    assert.equal((await brain.readCollapseJournal()).committed, true);
+    assert.equal(existsSync(generationPaths(root, original).store), true);
+    const interruptedAck = { ...brain, acknowledgeDelegationTransfer: async () => { throw new Error("crash after placement"); } };
+    await assert.rejects(openLiveSession({ ...options, brain: interruptedAck }), /crash after placement/);
+    assert.equal(existsSync(generationPaths(root, original).store), false);
+    assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+    // A conflicting destination must not be overwritten or acknowledged.
+    const path = generationPaths(root, transfer.destination).store;
+    const conflict = JSON.parse(transfer.content);
+    conflict.active.input.id = "other-task";
+    const changeDestination = async (content) => {
+      const db = await openNodeSqliteDatabase(path);
+      try {
+        await db.run("UPDATE live_document_revisions SET content = ? WHERE document_id IN (SELECT id FROM live_documents WHERE kind = ?)", content, JSON.stringify("carto.delegation"));
+      } finally { await db.close(); }
+    };
+    await changeDestination(JSON.stringify(conflict));
+    await assert.rejects(openLiveSession(options), /conflicts with the transfer/);
+    assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+    await changeDestination(transfer.content);
+    session = await openLiveSession(options);
+    assert.equal(session.generation, transfer.destination);
+    const restored = await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT);
+    assert.deepEqual(restored.active.result, { kind: "person-ended", reason: "" });
+    assert.equal(await brain.readDelegationTransfer(), undefined);
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.deepEqual(await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT), restored);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
 });

@@ -2,8 +2,8 @@
  * Dormant sequential handoff record. Pi commits this document with the other
  * changes in the main conversation's generation store. It is not a scheduler:
  * no model, child conversation, report delivery or collapse is driven here.
- * Collapse refuses to delete a store containing this document until a future
- * protocol can reconcile it with the cross-store collapse journal.
+ * Returned handoffs cross a collapse via the Brain's temporary transfer record.
+ * Unfinished or ambiguous handoffs remain in their source store.
  */
 import { defineDoc } from "@earendil-works/pi-durable";
 
@@ -32,6 +32,32 @@ export type Delegation =
   | { phase: "running"; input: DelegationInput; conversationId: number }
   | { phase: "returned"; input: DelegationInput; conversationId: number | null; result: DelegationReturn };
 export type DelegationRecord = { active: Delegation | null };
+
+/** Exact source revision, retained until placement in the destination succeeds. */
+export type DelegationTransfer = {
+  source: string;
+  destination: string;
+  documentId: number;
+  revision: number;
+  content: string;
+};
+
+/** Fail closed on unexpected shape; preserve the original bytes for comparison. */
+export function parseReturnedDelegation(content: string): DelegationRecord {
+  const value: unknown = JSON.parse(content);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid delegation record.");
+  const active = (value as DelegationRecord).active;
+  if (active === null || typeof active !== "object" || active.phase !== "returned") {
+    throw new Error("Collapse cannot transfer an unfinished delegation record.");
+  }
+  const check: DelegationRecord = { active: null };
+  if (active.input === null || typeof active.input !== "object") throw new Error("Invalid delegation input.");
+  prepareDelegation(check, active.input);
+  if (active.conversationId !== null) startDelegation(check, active.input.id, active.conversationId);
+  if (active.result === null || typeof active.result !== "object") throw new Error("Invalid delegation return.");
+  returnDelegation(check, active.input.id, active.result);
+  return value as DelegationRecord;
+}
 
 export const DelegationDoc = defineDoc<DelegationRecord>({
   kind: "carto.delegation",
