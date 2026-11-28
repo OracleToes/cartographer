@@ -112,6 +112,17 @@ is not proof that they were assessed or that the list is complete. It is not
 an evidence store or an atomic project snapshot. Orchestration recovery, the
 parser pilot, capture workflow and controls remain to be built.
 
+**Return-sweep integration blocker:** `readGenerationEphemera` currently reads
+entries from every Pi conversation in a generation and applies the newest head
+marker across all of them. A delegate's head can therefore hide earlier main
+entries, and unrelated child entries can be mixed into the main sweep. The
+existing direct-mode behavior must not be silently changed. Before exposing
+orchestration, make the return sweep conversation-aware, preserve the appropriate
+per-conversation archive data and head boundaries, and test actual main and child
+stores through collapse and recovery. Do not put the child's transcript in main's
+context. Also guard against destroying a source generation with child inputs
+that were already withdrawn before checkpointing.
+
 ## Decisions recorded during refinement
 
 The person asked that answers be recorded and committed as the discussion
