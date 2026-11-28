@@ -64,8 +64,13 @@ proposal text; unresolved details are not implicitly decided by them.
   they remain current; it delegates fresh capture when the affected area is
   unclear or the code or surrounding dependencies change. When not given an
   active task, main should seek to capture the project systematically, in
-  focused delegated slices. Existing unknown intent remains unknown; capture
-  alone does not authorize implementation changes.
+  focused delegated slices. On reopening with no active task, follow Carto's
+  existing startup, resume and sleep behavior rather than starting capture just
+  because orchestration mode was restored. For example, an indefinite sleep
+  remains stopped until a message or resume, while a timed sleep remains durable
+  across restart and can wake on its timer. Once main is running without an active
+  task, it should seek systematic capture. Existing unknown intent remains
+  unknown; capture alone does not authorize implementation changes.
 - **Verification is chosen by main.** Main decides when a separate verification
   context is needed; it need not run after every implementation task, so several
   changes can proceed before verification. Results must distinguish checks
@@ -135,9 +140,9 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** when a project reopens in orchestration mode with
-no active task, should Carto immediately start systematic capture, or wait for
-the person to resume it or give it work?
+**Next unanswered question:** should the maintained project specification live
+in the project alongside its code, so it can be version-controlled and shared,
+or be kept only in Carto's project-local Brain?
 
 ## 1. Recommendation in one sentence
 
