@@ -775,12 +775,17 @@ an ending intent requires a paused Pi scheduler and aborts the owning main run
 before scheduling resumes, preserving its unanswered input for the host to
 handle. It does not roll back project changes or stop independent background
 jobs. Before restart recovery aborts that main run, a dormant Pi transaction
-records the active run inputs and queued inputs, including their submission
-identities, full input content and entry metadata, in a source-generation
-checkpoint. Repeating capture for the same handoff retains the original copy.
-A missing or inconsistent input, or a queued context write, stops capture rather
-than silently dropping it. The host must stop new input admission while capturing
-and keep it stopped through recovery; the checkpoint is not an admission lock.
+records the active main and delegate run inputs and queued inputs, including
+their submission identities, full input content and entry metadata, in a
+source-generation checkpoint. The delegate's own initial task instruction is
+not a person input and is not carried. A running delegate must have a verified
+task owner and child identity. Repeating capture for the same handoff retains
+the original copy. A missing or inconsistent input, a previously failed run
+whose inputs were not captured, or a queued context write stops capture rather
+than silently dropping it. The host must stop new input admission to both
+conversations while capturing and keep it stopped through recovery; the
+checkpoint is not an admission lock. This recovery checkpoint does not yet
+route person controls or preserve already-withdrawn child inbox items.
 A dormant, explicit collapse path can transfer the checkpoint together with its
 matching returned handoff through the existing Brain journal. It verifies the
 source handoff, checkpoint and source barrier before deleting the old store,

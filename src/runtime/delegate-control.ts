@@ -70,9 +70,9 @@ export async function endDelegateNow(harness: Harness, main: Conversation, id: s
 }
 
 /**
- * Recovery must run before any caller enables scheduling, with main input
- * admission sealed. Checkpoint main's inputs before aborting its run; the
- * checkpoint still needs transfer and replay. The abort cascades to the owned
+ * Recovery must run before any caller enables scheduling, with main and child
+ * input admission sealed. Checkpoint their inputs before aborting the main run;
+ * the checkpoint still needs transfer and replay. The abort cascades to the owned
  * child and withdraws queued child input. The caller must handle main inputs
  * and collapse before allowing new inference.
  */

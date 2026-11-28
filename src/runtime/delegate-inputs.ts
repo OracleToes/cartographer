@@ -1,7 +1,8 @@
 /** Dormant source-generation checkpoint for inputs before delegate recovery aborts main. */
 import type { JsonValue } from "@earendil-works/chord/json";
-import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type Tx } from "@earendil-works/pi-durable";
+import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegateMainBarrierDoc, DelegationDoc, type DelegationTransfer } from "./delegation-record.js";
+import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
 
 export type CapturedInput = {
   submissionId: number;
@@ -67,8 +68,8 @@ export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({
 
 /**
  * Call inside the Pi transaction before abort. The host must seal input
- * admission through capture and recovery; this checkpoint is not a lock.
- * It deliberately has no clearing operation until transfer/replay exists.
+ * admission to main and child through capture and recovery; this checkpoint
+ * is not a lock. A retry retains the original snapshot.
  */
 export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, id: string): Promise<void> {
   const active = (await tx.doc(DelegationDoc, mainId)).active;
@@ -83,39 +84,67 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
     return;
   }
   if (!Array.isArray(saved.inputs) || saved.inputs.length !== 0) throw new Error("Invalid empty input checkpoint; it was preserved.");
-  const live = await tx.doc(LiveDoc, mainId);
-  const inbox = await tx.doc(InboxDoc, mainId);
-  if (live.run === undefined && (live.runFailure?.inputs.length ?? 0) > 0) {
-    throw new Error("Main already ended without a checkpoint; its inputs were preserved for recovery.");
-  }
   const inputs: CapturedInput[] = [];
-  for (const submissionId of live.run?.inputs ?? []) {
-    const submission = await tx.submission(submissionId);
-    if (submission?.type !== "input" || submission.conversationId !== mainId || submission.status !== "placed") {
-      throw new Error("A running main input is missing or inconsistent; it was preserved.");
+  const capture = async (conversationId: ConversationId, initialRequest?: string) => {
+    const live = await tx.doc(LiveDoc, conversationId);
+    const inbox = await tx.doc(InboxDoc, conversationId);
+    if (live.run === undefined && (live.runFailure?.inputs.length ?? 0) > 0) {
+      for (const failedId of live.runFailure?.inputs ?? []) {
+        const failed = await tx.submission(failedId);
+        if (initialRequest === undefined || failed?.type !== "input" || failed.conversationId !== conversationId || failed.status !== "unanswered" || failed.requestId !== initialRequest) {
+          throw new Error("A run already ended without an input checkpoint; its inputs were preserved for recovery.");
+        }
+      }
     }
-    const entry = await tx.entry(submission.entry);
-    const message = entry?.model?.[0];
-    if (entry?.conversationId !== mainId || entry.model?.length !== 1 || message?.role !== "user") {
-      throw new Error("A running main input entry is missing or inconsistent; it was preserved.");
+    for (const submissionId of live.run?.inputs ?? []) {
+      const submission = await tx.submission(submissionId);
+      if (submission?.type !== "input" || submission.conversationId !== conversationId || submission.status !== "placed") {
+        throw new Error("A running input is missing or inconsistent; it was preserved.");
+      }
+      if (initialRequest !== undefined && submission.requestId === initialRequest) {
+        if (active.phase === "returned") throw new Error("The delegate's report run has not settled; its inputs were preserved.");
+        continue;
+      }
+      const entry = await tx.entry(submission.entry);
+      const message = entry?.model?.[0];
+      if (entry?.conversationId !== conversationId || entry.model?.length !== 1 || message?.role !== "user") {
+        throw new Error("A running input entry is missing or inconsistent; it was preserved.");
+      }
+      inputs.push({
+        submissionId, placement: "placed", whenBusy: "followUp",
+        content: JSON.parse(JSON.stringify(message.content)) as JsonValue,
+        entry: { kind: entry.kind, ...(entry.data === undefined ? {} : { data: entry.data }) },
+      });
     }
-    inputs.push({
-      submissionId, placement: "placed", whenBusy: "followUp",
-      content: JSON.parse(JSON.stringify(message.content)) as JsonValue,
-      entry: { kind: entry.kind, ...(entry.data === undefined ? {} : { data: entry.data }) },
-    });
-  }
-  for (const item of inbox.items) {
-    if (item.mode === "write") throw new Error("A queued context write needs recovery; it was preserved.");
-    const submission = await tx.submission(item.id);
-    if (submission?.type !== "input" || submission.conversationId !== mainId || submission.status !== "queued") {
-      throw new Error("A queued main input is missing or inconsistent; it was preserved.");
+    for (const item of inbox.items) {
+      if (item.mode === "write") throw new Error("A queued context write needs recovery; it was preserved.");
+      const submission = await tx.submission(item.id);
+      if (submission?.type !== "input" || submission.conversationId !== conversationId || submission.status !== "queued") {
+        throw new Error("A queued input is missing or inconsistent; it was preserved.");
+      }
+      if (initialRequest !== undefined && submission.requestId === initialRequest) continue;
+      inputs.push({
+        submissionId: item.id, placement: "queued", whenBusy: item.mode,
+        content: item.content as JsonValue,
+        entry: item.entry === undefined ? { kind: "pi.user" } : { kind: item.entry.kind, ...(item.entry.data === undefined ? {} : { data: item.entry.data }) },
+      });
     }
-    inputs.push({
-      submissionId: item.id, placement: "queued", whenBusy: item.mode,
-      content: item.content as JsonValue,
-      entry: item.entry === undefined ? { kind: "pi.user" } : { kind: item.entry.kind, ...(item.entry.data === undefined ? {} : { data: item.entry.data }) },
-    });
+  };
+  await capture(mainId);
+  if (active.conversationId !== null) {
+    const childId = active.conversationId as ConversationId;
+    const identity = await tx.doc(DelegateChildIdentityDoc, childId);
+    const child = await tx.conversation(childId);
+    if (Object.keys(identity).length !== 3 || identity.mainId !== mainId || !Number.isSafeInteger(identity.ownerId) ||
+        identity.ownerId === null || identity.ownerId < 1 || identity.handoffId !== id || id !== `delegate:${identity.ownerId}` ||
+        child?.owner?.conversationId !== mainId || child.owner.taskId !== identity.ownerId) {
+      throw new Error("Delegate child ownership conflicts with the checkpoint; its inputs were preserved.");
+    }
+    const owner = await tx.task(identity.ownerId as TaskId);
+    if (owner?.kind !== "pi.tool" || owner.conversationId !== mainId) {
+      throw new Error("Delegate owner is unavailable; its inputs were preserved.");
+    }
+    await capture(childId, `carto.delegate-input:${identity.ownerId}`);
   }
   inputs.sort((left, right) => left.submissionId - right.submissionId);
   if (new Set(inputs.map((input) => input.submissionId)).size !== inputs.length) {

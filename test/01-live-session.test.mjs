@@ -42,7 +42,7 @@ import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
-import { admitDelegateInput, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
+import { admitDelegateInput, DelegateChildIdentityDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
@@ -600,6 +600,11 @@ test("delegate barrier holds a queued child follow-up after its report", async (
     assert.equal(faux.state.callCount, 2, "the queued child run never reaches the model");
     const beforeAbort = await queued.status(BACKGROUND_CONTEXT);
     assert.equal(beforeAbort.status, "placed", "the held input remains identifiable for host recovery");
+    await main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT);
+    const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.deepEqual(saved.inputs.find((input) => input.submissionId === queued.id), {
+      submissionId: queued.id, placement: "placed", whenBusy: "followUp", content: "Preserve this follow-up", entry: { kind: "pi.user" },
+    });
     await child.abort(BACKGROUND_CONTEXT);
     assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal((await mainInput.wait(BACKGROUND_CONTEXT)).status, "done");
@@ -837,10 +842,16 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     const steering = await main.submit({ type: "input", content: "A steer", whenBusy: "steer" }, BACKGROUND_CONTEXT);
     const write = await main.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "context write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
+    const childInput = [{ type: "text", text: "Delegate follow-up" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }];
+    const childQueued = await child.submit({ type: "input", content: childInput, whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:child" } } }, BACKGROUND_CONTEXT);
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /queued context write/);
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), { handoffId: null, inputs: [] });
     assert.equal(await write.abort(BACKGROUND_CONTEXT), "aborted");
+    await main.commit(async (tx) => { (await tx.doc(DelegateChildIdentityDoc, child.id)).handoffId = "wrong"; }, BACKGROUND_CONTEXT);
+    await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /child ownership conflicts/);
+    await main.commit(async (tx) => { (await tx.doc(DelegateChildIdentityDoc, child.id)).handoffId = active.input.id; }, BACKGROUND_CONTEXT);
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(requestImmediateDelegateEnd(main, active.input.id, "different", BACKGROUND_CONTEXT), /different reason/);
     const lateReport = { status: "done", findings: "none", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
@@ -861,7 +872,9 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
       { submissionId: submission.id, placement: "placed", whenBusy: "followUp", content: "Keep this request", entry: { kind: "carto.user", data: { chatRecordId: "chat:original" } } },
       { submissionId: queued.id, placement: "queued", whenBusy: "followUp", content: attachment, entry: { kind: "carto.user", data: { chatRecordId: "chat:queued" } } },
       { submissionId: steering.id, placement: "queued", whenBusy: "steer", content: "A steer", entry: { kind: "pi.user" } },
+      { submissionId: childQueued.id, placement: "queued", whenBusy: "followUp", content: childInput, entry: { kind: "carto.user", data: { chatRecordId: "chat:child" } } },
     ] });
+    assert.equal((await (await harness.submission(childQueued.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");
     await main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT);
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "replay never replaces the pre-abort snapshot");
     await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);

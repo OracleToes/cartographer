@@ -70,10 +70,12 @@ control now records the person's reason as an ending intent, aborts the child's
 ordinary Pi work, then records a person-ended return. A restart helper requires
 Pi scheduling to remain paused and aborts the owning main run before resuming;
 its unanswered inputs still require host handling. Before the recovery abort,
-a dormant transaction checkpoints the active run's and inbox's input content,
-submission identity and entry metadata in the source generation, with replay
-reuse and refusal of ambiguous input or queued context writes. The host must
-seal input admission during capture and recovery. An explicit, dormant collapse
+a dormant transaction checkpoints active main and delegate run and inbox input
+content, submission identity and entry metadata in the source generation,
+excluding the delegate's own initial task instruction. It validates child
+ownership, reuses the snapshot on retry, and refuses ambiguous inputs or queued
+context writes. The host must seal both conversations' input admission during
+capture and recovery; already-withdrawn child inbox items are not recovered. An explicit, dormant collapse
 path now transfers the checkpoint with its matching handoff using the existing
 Brain journal and verifies the source barrier and both documents. Placement is
 atomic in the destination; conflicts preserve both copies. Ordinary collapse
