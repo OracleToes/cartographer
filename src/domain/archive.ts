@@ -53,6 +53,16 @@ export interface ArchiveMark {
   author: Author;
 }
 
+/** Identity of a Pi contribution captured for a future delegate return sweep. */
+export interface EphemeralSource {
+  version: 1;
+  generation: string;
+  conversationId: number;
+  entryId: number;
+  entryKind: string;
+  entryData?: unknown;
+}
+
 /** One thing in the archive. */
 export interface ArchivedItem {
   /** Storage-level identity. The agent never sees it (§5.4). */
@@ -62,7 +72,7 @@ export interface ArchivedItem {
   /** Set for a record; absent for an ephemeral item. */
   record?: { kind: ArchivedKind; value: ArchivedRecord };
   /** Set for an ephemeral item; absent for a record. */
-  ephemeral?: { kind: EphemeralKind; text: string; data?: unknown; model?: unknown };
+  ephemeral?: { kind: EphemeralKind; text: string; data?: unknown; model?: unknown; source?: EphemeralSource };
   /** The generation whose collapse swept this item in, for the person to read. */
   sweptAtGeneration: string;
   /**

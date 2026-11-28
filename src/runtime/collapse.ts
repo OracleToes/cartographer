@@ -441,22 +441,26 @@ export type ReturnSweepPart = {
  * editing and archive conversion. Tool IDs are scoped to one conversation;
  * ambiguous calls, unsupported multi-message entries and image-only inputs
  * fail rather than silently lose data. The result is only a preparation: its
- * provenance has not been persisted, Chat has not been deduplicated, and child
- * restoration or journal recovery is not implemented. It must not authorize
+ * provenance can be carried by archive rows but has not been swept, Chat has
+ * not been deduplicated, and child restoration or journal recovery is not
+ * implemented. It must not authorize
  * source deletion. The caller must keep the source writers sealed.
  */
 export function prepareReturnSweepParts(views: readonly ReturnSweepView[], generation: string): ReturnSweepPart[] {
+  if (!generation) throw new Error("Return sweep has no source generation; the source was preserved.");
   const parts: ReturnSweepPart[] = [];
   const conversations = new Set<number>();
   const entries = new Set<number>();
   for (const { conversation, view } of views) {
-    if (conversation.parent !== undefined || conversations.has(conversation.id) || view.entries.length !== view.contributions.length) {
+    if (conversation.parent !== undefined || !Number.isSafeInteger(conversation.id) || conversation.id < 1 ||
+        conversations.has(conversation.id) || view.entries.length !== view.contributions.length) {
       throw new Error("Ambiguous return-sweep conversations; the source was preserved.");
     }
     conversations.add(conversation.id);
     const parsed: SweepEntry[] = view.entries.map((entry, index) => {
       const messages = view.contributions[index]!;
-      if (entry.conversationId !== conversation.id || entries.has(entry.id) || messages.length > 1 || (entry.model?.length ?? 0) > 1) {
+      if (entry.conversationId !== conversation.id || !Number.isSafeInteger(entry.id) || entry.id < 1 || !entry.kind ||
+          entries.has(entry.id) || messages.length > 1 || (entry.model?.length ?? 0) > 1) {
         throw new Error("Unsupported or ambiguous return-sweep entry; the source was preserved.");
       }
       entries.add(entry.id);
@@ -499,8 +503,11 @@ export function prepareReturnSweepParts(views: readonly ReturnSweepView[], gener
     const byId = new Map(view.entries.map((entry) => [String(entry.id), entry]));
     for (const { entryId, item } of sweepParsedEntries(parsed, generation)) {
       const source = byId.get(entryId)!;
+      if (item.ephemeral === undefined) throw new Error("A return-sweep part is not ephemeral; the source was preserved.");
+      const provenance = { version: 1 as const, generation, conversationId: conversation.id, entryId: source.id, entryKind: source.kind,
+        ...(source.data === undefined ? {} : { entryData: source.data }) };
       parts.push({ conversationId: conversation.id, entryId: source.id, entryKind: source.kind,
-        ...(source.data === undefined ? {} : { entryData: source.data }), item });
+        ...(source.data === undefined ? {} : { entryData: source.data }), item: { ...item, ephemeral: { ...item.ephemeral, source: provenance } } });
     }
   }
   return parts.sort((left, right) => left.entryId - right.entryId);

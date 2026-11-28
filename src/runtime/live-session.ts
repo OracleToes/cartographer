@@ -23,6 +23,7 @@ import {
   Harness,
   InboxDoc,
   LiveDoc,
+  ROOT_CONVERSATION_ID,
   type Conversation,
   type EntryId,
   type HarnessOptions,
@@ -1051,6 +1052,17 @@ export async function interruptRun(session: LiveSession): Promise<boolean> {
 export async function restoreEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
   const ephemeral = item.ephemeral;
   if (ephemeral === undefined) return false;
+  // Legacy rows have no source. New return-sweep rows must prove they came
+  // from the main conversation; child contexts have no restore destination
+  // yet. A malformed source cannot be treated as a legacy main item.
+  const source: unknown = ephemeral.source;
+  if (source !== undefined) {
+    if (source === null || typeof source !== "object" || Array.isArray(source)) return false;
+    const value = source as { version?: unknown; generation?: unknown; conversationId?: unknown; entryId?: unknown; entryKind?: unknown };
+    if (value.version !== 1 || typeof value.generation !== "string" || !value.generation ||
+        value.conversationId !== ROOT_CONVERSATION_ID || typeof value.entryId !== "number" || !Number.isSafeInteger(value.entryId) || value.entryId < 1 ||
+        typeof value.entryKind !== "string" || !value.entryKind || !item.id.startsWith(`${value.generation}:${value.entryId}:`)) return false;
+  }
   let model: Message[];
   if (Array.isArray(ephemeral.model) && ephemeral.model.length > 0) {
     const saved = structuredClone(ephemeral.model) as Message[];

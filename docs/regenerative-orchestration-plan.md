@@ -142,11 +142,15 @@ edit semantics, and checking bounds before and after capture. It rejects forks;
 its caller must seal all writers, since the checks are not a lock and do not
 cover inbox or task changes. A dormant conversion now reuses Carto's existing
 archive-part logic on each captured context separately, pairs tool results only
-within their conversation, and returns entry/conversation provenance without
-persisting it. It rejects duplicate or missing call identities, multi-message
-entries and image-only user inputs rather than guessing. It does not archive,
-deduplicate Chat or remove the return guard. Persistent archive provenance,
-provenance-aware restoration, Chat deduplication and crash-safe journal
+within their conversation, and attaches versioned source generation,
+conversation and entry provenance to each item. Archive storage and editing
+retain it when explicitly written. Main restoration now refuses child or
+malformed source provenance; legacy rows without it retain their old behavior
+and cannot be distinguished from a row whose provenance was lost. The helper
+rejects duplicate or missing call identities, multi-message entries and
+image-only user inputs rather than guessing. The actual return path does not
+archive the prepared items, deduplicate Chat or remove the return guard. Child
+restoration, identity-aware Chat deduplication and crash-safe journal
 integration are still needed. The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.

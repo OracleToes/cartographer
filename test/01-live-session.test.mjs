@@ -252,6 +252,58 @@ test("return sweep captures each Pi context with its own head and edits", async 
   }
 });
 
+test("return-sweep provenance survives archive operations and blocks child restoration into main", async () => {
+  const { root, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const path = join(root, ".brain", "provenance-test.sqlite");
+  let brain = await openBrain(path);
+  let session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    await session.conversation.submit({ type: "write", entry: { kind: "test.main-input", model: [{ role: "user", content: "main archive content", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    await child.submit({ type: "write", entry: { kind: "carto.user", data: { chatRecordId: "child-chat" }, model: [{ role: "user", content: "child archive content", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    const prepared = prepareReturnSweepParts(await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), session.generation);
+    const main = prepared.find(({ entryKind }) => entryKind === "test.main-input");
+    const sub = prepared.find(({ entryKind }) => entryKind === "carto.user");
+    assert.deepEqual(sub.item.ephemeral.source, { version: 1, generation: session.generation, conversationId: child.id, entryId: sub.entryId, entryKind: "carto.user", entryData: { chatRecordId: "child-chat" } });
+    await brain.archiveEphemeral(main.item, "archive-generation", 1);
+    await brain.archiveEphemeral(sub.item, "archive-generation", 1);
+    let savedChild = (await brain.readArchive()).items.find((item) => item.id === sub.item.id);
+    await brain.editArchivedEphemeral(savedChild, "edited child archive content");
+    await brain.applyArchive({ kind: "pin", id: sub.item.id, pinned: "user" });
+    for (const id of [main.item.id, sub.item.id]) await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
+    const expected = { brain: await brain.read(), archive: await brain.readArchive() };
+    await brain.beginCollapse("test-source", "test-destination");
+    await brain.applyCollapse({ writes: [], source: "test-source", generation: "test-destination", expected, incoming: [], now: 2 });
+    assert.equal((await brain.readArchive()).items.find((item) => item.id === sub.item.id).restorePending, true);
+    // Exercise archive commit/reopen independently of real generation deletion.
+    await brain.recoverCollapseJournal(async (journal) => assert.equal(journal.committed, true));
+    await closeLiveSession(session);
+    session = undefined;
+    await brain.close();
+    brain = await openBrain(path);
+    savedChild = (await brain.readArchive()).items.find((item) => item.id === sub.item.id);
+    assert.deepEqual(savedChild.ephemeral.source, sub.item.ephemeral.source);
+    assert.equal(savedChild.ephemeral.text, "edited child archive content");
+    assert.equal(savedChild.pinned, "user");
+    session = await openLiveSession({ root, brain, models, model: ref });
+    assert.ok(!(await brain.readArchive()).items.some((item) => item.id === main.item.id), "main restore was acknowledged");
+    assert.equal((await brain.readArchive()).items.find((item) => item.id === sub.item.id).restorePending, true);
+    assert.equal(await restoreEphemeral(session, savedChild), false);
+    const malformed = { ...savedChild, ephemeral: { ...savedChild.ephemeral, source: { ...savedChild.ephemeral.source, conversationId: 1, entryId: 0 } } };
+    assert.equal(await restoreEphemeral(session, malformed), false);
+    const wrongId = { ...savedChild, ephemeral: { ...savedChild.ephemeral, source: { ...savedChild.ephemeral.source, conversationId: 1, entryId: 999999 } } };
+    assert.equal(await restoreEphemeral(session, wrongId), false);
+    const restored = (await session.conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.kind === "carto.restored");
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0].model[0].content, "main archive content");
+  } finally {
+    if (session) await closeLiveSession(session).catch(() => undefined);
+    await brain.close();
+    await cleanup();
+  }
+});
+
 test("return collapse and old committed recovery preserve a multi-conversation Pi source", async () => {
   const { root, brain, cleanup } = await fixture();
   const { models, ref } = fauxSetup();
