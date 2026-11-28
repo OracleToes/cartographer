@@ -42,6 +42,7 @@ import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
+import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -245,6 +246,55 @@ test("delegate creation is atomic, replay-safe and task-owned with an isolated a
     assert.match(JSON.stringify(captured[1]), /Inspect this entry/);
     assert.doesNotMatch(JSON.stringify(captured[1]), /Main private request/);
     assert.match(JSON.stringify((await child.context(BACKGROUND_CONTEXT)).messages), /focused answer/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("a selected delegate report commits once and cannot be forged or replaced", async () => {
+  const { root: cwd, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const input = { id: "report-1", role: "implementation", instruction: "Inspect", doneWhen: "Return a report" };
+  const report = { status: "blocked", findings: "Unexpected dependency", changes: "partial edit", checks: "not run", uncertainty: "impact", remaining: "ask the person", mainMessage: "Approval needed" };
+  let childId;
+  const tool = defineTool({
+    name: "test_handoff", description: "Drive the focused child for this test.", parameters: obj({}), replay: "safe",
+    execute: async (_args, api, context) => {
+      const agent = { model: ref, cwd, instructions: "Report your findings.", extensions: [DelegateReportExtension], tools: [DelegateReportTool] };
+      childId = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id, agent), context);
+      const child = await api.conversation(childId, context);
+      const submitted = await child.submit({ type: "input", content: input.instruction, requestId: "focused-request" }, context);
+      assert.equal((await submitted.wait(context)).status, "done");
+      assert.equal(await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id, agent), context), childId);
+      return { output: [{ type: "text", text: "Returned." }] };
+    },
+  });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: "test-handoff", tools: [tool] }));
+  registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd, extensions: [registry.snapshot().extension("test-handoff")], compaction: { enabled: false } } });
+    await main.commit(async (tx) => prepareDelegation(await tx.doc(DelegationDoc, main.id), input), BACKGROUND_CONTEXT);
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("test_handoff", {}, { id: "handoff" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "report" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("main continued"),
+    ]);
+    const submitted = await main.submit({ type: "input", content: "Please work." }, BACKGROUND_CONTEXT);
+    assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const saved = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(saved.result, { kind: "delegate", report });
+    assert.equal(saved.conversationId, childId);
+    const child = await harness.conversation(childId, BACKGROUND_CONTEXT);
+    assert.deepEqual((await child.agent(BACKGROUND_CONTEXT)).tools.map((item) => item.name), ["delegate_report"]);
+    const api = { conversationId: childId, commit: (fn, context) => main.commit(fn, context) };
+    await DelegateReportTool.execute(report, api, BACKGROUND_CONTEXT);
+    await assert.rejects(DelegateReportTool.execute({ ...report, changes: "invented" }, api, BACKGROUND_CONTEXT), /different result/);
+    await assert.rejects(DelegateReportTool.execute(report, { ...api, conversationId: main.id }, BACKGROUND_CONTEXT), /task-owned/);
+    assert.deepEqual((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active, saved);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();

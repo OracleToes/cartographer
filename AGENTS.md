@@ -66,10 +66,12 @@ Rules:
 - **The `Given by` column is factual.** `person` means they supplied it.
   `agent` means you found it. Never promote a source you found into one they
   gave you; that puts your voice in their mouth.
-- **Before you write behaviour, look for it in `node_modules/@earendil-works`.**
-  If a dependency provides it, use it. If one nearly provides it, say which and
-  why it does not fit. Building behaviour a dependency already supplies is the
-  defect this section exists to prevent, and it has already happened here.
+- **Before you write behaviour, look for it in `node_modules/@earendil-works`
+  and in Carto itself.** Extend and reuse existing code first; do not rewrite
+  behavior already present elsewhere. If a dependency provides it, use it. If
+  one nearly provides it, say which and why it does not fit. Building behaviour
+  a dependency already supplies is the defect this section exists to prevent,
+  and it has already happened here.
 
 ### Model references
 

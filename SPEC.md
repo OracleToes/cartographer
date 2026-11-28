@@ -725,10 +725,15 @@ A separate, dormant transaction helper can attach a prepared handoff to a
 new task-owned Pi conversation, setting an explicit model, working directory
 and focused instructions, and selecting no extensions or tools. Creation,
 configuration and the transition to running commit together. A retry by the
-same owning task reuses the recorded child; mismatched ownership or ambiguous
-children are refused. This helper does not submit work or deliver a report and
-is not exposed as an orchestration feature. It does not imply isolation from
-external side effects or recovery of them.
+same owning task reuses the recorded child, including after that child has
+reported; mismatched ownership or ambiguous children are refused. A separate
+report tool can commit a structured delegate-authored report directly to the
+owning handoff and end the child's run. Replaying the identical report is
+idempotent; a conflicting or person-ended handoff is not overwritten. The
+child receives only explicitly selected extensions and tools. These foundations
+do not submit work or present a report to main and are not exposed as an
+orchestration feature. They do not imply isolation from external side effects
+or recovery of them.
 
 A session-local inference admission gate serializes Pi's `stream`,
 `streamSimple` and `streamDeferred` calls across conversations in that session;
