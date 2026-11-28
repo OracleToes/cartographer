@@ -58,7 +58,7 @@ import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
 import { prepareReturnSweepWithInputs } from "../dist/runtime/delegate-sweep-reconcile.js";
 import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
-import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc } from "../dist/runtime/delegate-limit.js";
+import { assessDelegateLimit, createDelegateLimitExtension, DelegateLimitDoc, hasDelegateLimitMarker } from "../dist/runtime/delegate-limit.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -1000,7 +1000,7 @@ test("the delegation tool runs a focused capture using Carto's existing scoped r
 });
 
 test("delegate context boundary reserves a reporting request and holds further work", async () => {
-  for (const obeys of [true, false]) {
+  for (const outcome of ["report", "blocked", "answer", "overflow"]) {
     const { root, cleanup } = await fixture();
     const { faux, models, ref, captured, factory } = fauxSetup();
     let harness, notifyBlocked, reads = 0;
@@ -1021,10 +1021,12 @@ test("delegate context boundary reserves a reporting request and holds further w
       faux.setResponses([
         factory(() => fauxAssistantMessage([fauxToolCall("delegate", { role: "capture", instruction: "Inspect", doneWhen: "Report" }, { id: "limit-delegate" })], { stopReason: "toolUse" })),
         factory(() => fauxAssistantMessage([fauxToolCall("read", {}, { id: "initial-read" })], { stopReason: "toolUse" })),
-        factory(() => fauxAssistantMessage([fauxToolCall(obeys ? "delegate_report" : "read", obeys ? report : {}, { id: "limit-call" })], { stopReason: "toolUse" })),
+        factory(() => outcome === "answer" ? fauxAssistantMessage("Unstructured answer") : outcome === "overflow"
+          ? fauxAssistantMessage([], { stopReason: "error", errorMessage: "prompt exceeds the available context size" })
+          : fauxAssistantMessage([fauxToolCall(outcome === "report" ? "delegate_report" : "read", outcome === "report" ? report : {}, { id: "limit-call" })], { stopReason: "toolUse" })),
       ]);
       const submitted = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
-      if (!obeys) await blocked;
+      if (outcome === "blocked") await blocked;
       else assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
       const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
       const marker = await harness.snapshot(DelegateLimitDoc, handoff.conversationId, BACKGROUND_CONTEXT);
@@ -1034,8 +1036,12 @@ test("delegate context boundary reserves a reporting request and holds further w
       assert.match(JSON.stringify(captured[2]), /Context is approaching its limit/);
       assert.equal(reads, 1, "non-report work after the boundary is blocked");
       assert.equal(faux.state.callCount, 3, "a later request does not reach the provider");
-      if (obeys) {
+      if (outcome === "report") {
         assert.deepEqual(handoff.result, { kind: "delegate", report });
+      } else if (outcome !== "blocked") {
+        assert.equal(handoff.result.kind, "failure");
+        assert.match(handoff.result.explanation, /estimated context reporting threshold and ended without a report/);
+        if (outcome === "overflow") assert.match(handoff.result.explanation, /prompt exceeds the available context size/);
       } else {
         assert.equal(handoff.phase, "running");
         const child = await harness.conversation(handoff.conversationId, BACKGROUND_CONTEXT);
@@ -1045,9 +1051,17 @@ test("delegate context boundary reserves a reporting request and holds further w
         assert.equal(await main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, policy), BACKGROUND_CONTEXT), "hold");
         await assert.rejects(main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, { ...policy, model: { ...ref, modelId: "other" } }), BACKGROUND_CONTEXT), /request or model changed/);
         await assert.rejects(main.commit((tx) => assessDelegateLimit(tx, child.id, heldTask, 0, { ...policy, reserveTokens: 2000 }), BACKGROUND_CONTEXT), /Invalid delegate context-limit policy/);
+        const ownerId = Number(handoff.input.id.slice("delegate:".length));
+        assert.equal(await main.commit((tx) => hasDelegateLimitMarker(tx, main.id, child.id, ownerId, handoff.input.id), BACKGROUND_CONTEXT), true);
+        await main.commit(async (tx) => { (await tx.doc(DelegateLimitDoc, child.id)).taskId = ownerId; }, BACKGROUND_CONTEXT);
+        await assert.rejects(main.commit((tx) => hasDelegateLimitMarker(tx, main.id, child.id, ownerId, handoff.input.id), BACKGROUND_CONTEXT), /marker conflicts/);
+        await main.commit(async (tx) => { (await tx.doc(DelegateLimitDoc, child.id)).taskId = marker.taskId; }, BACKGROUND_CONTEXT);
         await child.abort(BACKGROUND_CONTEXT);
         assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
-        assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result.kind, "failure");
+        const result = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result;
+        assert.equal(result.kind, "failure");
+        assert.match(result.explanation, /estimated context reporting threshold and ended without a report/);
+        assert.match(result.explanation, /aborted/);
       }
     } finally {
       await harness.close(BACKGROUND_CONTEXT);

@@ -796,7 +796,11 @@ request is held until the host aborts it. A tool hook blocks new non-report
 calls after the marker. The estimate is approximate, a large result can already
 overshoot, and the model may not report. Pi can replay a tool with an already
 recorded intent without rerunning the hook, so this is not a universal tool
-execution guard. The host must select and retain the extension, ensure no other
+execution guard. If the child settles without a report after the marker, the
+dormant delegation tool checks its handoff, owner, generation and cutoff entry
+before identifying the estimated reporting threshold in the failure; it still
+retains Pi's unanswered reason and detail when present. An inconsistent marker
+is not used to invent a result. The host must select and retain the extension, ensure no other
 hook removes its guidance, supply the correct model/window/reserve, stop and
 reconcile held or recovered work, and preserve person inputs. It is not wired
 into orchestration and does not guarantee a report or safe return. Both delegation and delegate report require a

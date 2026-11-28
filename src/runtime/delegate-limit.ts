@@ -1,7 +1,7 @@
 /** Dormant delegate-only context-limit reporting boundary. */
 import { awaitWithContext } from "@earendil-works/chord/context";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { defineDoc, defineExtension, GenerationTask, hook, LiveDoc, ToolTask, type ConversationId, type Harness, type ModelRef, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { defineDoc, defineExtension, GenerationTask, hook, LiveDoc, ToolTask, type ConversationId, type EntryId, type Harness, type ModelRef, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
 import { DelegationDoc } from "./delegation-record.js";
 
@@ -19,6 +19,26 @@ function validState(value: DelegateLimitState): boolean {
   return Object.keys(value).length === 3 && ((value.handoffId === null && value.taskId === null && value.cutoff === null) ||
     (typeof value.handoffId === "string" && value.handoffId.length > 0 && Number.isSafeInteger(value.taskId) && (value.taskId ?? 0) > 0 &&
       Number.isSafeInteger(value.cutoff) && (value.cutoff ?? 0) > 0));
+}
+
+/** Check provenance before using a boundary marker to describe a missing report. */
+export async function hasDelegateLimitMarker(
+  tx: Tx, mainId: ConversationId, childId: ConversationId, ownerId: TaskId, handoffId: string,
+): Promise<boolean> {
+  const marker = await tx.doc(DelegateLimitDoc, childId);
+  if (!validState(marker)) throw new Error("Invalid delegate context-limit marker; the handoff was preserved.");
+  if (marker.handoffId === null) return false;
+  const child = await tx.conversation(childId);
+  const identity = await tx.doc(DelegateChildIdentityDoc, childId);
+  const task = await tx.task(marker.taskId as TaskId);
+  const entry = await tx.entry(marker.cutoff as EntryId);
+  if (marker.handoffId !== handoffId || handoffId !== `delegate:${ownerId}` ||
+      Object.keys(identity).length !== 3 || identity.mainId !== mainId || identity.ownerId !== ownerId ||
+      identity.handoffId !== handoffId || child?.owner?.conversationId !== mainId || child.owner.taskId !== ownerId ||
+      task?.kind !== "pi.generation" || task.conversationId !== childId || entry?.conversationId !== childId) {
+    throw new Error("Delegate context-limit marker conflicts with its source; the handoff was preserved.");
+  }
+  return true;
 }
 
 /**

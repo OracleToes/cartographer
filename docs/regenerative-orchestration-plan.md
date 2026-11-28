@@ -108,6 +108,11 @@ fail. Pi recovery can replay an already-recorded tool intent without calling
 beforeTool, and other hooks could replace the guidance. The host must control
 extension selection and ordering, policy, recovery and input preservation;
 this foundation alone does not guarantee forced reporting or a safe return.
+If a delegate settles without a report after the marker, the dormant delegation
+tool checks the marker against the child, owner, generation task and cutoff entry,
+then identifies the estimated threshold in its failure while retaining Pi's
+unanswered reason and detail. A conflicting marker blocks that attribution and
+preserves the handoff; this does not checkpoint or abort a held child.
 Recovery preserves partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.

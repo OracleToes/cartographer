@@ -11,6 +11,7 @@ import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, returnDelegat
 import { requireSoleDelegateCall } from "./delegate-round.js";
 import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc } from "./delegate-input-replay.js";
+import { hasDelegateLimitMarker } from "./delegate-limit.js";
 
 type Profile = { extensions: readonly Extension[]; tools: readonly ToolRegistration[] };
 
@@ -95,9 +96,11 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
           const record = await tx.doc(DelegationDoc, api.conversationId);
           if (record.active === null || record.active.input.id !== id) throw new Error("The delegation handoff changed; it was preserved.");
           if (record.active.phase !== "returned" && record.active.phase !== "ending") {
+            const limit = await hasDelegateLimitMarker(tx, api.conversationId, childId, api.taskId, id);
+            const prefix = limit ? "Delegate reached its estimated context reporting threshold and ended without a report" : "Delegate ended without a report";
             const explanation = settled.status === "unanswered"
-              ? `Delegate ended without a report (${settled.reason}${settled.detail === undefined ? "" : `: ${typeof settled.detail === "string" ? settled.detail : JSON.stringify(settled.detail)}`}).`
-              : "Delegate ended without a report.";
+              ? `${prefix} (${settled.reason}${settled.detail === undefined ? "" : `: ${typeof settled.detail === "string" ? settled.detail : JSON.stringify(settled.detail)}`}).`
+              : `${prefix}.`;
             returnDelegation(record, id, { kind: "failure", explanation });
           }
         }, context);
