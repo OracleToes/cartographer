@@ -39,6 +39,7 @@ import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "
 import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay } from "./delegate-input-replay.js";
+import { captureDelegateSourceSeal } from "./delegate-source-seal.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
 export interface GenerationFiles {
@@ -246,6 +247,15 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
         };
         if (JSON.stringify(stored ?? null) !== JSON.stringify(expected ?? null)) {
           throw new Error("Delegation record changed or was not transferred; all generation files were preserved.");
+        }
+        // A seal is only a change detector, not evidence of a complete sweep.
+        // Legacy transfers lack one; when present it can only add a refusal.
+        // Writers must still be stopped across this check and file cleanup.
+        if (transfer?.sourceSeal !== undefined) {
+          const current = await captureDelegateSourceSeal(discard.store, journal.source);
+          if (current.digest !== transfer.sourceSeal.digest) {
+            throw new Error("Delegate source changed after its seal; all generation files were preserved.");
+          }
         }
         // A journal committed by an older version may have swept the wrong
         // range. Do not destroy its source, even though the Brain committed.

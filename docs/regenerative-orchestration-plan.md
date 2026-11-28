@@ -181,10 +181,15 @@ snapshot. A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be
-retained atomically with the Brain's delegation transfer. It is only a change
-detector: it is not yet bound to the captured views, Brain, projection files or
-archive plan, is not checked by recovery, and never permits source deletion.
-The host must seal writers; a SQLite read snapshot is not a lock. File-pin
+retained atomically with the Brain's delegation transfer. Committed recovery
+now compares an explicitly stored seal with any surviving source and preserves
+both generations and journal if it changed or cannot be checked. A seal does
+not weaken the multi-conversation guard; transfers without a seal keep their
+existing recovery behavior. If cleanup already removed the source before a
+crash, recovery cannot check it and continues the existing idempotent cleanup.
+This is only a change detector: it is not yet bound to the captured views,
+Brain, projection files or archive plan and never permits source deletion by
+itself. The host must seal writers; a SQLite read snapshot is not a lock. File-pin
 refresh, full checkpoint reconciliation and transaction/journal integration
 remain necessary. The actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.

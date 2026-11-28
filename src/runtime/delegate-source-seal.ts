@@ -34,8 +34,9 @@ const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
  * store with the known schema, not an empty or unrelated database.
  *
  * This does not bind a context capture or archive plan to the digest, cover the
- * projection files or Brain, or prove the source may be removed. It is not an
- * authorization to bypass the return-collapse guard. Large rows (including image
+ * projection files or Brain, or prove the source may be removed. Recovery may
+ * compare a stored seal, but it is not an authorization to bypass the
+ * return-collapse guard. Large rows (including image
  * inputs) are materialized by Pi's SQLite facade, with at most 128 rows per page.
  */
 export async function captureDelegateSourceSeal(path: string, source: string): Promise<DelegateSourceSeal> {

@@ -139,15 +139,38 @@ test("a returned handoff survives crashes after sweep and after destination plac
     }, BACKGROUND_CONTEXT);
     const original = session.generation;
     await closeLiveSession(session);
+    const originalPath = generationPaths(root, original).store;
     const interrupted = { ...brain, applyCollapse: async (change) => {
-      await brain.applyCollapse(change);
+      const sourceSeal = await captureDelegateSourceSeal(originalPath, original);
+      await brain.applyCollapse({ ...change, delegationTransfer: { ...change.delegationTransfer, sourceSeal } });
       throw new Error("crash after sweep");
     } };
     await assert.rejects(collapse(root, interrupted), /crash after sweep/);
     const transfer = await brain.readDelegationTransfer();
     assert.equal(transfer.source, original);
-    assert.equal((await brain.readCollapseJournal()).committed, true);
-    assert.equal(existsSync(generationPaths(root, original).store), true);
+    const journal = await brain.readCollapseJournal();
+    assert.equal(journal.committed, true);
+    assert.equal(existsSync(originalPath), true);
+    const sourceDb = await openNodeSqliteDatabase(originalPath);
+    try {
+      const metadata = await sourceDb.get("SELECT next_seq FROM live_durable_metadata WHERE singleton = 1");
+      await sourceDb.run("UPDATE live_durable_metadata SET next_seq = ? WHERE singleton = 1", metadata.next_seq + 1);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await assert.rejects(recoverCollapse(root, brain), /source changed after its seal/);
+        assert.deepEqual(await brain.readCollapseJournal(), journal);
+        assert.deepEqual(await brain.readDelegationTransfer(), transfer);
+        assert.equal(existsSync(originalPath), true);
+        assert.equal(existsSync(generationPaths(root, transfer.destination).store), true);
+      }
+      await sourceDb.run("UPDATE live_durable_metadata SET next_seq = ? WHERE singleton = 1", metadata.next_seq);
+    } finally { await sourceDb.close(); }
+    const interruptedCleanup = { ...brain, recoverCollapseJournal: (recover) => brain.recoverCollapseJournal(async (...args) => {
+      await recover(...args); throw new Error("crash after source cleanup");
+    }) };
+    await assert.rejects(recoverCollapse(root, interruptedCleanup), /crash after source cleanup/);
+    assert.equal(existsSync(originalPath), false);
+    assert.deepEqual(await brain.readCollapseJournal(), journal);
+    assert.deepEqual(await brain.readDelegationTransfer(), transfer);
     const interruptedAck = { ...brain, acknowledgeDelegationTransfer: async () => { throw new Error("crash after placement"); } };
     await assert.rejects(openLiveSession({ ...options, brain: interruptedAck }), /crash after placement/);
     assert.equal(existsSync(generationPaths(root, original).store), false);
@@ -526,6 +549,15 @@ test("return collapse and old committed recovery preserve a multi-conversation P
       await receiptBrain.close();
       receiptBrain = await openBrain(receiptPath);
       assert.deepEqual((await receiptBrain.readDelegationTransfer()).sourceSeal, seal);
+      const changedSource = await openNodeSqliteDatabase(sourcePaths.store);
+      try {
+        await changedSource.exec("CREATE TABLE unexpected_data (id INTEGER PRIMARY KEY)");
+        await assert.rejects(recoverCollapse(root, receiptBrain), /Unsupported delegate source tables/);
+        assert.equal((await receiptBrain.readCollapseJournal()).committed, true);
+        assert.deepEqual(await receiptBrain.readDelegationTransfer(), transfer);
+        assert.equal(existsSync(sourcePaths.store), true);
+        await changedSource.exec("DROP TABLE unexpected_data");
+      } finally { await changedSource.close(); }
       await assert.rejects(recoverCollapse(root, receiptBrain), /multiple conversations.*preserved/);
       assert.equal(existsSync(sourcePaths.store), true);
       await receiptBrain.recoverCollapseJournal(async (journal, stored) => {

@@ -874,11 +874,16 @@ permit deletion; source and Brain writers must remain sealed through its use.
 A dormant logical source seal can hash the stopped Pi store's schema and rows
 in one read-only SQLite snapshot, including committed WAL changes; unsupported
 schemas are refused. A seal may be stored with the delegation transfer in the
-Brain sweep transaction and is validated on write and read. It is only a change
-detector, not a lock or proof that the captured context and archive plan match;
-it does not cover the projection files or Brain, is not checked by recovery,
-and cannot authorize removing a multi-conversation source. The actual return
-collapse remains guarded. A dormant main-conversation generation hook holds an old generation's
+Brain sweep transaction and is validated on write and read. If a committed
+transfer carries a seal and its source still exists, recovery compares it and
+preserves the journal and generation files on mismatch or read failure. Transfers
+without seals retain their previous recovery behavior; if cleanup already
+removed the source before a crash, recovery cannot check it and continues the
+existing idempotent cleanup. The seal is only a change detector, not a lock or
+proof that the captured context and archive plan match; it does not cover the
+projection files or Brain and cannot authorize removing a multi-conversation
+source. The actual return collapse remains guarded. A dormant main-conversation
+generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for
 collapse; it cannot be released by admitting the return in the source
