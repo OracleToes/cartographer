@@ -724,7 +724,14 @@ sweep and recovery are implemented, a returned handoff with any additional Pi
 conversation refuses collapse before the sweep; recovery also refuses to delete
 a multi-conversation source of an older committed return sweep. The source and
 journal remain available for recovery. This guard requires stopped source writers
-and does not repair a source already deleted by an older version. Restart retries this
+and does not repair a source already deleted by an older version. A dormant
+capture helper can obtain each non-forked conversation's active entries and
+edited contributions from Pi's own context view, checking conversation bounds
+before and after the reads. It retains conversation and entry identities and
+refuses forks instead of guessing how to archive shared history. It does not
+perform a sweep, persist its result, detect every kind of concurrent write, or
+replace the guard: its caller must seal all writers throughout capture and
+subsequent handling. Restart retries this
 placement without replacing a conflicting document. An empty acknowledged
 handoff needs no transfer. An unfinished, retired, ambiguous or unsupported
 handoff instead prevents collapse; its source is preserved. These checks assume

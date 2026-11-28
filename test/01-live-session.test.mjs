@@ -51,6 +51,7 @@ import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
+import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -167,6 +168,48 @@ test("a returned handoff survives crashes after sweep and after destination plac
     await closeLiveSession(session);
     session = await openLiveSession(options);
     assert.deepEqual(await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT), restored);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("return sweep captures each Pi context with its own head and edits", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const main = session.conversation;
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    const write = async (conversation, entry) => conversation.submit({ type: "write", entry }, BACKGROUND_CONTEXT);
+    const user = (text) => [{ role: "user", content: text, timestamp: 1 }];
+    await write(main, { kind: "test.old", model: user("main discarded") });
+    await write(child, { kind: "test.old", model: user("child discarded") });
+    await write(main, { kind: "test.kept", model: user("main retained") });
+    const kept = (await main.context(BACKGROUND_CONTEXT)).entries.find((entry) => entry.kind === "test.kept");
+    await write(child, { kind: "test.reset", head: "self", model: user("child reset") });
+    await write(main, { kind: "test.head", head: kept.id, model: user("main head"),
+      edits: [{ target: kept.id, action: "replace", messages: user("main edited") }] });
+    await write(main, { kind: "test.call", model: [fauxAssistantMessage([fauxToolCall("read", { path: "main.ts" }, { id: "same-call" })], { stopReason: "toolUse" })] });
+    await write(child, { kind: "test.call", model: [fauxAssistantMessage([fauxToolCall("bash", { command: "pwd" }, { id: "same-call" })], { stopReason: "toolUse" })] });
+
+    const captured = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
+    assert.deepEqual(captured.map((item) => item.conversation.id), [main.id, child.id]);
+    assert.deepEqual(captured[0].view, await main.context(BACKGROUND_CONTEXT));
+    assert.deepEqual(captured[1].view, await child.context(BACKGROUND_CONTEXT));
+    assert.equal(captured[0].view.head.head, kept.id, "the marker selects an earlier retained entry");
+    assert.match(JSON.stringify(captured[0].view.contributions), /main edited/);
+    assert.doesNotMatch(JSON.stringify(captured[0].view.contributions), /main discarded|main retained|child reset/);
+    assert.match(JSON.stringify(captured[1].view.contributions), /child reset/);
+    assert.doesNotMatch(JSON.stringify(captured[1].view.contributions), /child discarded|main edited/);
+    assert.match(JSON.stringify(captured[0].view.contributions), /main.ts/);
+    assert.match(JSON.stringify(captured[1].view.contributions), /pwd/);
+    captured[0].view.entries[0].kind = "modified copy";
+    assert.notEqual((await main.context(BACKGROUND_CONTEXT)).entries[0].kind, "modified copy");
+
+    const tail = captured[0].tail;
+    await main.fork(tail, { ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT);
+    await assert.rejects(captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), /Forked conversation sweep is unsupported/);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();

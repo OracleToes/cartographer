@@ -128,8 +128,15 @@ child's transcript in main's context. As an interim fail-closed measure, return
 collapse now rejects sources containing additional conversations, and recovery
 preserves an older committed return sweep's multi-conversation source and journal.
 This does not recover a source already deleted, or make a return sweep usable.
-Also guard against destroying a source generation with child inputs that were
-already withdrawn before checkpointing.
+A dormant capture helper now reads each conversation's active entries and
+contributions from the already-open Pi Harness, preserving Pi's own head and
+edit semantics, and checking bounds before and after capture. It rejects forks;
+its caller must seal all writers, since the checks are not a lock and do not
+cover inbox or task changes. It does not archive, persist captured views or
+remove the return guard. Tool-result pairing, stable archive provenance,
+Chat deduplication, restoration, and crash-safe journal integration are still
+needed. Also guard against destroying a source generation with child inputs
+that were already withdrawn before checkpointing.
 
 ## Decisions recorded during refinement
 
