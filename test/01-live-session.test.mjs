@@ -38,6 +38,7 @@ import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dis
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
+import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -68,6 +69,50 @@ const flatten = (messages) => JSON.stringify(messages);
 
 // Independent cases own separate projects and harnesses.
 test.describe("live session (continued)", { concurrency: 2 }, () => {
+test("delegation handoff is durable within a generation and preserves report provenance", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  const input = { id: "task-1", role: "capture", instruction: "Trace the entry point", doneWhen: "Report source and unknowns" };
+  try {
+    const commit = (action) => session.conversation.commit(async (tx) => action(await tx.doc(DelegationDoc, session.conversation.id)), BACKGROUND_CONTEXT);
+    await commit((record) => prepareDelegation(record, input));
+    await assert.rejects(commit((record) => prepareDelegation(record, { ...input, id: "task-2" })), /already recorded/);
+    await assert.rejects(commit((record) => startDelegation(record, "other", 2)), /not prepared/);
+    await commit((record) => startDelegation(record, "task-1", 2));
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active,
+      { phase: "running", input, conversationId: 2 });
+    await commit((record) => returnDelegation(record, "task-1", { kind: "person-ended", reason: "" }));
+    const returned = (await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(returned.result, { kind: "person-ended", reason: "" });
+    await assert.rejects(commit((record) => returnDelegation(record, "task-1", { kind: "failure", explanation: "late" })), /cannot return/);
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
+  } finally {
+    await closeLiveSession(session);
+    await cleanup();
+  }
+});
+
+test("delegate reports and missing reports stay distinct", () => {
+  const input = { id: "task-1", role: "implementation", instruction: "Fix the issue", doneWhen: "Report changes" };
+  const report = { status: "blocked", findings: "Unexpected behavior", changes: "none", checks: "not run", uncertainty: "impact unknown", remaining: "ask the person", mainMessage: "Blocked" };
+  const record = { active: null };
+  prepareDelegation(record, input);
+  assert.throws(() => returnDelegation(record, input.id, { kind: "delegate", report }), /running/);
+  startDelegation(record, input.id, 2);
+  assert.throws(() => returnDelegation(record, input.id, { kind: "delegate", report: { ...report, checks: "" } }), /checks/);
+  returnDelegation(record, input.id, { kind: "delegate", report });
+  report.changes = "mutated after return";
+  assert.equal(record.active.result.report.changes, "none");
+  const failed = { active: null };
+  prepareDelegation(failed, input);
+  returnDelegation(failed, input.id, { kind: "failure", explanation: "overflow prevented a report" });
+  assert.deepEqual(failed.active.result, { kind: "failure", explanation: "overflow prevented a report" });
+});
+
 test("the bash tool runs through the conversation's environment: a real command, real stdout", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();

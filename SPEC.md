@@ -707,6 +707,17 @@ error rather than silently running in direct mode or claiming orchestration is
 active. This storage foundation does not implement delegation, capture, a project
 specification format, or the rest of regenerative coding.
 
+A dormant handoff-record foundation uses a Pi Durable conversation document in
+the main generation's store. It can record one prepared task, its transition to
+running, and its return as either a delegate-authored report, a person-ended
+reason (which may be blank), or a failure with no report. A second task or an
+invalid transition is refused without replacing the recorded task. The record
+survives reopening that generation. It is not wired to model execution or UI,
+and it does not survive generation collapse by itself: the future handoff
+protocol must reconcile it with the existing cross-store collapse journal before
+using it for real work. This record does not imply a model lease, isolation,
+report delivery, or recovery of external side effects.
+
 ### 6.1 Read only mode and edit mode
 
 Carto is always in one of two modes. A toggle in the workspace switches between

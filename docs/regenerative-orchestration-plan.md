@@ -31,8 +31,13 @@ The first foundation reserves and validates a per-project execution-mode
 preference in `.brain/settings.json`, defaulting legacy settings to direct. It
 is not an orchestration implementation: no UI enables it, and an attempt to
 open a project whose settings request orchestration fails explicitly rather
-than silently using direct mode. The parser pilot, sequential delegation,
-capture, controls and recovery remain to be built.
+than silently using direct mode. A dormant Pi Durable conversation document
+can retain one handoff within a generation, with distinct delegate reports,
+person-ended reasons and missing-report failures; it is not a scheduler or an
+end-to-end recovery protocol. In particular, its generation store is removed by
+collapse, so it must be reconciled with the existing collapse journal before
+real use. The parser pilot, sequential delegation, capture, controls and
+cross-generation recovery remain to be built.
 
 ## Decisions recorded during refinement
 
