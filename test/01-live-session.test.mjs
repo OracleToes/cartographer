@@ -1843,8 +1843,16 @@ test("person-ended delegate stops its in-flight work without a final report", as
       await assert.rejects(captureReturnSweepPlan(root, brain, unrelated, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /Harness does not match the named source/);
       assert.deepEqual(await captureDelegateSourceSeal(generationPaths(root, "gen-end").store, "gen-end"), capturedPlan.sourceSeal);
     } finally { await unrelated.close(BACKGROUND_CONTEXT); }
-    await assert.rejects(captureReturnSweepPlan(root, brain, harness, { scanSubmissions: async () => { throw new Error("scan unavailable"); } }, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /scan unavailable/);
-    assert.equal(await brain.readCollapseJournal(), undefined, "a failed input scan cannot create a sweep journal");
+    const unrelatedStorage = new MemoryStorage();
+    try {
+      await assert.rejects(captureReturnSweepPlan(root, brain, harness, unrelatedStorage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /scan storage does not match/);
+    } finally { await unrelatedStorage.close(BACKGROUND_CONTEXT); }
+    const unavailableScan = { document: storage.document.bind(storage), scanSubmissions: async () => { throw new Error("scan unavailable"); } };
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, unavailableScan, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /scan unavailable/);
+    let markerReads = 0;
+    const changingStorage = { scanSubmissions: storage.scanSubmissions.bind(storage), document: async (...args) => ++markerReads === 1 ? storage.document(...args) : undefined };
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, changingStorage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /scan storage does not match/);
+    assert.equal(await brain.readCollapseJournal(), undefined, "a failed or mismatched input scan cannot create a sweep journal");
     let archiveReads = 0;
     const racingBrain = { ...brain, readArchive: async () => {
       if (++archiveReads === 2) {

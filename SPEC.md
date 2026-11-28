@@ -830,10 +830,13 @@ for later commit; Pi inspection rejects unfinished source tasks or submissions,
 including background tasks and queued writes, before and after capture. The
 wrapper also reuses Pi's unanswered-submission scan to check the existing
 checkpoint for main and the owned child; an uncheckpointed unanswered input or
-a failed scan blocks capture. The caller must supply that Harness's actual
-storage: the scan cannot prove its own backing-store identity or reconstruct
-withdrawn content. These point-in-time checks do not stop scheduling, establish
-a lock, or authenticate hidden sidecar fields. Project-file observations and
+a failed scan blocks capture. Before and after the scan, Pi's Storage document
+API must return the same fresh capture challenge and document identity as the
+named source; an accidentally unrelated scan storage is refused. The caller
+must still supply the Harness's actual storage: copies, replacement or relays
+can defeat this check, and a scan cannot reconstruct withdrawn content. These
+point-in-time checks do not stop scheduling, establish a lock, or authenticate
+hidden sidecar fields. Project-file observations and
 ABA changes remain unprotected. A caller may also
 commit the captured projection digest with the source seal in the transfer and
 Brain journal. Committed recovery checks both projection files against that

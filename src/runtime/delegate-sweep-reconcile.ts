@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { ROOT_CONVERSATION_ID, type ConversationId, type Harness, type Storage, type Tx } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type ConversationId, type DocumentId, type Harness, type Storage, type Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
 import { projectContext } from "../domain/projection.js";
@@ -206,11 +206,11 @@ export async function prepareReturnSweepWithRecords(
  * its work and seal all admissions, withdrawals, context, Brain, archive,
  * projection, settings and project-file writers through eventual handling. The
  * supplied storage must be that Harness's actual backing storage: Pi's scan
- * is not part of its transaction and an unrelated storage could omit inputs. A
- * fresh Pi document challenge is written before capture and checked through a
- * read-only connection to the named store. This detects an accidentally unrelated
- * Harness, but not a copied or replaced database, a malicious relay, or a later
- * path swap. The caller must still ensure the backing-store relationship.
+ * is not part of its transaction. A fresh Pi document challenge is checked in
+ * the named store and through the supplied storage before and after the scan.
+ * This detects an accidentally unrelated Harness or storage, but not a copied
+ * or replaced database, a malicious relay, or a later path swap. The caller
+ * must still ensure the backing-store relationship.
  * Pi inspection rejects unfinished tasks and submissions before and after
  * capture, including background work and queued writes; it is not a lock. Pi's
  * unanswered-input scan is rechecked against the returned checkpoint for main
@@ -221,7 +221,7 @@ export async function prepareReturnSweepWithRecords(
  * permit, or replace the multi-conversation guard. Recheck inputs at commit.
  */
 export async function captureReturnSweepPlan(
-  root: string, brain: BrainStore, harness: Harness, storage: Pick<Storage, "scanSubmissions">,
+  root: string, brain: BrainStore, harness: Harness, storage: Pick<Storage, "scanSubmissions" | "document">,
   generation: string, id: string, now: number, person: string, context: Context,
 ) {
   if (!/^gen-[\w-]+$/.test(generation)) throw new Error("Invalid return-sweep generation; the source was preserved.");
@@ -241,14 +241,29 @@ export async function captureReturnSweepPlan(
     marker.challenge = challenge.challenge;
   }, context);
   const database = await openNodeSqliteDatabase(path, { mode: "read-only" });
+  let markerId: DocumentId;
   try {
     const storedMarker = await database.transaction((tx) => readStoredMainCheckpoint(tx, DelegateCaptureDoc.definition.kind, "delegate capture"));
     let value: unknown;
     try { value = storedMarker === undefined ? undefined : JSON.parse(storedMarker.content); } catch { value = undefined; }
-    if (!isDeepStrictEqual(value, challenge)) throw new Error("Return-sweep Harness does not match the named source; both stores were preserved.");
+    if (storedMarker === undefined || !isDeepStrictEqual(value, challenge)) throw new Error("Return-sweep Harness does not match the named source; both stores were preserved.");
+    markerId = storedMarker.documentId as DocumentId;
   } finally {
     await database.close();
   }
+  // Check the scanner's own Storage API, not only the Harness. An unrelated
+  // Storage can otherwise return an empty unanswered-input scan successfully.
+  const requireMatchingStorage = async () => {
+    const marker = await storage.document(markerId, "current", context);
+    if (marker?.record.id !== markerId || marker.record.kind !== DelegateCaptureDoc.definition.kind ||
+        marker.record.scope.kind !== "conversation" || marker.record.scope.conversationId !== ROOT_CONVERSATION_ID ||
+        marker.record.history !== "latest" || marker.record.fork !== "initial" || marker.record.key !== undefined ||
+        marker.record.retiredAt !== undefined || marker.version !== 1 || marker.deltasSinceBase !== 0 ||
+        !isDeepStrictEqual(marker.value, challenge)) {
+      throw new Error("Return-sweep scan storage does not match the named source; both stores were preserved.");
+    }
+  };
+  await requireMatchingStorage();
   const sourceSeal = await captureDelegateSourceSeal(path, generation);
   const views = await captureReturnSweepViews(harness, context);
   const captured = await harness.commit(async (tx) => {
@@ -274,6 +289,7 @@ export async function captureReturnSweepPlan(
   const main = await harness.conversation(ROOT_CONVERSATION_ID, context);
   if (main === undefined) throw new Error("Return-sweep Harness has no main conversation; the source was preserved.");
   await verifyReturnedDelegateInputs(main, storage, id, context);
+  await requireMatchingStorage();
   const after = { brain: await brain.read(), archive: await brain.readArchive() };
   if (!isDeepStrictEqual(expected, after)) throw new Error("Brain or archive changed during return-sweep capture; the source was preserved.");
   await requireReturnSweepQuiescence(harness, context);

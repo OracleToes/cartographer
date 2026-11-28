@@ -341,15 +341,15 @@ rechecks projection and Brain/archive snapshots. Pi inspection rejects unfinishe
 tasks and queued or placed submissions before and after capture, including
 background work and queued writes. It also reuses the existing unanswered-input
 scan and checkpoint verification for main and the owned child; missing content
-or a scan failure blocks capture. The host must supply the Harness's actual
-storage, since an unrelated or incomplete scan can omit inputs and the scan
-cannot reconstruct withdrawn content. These are point-in-time checks, not a
-pause or writer lock. Before fingerprinting, the wrapper writes a fresh challenge into
-a Pi source document and compares it with the named store through a read-only
-SQLite connection. This catches an accidentally unrelated Harness; once written,
-the challenge remains even if later capture fails. It cannot rule out database
-copies, replacement, relay or a subsequent
-path swap. The wrapper returns its values together but does not journal them or
+or a scan failure blocks capture. Before fingerprinting, the wrapper writes a
+fresh challenge into a Pi source document and compares it with the named store
+through a read-only SQLite connection. It also uses Pi's Storage document API
+to check the same identity and challenge before and after the submission scan,
+rejecting accidentally unrelated Harnesses or scan stores. Once written, the
+challenge remains even if later capture fails. The host must still supply the
+actual backing storage: copies, replacement, relays, a misleading scan or a
+subsequent path swap are not excluded. The scan cannot reconstruct withdrawn
+content. These are point-in-time checks, not a pause or writer lock. The wrapper returns its values together but does not journal them or
 protect against ABA changes and filesystem races. The host must ensure the
 backing-store relationship and seal writers; a SQLite read snapshot is not a
 lock. The captured projection digest can optionally be retained with a source
