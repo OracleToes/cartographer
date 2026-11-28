@@ -5,7 +5,7 @@
  */
 import { defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
-import { ensureDelegateConversation } from "./delegate-conversation.js";
+import { admitDelegateInput, ensureDelegateConversation } from "./delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "./delegate-report.js";
 import { DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
@@ -54,18 +54,29 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
           : args.role === "implementation"
             ? "Work on the requested implementation, not the project specification. If an unrequested behavior must change, stop and report blocked; preserve partial work."
             : "Verify the focused task and report the checks actually performed, results, gaps and uncertainty.";
-        const childId = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, id, {
-          model, cwd: options.cwd,
-          instructions: `${guidance} Return via delegate_report. Do not invent findings, changes or checks.`,
-          extensions: [...profile.extensions, DelegateReportExtension],
-          tools: [...profile.tools, DelegateReportTool],
-        }), context);
+        const childId = await api.commit(async (tx) => {
+          const active = (await tx.doc(DelegationDoc, api.conversationId)).active;
+          if (active?.input.id === id && active.phase === "returned") return null;
+          return ensureDelegateConversation(tx, api.conversationId, api.taskId, id, {
+            model, cwd: options.cwd,
+            instructions: `${guidance} Return via delegate_report. Do not invent findings, changes or checks.`,
+            extensions: [...profile.extensions, DelegateReportExtension],
+            tools: [...profile.tools, DelegateReportTool],
+          });
+        }, context);
+        if (childId === null) return { output: [{ type: "text" as const, text: "Delegation returned; main must collapse and reconcile the handoff." }], control: { terminate: true } };
         await api.details({ conversationId: childId }, context);
         const child = await api.conversation(childId, context);
         if (child === undefined) throw new Error("The delegate conversation is unavailable; the handoff was preserved.");
+        const submissionId = await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, id, child), context);
+        if (submissionId === null) return { output: [{ type: "text" as const, text: "Delegation returned; main must collapse and reconcile the handoff." }], control: { terminate: true } };
+        // The invocation-bound handle exposes waits only through submit(). The
+        // same request ID retrieves the already-admitted submission, even if
+        // the handoff returned between this commit and this lookup.
         const submitted = await child.submit({
           type: "input", content: JSON.stringify(input), requestId: `carto.delegate-input:${api.taskId}`,
         }, context);
+        if (submitted.id !== submissionId) throw new Error("Delegate input identity changed; the handoff was preserved.");
         const settled = await submitted.wait(context);
         await api.commit(async (tx) => {
           const record = await tx.doc(DelegationDoc, api.conversationId);

@@ -41,7 +41,7 @@ import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
-import { ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
+import { admitDelegateInput, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
@@ -269,7 +269,11 @@ test("delegate creation is atomic, replay-safe and task-owned with an isolated a
       assert.equal(replayed, childId);
       await assert.rejects(api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, "wrong-id", agent), context), /not available/);
       const child = await api.conversation(childId, context);
-      const submitted = await child.submit({ type: "input", content: input.instruction, requestId: "focused-request" }, context);
+      const admitted = await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, input.id, child), context);
+      assert.equal(await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, input.id, child), context), admitted);
+      await assert.rejects(api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId + 1, input.id, child), context), /owned handoff/);
+      const submitted = await child.submit({ type: "input", content: JSON.stringify(input), requestId: `carto.delegate-input:${api.taskId}` }, context);
+      assert.equal(submitted.id, admitted);
       assert.equal((await submitted.wait(context)).status, "done");
       return { output: [{ type: "text", text: "Delegate answered." }] };
     },
@@ -299,6 +303,46 @@ test("delegate creation is atomic, replay-safe and task-owned with an isolated a
     assert.match(JSON.stringify(captured[1]), /Inspect this entry/);
     assert.doesNotMatch(JSON.stringify(captured[1]), /Main private request/);
     assert.match(JSON.stringify((await child.context(BACKGROUND_CONTEXT)).messages), /focused answer/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("a returned handoff prevents admission of a not-yet-started delegate", async () => {
+  const { root: cwd, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const input = { id: "ended-before-input", role: "implementation", instruction: "Do work", doneWhen: "Report" };
+  let childId;
+  const tool = defineTool({
+    name: "test_end", description: "Return before delegate input", parameters: obj({}), replay: "safe",
+    execute: async (_args, api, context) => {
+      childId = await api.commit((tx) => ensureDelegateConversation(tx, api.conversationId, api.taskId, input.id,
+        { model: ref, cwd, instructions: "Do not start after return." }), context);
+      const child = await api.conversation(childId, context);
+      await api.commit(async (tx) => returnDelegation(await tx.doc(DelegationDoc, api.conversationId), input.id, { kind: "person-ended", reason: "" }), context);
+      assert.equal(await api.commit((tx) => admitDelegateInput(tx, api.conversationId, api.taskId, input.id, child), context), null);
+      return { output: [{ type: "text", text: "Stopped." }] };
+    },
+  });
+  const extension = defineExtension({ name: "test-end", tools: [tool] });
+  const registry = createRegistry();
+  registry.install(extension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd, extensions: [extension], compaction: { enabled: false } } });
+    await main.commit(async (tx) => prepareDelegation(await tx.doc(DelegationDoc, main.id), input), BACKGROUND_CONTEXT);
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("test_end", {}, { id: "end" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("main continued"),
+    ]);
+    const submission = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    assert.deepEqual((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result, { kind: "person-ended", reason: "" });
+    const child = await harness.conversation(childId, BACKGROUND_CONTEXT);
+    assert.deepEqual((await child.context(BACKGROUND_CONTEXT)).messages, []);
+    assert.equal(faux.state.callCount, 2);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();

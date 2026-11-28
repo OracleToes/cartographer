@@ -4,7 +4,7 @@
  * the handoff lifecycle and keep orchestration disabled until its controls and
  * recovery are implemented.
  */
-import { configure, type ConversationId, type Extension, type ModelRef, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
+import { configure, type ConversationHandle, type ConversationId, type Extension, type ModelRef, type SubmissionId, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { DelegationDoc, startDelegation } from "./delegation-record.js";
 
 /** Call in the owning task's commit; no model or filesystem work runs here. */
@@ -51,4 +51,26 @@ export async function ensureDelegateConversation(
   });
   startDelegation(record, delegationId, child.id);
   return child.id;
+}
+
+/** Admit the first child input only while its own handoff is still running. */
+export async function admitDelegateInput(
+  tx: Tx,
+  mainId: ConversationId,
+  ownerId: TaskId,
+  delegationId: string,
+  child: ConversationHandle,
+): Promise<SubmissionId | null> {
+  const conversation = await tx.conversation(child.id);
+  const record = await tx.doc(DelegationDoc, mainId);
+  const active = record.active;
+  if (active === null || active.input.id !== delegationId || active.phase === "prepared" ||
+      active.conversationId !== child.id || conversation?.owner?.conversationId !== mainId ||
+      conversation.owner.taskId !== ownerId) {
+    throw new Error("Delegate input does not match its owned handoff; no input was admitted.");
+  }
+  if (active.phase === "returned") return null;
+  return child.submit(tx, {
+    type: "input", content: JSON.stringify(active.input), requestId: `carto.delegate-input:${ownerId}`,
+  });
 }

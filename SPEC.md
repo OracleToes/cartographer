@@ -751,8 +751,12 @@ finishes without reporting. Both delegation and delegate report require a
 sole model-issued tool call in their round, checked against Pi's durable task
 and assistant entry before making the handoff. Mixed or nested calls cannot
 start delegation or commit a report. Other calls in a rejected mixed round
-retain their normal semantics. The host must perform the return collapse and
-handle interrupts and recovery before exposing it. Capture's selected tools are
+retain their normal semantics. The initial delegate input is admitted in a Pi
+transaction that checks the same running handoff and its task-owned child; if
+the handoff has already returned, no new child input is admitted. Replays reuse
+the same request ID. This admission check does not itself stop a child whose
+input was already admitted. The host must perform the return collapse and handle
+interrupts and recovery before exposing it. Capture's selected tools are
 restricted to read/search names and the report tool; this is not a sandbox.
 
 A session-local inference admission gate serializes Pi's `stream`,
