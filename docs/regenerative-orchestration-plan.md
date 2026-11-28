@@ -177,8 +177,16 @@ Chat record or a pin/deletion mark on a checkpointed source entry blocks rather
 than silently overriding the person's action. Withdrawn queued content remains
 verifiable only against the checkpoint. The planner does not commit a sweep or
 permit source deletion; callers must seal Pi and Brain writers and verify the
-snapshot. File-pin refresh, full checkpoint reconciliation and transaction/journal
-integration remain necessary. The actual return path does not archive the prepared items or
+snapshot. A dormant source seal now hashes the logical contents and schema of a
+stopped Pi store in a single read-only SQLite snapshot, including committed WAL
+changes, using fixed primary-key ordering and rejecting unknown tables, key
+shapes, column types and schema versions. An optional, validated seal can be
+retained atomically with the Brain's delegation transfer. It is only a change
+detector: it is not yet bound to the captured views, Brain, projection files or
+archive plan, is not checked by recovery, and never permits source deletion.
+The host must seal writers; a SQLite read snapshot is not a lock. File-pin
+refresh, full checkpoint reconciliation and transaction/journal integration
+remain necessary. The actual return path does not archive the prepared items or
 remove the return guard. Child restoration and crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or

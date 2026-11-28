@@ -57,6 +57,7 @@ import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.j
 import { prepareReturnSweepMarks } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
 import { prepareReturnSweepWithInputs } from "../dist/runtime/delegate-sweep-reconcile.js";
+import { captureDelegateSourceSeal } from "../dist/runtime/delegate-source-seal.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -481,6 +482,59 @@ test("return collapse and old committed recovery preserve a multi-conversation P
     const sourcePaths = generationPaths(root, source);
     await closeLiveSession(session); closed = true;
     const handoff = await readStoredDelegation(sourcePaths.store);
+    const seal = await captureDelegateSourceSeal(sourcePaths.store, source);
+    assert.deepEqual(await captureDelegateSourceSeal(sourcePaths.store, source), seal);
+    assert.match(seal.digest, /^[0-9a-f]{64}$/);
+    await assert.rejects(captureDelegateSourceSeal(sourcePaths.store, "../bad"), /Invalid source generation/);
+    const sourceWriter = await openNodeSqliteDatabase(sourcePaths.store);
+    try {
+      const row = await sourceWriter.get("SELECT id, record FROM live_entries ORDER BY id LIMIT 1");
+      const changed = JSON.parse(row.record); changed.kind = "test.changed-after-capture";
+      await sourceWriter.run("UPDATE live_entries SET record = ? WHERE id = ?", JSON.stringify(changed), row.id);
+      assert.notEqual((await captureDelegateSourceSeal(sourcePaths.store, source)).digest, seal.digest, "a committed WAL change is visible");
+      await sourceWriter.run("UPDATE live_entries SET record = ? WHERE id = ?", row.record, row.id);
+      const revision = await sourceWriter.get("SELECT document_id, seq, content FROM live_document_revisions ORDER BY document_id, seq LIMIT 1");
+      await sourceWriter.run("UPDATE live_document_revisions SET content = ? WHERE document_id = ? AND seq = ?", JSON.stringify({ changed: true }), revision.document_id, revision.seq);
+      assert.notEqual((await captureDelegateSourceSeal(sourcePaths.store, source)).digest, seal.digest, "document revisions are covered");
+      await sourceWriter.run("UPDATE live_document_revisions SET content = ? WHERE document_id = ? AND seq = ?", revision.content, revision.document_id, revision.seq);
+      assert.deepEqual(await captureDelegateSourceSeal(sourcePaths.store, source), seal);
+      await sourceWriter.exec("CREATE TABLE unexpected_data (id INTEGER PRIMARY KEY)");
+      await assert.rejects(captureDelegateSourceSeal(sourcePaths.store, source), /Unsupported delegate source tables/);
+      await sourceWriter.exec("DROP TABLE unexpected_data");
+      assert.deepEqual(await captureDelegateSourceSeal(sourcePaths.store, source), seal);
+    } finally { await sourceWriter.close(); }
+    assert.deepEqual(await captureDelegateSourceSeal(sourcePaths.store, source), seal, "WAL checkpointing does not change the logical seal");
+
+    // The optional receipt is stored atomically with a Brain sweep, but it
+    // does not by itself authorize return recovery to remove the source.
+    const receiptPath = join(root, ".brain", "seal-receipt.sqlite");
+    let receiptBrain = await openBrain(receiptPath);
+    try {
+      const receiptDestination = "gen-receipt-destination";
+      const transfer = { source, destination: receiptDestination, ...handoff, sourceSeal: seal };
+      await receiptBrain.beginCollapse(source, receiptDestination);
+      const change = { source, generation: receiptDestination, delegationTransfer: transfer,
+        expected: { brain: await receiptBrain.read(), archive: await receiptBrain.readArchive() }, writes: [], incoming: [], now: 1 };
+      await assert.rejects(receiptBrain.applyCollapse({ ...change, delegationTransfer: { ...transfer, sourceSeal: { ...seal, digest: "invalid" } } }), /Invalid delegate source seal/);
+      assert.equal((await receiptBrain.readCollapseJournal()).committed, false);
+      assert.equal(await receiptBrain.readDelegationTransfer(), undefined);
+      await receiptBrain.applyCollapse(change);
+      const receiptFiles = generationPaths(root, receiptDestination);
+      copyFileSync(sourcePaths.markdown, receiptFiles.markdown);
+      copyFileSync(sourcePaths.sidecar, receiptFiles.sidecar);
+      const destinationDb = await openNodeSqliteDatabase(receiptFiles.store); await destinationDb.close();
+      await receiptBrain.close();
+      receiptBrain = await openBrain(receiptPath);
+      assert.deepEqual((await receiptBrain.readDelegationTransfer()).sourceSeal, seal);
+      await assert.rejects(recoverCollapse(root, receiptBrain), /multiple conversations.*preserved/);
+      assert.equal(existsSync(sourcePaths.store), true);
+      await receiptBrain.recoverCollapseJournal(async (journal, stored) => {
+        assert.equal(journal.committed, true);
+        assert.deepEqual(stored.sourceSeal, seal);
+      });
+      assert.deepEqual((await receiptBrain.readDelegationTransfer()).sourceSeal, seal);
+      for (const file of [receiptFiles.store, receiptFiles.markdown, receiptFiles.sidecar]) rmSync(file, { force: true });
+    } finally { await receiptBrain.close(); }
     await assert.rejects(collapse(root, brain), /multiple conversations.*preserved/);
     assert.equal(await brain.readCollapseJournal(), undefined);
     assert.deepEqual((await brain.readArchive()).items, []);

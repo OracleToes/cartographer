@@ -31,6 +31,7 @@
 import { openNodeSqliteDatabase } from "@earendil-works/chord/sqlite/node";
 import { parseReturnedDelegation, type DelegationTransfer } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
+import { validateDelegateSourceSeal } from "./delegate-source-seal.js";
 import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { Message } from "@earendil-works/pi-ai";
 import type { EntryId } from "@earendil-works/pi-durable";
@@ -339,6 +340,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
       throw new Error("Invalid delegation transfer; recovery data was preserved.");
     }
     const active = parseReturnedDelegation(value.content).active;
+    if (value.sourceSeal !== undefined) validateDelegateSourceSeal(value.sourceSeal, value.source);
     if (value.inputCheckpoint !== undefined) {
       if (active === null || value.inputCheckpoint === null || value.inputCheckpoint.documentId === value.documentId || value.inputCheckpoint.barrier?.documentId === value.documentId) {
         throw new Error("Invalid delegate input transfer; recovery data was preserved.");
@@ -562,6 +564,7 @@ export async function openBrain(databasePath: string): Promise<BrainStore> {
             throw new Error("Invalid or conflicting delegation transfer; the sweep was not committed.");
           }
           const active = parseReturnedDelegation(transfer.content).active;
+          if (transfer.sourceSeal !== undefined) validateDelegateSourceSeal(transfer.sourceSeal, transfer.source);
           if (transfer.inputCheckpoint !== undefined) {
             if (active === null || transfer.inputCheckpoint.documentId === transfer.documentId || transfer.inputCheckpoint.barrier?.documentId === transfer.documentId) {
               throw new Error("Invalid delegate input transfer; the sweep was not committed.");

@@ -6,6 +6,7 @@
  * Unfinished or ambiguous handoffs remain in their source store.
  */
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { DelegateSourceSeal } from "./delegate-source-seal.js";
 
 export type DelegateRole = "capture" | "implementation" | "verification";
 export type DelegationInput = {
@@ -39,6 +40,8 @@ export type StoredCheckpoint = { documentId: number; revision: number; content: 
 export type DelegationTransfer = StoredCheckpoint & {
   source: string;
   destination: string;
+  /** Dormant change detector; it does not authorize multi-conversation deletion. */
+  sourceSeal?: DelegateSourceSeal;
   inputCheckpoint?: StoredCheckpoint & { barrier: StoredCheckpoint };
 };
 
