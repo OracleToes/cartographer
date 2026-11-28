@@ -44,6 +44,7 @@ import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } f
 import { ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
+import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -346,6 +347,73 @@ test("a selected delegate report commits once and cannot be forged or replaced",
     await assert.rejects(DelegateReportTool.execute({ ...report, changes: "invented" }, api, BACKGROUND_CONTEXT), /different result/);
     await assert.rejects(DelegateReportTool.execute(report, { ...api, conversationId: main.id }, BACKGROUND_CONTEXT), /task-owned/);
     assert.deepEqual((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active, saved);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("the delegation tool runs a focused capture using Carto's existing scoped read", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  const session = { person: "OracleToes", pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "test", readOnly: false, pathScope: "strict" };
+  const read = createTools({ root, brain, session }).find((tool) => tool.name === "read");
+  const capture = defineExtension({ name: "capture-read", tools: [read] });
+  const delegate = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture], tools: [read] } } });
+  const mainExtension = defineExtension({ name: "test-main", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension);
+  registry.install(capture);
+  registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry, env: () => new NodeExecutionEnv({ cwd: root }) }, BACKGROUND_CONTEXT);
+  const report = { status: "done", findings: "src/verify-me.ts exports answer", changes: "none", checks: "read file", uncertainty: "callers not assessed", remaining: "trace callers", mainMessage: "Found the export" };
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate", { role: "capture", instruction: "Read src/verify-me.ts", doneWhen: "Report what it exports" }, { id: "delegate-call" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts" }, { id: "capture-read" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "capture-report" })], { stopReason: "toolUse" })),
+    ]);
+    const submitted = await main.submit({ type: "input", content: "Main private request" }, BACKGROUND_CONTEXT);
+    assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.equal(handoff.phase, "returned");
+    assert.deepEqual(handoff.result, { kind: "delegate", report });
+    const child = await harness.conversation(handoff.conversationId, BACKGROUND_CONTEXT);
+    assert.deepEqual((await child.agent(BACKGROUND_CONTEXT)).tools.map((item) => item.name), ["read", "delegate_report"]);
+    assert.doesNotMatch(JSON.stringify(captured[1]), /Main private request/);
+    assert.match(JSON.stringify(captured[2]), /answer = 42/);
+    assert.equal(faux.state.callCount, 3, "main does not run again before the host handles the return");
+    const unsafe = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture], tools: [{ ...read, name: "bash" }] } } });
+    await assert.rejects(unsafe.execute({ role: "capture", instruction: "Inspect", doneWhen: "Report" }, { agent: async () => ({ model: ref }) }, BACKGROUND_CONTEXT), /read\/search/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("a delegate ending without a report records a failure rather than inventing one", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  const delegate = createDelegateTool({ cwd: root });
+  const mainExtension = defineExtension({ name: "test-main", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension);
+  registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Do work", doneWhen: "Report" }, { id: "delegate-call" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("An unstructured answer is not a report."),
+    ]);
+    const submitted = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    assert.equal((await submitted.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(handoff.result, { kind: "failure", explanation: "Delegate ended without a report." });
+    assert.equal(faux.state.callCount, 2);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();

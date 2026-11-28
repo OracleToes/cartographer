@@ -51,10 +51,14 @@ handoff, with idempotent replay and conflict refusal. A dormant return-admission
 helper uses Pi's transactional submissions and request IDs to present a return
 to main, retaining the handoff until that input is answered and checked before
 clearing the slot. The caller must first perform the return collapse and must
-handle unanswered inputs. These pieces reuse Pi's owned conversations, schema
-validation and commit semantics; they are not yet a delegate runtime or UI.
-Orchestration recovery, the parser pilot, sequential delegation, capture and
-controls remain to be built.
+handle unanswered inputs. A dormant Pi delegation tool composes the child and
+report foundations, with request-ID replay and an explicit missing-report
+failure; a test reuses Carto's scoped read tool for capture. The host must
+still ensure a sole-call round, perform return collapse, and handle interrupts
+and recovery; Pi's terminate control alone does not stop a mixed tool round.
+These pieces reuse Pi's owned conversations, schema validation and commit
+semantics, but are not yet a complete delegate runtime or UI. Orchestration
+recovery, the parser pilot, capture workflow and controls remain to be built.
 
 ## Decisions recorded during refinement
 

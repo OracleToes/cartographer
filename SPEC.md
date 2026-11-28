@@ -744,6 +744,15 @@ foundations do not yet drive delegation or return presentation in the product
 and are not exposed as an orchestration feature. They do not imply isolation
 from external side effects or recovery of them.
 
+A dormant delegation tool composes these pieces using Pi's task ownership and
+request-ID replay: it prepares one handoff, creates or reuses its child, submits
+the focused request once, and records a missing-report failure if the child
+finishes without reporting. It ends its own tool round when possible, but Pi
+only terminates a round if every tool result requests termination. The host must
+ensure a delegation is the sole call in its round, perform the return collapse,
+and handle interrupts and recovery before exposing it. Capture's selected tools
+are restricted to read/search names and the report tool; this is not a sandbox.
+
 A session-local inference admission gate serializes Pi's `stream`,
 `streamSimple` and `streamDeferred` calls across conversations in that session;
 the corresponding `complete`, `completeSimple` and `fetchDeferred` convenience
