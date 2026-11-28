@@ -76,7 +76,7 @@ test("the instructions name the person, and never the old words", () => {
   const text = cartoInstructions("OracleToes");
   assert.match(text, /kept for OracleToes\./);
   assert.match(text, /U is OracleToes's messages/);
-  assert.match(text, /OracleToes hears you through/);
+  assert.match(text, /OracleToes only hears you through `chat`/);
   assert.doesNotMatch(text, OLD_WORDS);
 });
 

@@ -33,10 +33,13 @@ current code against that contract.**
 
 This is a recommendation to evaluate and adopt an existing format and parser
 when the feasibility gate passes, not a claim that they already work in Carto.
-It is not a proposal to embed Turri's whole harness, adopt its generated-folder
-layout, or invent a new language in advance. If ***plain cannot meet a required
-property, report the specific incompatibility and compare alternatives with the
-person before choosing a fallback.
+In particular, **the ***plain components examined below disagree about syntax and
+test files**: version the language profile and validate the actual selected
+implementations before calling the format interoperable. It is not a proposal
+to install plain-forge, run Pyro, embed Turri's whole harness, adopt their
+generated-folder layout, or invent a new language in advance. If ***plain cannot
+meet a required property, report the specific incompatibility and compare
+alternatives with the person before choosing a fallback.
 
 ## 2. What the source review found
 
@@ -103,6 +106,89 @@ Source entry points: [Turri parser](https://github.com/turri-oss/turri/blob/7ada
 [capture](https://github.com/turri-oss/turri/blob/7ada23456908792bdba5d9b0651df84975793df9/src/capture/capture.ts),
 and [reference parser](https://github.com/plainlang/plain-parser/tree/e3dbd27df6e833c1330c31392d87de61b1d8b402).
 
+### Additional review: the upstream regenerative-software stack
+
+The [entry repository](https://github.com/plainlang/regenerative-software/tree/d35b03fcc68c5ee2609b76ee7b9edeb9e09439ec)
+is an overview and license, not an implementation of an orchestration engine.
+Its linked stack was reviewed at plain-forge `c981a7a37a9f038448263fc59ee571a42b88d3b3`,
+Pyro `c8e6efaadfde06cf6ea36866529f416a7e548abe`, upstream parser
+`e3dbd27df6e833c1330c31392d87de61b1d8b402`, plainlang-docs
+`aa5891bd5a86ca6a9f8e250082be92d3e4fdd9d9`, plain-language-server
+`edf0220d2f875bef91d487bfb1951ea2a261bf44`, tree-sitter-plain
+`0c18b48f98d0ae5def55f0c9baaab317ccad7471`, and plyn
+`f9c02b8d13029656a3296380027901623ab94b49`. These are inspected source
+snapshots, not a tested or pinned release set. The examples repository was
+also inspected at [`c2ddfd790b3abd878ea4d75d5a036fee5b2605d0`](https://github.com/plainlang/plainlang-examples/tree/c2ddfd790b3abd878ea4d75d5a036fee5b2605d0);
+its Python hello-world test file has the 0.4 two-section form with an empty
+acceptance section. Forge's checked-out submodule points at the Pyro snapshot
+above; the npm wrapper's published `1.0.0` metadata instead pins forge `1.0.23`,
+whereas the inspected forge checkout identifies itself as `1.0.19`. Findings
+that revise the recommendation:
+
+- **The installer is not a Carto integration.** The entry README points to
+  plain-forge, Pyro and plain-parser. The npm entry package's registry metadata
+  describes a wrapper forwarding to a pinned plain-forge release. Forge's
+  installer copies skills/rules/docs into supported agents' directories and by
+  default installs or upgrades Python tooling via `uv`; it does not list Carto.
+  Carto has no demonstrated compatible skill loader. Do not run that installer,
+  download runtimes, overwrite user skill files or claim drop-in support as part
+  of this proposal. Inspect the exact published artifact when choosing a
+  version: a repository checkout and an npm wrapper need not be the same release.
+- **Forge provides valuable authoring patterns, not an executable contract.**
+  Its `load-plain-reference` routes only relevant rules; `forge-plain` and
+  `add-feature` ask focused questions, write and review snippets, and check
+  conflicts and section ownership; `plain-healthcheck` combines parser checks,
+  config/script inspection and agent review. These are skill instructions for
+  supported hosts, not evidence of deterministic validation or a Carto API.
+  Adapt the ideas to the person's chosen interaction policy and small contexts;
+  do not import the mandatory one-question/approval loop or agent spawning
+  wholesale. `debug-specs` directs every fix back to the spec, even when a clear
+  spec's implementation is simply wrong; Carto must retain the distinct
+  implementation-defect outcome in §5.
+- **Pyro is a sequential agent skill, not a stand-alone deterministic compiler.**
+  Its `render-spec` tells one agent to read the module/requirements/scenarios,
+  implement and verify them, and report missing scenario coverage. It forbids
+  subagents, which fits the single-inference constraint in that respect. But it
+  implements into `plain_module/code`, writes tests to `plain_module/tests`,
+  and copies output into `dist`; its `copy_folder.py` merges and overwrites
+  matching destination files. Its scenario helper scans a `tests` folder next
+  to the module rather than consulting the reference parser's configured test
+  folders. Running it directly on an existing Carto project would not implement
+  the agreed in-place, selective assessment-first workflow and could overwrite
+  output. Its helpers are not a replacement for the reference parser. Treat
+  Pyro as a reference unless a separately agreed integration proves otherwise.
+- **The version mismatch is concrete, not theoretical.** The entry README's
+  example shows 0.3 functional-spec bullets and nested acceptance tests. The
+  reviewed plainlang-docs migration guide and reference parser describe 0.4:
+  `# func-id` behaviors and separate test plain files with `module` and
+  `func_id`. The reference parser's test file requires both conformance and
+  acceptance section markers, allowing empty sections; Turri's reviewed port
+  instead allows either section and rejects a present empty section. The
+  `plain-language-server` source still diagnoses standalone acceptance sections
+  as invalid and doesn't list conformance test sections; its Tree-sitter grammar
+  likewise describes the old nested shape. Thus an apparently valid 0.4 project
+  can receive contradictory editor diagnostics or parser failures. Do not use
+  the landing-page example as a 0.4 fixture or promise plyn compatibility.
+  Check actual released versions, not just these snapshots, before any adoption.
+- **One format does not imply one workflow.** The upstream stack's stated model
+  is spec-first and treats generated code as read-only; Turri's own `package.json`
+  shows a separate pi-coding-agent/LangGraph runtime and no dependency on the
+  upstream installer or Pyro. Both use ***plain ideas, but the available sources
+  do not establish that the stack is a drop-in backend for Turri or Carto.
+  Carto's person-directed selective in-place repair intentionally differs from
+  the upstream renderer's generated-code workflow. It can still use a genuine
+  ***plain format if the selected parser and compatibility profile pass.
+
+Upstream source: [forge rule loader](https://github.com/plainlang/plain-forge/blob/c981a7a37a9f038448263fc59ee571a42b88d3b3/forge/skills/load-plain-reference/SKILL.md),
+[forge healthcheck](https://github.com/plainlang/plain-forge/blob/c981a7a37a9f038448263fc59ee571a42b88d3b3/forge/skills/plain-healthcheck/SKILL.md),
+[Pyro renderer](https://github.com/plainlang/pyro/blob/c8e6efaadfde06cf6ea36866529f416a7e548abe/skills/render-spec/SKILL.md),
+[Pyro copy helper](https://github.com/plainlang/pyro/blob/c8e6efaadfde06cf6ea36866529f416a7e548abe/skills/render-spec/scripts/copy_folder.py),
+[0.4 migration guide](https://github.com/plainlang/plainlang-docs/blob/aa5891bd5a86ca6a9f8e250082be92d3e4fdd9d9/docs/guardrails/migrating-from-0-3.md),
+[reference test-file parser](https://github.com/plainlang/plain-parser/blob/e3dbd27df6e833c1330c31392d87de61b1d8b402/src/plain_parser/test_plain_file.py),
+[Turri test-file parser](https://github.com/turri-oss/turri/blob/7ada23456908792bdba5d9b0651df84975793df9/src/plain/test-plain-file.ts),
+[editor diagnostics](https://github.com/plainlang/plain-language-server/blob/edf0220d2f875bef91d487bfb1951ea2a261bf44/src/diagnostics.ts),
+and [Tree-sitter grammar](https://github.com/plainlang/tree-sitter-plain/blob/0c18b48f98d0ae5def55f0c9baaab317ccad7471/grammar.js).
+
 ## 3. Project contract and authority
 
 The project contract is a version-controlled, human-readable collection of
@@ -111,8 +197,15 @@ The project contract is a version-controlled, human-readable collection of
 `module:func-id`; a scenario has its module, behavior and scenario ID. IDs are
 not Carto's generation-local display handles. Definitions, implementation and
 test requirements, imports and linked resources are included as the parser
-resolves them. Files are still project files: existing strict/relaxed path and
-read-only semantics apply.
+resolves them. Under the reviewed 0.4 rules, a func-id is unique within its
+module and remains stable as the behavior's text changes; a scenario-id is
+unique across all test files bound to that behavior, regardless of test section.
+A test file's path is a convention, while its frontmatter gives the binding.
+Do not treat Turri's graph file-and-line IDs as durable identities. A module or
+func-id rename/move, deletion, split or reuse changes or threatens identity:
+require explicit mapping when continuity is established, otherwise invalidate
+old evidence and treat it as a removal/addition rather than guessing. Files are
+still project files: existing strict/relaxed path and read-only semantics apply.
 
 The contract records the person's decisions, not whatever the agent can infer
 from code. The person's current instruction outranks it; a contradiction is
@@ -150,8 +243,22 @@ linked resources and scenarios. Compare:
 
 - the published Turri host APIs (including parser/check/graph) and their actual
   package/version and dependency footprint against Carto's Node and pi versions;
-- the reference Python parser's versioned JSON CLI and Python installation
-  requirement, including error behavior and compatibility with Turri's dialect;
+- the reference Python parser's `check`/version-2 JSON `parse` CLI and Python
+  3.11+ requirement, including exit/error behavior and compatibility with
+  Turri's dialect; Pyro's helper scripts need Python 3.8+ but are not this parser;
+- an explicit selected language/tool profile and fixture matrix: 0.3 vs 0.4,
+  both empty and populated test sections, absent scenario files, multiple test
+  folders/config defaults, bound and orphaned tests, duplicate semantic IDs,
+  version migrations, modules, imports and linked resources. Include the
+  examples' empty acceptance section and compare reference and Turri results;
+  Turri's parser comparison document says its own cross-parser run was not done.
+  Keep editor diagnostics optional or disabled for an incompatible profile,
+  never as the validation gate; do not assume plyn integrates with Carto's TUI;
+- if evaluating Forge skills or Pyro helpers, check the exact release artifact,
+  license, discovery and loading, tool invocation and prompt budget, network and
+  installation side effects, output paths and overwrite behavior, and whether
+  adaptation preserves one-model operation and selective existing-code repair;
+  execute any renderer pilot only with explicit approval in a disposable project;
 - whether the available parser validates the chosen syntax, test bindings,
   imports, cycles, resources, error locations and malformed files; whether the
   needed graph and stable semantic IDs can be obtained without private APIs;

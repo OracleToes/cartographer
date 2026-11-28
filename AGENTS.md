@@ -48,6 +48,7 @@ The project is built on these packages. They are dependencies, not suggestions.
 | [tomooshi/condensed-milk-pi](https://github.com/tomooshi/condensed-milk-pi) | person | Evaluated for context compression and bash output filtering; not adopted (retroactive masking conflicts with Carto's short-generation collapse model) | reference only (not adopted) |
 | [dense-analysis/ale](https://github.com/dense-analysis/ale) | person | Reference for asynchronous linting and diagnostics in projects Carto works on | reference only |
 | [turri-oss/turri](https://github.com/turri-oss/turri) | person | Reference for regenerative coding, ***plain specifications, and orchestration | reference only |
+| [plainlang/regenerative-software](https://github.com/plainlang/regenerative-software) | person | Reference for the ***plain authoring, parser, rendering and editor-tooling stack | reference only |
 
 The three `pi` links are the reason this project exists in its current shape.
 They were given when the project started, and the agent did not record them at
