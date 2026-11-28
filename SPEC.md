@@ -742,8 +742,13 @@ input. A dormant preparation step excludes a main person contribution only
 when its explicit, unique Chat identity and text match one Brain Chat record
 and the contribution contains no non-text parts. It retains child input,
 attachments and ambiguous or legacy text matches; it also recognizes a proven
-latest Carto Chat edit on a legacy entry. This does not handle agent Chat calls,
-checkpointed inputs, pins, deletion marks or child restoration. The return path
+latest Carto Chat edit on a legacy entry. Unlike the direct sweep, return
+preparation includes Chat tool calls from each conversation. It identifies a
+main call as a duplicate only when its call ID and text match a unique agent
+Chat record and the call has no extra arguments or metadata. Child calls,
+nonmatching or richer calls, and tool results remain; candidate duplicates
+retain their full parts for later mark reconciliation. Checkpointed inputs,
+pins, deletion marks and child restoration are not handled here. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this

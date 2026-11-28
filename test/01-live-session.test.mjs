@@ -301,6 +301,56 @@ test("return sweep recognizes only proven main person Chat duplicates", async ()
   }
 });
 
+test("return sweep preserves chat calls and deduplicates only proven main agent Chat", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const main = session.conversation;
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    const write = (conversation, entry) => conversation.submit({ type: "write", entry }, BACKGROUND_CONTEXT);
+    const call = (id, text) => fauxToolCall("chat", { text }, { id });
+    await write(main, { kind: "test.agent", model: [fauxAssistantMessage([
+      fauxText("other work"), call("shared", "said main"), call("missing", "not recorded"), call("mismatch", "live text"),
+      { ...call("signed", "signed text"), thoughtSignature: "signature" },
+      fauxToolCall("chat", { text: "extra text", extra: true }, { id: "extra" }),
+      call("duplicate", "duplicate record"), call("wrong-author", "wrong author"),
+    ], { stopReason: "toolUse" })] });
+    await write(child, { kind: "test.child-agent", model: [fauxAssistantMessage([call("shared", "said child")], { stopReason: "toolUse" })] });
+    const result = (text) => [{ role: "toolResult", toolCallId: "shared", toolName: "chat", content: [{ type: "text", text }], isError: false, timestamp: 1 }];
+    await write(main, { kind: "test.main-result", model: result("main result") });
+    await write(child, { kind: "test.child-result", model: result("child result") });
+    const views = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
+    const parts = prepareReturnSweepParts(views, session.generation);
+    const mainCall = parts.find((part) => part.conversationId === main.id && part.item.ephemeral?.text === 'chat {"text":"said main"}');
+    const childCall = parts.find((part) => part.conversationId === child.id && part.item.ephemeral?.text === 'chat {"text":"said child"}');
+    assert.ok(mainCall && childCall);
+    assert.equal(mainCall.item.id, ephemeralItemId(session.generation, mainCall.entryId, "c1"));
+    for (const [conv, expected, text] of [[main, "said main", "main result"], [child, "said child", "child result"]]) {
+      const part = parts.find((part) => part.conversationId === conv.id && part.item.ephemeral?.text === text);
+      assert.equal(part.item.ephemeral.model[0].content[0].arguments.text, expected);
+    }
+    const record = (id, text, author = "agent") => ({ id: `chat:${id}`, author, text, createdAt: 1, updatedAt: 1 });
+    const records = [record("shared", "said main"), record("mismatch", "different"), record("signed", "signed text"),
+      record("extra", "extra text"), record("duplicate", "duplicate record"), record("duplicate", "duplicate record"), record("wrong-author", "wrong author", "user")];
+    const resultParts = prepareReturnSweepArchive(views, session.generation, records, new Set());
+    assert.deepEqual(resultParts.chatDuplicates.map((item) => item.recordId), ["chat:shared"]);
+    assert.deepEqual(resultParts.chatDuplicates[0].part, mainCall);
+    assert.ok(!resultParts.parts.some((part) => part.item.id === mainCall.item.id));
+    assert.ok(resultParts.parts.some((part) => part.item.id === childCall.item.id));
+    for (const name of ["not recorded", "live text", "signed text", "extra text", "duplicate record", "wrong author"]) {
+      assert.ok(resultParts.parts.some((part) => part.item.ephemeral?.kind === "toolCall" && part.item.ephemeral.text.includes(name)), name);
+    }
+    assert.ok(resultParts.parts.some((part) => part.item.ephemeral?.text === "other work"));
+    assert.equal(resultParts.parts.filter((part) => part.item.ephemeral?.text?.endsWith(" result")).length, 2);
+    const direct = await readGenerationEphemera(generationPaths(root, session.generation).store, session.generation);
+    assert.ok(!direct.some((item) => item.ephemeral?.kind === "toolCall" && item.ephemeral.text.startsWith("chat ")), "direct-mode conversion remains unchanged");
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("return-sweep provenance survives archive operations and blocks child restoration into main", async () => {
   const { root, cleanup } = await fixture();
   const { models, ref } = fauxSetup();
@@ -1964,6 +2014,9 @@ test("live Chat edits update the Brain, the exact Pi contribution and its pin", 
     assert.equal(agentEntry.model[0].content[0].text, "sibling");
     assert.equal(agentEntry.model[0].content[1].arguments.text, "agent edited");
     assert.deepEqual(agentEntry.partKeys, ["x0", "c1"]);
+    const prepared = prepareReturnSweepArchive(await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), session.generation, records, new Set());
+    assert.ok(prepared.chatDuplicates.some((item) => item.recordId === agent.id && item.itemId === agentSnapshot.itemId));
+    assert.ok(prepared.parts.some((part) => part.item.ephemeral?.text === "person edited"), "person image remains even when Chat is recorded");
     assert.equal(readFileSync(session.markdownPath, "utf8"), head, "frozen bytes stay unchanged");
     session = (await collapseLiveSession(session, options, "edit test")).session;
     assert.match(readFileSync(session.markdownPath, "utf8"), /person edited/);

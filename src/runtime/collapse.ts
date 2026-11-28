@@ -356,7 +356,7 @@ export async function readGenerationEphemera(storePath: string, generation: stri
 
 /** Reuse the existing Carto archive conversion for one set of entries. */
 type SweepEntry = { id: string; entry: StoredEntry; original: StoredEntry };
-function sweepParsedEntries(parsed: SweepEntry[], generation: string): Array<{ entryId: string; item: IncomingItem }> {
+function sweepParsedEntries(parsed: SweepEntry[], generation: string, includeChatCalls = false): Array<{ entryId: string; item: IncomingItem }> {
   const tools = new Map<string, { name: string; path?: string }>();
   const callMessages = new Map<string, unknown>();
   const removed = removedPartKeys(parsed.map(({ original }) => original), generation);
@@ -400,7 +400,7 @@ function sweepParsedEntries(parsed: SweepEntry[], generation: string): Array<{ e
     const call = callId === undefined ? undefined : tools.get(callId);
     const tool = call?.name;
     const path = call?.path;
-    for (const part of ephemeralPartsOf(entry, tool, keys)) {
+    for (const part of ephemeralPartsOf(entry, tool, keys, includeChatCalls)) {
       let model: unknown;
       if (message?.role === "assistant" && Array.isArray(message.content)) {
         const index = keys?.indexOf(part.key) ?? -1;
@@ -501,7 +501,7 @@ export function prepareReturnSweepParts(views: readonly ReturnSweepView[], gener
       }
     }
     const byId = new Map(view.entries.map((entry) => [String(entry.id), entry]));
-    for (const { entryId, item } of sweepParsedEntries(parsed, generation)) {
+    for (const { entryId, item } of sweepParsedEntries(parsed, generation, true)) {
       const source = byId.get(entryId)!;
       if (item.ephemeral === undefined) throw new Error("A return-sweep part is not ephemeral; the source was preserved.");
       const provenance = { version: 1 as const, generation, conversationId: conversation.id, entryId: source.id, entryKind: source.kind,
@@ -645,7 +645,7 @@ export function ephemeralItemId(generation: string, entryId: string | number, ke
   return `${generation}:${entryId}:${key}`;
 }
 
-export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, keys?: readonly string[]): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
+export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, keys?: readonly string[], includeChatCalls = false): Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> {
   const parts: Array<{ key: string; value: NonNullable<IncomingItem["ephemeral"]> }> = [];
   const role = entry.model?.find((message) => typeof message.role === "string")?.role;
   const { thinking, text } = modelTexts(entry);
@@ -662,7 +662,7 @@ export function ephemeralPartsOf(entry: StoredEntry, tool: string | undefined, k
         parts.push({ key, value: { kind: "reasoning", text: value.thinking } });
       } else if (value.type === "text" && typeof value.text === "string" && value.text.trim()) {
         parts.push({ key, value: { kind: "plainText", text: value.text } });
-      } else if (value.type === "toolCall" && value.name !== "chat") {
+      } else if (value.type === "toolCall" && (includeChatCalls || value.name !== "chat")) {
         parts.push({ key, value: { kind: "toolCall", text: `${String(value.name)} ${JSON.stringify(value.arguments ?? {})}` } });
       }
     }

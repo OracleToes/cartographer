@@ -152,9 +152,13 @@ image-only user inputs rather than guessing. A further dormant preparation
 reuses Carto's Chat bindings to exclude only uniquely identified main person
 messages whose text matches a Brain Chat record and whose content is text-only.
 Child messages, attachments and ambiguous or legacy text matches remain; a latest
-Carto Chat edit can identify an otherwise legacy entry. Agent Chat calls,
-checkpoint reconciliation, pins and deletion marks still need handling. The
-actual return path does not archive the prepared items or remove the return
+Carto Chat edit can identify an otherwise legacy entry. Return preparation also
+includes Chat calls (without changing the direct sweep), retaining child calls
+and results. It identifies only simple main calls whose exact call ID and text
+match one agent Chat record; extra arguments, call metadata or ambiguous records
+prevent deduplication. Full candidate parts remain available for subsequent
+mark handling. Checkpoint reconciliation, pins and deletion marks still need
+handling. The actual return path does not archive the prepared items or remove the return
 guard. Child restoration and crash-safe journal integration remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
