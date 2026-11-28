@@ -140,10 +140,14 @@ A dormant capture helper now reads each conversation's active entries and
 contributions from the already-open Pi Harness, preserving Pi's own head and
 edit semantics, and checking bounds before and after capture. It rejects forks;
 its caller must seal all writers, since the checks are not a lock and do not
-cover inbox or task changes. It does not archive, persist captured views or
-remove the return guard. Tool-result pairing, stable archive provenance,
-Chat deduplication, restoration, and crash-safe journal integration are still
-needed. The submission scan guards the immediate-end and restart-recovery aborts,
+cover inbox or task changes. A dormant conversion now reuses Carto's existing
+archive-part logic on each captured context separately, pairs tool results only
+within their conversation, and returns entry/conversation provenance without
+persisting it. It rejects duplicate or missing call identities, multi-message
+entries and image-only user inputs rather than guessing. It does not archive,
+deduplicate Chat or remove the return guard. Persistent archive provenance,
+provenance-aware restoration, Chat deduplication and crash-safe journal
+integration are still needed. The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.
 

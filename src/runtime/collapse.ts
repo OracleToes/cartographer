@@ -39,6 +39,7 @@ import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "
 import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
 import { clearedInputCheckpoint, clearedInputReplay } from "./delegate-input-replay.js";
+import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
 export interface GenerationFiles {
   generation: string;
@@ -331,16 +332,12 @@ export async function readGenerationEphemera(storePath: string, generation: stri
     // builds a new store rather than cutting, so the newest head is the whole of
     // it; there is no second, later cut to walk.
     const newestHead = rows.reduce<number>((latest, row) => (row.head === null ? latest : Math.max(latest, Number(row.id))), 0);
-    const tools = new Map<string, { name: string; path?: string }>();
-    const callMessages = new Map<string, unknown>();
     const parsed = rows
       .filter((row) => Number(row.id) >= newestHead)
       .map((row) => {
         const entry = JSON.parse(row.record) as StoredEntry;
         return { id: String(row.id), entry, original: entry };
       });
-    const removed = removedPartKeys(parsed.map(({ entry }) => entry), generation);
-    const changedParts = editedPartValues(parsed.map(({ entry }) => entry), generation);
     // Pi's context edits supersede the raw model contribution. A delete applied
     // now must not reappear in the archive when the old store is swept.
     const edits = new Map<string, NonNullable<StoredEntry["edits"]>[number]>();
@@ -351,73 +348,162 @@ export async function readGenerationEphemera(storePath: string, generation: stri
       const edit = edits.get(item.id);
       if (edit !== undefined) item.entry = { ...item.entry, model: edit.action === "replace" ? (edit.messages ?? []) : [] };
     }
-    for (const { original } of parsed) {
-      // Keep pairing metadata even when an edit removed the call. The result's
-      // original bytes must still be recoverable rather than silently discarded.
-      for (const call of toolCallsOf(original)) tools.set(call.id, call);
-      for (const message of original.model ?? []) {
-        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-        for (const part of message.content) {
-          if (part === null || typeof part !== "object") continue;
-          const call = part as { type?: unknown; id?: unknown };
-          if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
-        }
-      }
-    }
-    // Prefer the call actually in the context when saving a result's restore
-    // payload, but retain the original as a fallback for an omitted call.
-    for (const { entry } of parsed) {
-      for (const call of toolCallsOf(entry)) tools.set(call.id, call);
-      for (const message of entry.model ?? []) {
-        if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-        for (const part of message.content) {
-          if (part === null || typeof part !== "object") continue;
-          const call = part as { type?: unknown; id?: unknown };
-          if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
-        }
-      }
-    }
-    const incoming: IncomingItem[] = [];
-    for (const { id, entry, original } of parsed) {
-      const oldMessage = original.model?.[0];
-      const message = entry.model?.[0];
-      const keys = oldMessage?.role === "assistant" && message?.role === "assistant"
-        ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set(), changedParts.get(id))
-        : undefined;
-      // The entity is what a restore needs to put the item back where it was:
-      // the tool call's own id, and for a result the call it answers.
-      const callId = callIdOf(entry);
-      const call = callId === undefined ? undefined : tools.get(callId);
-      const tool = call?.name;
-      const path = call?.path;
-      for (const part of ephemeralPartsOf(entry, tool, keys)) {
-        let model: unknown;
-        if (message?.role === "assistant" && Array.isArray(message.content)) {
-          const index = keys?.indexOf(part.key) ?? -1;
-          if (index >= 0) model = [{ ...message, content: [message.content[index]], stopReason: part.value.kind === "toolCall" ? "toolUse" : "stop" }];
-        } else if (message?.role === "toolResult" && callId !== undefined) {
-          const callMessage = callMessages.get(callId);
-          if (callMessage !== undefined) model = [callMessage, message];
-        } else if (message?.role === "user") {
-          model = [message];
-        }
-        incoming.push({
-          id: ephemeralItemId(generation, id, part.key),
-          layer: "ephemeral",
-          ephemeral: {
-            ...part.value,
-            ...(model === undefined ? {} : { model }),
-            ...(callId === undefined
-              ? {}
-              : { data: { callId, ...(tool === undefined ? {} : { tool }), ...(path === undefined ? {} : { path }) } }),
-          },
-        });
-      }
-    }
-    return incoming;
+    return sweepParsedEntries(parsed, generation).map(({ item }) => item);
   } finally {
     await database.close().catch(() => undefined);
   }
+}
+
+/** Reuse the existing Carto archive conversion for one set of entries. */
+type SweepEntry = { id: string; entry: StoredEntry; original: StoredEntry };
+function sweepParsedEntries(parsed: SweepEntry[], generation: string): Array<{ entryId: string; item: IncomingItem }> {
+  const tools = new Map<string, { name: string; path?: string }>();
+  const callMessages = new Map<string, unknown>();
+  const removed = removedPartKeys(parsed.map(({ original }) => original), generation);
+  const changedParts = editedPartValues(parsed.map(({ original }) => original), generation);
+  for (const { original } of parsed) {
+    // Keep pairing metadata even when an edit removed the call. The result's
+    // original bytes must still be recoverable rather than silently discarded.
+    for (const call of toolCallsOf(original)) tools.set(call.id, call);
+    for (const message of original.model ?? []) {
+      if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (part === null || typeof part !== "object") continue;
+        const call = part as { type?: unknown; id?: unknown };
+        if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
+      }
+    }
+  }
+  // Prefer the call actually in the context when saving a result's restore
+  // payload, but retain the original as a fallback for an omitted call.
+  for (const { entry } of parsed) {
+    for (const call of toolCallsOf(entry)) tools.set(call.id, call);
+    for (const message of entry.model ?? []) {
+      if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+      for (const part of message.content) {
+        if (part === null || typeof part !== "object") continue;
+        const call = part as { type?: unknown; id?: unknown };
+        if (call.type === "toolCall" && typeof call.id === "string") callMessages.set(call.id, { ...message, content: [part] });
+      }
+    }
+  }
+  const incoming: Array<{ entryId: string; item: IncomingItem }> = [];
+  for (const { id, entry, original } of parsed) {
+    const oldMessage = original.model?.[0];
+    const message = entry.model?.[0];
+    const keys = oldMessage?.role === "assistant" && message?.role === "assistant"
+      ? stablePartKeys(oldMessage.content, message.content, removed.get(id) ?? new Set(), changedParts.get(id))
+      : undefined;
+    // The entity is what a restore needs to put the item back where it was:
+    // the tool call's own id, and for a result the call it answers.
+    const callId = callIdOf(entry);
+    const call = callId === undefined ? undefined : tools.get(callId);
+    const tool = call?.name;
+    const path = call?.path;
+    for (const part of ephemeralPartsOf(entry, tool, keys)) {
+      let model: unknown;
+      if (message?.role === "assistant" && Array.isArray(message.content)) {
+        const index = keys?.indexOf(part.key) ?? -1;
+        if (index >= 0) model = [{ ...message, content: [message.content[index]], stopReason: part.value.kind === "toolCall" ? "toolUse" : "stop" }];
+      } else if (message?.role === "toolResult" && callId !== undefined) {
+        const callMessage = callMessages.get(callId);
+        if (callMessage !== undefined) model = [callMessage, message];
+      } else if (message?.role === "user") {
+        model = [message];
+      }
+      incoming.push({ entryId: id, item: {
+        id: ephemeralItemId(generation, id, part.key),
+        layer: "ephemeral",
+        ephemeral: {
+          ...part.value,
+          ...(model === undefined ? {} : { model }),
+          ...(callId === undefined
+            ? {}
+            : { data: { callId, ...(tool === undefined ? {} : { tool }), ...(path === undefined ? {} : { path }) } }),
+        },
+      } });
+    }
+  }
+  return incoming;
+}
+
+/** A prospective item with the source needed for future Chat and restore handling. */
+export type ReturnSweepPart = {
+  conversationId: number;
+  entryId: number;
+  entryKind: string;
+  entryData?: unknown;
+  item: IncomingItem;
+};
+
+/**
+ * Convert Pi-derived, non-forked contexts using Carto's existing part IDs,
+ * editing and archive conversion. Tool IDs are scoped to one conversation;
+ * ambiguous calls, unsupported multi-message entries and image-only inputs
+ * fail rather than silently lose data. The result is only a preparation: its
+ * provenance has not been persisted, Chat has not been deduplicated, and child
+ * restoration or journal recovery is not implemented. It must not authorize
+ * source deletion. The caller must keep the source writers sealed.
+ */
+export function prepareReturnSweepParts(views: readonly ReturnSweepView[], generation: string): ReturnSweepPart[] {
+  const parts: ReturnSweepPart[] = [];
+  const conversations = new Set<number>();
+  const entries = new Set<number>();
+  for (const { conversation, view } of views) {
+    if (conversation.parent !== undefined || conversations.has(conversation.id) || view.entries.length !== view.contributions.length) {
+      throw new Error("Ambiguous return-sweep conversations; the source was preserved.");
+    }
+    conversations.add(conversation.id);
+    const parsed: SweepEntry[] = view.entries.map((entry, index) => {
+      const messages = view.contributions[index]!;
+      if (entry.conversationId !== conversation.id || entries.has(entry.id) || messages.length > 1 || (entry.model?.length ?? 0) > 1) {
+        throw new Error("Unsupported or ambiguous return-sweep entry; the source was preserved.");
+      }
+      entries.add(entry.id);
+      const original = entry as unknown as StoredEntry;
+      const effective: StoredEntry = { ...original, model: [...messages] };
+      const message = messages[0];
+      if (message?.role === "assistant" && original.model?.[0]?.role !== "assistant") {
+        throw new Error("An assistant contribution has no stable original; the source was preserved.");
+      }
+      if (message?.role === "user" && Array.isArray(message.content) &&
+          message.content.some((part) => part.type === "image") && !modelTexts(effective).text.join("").trim()) {
+        throw new Error("An image-only input needs separate archive handling; the source was preserved.");
+      }
+      return { id: String(entry.id), original, entry: effective };
+    });
+    const callOwners = new Map<string, string>();
+    for (const { id, original } of parsed) {
+      for (const call of toolCallsOf(original)) {
+        if (callOwners.has(call.id)) throw new Error("Duplicate tool-call identity in one conversation; the source was preserved.");
+        callOwners.set(call.id, id);
+      }
+    }
+    const activeCalls = new Set<string>();
+    for (const { id, entry } of parsed) {
+      for (const call of toolCallsOf(entry)) {
+        const owner = callOwners.get(call.id);
+        if (activeCalls.has(call.id) || (owner !== undefined && owner !== id)) {
+          throw new Error("Ambiguous edited tool-call identity; the source was preserved.");
+        }
+        activeCalls.add(call.id);
+        callOwners.set(call.id, id);
+      }
+    }
+    for (const { entry } of parsed) {
+      const resultId = callIdOf(entry);
+      if (entry.model?.[0]?.role === "toolResult" && (resultId === undefined || !callOwners.has(resultId))) {
+        throw new Error("A tool result lacks its source call; the source was preserved.");
+      }
+    }
+    const byId = new Map(view.entries.map((entry) => [String(entry.id), entry]));
+    for (const { entryId, item } of sweepParsedEntries(parsed, generation)) {
+      const source = byId.get(entryId)!;
+      parts.push({ conversationId: conversation.id, entryId: source.id, entryKind: source.kind,
+        ...(source.data === undefined ? {} : { entryData: source.data }), item });
+    }
+  }
+  return parts.sort((left, right) => left.entryId - right.entryId);
 }
 
 /** One row of the store's entries table, as far as the sweep reads it. */

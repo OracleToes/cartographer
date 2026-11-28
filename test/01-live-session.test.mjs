@@ -37,7 +37,7 @@ import {
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera, readStoredDelegation, recoverCollapse } from "../dist/runtime/collapse.js";
+import { collapse, ephemeralItemId, generationPaths, prepareReturnSweepParts, readGenerationEphemera, readStoredDelegation, recoverCollapse } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
@@ -192,6 +192,9 @@ test("return sweep captures each Pi context with its own head and edits", async 
       edits: [{ target: kept.id, action: "replace", messages: user("main edited") }] });
     await write(main, { kind: "test.call", model: [fauxAssistantMessage([fauxToolCall("read", { path: "main.ts" }, { id: "same-call" })], { stopReason: "toolUse" })] });
     await write(child, { kind: "test.call", model: [fauxAssistantMessage([fauxToolCall("bash", { command: "pwd" }, { id: "same-call" })], { stopReason: "toolUse" })] });
+    await write(child, { kind: "test.result", model: [{ role: "toolResult", toolCallId: "same-call", toolName: "bash", content: [{ type: "text", text: "child result" }], isError: false, timestamp: 1 }] });
+    await write(main, { kind: "test.result", model: [{ role: "toolResult", toolCallId: "same-call", toolName: "read", content: [{ type: "text", text: "main result" }], isError: false, timestamp: 1 }] });
+    await write(child, { kind: "carto.user", data: { chatRecordId: "child-chat" }, model: [{ role: "user", content: [{ type: "text", text: "child image" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }], timestamp: 1 }] });
 
     const captured = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
     assert.deepEqual(captured.map((item) => item.conversation.id), [main.id, child.id]);
@@ -204,6 +207,39 @@ test("return sweep captures each Pi context with its own head and edits", async 
     assert.doesNotMatch(JSON.stringify(captured[1].view.contributions), /child discarded|main edited/);
     assert.match(JSON.stringify(captured[0].view.contributions), /main.ts/);
     assert.match(JSON.stringify(captured[1].view.contributions), /pwd/);
+
+    const prepared = prepareReturnSweepParts(captured, "g-test");
+    assert.ok(prepared.every((part, index) => index === 0 || prepared[index - 1].entryId <= part.entryId));
+    const texts = prepared.map(({ item }) => item.ephemeral?.text);
+    assert.ok(texts.includes("main edited"));
+    assert.ok(texts.includes("child reset"));
+    assert.ok(!texts.includes("main discarded"));
+    assert.ok(!texts.includes("main retained"));
+    assert.ok(!texts.includes("child discarded"));
+    for (const [conv, expectedTool, expectedPath, expectedText] of [[main, "read", "main.ts", "main result"], [child, "bash", undefined, "child result"]]) {
+      const part = prepared.find((part) => part.conversationId === conv.id && part.item.ephemeral?.text === expectedText);
+      assert.ok(part);
+      assert.equal(part.item.ephemeral.data.tool, expectedTool);
+      assert.equal(part.item.ephemeral.data.path, expectedPath);
+      assert.equal(part.item.ephemeral.model[0].content[0].name, expectedTool);
+      assert.equal(part.item.id, ephemeralItemId("g-test", String(part.entryId), "r"));
+    }
+    const chat = prepared.find((part) => part.entryKind === "carto.user");
+    assert.equal(chat.conversationId, child.id);
+    assert.equal(chat.entryData.chatRecordId, "child-chat");
+    assert.equal(chat.item.ephemeral.model[0].content[1].type, "image");
+    assert.throws(() => prepareReturnSweepParts([...captured, captured[0]], "g-test"), /Ambiguous/);
+    const unsupported = structuredClone(captured);
+    unsupported[0].view.contributions[0] = [{ role: "user", content: [{ type: "image", data: "aA==", mimeType: "image/png" }], timestamp: 1 }];
+    assert.throws(() => prepareReturnSweepParts(unsupported, "g-test"), /image-only/);
+    const missingCall = structuredClone(captured);
+    const result = missingCall.flatMap(({ view }) => view.contributions).flat().find((message) => message.role === "toolResult");
+    result.toolCallId = "not-present";
+    assert.throws(() => prepareReturnSweepParts(missingCall, "g-test"), /lacks its source call/);
+    const multi = structuredClone(captured);
+    multi[0].view.contributions[0].push(multi[0].view.contributions[0][0]);
+    assert.throws(() => prepareReturnSweepParts(multi, "g-test"), /Unsupported/);
+
     captured[0].view.entries[0].kind = "modified copy";
     assert.notEqual((await main.context(BACKGROUND_CONTEXT)).entries[0].kind, "modified copy");
 
@@ -1611,6 +1647,10 @@ test("live work edits keep identities across further edits, removal, reopening a
     const saved = swept.find((item) => item.id === resultId).ephemeral.model;
     assert.equal(saved[0].content[0].arguments.path, "new");
     assert.equal(saved[1].content[0].text, "new result");
+    const prepared = prepareReturnSweepParts(await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), session.generation);
+    assert.ok(!prepared.some(({ item }) => item.id === id("x0")));
+    assert.equal(prepared.find(({ item }) => item.id === id("x1")).item.ephemeral.text, "changed sibling");
+    assert.equal(prepared.find(({ item }) => item.id === resultId).item.ephemeral.model[0].content[0].arguments.path, "new");
   } finally {
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();

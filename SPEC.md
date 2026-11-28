@@ -728,8 +728,13 @@ and does not repair a source already deleted by an older version. A dormant
 capture helper can obtain each non-forked conversation's active entries and
 edited contributions from Pi's own context view, checking conversation bounds
 before and after the reads. It retains conversation and entry identities and
-refuses forks instead of guessing how to archive shared history. It does not
-perform a sweep, persist its result, detect every kind of concurrent write, or
+refuses forks instead of guessing how to archive shared history. A separate
+dormant conversion prepares Carto archive items from those views using the
+existing part identities and per-conversation tool-call pairing, retaining
+conversation and entry provenance for later handling. It rejects ambiguous
+calls, unsupported multi-message contributions and image-only user input;
+Chat deduplication and provenance-aware restoration are not implemented. It
+does not persist the prepared items, detect every kind of concurrent write, or
 replace the guard: its caller must seal all writers throughout capture and
 subsequent handling. Restart retries this
 placement without replacing a conflicting document. An empty acknowledged
