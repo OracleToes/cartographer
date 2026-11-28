@@ -900,9 +900,12 @@ An additional dormant planner combines that reconciliation with the ordinary
 collapse's file-pin and pinned-read refresh, producing prospective file texts
 and Brain writes without mutating the snapshot. Missing pinned files are marked
 stale, missing pinned reads retain their last text, and deletion wins over
-refresh. The caller must still verify pinned-read entity and path against the
-actual main source or old head: the current mark planner checks identities and
-text but not those fields. Files, settings, Pi and Brain writers must be sealed;
+refresh. Before reading pinned results, this planner checks each read's call,
+tool and exact path against the captured main result or an item from the source
+head. Unproven path aliases and transient handles are refused rather than
+resolved from today's tree. The caller must supply the actual verified frozen
+head items; the lower-level marks planner alone still checks only identities and
+text. Files, settings, Pi, the frozen sidecar and Brain writers must be sealed;
 the reads are not atomic and the plan is not bound to a journal or source seal.
 It does not authorize deletion. A dormant logical source seal can hash the stopped Pi store's schema and rows
 in one read-only SQLite snapshot, including committed WAL changes; unsupported

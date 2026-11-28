@@ -202,11 +202,14 @@ permit source deletion; callers must seal Pi and Brain writers and verify the
 snapshot. An additional dormant planner composes that reconciliation with the
 same file-pin and pinned-read refresh used by ordinary collapse, returning file
 texts and prospective Brain writes. It retains existing missing-file and
-delete-over-pin behavior without mutating the snapshot. Pinned-read entity and
-path still need verification against the main source or old head; current mark
-checks do not establish those fields. The caller must seal files and settings
-as well as Pi and Brain writers. The reads are not atomic or bound to the source
-seal, snapshot, head, or journal and do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
+delete-over-pin behavior without mutating the snapshot. Before refreshing a
+pinned read, it compares the call ID, tool and exact path to the captured main
+result or to the corresponding item supplied from the verified frozen head.
+Unproven path aliases and transient F handles block rather than being resolved
+from the current tree. The lower-level mark planner does not perform these
+checks; the host must supply authentic frozen items and seal the sidecar, files
+and settings as well as Pi and Brain writers. The reads are not atomic or bound
+to the source seal, snapshot, head, or journal and do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be

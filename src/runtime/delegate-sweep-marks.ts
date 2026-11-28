@@ -2,7 +2,7 @@
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import type { IncomingItem } from "../domain/archive.js";
 import type { BrainWrite } from "../domain/brain.js";
-import type { CartoBrain } from "../domain/records.js";
+import type { CartoBrain, PinnedEphemeral } from "../domain/records.js";
 import { collapseEphemeralDeletionWrites, type ReturnSweepPart } from "./collapse.js";
 import { prepareReturnSweepArchive, type ReturnSweepChatDuplicate } from "./delegate-sweep-chat.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
@@ -16,6 +16,59 @@ function hasImage(model: unknown): boolean {
     return Array.isArray(content) && content.some((part: unknown) => part !== null && typeof part === "object" &&
       !Array.isArray(part) && (part as { type?: unknown }).type === "image");
   });
+}
+
+/**
+ * Verify read-result pins against already classified main parts or items from
+ * the source generation's verified frozen sidecar. Paths must match exactly:
+ * a read made through a transient F handle cannot safely be resolved from the
+ * current tree, and current filesystem equivalence cannot prove its old target.
+ * A deleted pin is not refreshed. This checks metadata, not file stability or
+ * authenticity of caller-supplied views and sidecar; writers must remain sealed.
+ */
+export function verifyReturnSweepReadPins(
+  brain: CartoBrain, pinned: readonly ReturnSweepPart[], mainHeadPins: readonly PinnedEphemeral[],
+): void {
+  const head = new Map<string, PinnedEphemeral>();
+  for (const item of mainHeadPins) {
+    if (item === null || typeof item !== "object" || typeof item.id !== "string" || !item.id || head.has(item.id)) {
+      throw new Error("Invalid or duplicate frozen pin identity; the source was preserved.");
+    }
+    head.set(item.id, item);
+  }
+  const current = new Map<string, ReturnSweepPart>();
+  for (const part of pinned) {
+    if (part.conversationId !== ROOT_CONVERSATION_ID || current.has(part.item.id) || head.has(part.item.id)) {
+      throw new Error("Ambiguous pinned read source; the source was preserved.");
+    }
+    current.set(part.item.id, part);
+  }
+  const deleted = new Set(brain.ephemeralDeletes ?? []);
+  for (const pin of brain.ephemera) {
+    if (pin.pinned === undefined || pin.kind !== "readResult" || deleted.has(pin.id)) continue;
+    const entity = pin.entity;
+    if (entity === undefined || typeof entity.callId !== "string" || !entity.callId || entity.tool !== "read" ||
+        typeof entity.path !== "string" || !entity.path || pin.containsImage) {
+      throw new Error("A pinned read lacks a verified call or path; the source was preserved.");
+    }
+    const part = current.get(pin.id);
+    if (part !== undefined) {
+      const value = part.item.ephemeral;
+      const data = value?.data;
+      if (value?.kind !== "readResult" || value.text !== pin.text || hasImage(value.model) ||
+          data === null || typeof data !== "object" || Array.isArray(data) ||
+          (data as { callId?: unknown }).callId !== entity.callId || (data as { tool?: unknown }).tool !== "read" ||
+          (data as { path?: unknown }).path !== entity.path) {
+        throw new Error("A pinned read conflicts with its captured call or path; the source was preserved.");
+      }
+      continue;
+    }
+    const previous = head.get(pin.id);
+    if (previous?.kind !== "readResult" || previous.text !== pin.text || previous.containsImage ||
+        previous.entity?.callId !== entity.callId || previous.entity.tool !== "read" || previous.entity.path !== entity.path) {
+      throw new Error("A pinned read conflicts with its frozen head; the source was preserved.");
+    }
+  }
 }
 
 /**
