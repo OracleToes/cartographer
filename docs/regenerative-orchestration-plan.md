@@ -48,7 +48,10 @@ proposal text; unresolved details are not implicitly decided by them.
   recommends capturing it with higher priority than the code. Discrepancies
   are discussed with the person before they are written into the maintained
   specification. Finding such material does not by itself establish that its
-  requirements were dictated or accepted by the person.
+  requirements were dictated or accepted by the person. When the person agrees
+  to capture an existing specification, its undisputed requirements count as
+  accepted as a whole, not dictated; discrepancies still must be discussed
+  before they are written into the maintained specification.
 - **Capture is a distinct delegate.** Main delegates capture to a focused,
   bespoke context, separate from implementation and verification, with limited
   tools. It receives the request, relevant specification and starting points,
@@ -84,7 +87,9 @@ proposal text; unresolved details are not implicitly decided by them.
   - **Dictated:** a feature, build, or implementation requested by the person,
     or behavior promoted to dictated.
   - **Accepted:** behavior found in capture and explicitly accepted by the
-    person; acceptance does not mean the person dictated it.
+    person, including undisputed requirements covered by the person's approval
+    to capture an existing specification; acceptance does not mean the person
+    dictated it.
   - **Observed:** behavior found by the agent that the person has not accepted,
     including behavior the person decides is fine to keep unpromoted.
   - Observed behavior can be promoted to accepted or dictated; accepted behavior
@@ -108,9 +113,9 @@ proposal text; unresolved details are not implicitly decided by them.
   remains in the project. The person retains the normal ability to steer or
   interrupt a delegate.
 
-**Next unanswered question:** when the person agrees to capture an existing
-specification, does that approval accept its undisputed requirements as a
-whole, or do they remain unaccepted until the person explicitly accepts them?
+**Next unanswered question:** when a delegate is approaching its context limit,
+should it collapse its own context and continue the task, or return to main
+with its progress so main can decide what to do next?
 
 ## 1. Recommendation in one sentence
 
