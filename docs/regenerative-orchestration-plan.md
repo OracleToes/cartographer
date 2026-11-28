@@ -47,11 +47,14 @@ conversation. A dormant transaction helper now creates a tool-task-owned child
 and marks the handoff running atomically, reusing the same child on replay and
 refusing ambiguous ownership. Its agent uses only explicitly selected tools and
 extensions. A dedicated Pi tool records a structured delegate report in the
-handoff, with idempotent replay and conflict refusal. These pieces reuse Pi's
-owned conversations, schema validation and commit semantics; they do not
-submit work or implement the delegate runtime or UI. Report presentation and
-orchestration recovery are not yet implemented. The parser pilot, sequential
-delegation, capture and controls remain to be built.
+handoff, with idempotent replay and conflict refusal. A dormant return-admission
+helper uses Pi's transactional submissions and request IDs to present a return
+to main, retaining the handoff until that input is answered and checked before
+clearing the slot. The caller must first perform the return collapse and must
+handle unanswered inputs. These pieces reuse Pi's owned conversations, schema
+validation and commit semantics; they are not yet a delegate runtime or UI.
+Orchestration recovery, the parser pilot, sequential delegation, capture and
+controls remain to be built.
 
 ## Decisions recorded during refinement
 

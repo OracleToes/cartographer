@@ -711,29 +711,38 @@ A dormant handoff-record foundation uses a Pi Durable conversation document in
 the main generation's store. It can record one prepared task, its transition to
 running, and its return as either a delegate-authored report, a person-ended
 reason (which may be blank), or a failure with no report. A second task or an
-invalid transition is refused without replacing the recorded task.
+invalid transition is refused without replacing the recorded task. Once a
+returned handoff has been admitted to main and answered, a checked
+acknowledgement can clear the active slot for another task; an unacknowledged or
+unanswered return stays recorded.
 
 A returned handoff crosses a full collapse: its exact source document is copied
 into a temporary Brain transfer record in the same transaction as the collapse
 sweep, verified against the source before deletion, then restored to the new
 main conversation before the transfer is acknowledged. Restart retries this
-placement without replacing a conflicting document. An unfinished, retired,
-ambiguous or unsupported handoff instead prevents collapse; its source is
-preserved. These checks assume the existing collapse lifecycle: the caller has
+placement without replacing a conflicting document. An empty acknowledged
+handoff needs no transfer. An unfinished, retired, ambiguous or unsupported
+handoff instead prevents collapse; its source is preserved. These checks assume
+the existing collapse lifecycle: the caller has
 stopped writers to the generation; they are not a cross-process writer lock.
 A separate, dormant transaction helper can attach a prepared handoff to a
 new task-owned Pi conversation, setting an explicit model, working directory
-and focused instructions, and selecting no extensions or tools. Creation,
+and focused instructions, with no extensions or tools unless explicitly selected. Creation,
 configuration and the transition to running commit together. A retry by the
 same owning task reuses the recorded child, including after that child has
 reported; mismatched ownership or ambiguous children are refused. A separate
 report tool can commit a structured delegate-authored report directly to the
 owning handoff and end the child's run. Replaying the identical report is
 idempotent; a conflicting or person-ended handoff is not overwritten. The
-child receives only explicitly selected extensions and tools. These foundations
-do not submit work or present a report to main and are not exposed as an
-orchestration feature. They do not imply isolation from external side effects
-or recovery of them.
+child receives only explicitly selected extensions and tools. A dormant return
+admission helper uses Pi's transactional input and request-ID deduplication to
+put a clearly attributed return into main's context. It retains the handoff
+until the corresponding input is answered; a retry reuses that input and an
+unanswered input cannot clear the handoff. The caller is responsible for the
+required preceding collapse and for handling unanswered inputs. These
+foundations do not yet drive delegation or return presentation in the product
+and are not exposed as an orchestration feature. They do not imply isolation
+from external side effects or recovery of them.
 
 A session-local inference admission gate serializes Pi's `stream`,
 `streamSimple` and `streamDeferred` calls across conversations in that session;

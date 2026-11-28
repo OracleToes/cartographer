@@ -43,6 +43,7 @@ import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
+import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -160,6 +161,56 @@ test("a returned handoff survives crashes after sweep and after destination plac
     session = await openLiveSession(options);
     assert.deepEqual(await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT), restored);
   } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("a collapsed return is admitted once and retained until main answers", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  let session = await openLiveSession(options);
+  let release;
+  let started;
+  const running = new Promise((resolve) => { started = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  try {
+    await session.conversation.commit(async (tx) => {
+      const record = await tx.doc(DelegationDoc, session.conversation.id);
+      prepareDelegation(record, { id: "early-end", role: "capture", instruction: "Investigate", doneWhen: "Report" });
+      returnDelegation(record, "early-end", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    session = (await collapseLiveSession(session, options, "delegate returned")).session;
+    faux.setResponses([factory(async () => {
+      started(); await hold;
+      return fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "return-sleep" })], { stopReason: "toolUse" });
+    })]);
+    const id = await admitDelegationReturn(session.conversation, "early-end", BACKGROUND_CONTEXT);
+    await running;
+    assert.equal(await admitDelegationReturn(session.conversation, "early-end", BACKGROUND_CONTEXT), id);
+    await assert.rejects(acknowledgeDelegationReturn(session.conversation, "early-end", id, BACKGROUND_CONTEXT), /not been answered/);
+    assert.equal((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active.result.kind, "person-ended");
+    release();
+    const submission = await session.harness.submission(id, BACKGROUND_CONTEXT);
+    assert.equal((await submission.wait(BACKGROUND_CONTEXT)).status, "done");
+    await waitForRunEnd(session);
+    const message = captured[0].find((item) => item.role === "user" && typeof item.content === "string" && item.content.startsWith("Delegation return"));
+    const payload = JSON.parse(message.content.slice(message.content.indexOf("\n") + 1));
+    assert.deepEqual(payload.result, { kind: "person-ended", reason: "" });
+    assert.equal(faux.state.callCount, 1);
+    await closeLiveSession(session);
+    session = await openLiveSession(options);
+    assert.equal(await admitDelegationReturn(session.conversation, "early-end", BACKGROUND_CONTEXT), id);
+    assert.equal(await acknowledgeDelegationReturn(session.conversation, "early-end", id, BACKGROUND_CONTEXT), true);
+    assert.equal(await acknowledgeDelegationReturn(session.conversation, "early-end", id, BACKGROUND_CONTEXT), false);
+    session = (await collapseLiveSession(session, options, "later collapse")).session;
+    await session.conversation.commit(async (tx) => {
+      prepareDelegation(await tx.doc(DelegationDoc, session.conversation.id), { id: "next", role: "verification", instruction: "Check", doneWhen: "Report" });
+    }, BACKGROUND_CONTEXT);
+    assert.equal((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active.input.id, "next");
+  } finally {
+    release();
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }

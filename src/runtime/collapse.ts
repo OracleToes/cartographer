@@ -138,6 +138,11 @@ export async function readStoredDelegation(storePath: string): Promise<{ documen
       if (revision === undefined || revision.kind !== "base" || revision.version !== 1 || !Number.isSafeInteger(doc.id) || doc.id < 1 || !Number.isSafeInteger(revision.seq) || revision.seq < 1) {
         throw new Error("Unsupported delegation checkpoint; the generation store was preserved.");
       }
+      // An acknowledged handoff leaves an empty current document. It has no
+      // return to transfer; reject any other unexpected shape as before.
+      const value: unknown = JSON.parse(revision.content);
+      if (value !== null && typeof value === "object" && !Array.isArray(value) &&
+          Object.keys(value).length === 1 && (value as { active?: unknown }).active === null) return undefined;
       parseReturnedDelegation(revision.content);
       return { documentId: doc.id, revision: revision.seq, content: revision.content };
     });
