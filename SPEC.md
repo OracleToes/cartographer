@@ -758,7 +758,16 @@ retain their normal semantics. The initial delegate input is admitted in a Pi
 transaction that checks the same running handoff and its task-owned child; if
 the handoff has already returned, no new child input is admitted. Replays reuse
 the same request ID. This admission check does not itself stop a child whose
-input was already admitted. A dormant immediate-end control records the person's
+input was already admitted. The report extension also installs a dormant
+child-only request barrier: an explicitly identified task-owned child may
+request the model only while its matching main handoff is running. After the
+handoff returns or begins ending, a later queued child run is held until abort;
+a failed identity or handoff read also holds rather than sending. The child
+identity is committed with creation and checked on reuse. The host must keep
+the extension registered and selected, abort held work and preserve any
+unanswered child inputs before deleting the source generation. The barrier is
+not an atomic cancellation of a request that already passed it, and does not
+implement person-input routing. A dormant immediate-end control records the person's
 reason (including a blank one) as a durable ending intent before aborting the
 child's ordinary Pi work. It commits a person-ended return only after that work
 has stopped; a report racing the ending intent cannot replace it. Recovery of

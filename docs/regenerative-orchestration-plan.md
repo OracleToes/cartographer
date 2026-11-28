@@ -59,7 +59,13 @@ model-issued assistant entry with exactly that one call. Nested callers are
 disallowed. Other calls in a mixed round may still run normally; rejecting the
 delegation does not roll them back. Initial child input admission now checks
 the handoff and child ownership in the same Pi transaction, refusing to start
-new work after a return; replay uses the same request ID. A dormant immediate-end
+new work after a return; replay uses the same request ID. A durable child
+identity and a request hook in the report extension now hold later child requests
+once the matching handoff returns or begins ending, including a queued follow-up
+Pi starts on the report boundary. A missing or inconsistent identity also holds;
+the host must retain the extension, stop the held run and preserve the input,
+and a request already past the hook still needs cancellation. This is not the
+person-input routing or recovery implementation. A dormant immediate-end
 control now records the person's reason as an ending intent, aborts the child's
 ordinary Pi work, then records a person-ended return. A restart helper requires
 Pi scheduling to remain paused and aborts the owning main run before resuming;

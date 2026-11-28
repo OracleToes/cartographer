@@ -4,8 +4,25 @@
  * the handoff lifecycle and keep orchestration disabled until its controls and
  * recovery are implemented.
  */
-import { configure, type ConversationHandle, type ConversationId, type Extension, type ModelRef, type SubmissionId, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
+import { configure, defineDoc, type ConversationHandle, type ConversationId, type Extension, type ModelRef, type SubmissionId, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { DelegationDoc, startDelegation } from "./delegation-record.js";
+
+/** Durable link checked by the child request barrier; not a substitute for task ownership. */
+export const DelegateChildIdentityDoc = defineDoc<{ mainId: number | null; ownerId: number | null; handoffId: string | null }>({
+  kind: "carto.delegate-child-identity", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ mainId: null, ownerId: null, handoffId: null }), checkpointWhen: () => true,
+});
+
+async function identifyChild(tx: Tx, child: ConversationId, main: ConversationId, owner: TaskId, handoff: string): Promise<void> {
+  const identity = await tx.doc(DelegateChildIdentityDoc, child);
+  if (identity.mainId === null && identity.ownerId === null && identity.handoffId === null && Object.keys(identity).length === 3) {
+    identity.mainId = main;
+    identity.ownerId = owner;
+    identity.handoffId = handoff;
+  } else if (Object.keys(identity).length !== 3 || identity.mainId !== main || identity.ownerId !== owner || identity.handoffId !== handoff) {
+    throw new Error("Delegate child identity conflicts with its owner; it was preserved.");
+  }
+}
 
 /** Call in the owning task's commit; no model or filesystem work runs here. */
 export async function ensureDelegateConversation(
@@ -32,6 +49,7 @@ export async function ensureDelegateConversation(
     if (children.length !== 1 || children[0]?.id !== active.conversationId || children[0].owner?.conversationId !== mainId) {
       throw new Error("Delegate conversation ownership conflicts with the handoff; data was preserved.");
     }
+    await identifyChild(tx, children[0].id, mainId, ownerId, delegationId);
     return children[0].id;
   }
   if (children.length !== 0) throw new Error("Unexpected delegate conversations for the owner; data was preserved.");
@@ -49,6 +67,7 @@ export async function ensureDelegateConversation(
     modelTools: agent.tools ?? [],
     compaction: { enabled: false },
   });
+  await identifyChild(tx, child.id, mainId, ownerId, delegationId);
   startDelegation(record, delegationId, child.id);
   return child.id;
 }

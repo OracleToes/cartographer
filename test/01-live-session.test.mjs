@@ -43,7 +43,7 @@ import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
-import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
+import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
@@ -564,6 +564,48 @@ test("the delegation tool runs a focused capture using Carto's existing scoped r
     const unsafe = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture], tools: [{ ...read, name: "bash" }] } } });
     await assert.rejects(unsafe.execute({ role: "capture", instruction: "Inspect", doneWhen: "Report" }, { agent: async () => ({ model: ref }) }, BACKGROUND_CONTEXT), /read\/search/);
   } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("delegate barrier holds a queued child follow-up after its report", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, factory } = fauxSetup();
+  let childStarted, unblockReport, notifyBlocked;
+  const started = new Promise((resolve) => { childStarted = resolve; });
+  const hold = new Promise((resolve) => { unblockReport = resolve; });
+  const blocked = new Promise((resolve) => { notifyBlocked = resolve; });
+  const reportExtension = createDelegateReportExtension(notifyBlocked);
+  const mainBarrier = createDelegateMainBarrier();
+  const mainExtension = defineExtension({ name: "child-barrier-main", tools: [createDelegateTool({ cwd: root })] });
+  const registry = createRegistry();
+  registry.install(mainExtension); registry.install(mainBarrier); registry.install(reportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const report = { status: "done", findings: "found", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension, mainBarrier], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      factory(async () => { childStarted(); await hold; return fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "report" })], { stopReason: "toolUse" }); }),
+    ]);
+    const mainInput = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    await started;
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
+    const queued = await child.submit({ type: "input", content: "Preserve this follow-up", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    unblockReport();
+    await blocked;
+    assert.deepEqual((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.result, { kind: "delegate", report });
+    assert.equal(faux.state.callCount, 2, "the queued child run never reaches the model");
+    const beforeAbort = await queued.status(BACKGROUND_CONTEXT);
+    assert.equal(beforeAbort.status, "placed", "the held input remains identifiable for host recovery");
+    await child.abort(BACKGROUND_CONTEXT);
+    assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal((await mainInput.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    unblockReport();
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();
   }

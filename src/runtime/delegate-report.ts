@@ -3,9 +3,11 @@
  * the tool call and validates its schema; Carto only connects it to its durable
  * handoff. This extension is not installed in ordinary direct-mode sessions.
  */
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { awaitWithContext } from "@earendil-works/chord/context";
+import { defineExtension, defineTool, GenerationTask, hook, type ConversationId } from "@earendil-works/pi-durable";
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
 import { DelegationDoc, returnDelegation, type DelegateReport } from "./delegation-record.js";
+import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
 
 const fields = ["status", "findings", "changes", "checks", "uncertainty", "remaining", "mainMessage"] as const;
@@ -52,4 +54,34 @@ export const DelegateReportTool = defineTool({
   },
 });
 
-export const DelegateReportExtension = defineExtension({ name: "carto.delegate-report", tools: [DelegateReportTool] });
+/** The host must install and retain this extension for every selected child. */
+export function createDelegateReportExtension(onBlocked?: () => void) {
+  return defineExtension({
+    name: "carto.delegate-report",
+    tools: [DelegateReportTool],
+    hooks: [hook(GenerationTask, {
+      beforeRequest: async (_request, api, context) => {
+        let allowed = false;
+        try {
+          const identity = await api.snapshot(DelegateChildIdentityDoc, api.conversationId, context);
+          if (identity !== undefined && Object.keys(identity).length === 3 &&
+              Number.isSafeInteger(identity.mainId) && (identity.mainId ?? 0) > 0 &&
+              Number.isSafeInteger(identity.ownerId) && (identity.ownerId ?? 0) > 0 &&
+              typeof identity.handoffId === "string" && identity.handoffId.length > 0) {
+            const record = await api.snapshot(DelegationDoc, identity.mainId as ConversationId, context);
+            allowed = record?.active?.phase === "running" && record.active.input.id === identity.handoffId &&
+              record.active.conversationId === api.conversationId;
+          }
+        } catch (error) {
+          // Pi reports and skips throwing hooks; an uncertain read must hold.
+          if (context.abortSignal?.aborted) throw error;
+        }
+        if (allowed) return;
+        try { onBlocked?.(); } catch { /* notification cannot bypass the barrier */ }
+        await awaitWithContext(new Promise<void>(() => {}), context);
+      },
+    })],
+  });
+}
+
+export const DelegateReportExtension = createDelegateReportExtension();
