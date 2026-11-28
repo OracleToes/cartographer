@@ -1,11 +1,12 @@
 # Regenerative orchestration: proposed revision
 
-**Status: proposal for discussion, not an implementation decision or a change to
-`SPEC.md`.** This is a full proposed revision of the approach in
+**Status: regenerative coding is approved in principle; its detailed design is
+being decided.** This proposal revises the approach in
 [orchestration-plan.md](orchestration-plan.md), which remains as a record of the
-original decisions. It does not itself authorize implementation. Confirm the
-unresolved decisions below, then update `SPEC.md` before implementing agreed
-behavior.
+original decisions. The person's decisions below are recorded as we discuss
+and commit them; other recommendations and questions remain proposals. This
+document does not change `SPEC.md`: resolve the remaining details and update
+`SPEC.md` before implementing agreed behavior.
 
 The person wants Carto to maintain a structured, standard project definition,
 using ***plain if it is applicable or another method if not. Existing code that
@@ -23,6 +24,66 @@ and a task overflow preserves partial work and sends main an honest system
 notice. Archive grace advances normally on each main return collapse, even when
 returns are close together. Task-local collapse and other unresolved boundaries
 remain decisions, not assumptions.
+
+## Decisions recorded during refinement
+
+The person asked that answers be recorded and committed as the discussion
+continues, rather than left only in conversation. These decisions refine earlier
+proposal text; unresolved details are not implicitly decided by them.
+
+- **Separate authorship and work.** Main writes or updates the specification,
+  then delegates implementation to a different context. When the person's
+  request is clear, main updates the specification and delegates immediately,
+  without a spec-diff approval stop. A worker that finds a spec gap reports it
+  back to main rather than editing the specification itself.
+- **Capture existing projects incrementally and deeply.** Capture the behavior
+  relevant to work as Carto encounters it, rather than requiring a whole-project
+  capture before work starts. Trace the depth of that behavior and where a change
+  may affect other aspects of the code, including callers, dependencies, shared
+  state, side effects and tests. Capture reports evidence and unknowns; it does
+  not claim a complete impact map. It does not justify rewriting existing code.
+- **Capture is a distinct delegate.** Main delegates capture to a focused,
+  bespoke context, separate from implementation and verification, with limited
+  tools. It receives the request, relevant specification and starting points,
+  may follow connections to investigate, and returns findings with sources to
+  main. It does not write the specification. Read/search rather than edit tools
+  are the proposed starting point; the exact tool set and how limitations work
+  need design. An unrestricted shell can write, so hiding editing tools is not
+  by itself write isolation. All delegates run sequentially on the one model.
+- **Reuse and idle capture.** Main can reuse relevant capture findings when
+  they remain current; it delegates fresh capture when the affected area is
+  unclear or the code or surrounding dependencies change. When not given an
+  active task, main should seek to capture the project systematically, in
+  focused delegated slices. Existing unknown intent remains unknown; capture
+  alone does not authorize implementation changes.
+- **Verification is chosen by main.** Main decides when a separate verification
+  context is needed; it need not run after every implementation task, so several
+  changes can proceed before verification. Results must distinguish checks
+  actually performed from work not verified. The exact selection and checks
+  remain to be designed.
+- **Delegation controls.** Capture is an ordinary delegated task, not a special
+  background process. The person may interrupt any delegation at any time or
+  call for early return. The normal agent's controls apply to an active delegate:
+  `SPEC.md` §9 defines steer, follow-up, interrupt, pause and cancel, including
+  partial in-flight tool results. Do not invent an automatic interruption on a
+  normal message. How early return obtains and delivers a partial report when
+  possible, and handles an unavailable report, still needs specification.
+- **Behavior provenance and promotion.** Keep these distinctions:
+  - **Dictated:** a feature, build, or implementation requested by the person,
+    or behavior promoted to dictated.
+  - **Accepted:** behavior found in capture and explicitly accepted by the
+    person; acceptance does not mean the person dictated it.
+  - **Observed:** behavior found by the agent that the person has not accepted,
+    including behavior the person decides is fine to keep unpromoted.
+  - Observed behavior can be promoted to accepted or dictated; accepted behavior
+    can be promoted to dictated. A lack of objection is not acceptance, and
+    acceptance alone is not dictation. How these statuses are represented in
+    the chosen standard, their effect on changes, and the mechanics of promotion
+    remain open.
+
+**Next unanswered question:** if a requested feature would change an observed
+behavior, should main flag the consequence and ask the person before changing
+it? That is a recommendation for discussion, not an agreed rule.
 
 ## 1. Recommendation in one sentence
 
@@ -207,15 +268,16 @@ require explicit mapping when continuity is established, otherwise invalidate
 old evidence and treat it as a removal/addition rather than guessing. Files are
 still project files: existing strict/relaxed path and read-only semantics apply.
 
-The contract records the person's decisions, not whatever the agent can infer
-from code. The person's current instruction outranks it; a contradiction is
-surfaced and resolved, not silently settled in favor of a stale document. Code,
-tests, notes and task reports can provide evidence of current behavior, but do
-not independently establish intended behavior. An agent should ask when a
+The project definition records the person's decisions and can also record
+captured behavior as observed, clearly distinguished from accepted or dictated
+behavior as described in the recorded decisions. Code, tests, notes and task
+reports can provide evidence of current behavior, but do not independently
+establish intended behavior or the person's acceptance. The person's current
+instruction outranks the contract; a contradiction is surfaced and resolved,
+not silently settled in favor of a stale document. An agent should ask when a
 consequential ambiguity needs the person's decision; a draft assumption must be
-marked as such. The degree of review or confirmation for ordinary contract
-changes is a decision below: this proposal does not add an approval queue to
-direct Carto.
+marked as such. Clear requests do not require a spec-diff approval stop before
+main delegates work. This proposal does not add an approval queue to direct Carto.
 
 There must be **one authority per behavior**. For a project already using
 `SPEC.md`, including Carto itself, no automatic migration or duplicate authoritative
@@ -368,14 +430,15 @@ Shell jobs are not model agents, but their ownership and persistence still need
 a decision. Model changes, if used, are sequential swaps on the same hardware;
 no special models are required by this design.
 
-1. **Understand and define.** Main reads the project contract if one exists,
-   distinguishes the person's request, current behavior, gaps and intended
-   changes, and keeps active planning in Atlas/Ledger. It updates the contract
-   according to the agreed decision policy. In an existing project without a
-   contract, it can propose a bounded capture from code, tests and any existing
-   docs, explicitly marking uncertainties and current behavior vs intended
-   behavior; it does not replace or regenerate the project merely to adopt a
-   format.
+1. **Understand, capture and define.** Main reads the project contract if one
+   exists, distinguishes the person's request, current behavior, gaps and
+   intended changes, and keeps active planning in Atlas/Ledger. It delegates
+   capture when needed, including systematic capture when there is no active
+   task, and writes the definition itself from the findings and the person's
+   decisions. Observed behavior remains distinct from accepted or dictated
+   behavior. With a clear request, main updates the spec and delegates work
+   without an approval stop; it does not replace or regenerate the project
+   merely to adopt a format.
 2. **Identify candidates.** Use parsed behavior IDs, resolved definitions and
    resources, recorded fingerprints, and relevant project changes to find
    potential impacts. The main agent also reads beyond the graph when useful;
@@ -389,12 +452,13 @@ no special models are required by this design.
    controls, and access to shared Atlas/Ledger as specified. Task context is
    isolated, but project and shared Brain writes are real and immediately
    visible; it is not a filesystem sandbox.
-4. **Assess or make the smallest justified change.** A task can be a contract
-   authoring/capture, assessment, code change, test work, or review task. Roles
-   are sequential context switches, not concurrent agents. A test/review task
-   may offer a fresh perspective, but shared filesystem access and a shared
-   model do not guarantee independence. No hidden limitation or new approval
-   gate is implied by a role.
+4. **Capture, assess or make the smallest justified change.** Capture, code
+   work and verification use separate contexts; main owns specification
+   authorship. Assessment or test work may also be delegated as appropriate.
+   Roles are sequential context switches, not concurrent agents. A test/review
+   task may offer a fresh perspective, but shared filesystem access and a shared
+   model do not guarantee independence. Tool limits for capture need design;
+   no filesystem isolation is implied by a role.
 5. **Report at done or warning.** At done-when, return a structured report and
    the person's required main Chat message. At the existing warning, give the
    task a turn for Atlas/Ledger bookkeeping, then request its forced report.
@@ -462,10 +526,11 @@ These are proposals/questions, not decisions attributed to the person:
    Where should a project's contract live, and how is an existing `SPEC.md`
    transitioned without two authorities? Should projects choose to use an
    existing other standard instead? What happens when the parser is missing?
-2. **Decision policy:** which contract changes can Carto make from clear user
-   instructions, and when must it ask about ambiguity, changed behavior or a
-   proposed capture? Should the person review a diff before any code work,
-   or only when a decision is needed? Preserve direct mode either way.
+2. **Decision policy and behavior status:** how are observed, accepted and
+   dictated behavior represented in the chosen format, promoted and used when
+   work may change existing behavior? When must main ask about an ambiguity,
+   consequence or captured behavior? Clear requests proceed without a spec-diff
+   approval stop as recorded above; preserve direct mode.
 3. **Assessment scope:** when should assessment run—on request, after a
    detected change, or as part of an orchestration task—and what evidence is
    adequate to stop at "checked" rather than continue investigating?
