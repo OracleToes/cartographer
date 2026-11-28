@@ -1,6 +1,7 @@
 /** Dormant source-generation checkpoint for inputs before delegate recovery aborts main. */
+import type { Context } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
-import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type TaskId, type Tx } from "@earendil-works/pi-durable";
+import { defineDoc, InboxDoc, LiveDoc, type ConversationId, type Cursor, type Storage, type SubmissionRecord, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegateMainBarrierDoc, DelegationDoc, type DelegationTransfer } from "./delegation-record.js";
 import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
 
@@ -59,6 +60,33 @@ export function validateInputTransfer(value: NonNullable<DelegationTransfer["inp
     throw new Error("Invalid delegate input source barrier; it was preserved.");
   }
   return parseInputCheckpoint(value.content, handoffId);
+}
+
+/**
+ * Find child inputs Pi has already settled without an answer. A queued input
+ * withdrawn before capture no longer appears in the latest inbox and may have
+ * no retained content; its submission still identifies the loss. Pi exposes
+ * this scan on Storage, not Tx, so call outside a Session commit. The caller
+ * must provide the same storage as the Harness, verify child/owner identity and
+ * seal writers before scanning through the later checkpoint/abort. This is not
+ * integrated into the checkpoint, and an existing checkpoint may already hold
+ * some of the returned inputs. It does not decide whether to replay or recover.
+ */
+export async function findUnansweredDelegateInputs(
+  storage: Pick<Storage, "scanSubmissions">, childId: ConversationId, ownerId: TaskId, context: Context,
+): Promise<Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>>> {
+  const result: Array<Extract<SubmissionRecord, { type: "input"; status: "unanswered" }>> = [];
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanSubmissions({ conversationId: childId, status: "unanswered", order: "ascending" }, 100, cursor, context);
+    for (const submission of page.items) {
+      if (submission.type === "input" && submission.status === "unanswered" && submission.requestId !== `carto.delegate-input:${ownerId}`) {
+        result.push(submission);
+      }
+    }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  return result;
 }
 
 export const DelegateInputCheckpointDoc = defineDoc<InputCheckpoint>({

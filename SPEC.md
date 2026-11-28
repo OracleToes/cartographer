@@ -798,8 +798,15 @@ the original copy. A missing or inconsistent input, a previously failed run
 whose inputs were not captured, or a queued context write stops capture rather
 than silently dropping it. The host must stop new input admission to both
 conversations while capturing and keep it stopped through recovery; the
-checkpoint is not an admission lock. This recovery checkpoint does not yet
-route person controls or preserve already-withdrawn child inbox items.
+checkpoint is not an admission lock. A separate dormant helper can scan Pi's
+child submission records for earlier unanswered inputs, excluding the delegate's
+own initial task input. Pi may already have discarded a withdrawn queued input's
+content, so this detection does not recover it. The storage-level scan is outside
+Pi's transaction API and is not yet integrated into checkpoint or abort; the host
+must verify ownership, seal writers, compare against any existing checkpoint and
+resolve earlier inputs before aborting further work. A retry of an existing
+checkpoint keeps its pre-abort copy. This recovery checkpoint does not yet route
+person controls.
 A dormant, explicit collapse path can transfer the checkpoint together with its
 matching returned handoff through the existing Brain journal. It verifies the
 source handoff, checkpoint and source barrier before deleting the old store,

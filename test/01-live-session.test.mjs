@@ -49,7 +49,7 @@ import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
-import { checkpointDelegateInputs, DelegateInputCheckpointDoc } from "../dist/runtime/delegate-inputs.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
 
@@ -909,6 +909,67 @@ test("person-ended delegate stops its in-flight work without a final report", as
     assert.equal(faux.state.callCount, 2, "no reporting or main inference after immediate end");
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("Pi submission scan detects withdrawn child input across restart without inventing content", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref } = fauxSetup();
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const hold = defineTool({ name: "hold", description: "Hold until closed", parameters: obj({}), replay: "safe", execute: async (_args, _api, context) => {
+    markStarted();
+    await new Promise((resolve) => {
+      if (context.abortSignal?.aborted) resolve();
+      else context.abortSignal?.addEventListener("abort", resolve, { once: true });
+    });
+    return { output: [{ type: "text", text: "stopped" }] };
+  } });
+  const worker = defineExtension({ name: "withdrawn-worker", tools: [hold] });
+  const delegate = createDelegateTool({ cwd: root, profiles: { implementation: { extensions: [worker], tools: [hold] } } });
+  const mainExtension = defineExtension({ name: "withdrawn-main", tools: [delegate] });
+  const registry = createRegistry();
+  registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
+  const path = join(root, ".brain", "withdrawn-input.sqlite");
+  let database = await openNodeSqliteDatabase(path);
+  let storage = await SqliteStorage.open(database, { prefix: "live_" });
+  let harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })], { stopReason: "toolUse" }),
+    ]);
+    await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    await started;
+    const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
+    const withdrawn = await child.submit({ type: "input", content: "Previously withdrawn", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    const stillQueued = await child.submit({ type: "input", content: "Still queued", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    assert.equal(await withdrawn.abort(BACKGROUND_CONTEXT), "aborted");
+    assert.equal((await withdrawn.status(BACKGROUND_CONTEXT)).entry, undefined, "Pi never placed the withdrawn input");
+    assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "", BACKGROUND_CONTEXT), true);
+    const ownerId = Number(active.input.id.slice("delegate:".length));
+    const found = await findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    assert.deepEqual(found.map((submission) => submission.id), [withdrawn.id]);
+    assert.equal(found[0].reason, "aborted");
+    assert.equal(found[0].entry, undefined);
+    assert.equal((await stillQueued.status(BACKGROUND_CONTEXT)).status, "queued");
+    await harness.close(BACKGROUND_CONTEXT); await database.close();
+    database = await openNodeSqliteDatabase(path);
+    storage = await SqliteStorage.open(database, { prefix: "live_" });
+    harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
+    main = await harness.root(BACKGROUND_CONTEXT);
+    assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
+    const persisted = await findUnansweredDelegateInputs(storage, child.id, ownerId, BACKGROUND_CONTEXT);
+    assert.deepEqual(persisted.map((submission) => submission.id), [withdrawn.id]);
+    assert.equal(persisted[0].entry, undefined, "the scan does not invent discarded inbox content");
+    assert.equal((await (await harness.submission(stillQueued.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "queued");
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
+    await database.close().catch(() => undefined);
     await cleanup();
   }
 });
