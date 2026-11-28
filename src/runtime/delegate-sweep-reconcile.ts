@@ -80,10 +80,12 @@ export async function prepareReturnSweepWithInputs(
   }
   for (const entryId of pendingEntries) {
     const inputIndex = inspected.findIndex((link) => link.entryId === entryId);
-    const text = userText(checkpoint.inputs[inputIndex]!.content);
+    const content = checkpoint.inputs[inputIndex]!.content;
+    const text = userText(content);
+    const hasImage = Array.isArray(content) && content.some((part) => part !== null && typeof part === "object" && !Array.isArray(part) && part.type === "image");
     const incoming = pendingItems.filter((item) => item.ephemeral?.source?.entryId === entryId);
     const duplicates = plan.chatDuplicates.filter((duplicate) => duplicate.entryId === entryId);
-    if (incoming.length + duplicates.length !== (text.trim() ? 1 : 0)) {
+    if (incoming.length + duplicates.length !== (text.trim() || hasImage ? 1 : 0)) {
       throw new Error("A checkpointed input has ambiguous archive parts; the source was preserved.");
     }
   }

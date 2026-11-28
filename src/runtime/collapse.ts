@@ -366,7 +366,7 @@ export async function readGenerationEphemera(storePath: string, generation: stri
 
 /** Reuse the existing Carto archive conversion for one set of entries. */
 type SweepEntry = { id: string; entry: StoredEntry; original: StoredEntry };
-function sweepParsedEntries(parsed: SweepEntry[], generation: string, includeChatCalls = false): Array<{ entryId: string; item: IncomingItem }> {
+function sweepParsedEntries(parsed: SweepEntry[], generation: string, includeChatCalls = false, includeImageOnly = false): Array<{ entryId: string; item: IncomingItem }> {
   const tools = new Map<string, { name: string; path?: string }>();
   const callMessages = new Map<string, unknown>();
   const removed = removedPartKeys(parsed.map(({ original }) => original), generation);
@@ -410,7 +410,15 @@ function sweepParsedEntries(parsed: SweepEntry[], generation: string, includeCha
     const call = callId === undefined ? undefined : tools.get(callId);
     const tool = call?.name;
     const path = call?.path;
-    for (const part of ephemeralPartsOf(entry, tool, keys, includeChatCalls)) {
+    const parts = ephemeralPartsOf(entry, tool, keys, includeChatCalls);
+    // A Pi user input can be only images (or whitespace and images). The
+    // ordinary direct sweep is unchanged; a return sweep must retain the whole
+    // message even when there is no text from which to make a normal part.
+    if (includeImageOnly && parts.length === 0 && message?.role === "user" && Array.isArray(message.content) &&
+        message.content.some((part) => part !== null && typeof part === "object" && (part as { type?: unknown }).type === "image")) {
+      parts.push({ key: "x0", value: { kind: "personMessage", text: "[image]" } });
+    }
+    for (const part of parts) {
       let model: unknown;
       if (message?.role === "assistant" && Array.isArray(message.content)) {
         const index = keys?.indexOf(part.key) ?? -1;
@@ -449,8 +457,9 @@ export type ReturnSweepPart = {
 /**
  * Convert Pi-derived, non-forked contexts using Carto's existing part IDs,
  * editing and archive conversion. Tool IDs are scoped to one conversation;
- * ambiguous calls, unsupported multi-message entries and image-only inputs
- * fail rather than silently lose data. The result is only a preparation: its
+ * ambiguous calls and unsupported multi-message entries fail rather than
+ * silently lose data. Image-only inputs retain their complete Pi message and
+ * receive a display label. The result is only a preparation: its
  * provenance can be carried by archive rows but has not been swept, Chat has
  * not been deduplicated, and child restoration or journal recovery is not
  * implemented. It must not authorize
@@ -480,10 +489,6 @@ export function prepareReturnSweepParts(views: readonly ReturnSweepView[], gener
       if (message?.role === "assistant" && original.model?.[0]?.role !== "assistant") {
         throw new Error("An assistant contribution has no stable original; the source was preserved.");
       }
-      if (message?.role === "user" && Array.isArray(message.content) &&
-          message.content.some((part) => part.type === "image") && !modelTexts(effective).text.join("").trim()) {
-        throw new Error("An image-only input needs separate archive handling; the source was preserved.");
-      }
       return { id: String(entry.id), original, entry: effective };
     });
     const callOwners = new Map<string, string>();
@@ -511,7 +516,7 @@ export function prepareReturnSweepParts(views: readonly ReturnSweepView[], gener
       }
     }
     const byId = new Map(view.entries.map((entry) => [String(entry.id), entry]));
-    for (const { entryId, item } of sweepParsedEntries(parsed, generation, true)) {
+    for (const { entryId, item } of sweepParsedEntries(parsed, generation, true, true)) {
       const source = byId.get(entryId)!;
       if (item.ephemeral === undefined) throw new Error("A return-sweep part is not ephemeral; the source was preserved.");
       const provenance = { version: 1 as const, generation, conversationId: conversation.id, entryId: source.id, entryKind: source.kind,

@@ -737,8 +737,12 @@ provenance if a prepared item is written. Legacy items have no provenance;
 a restore to main refuses a child source or malformed provenance, leaving it
 in the archive. This is not a child restore facility and cannot distinguish a
 legacy item from one whose provenance was lost. The conversion rejects
-ambiguous calls, unsupported multi-message contributions and image-only user
-input. A dormant preparation step excludes a main person contribution only
+ambiguous calls and unsupported multi-message contributions. Image-only user
+inputs are prepared as a single person-message item with an `[image]` display
+label and their complete Pi message retained for restoration. The archive editor
+shows their actual text, not that display label. Checkpoint reconciliation keeps
+an active image-only input for replay rather than also sweeping it. Direct sweep
+is unchanged. A dormant preparation step excludes a main person contribution only
 when its explicit, unique Chat identity and text match one Brain Chat record
 and the contribution contains no non-text parts. It retains child input,
 attachments and ambiguous or legacy text matches; it also recognizes a proven

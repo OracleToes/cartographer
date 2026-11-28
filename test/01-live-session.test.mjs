@@ -20,6 +20,7 @@ import { handleOf, rebuildHandles } from "../dist/domain/handles.js";
 import { projectContext } from "../dist/domain/projection.js";
 import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { personChatBindings } from "../dist/domain/chat-identity.js";
+import { archivedEphemeralText, editArchivedEphemeral } from "../dist/domain/archive-editor.js";
 import { applyWrite } from "../dist/domain/brain.js";
 import {
   applyOmitNow,
@@ -265,6 +266,7 @@ test("return sweep captures each Pi context with its own head and edits", async 
     await write(child, { kind: "test.result", model: [{ role: "toolResult", toolCallId: "same-call", toolName: "bash", content: [{ type: "text", text: "child result" }], isError: false, timestamp: 1 }] });
     await write(main, { kind: "test.result", model: [{ role: "toolResult", toolCallId: "same-call", toolName: "read", content: [{ type: "text", text: "main result" }], isError: false, timestamp: 1 }] });
     await write(child, { kind: "carto.user", data: { chatRecordId: "child-chat" }, model: [{ role: "user", content: [{ type: "text", text: "child image" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }], timestamp: 1 }] });
+    await write(child, { kind: "test.image-only", model: [{ role: "user", content: [{ type: "image", data: "YQ==", mimeType: "image/png" }], timestamp: 1 }] });
 
     const captured = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
     assert.deepEqual(captured.map((item) => item.conversation.id), [main.id, child.id]);
@@ -319,9 +321,10 @@ test("return sweep captures each Pi context with its own head and edits", async 
     assert.equal(chat.entryData.chatRecordId, "child-chat");
     assert.equal(chat.item.ephemeral.model[0].content[1].type, "image");
     assert.throws(() => prepareReturnSweepParts([...captured, captured[0]], "g-test"), /Ambiguous/);
-    const unsupported = structuredClone(captured);
-    unsupported[0].view.contributions[0] = [{ role: "user", content: [{ type: "image", data: "aA==", mimeType: "image/png" }], timestamp: 1 }];
-    assert.throws(() => prepareReturnSweepParts(unsupported, "g-test"), /image-only/);
+    const imageOnly = prepared.find((part) => part.entryKind === "test.image-only");
+    assert.equal(imageOnly.item.ephemeral.text, "[image]");
+    assert.equal(imageOnly.item.ephemeral.model[0].content[0].data, "YQ==");
+    assert.equal(imageOnly.item.ephemeral.source.conversationId, child.id);
     const missingCall = structuredClone(captured);
     const result = missingCall.flatMap(({ view }) => view.contributions).flat().find((message) => message.role === "toolResult");
     result.toolCallId = "not-present";
@@ -505,17 +508,24 @@ test("return-sweep provenance survives archive operations and blocks child resto
   try {
     const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
     await session.conversation.submit({ type: "write", entry: { kind: "test.main-input", model: [{ role: "user", content: "main archive content", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    await session.conversation.submit({ type: "write", entry: { kind: "test.image-only", model: [{ role: "user", content: [{ type: "image", data: "YQ==", mimeType: "image/png" }], timestamp: 1 }] } }, BACKGROUND_CONTEXT);
     await child.submit({ type: "write", entry: { kind: "carto.user", data: { chatRecordId: "child-chat" }, model: [{ role: "user", content: "child archive content", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
     const prepared = prepareReturnSweepParts(await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT), session.generation);
     const main = prepared.find(({ entryKind }) => entryKind === "test.main-input");
+    const imageOnly = prepared.find(({ entryKind }) => entryKind === "test.image-only");
     const sub = prepared.find(({ entryKind }) => entryKind === "carto.user");
     assert.deepEqual(sub.item.ephemeral.source, { version: 1, generation: session.generation, conversationId: child.id, entryId: sub.entryId, entryKind: "carto.user", entryData: { chatRecordId: "child-chat" } });
     await brain.archiveEphemeral(main.item, "archive-generation", 1);
+    await brain.archiveEphemeral(imageOnly.item, "archive-generation", 1);
     await brain.archiveEphemeral(sub.item, "archive-generation", 1);
+    const savedImage = (await brain.readArchive()).items.find((item) => item.id === imageOnly.item.id);
+    assert.equal(archivedEphemeralText(savedImage), "", "the image label is not editable message text");
+    const editedImage = editArchivedEphemeral(savedImage, "caption");
+    assert.equal(editedImage.ephemeral.model[0].content[1].data, "YQ==");
     let savedChild = (await brain.readArchive()).items.find((item) => item.id === sub.item.id);
     await brain.editArchivedEphemeral(savedChild, "edited child archive content");
     await brain.applyArchive({ kind: "pin", id: sub.item.id, pinned: "user" });
-    for (const id of [main.item.id, sub.item.id]) await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
+    for (const id of [main.item.id, imageOnly.item.id, sub.item.id]) await brain.applyArchive({ kind: "mark", id, action: "restore", author: "user" });
     const expected = { brain: await brain.read(), archive: await brain.readArchive() };
     await brain.beginCollapse("test-source", "test-destination");
     await brain.applyCollapse({ writes: [], source: "test-source", generation: "test-destination", expected, incoming: [], now: 2 });
@@ -539,8 +549,9 @@ test("return-sweep provenance survives archive operations and blocks child resto
     const wrongId = { ...savedChild, ephemeral: { ...savedChild.ephemeral, source: { ...savedChild.ephemeral.source, conversationId: 1, entryId: 999999 } } };
     assert.equal(await restoreEphemeral(session, wrongId), false);
     const restored = (await session.conversation.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.kind === "carto.restored");
-    assert.equal(restored.length, 1);
-    assert.equal(restored[0].model[0].content, "main archive content");
+    assert.equal(restored.length, 2);
+    assert.equal(restored.find((entry) => entry.data.archiveId === main.item.id).model[0].content, "main archive content");
+    assert.equal(restored.find((entry) => entry.data.archiveId === imageOnly.item.id).model[0].content[0].data, "YQ==");
   } finally {
     if (session) await closeLiveSession(session).catch(() => undefined);
     await brain.close();
@@ -1414,7 +1425,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
       fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
       fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })], { stopReason: "toolUse" }),
     ]);
-    const submission = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    const imageOnlyInput = [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }];
+    const submission = await main.submit({ type: "input", content: imageOnlyInput }, BACKGROUND_CONTEXT);
     await started;
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     const child = await harness.conversation(active.conversationId, BACKGROUND_CONTEXT);
@@ -1448,7 +1460,8 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const plan = await main.commit((tx) => prepareReturnSweepWithInputs(tx, main.id, active.input.id, returnViews, "gen-end", brainSnapshot, new Set(), new Set(), 1), BACKGROUND_CONTEXT);
     assert.equal(plan.checkpointInputs.find((input) => input.submissionId === submission.id).status, "done");
     assert.equal(plan.pendingItems.length, 1);
-    assert.equal(plan.pendingItems[0].ephemeral.text, "Start");
+    assert.equal(plan.pendingItems[0].ephemeral.text, "[image]");
+    assert.deepEqual(plan.pendingItems[0].ephemeral.model[0].content, imageOnlyInput);
     assert.ok(!plan.incoming.some((item) => item.id === plan.pendingItems[0].id));
     const withPins = structuredClone(brainSnapshot);
     withPins.files = [

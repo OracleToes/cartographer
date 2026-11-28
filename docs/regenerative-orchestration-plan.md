@@ -169,8 +169,12 @@ conversation and entry provenance to each item. Archive storage and editing
 retain it when explicitly written. Main restoration now refuses child or
 malformed source provenance; legacy rows without it retain their old behavior
 and cannot be distinguished from a row whose provenance was lost. The helper
-rejects duplicate or missing call identities, multi-message entries and
-image-only user inputs rather than guessing. A further dormant preparation
+rejects duplicate or missing call identities and multi-message entries rather
+than guessing. Image-only user inputs are now prepared as one person-message
+item with a display label and their original Pi content retained for restoration;
+the archive editor does not turn that label into person-authored text. An active
+checkpointed image-only input is excluded from the sweep and retained for replay.
+Direct sweep is unchanged. A further dormant preparation
 reuses Carto's Chat bindings to exclude only uniquely identified main person
 messages whose text matches a Brain Chat record and whose content is text-only.
 Child messages, attachments and ambiguous or legacy text matches remain; a latest

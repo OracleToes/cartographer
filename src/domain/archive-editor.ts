@@ -1,12 +1,20 @@
 /** Editing an archived item updates both its displayed text and its restore payload. */
 import type { Message, TextContent } from "@earendil-works/pi-ai";
 import type { ArchivedItem } from "./archive.js";
+import { userText } from "./chat-identity.js";
 
 /** Text to put in the editor. Tool call arguments are structured JSON. */
 export function archivedEphemeralText(item: ArchivedItem): string {
   const value = item.ephemeral;
   if (value === undefined) throw new Error("Not an archived ephemeral item.");
   const model = value.model;
+  if (value.kind === "personMessage" && Array.isArray(model)) {
+    const message = (model as Message[])[0];
+    if (message?.role === "user" && Array.isArray(message.content) && message.content.some((part) => part.type === "image") && !userText(message.content).trim()) {
+      // The archive's [image] label is not text the person originally sent.
+      return userText(message.content);
+    }
+  }
   if (value.kind === "toolCall" && Array.isArray(model)) {
     const call = (model as Message[])[0];
     if (call?.role !== "assistant" || call.content.length !== 1 || call.content[0]?.type !== "toolCall") throw new Error("The archived tool call has an invalid restore payload.");
