@@ -5,6 +5,7 @@ import type { CartoBrain, PinnedEphemeral } from "../domain/records.js";
 import { ephemeralItemId, prepareCollapsePinRefresh } from "./collapse.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
+import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "./delegate-sweep-marks.js";
 import type { ReturnSweepView } from "./delegate-sweep-view.js";
 
@@ -114,4 +115,19 @@ export async function prepareReturnSweepWithInputsAndPinRefresh(
   verifyReturnSweepReadPins(brain, plan.pinned, mainHeadPins);
   const refresh = prepareCollapsePinRefresh(root, brain, now);
   return { ...plan, writes: [...plan.writes, ...refresh.writes], fileTexts: refresh.fileTexts };
+}
+
+/**
+ * Capture the source head alongside the prospective plan. The returned digest
+ * records both projection files, but does not authenticate hidden sidecar IDs
+ * or bind the plan to a journal. The host must independently establish their
+ * authenticity, seal writers and recheck the bytes before any eventual commit.
+ */
+export async function prepareReturnSweepWithSourceHead(
+  root: string, tx: Tx, mainId: ConversationId, id: string, views: readonly ReturnSweepView[], generation: string,
+  brain: CartoBrain, now: number,
+) {
+  const head = captureReturnSweepHead(root, generation, views);
+  const plan = await prepareReturnSweepWithInputsAndPinRefresh(root, tx, mainId, id, views, generation, brain, new Set(head.chatIds), head.pins, now);
+  return { ...plan, sourceHeadDigest: head.digest };
 }

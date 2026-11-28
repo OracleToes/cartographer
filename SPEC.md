@@ -753,7 +753,16 @@ deletion wins over pins and Chat duplicates. It refuses to carry child pins into
 main or trust unknown pins; older main pins require identities verified against
 the source head, and current main pins must match their captured kind and text
 and cannot discard images. This is not a commit. Checkpoint reconciliation,
-pin refresh and child restoration remain unfinished. The return path
+pin refresh and child restoration remain unfinished. A dormant source-head
+capture reads both projection files, compares the markdown to Pi's replayed
+main `carto-context` section, checks sidecar pin rows against the rendered
+pinned section, and returns a digest of both files. A prospective planner can
+consume these captured Chat IDs and pin items, but the visible markdown does
+not authenticate their hidden IDs or read-call metadata. The digest detects
+later byte changes; it is not a lock or proof of original authenticity. The
+host must independently establish that provenance, seal all writers and
+recheck the files before any eventual commit. Missing, malformed or inconsistent
+heads block the prospective plan. The return path
 does not use or persist these prepared items, detect every kind of concurrent
 write, or replace the guard: its caller must seal all writers throughout capture
 and subsequent handling. Restart retries this

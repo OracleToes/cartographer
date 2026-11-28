@@ -16,7 +16,9 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 
 import { openBrain } from "../dist/runtime/brain-store.js";
-import { handleOf } from "../dist/domain/handles.js";
+import { handleOf, rebuildHandles } from "../dist/domain/handles.js";
+import { projectContext } from "../dist/domain/projection.js";
+import { writeSnapshot } from "../dist/runtime/projection-files.js";
 import { personChatBindings } from "../dist/domain/chat-identity.js";
 import { applyWrite } from "../dist/domain/brain.js";
 import {
@@ -53,6 +55,7 @@ import { endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateE
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
+import { captureReturnSweepHead } from "../dist/runtime/delegate-sweep-head.js";
 import { prepareReturnSweepArchive } from "../dist/runtime/delegate-sweep-chat.js";
 import { prepareReturnSweepMarks, verifyReturnSweepReadPins } from "../dist/runtime/delegate-sweep-marks.js";
 import { inspectReturnSweepInputs } from "../dist/runtime/delegate-sweep-inputs.js";
@@ -202,6 +205,43 @@ test("a returned handoff survives crashes after sweep and after destination plac
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();
   }
+});
+
+test("return sweep captures and checks the source projection, without authenticating hidden sidecar fields", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const session = await openLiveSession({ root, brain, models, model: ref });
+  try {
+    const frozen = await brain.read();
+    frozen.chat.push({ id: "chat:head", author: "user", text: "hello", createdAt: 1, updatedAt: 1 });
+    frozen.ephemera.push({ id: "pin:head", kind: "readResult", text: "read\ncontent", createdAt: 2, pinned: "user", entity: { callId: "call", tool: "read", path: "src/verify-me.ts" } });
+    frozen.handles = rebuildHandles(frozen);
+    const projection = projectContext(frozen, new Map(), "Person");
+    const paths = writeSnapshot(root, session.generation, projection, 1);
+    await session.conversation.submit({ type: "write", entry: { kind: "test.system", model: [{ role: "system", content: "", sections: { "carto-context": projection.text }, timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    const views = await captureReturnSweepViews(session.harness, BACKGROUND_CONTEXT);
+    const head = captureReturnSweepHead(root, session.generation, views);
+    assert.deepEqual(head.chatIds, ["chat:head"]);
+    assert.deepEqual(head.pins, frozen.ephemera);
+    const original = readFileSync(paths.sidecar, "utf8");
+    const sidecar = JSON.parse(original);
+    sidecar.ephemeralItems[0].item.entity.path = "different.ts";
+    writeFileSync(paths.sidecar, JSON.stringify(sidecar));
+    const changedHiddenMetadata = captureReturnSweepHead(root, session.generation, views);
+    assert.notEqual(changedHiddenMetadata.digest, head.digest, "the digest detects changes but hidden fields are not visible in markdown");
+    sidecar.ephemeralItems[0].item.text = "different";
+    writeFileSync(paths.sidecar, JSON.stringify(sidecar));
+    assert.throws(() => captureReturnSweepHead(root, session.generation, views), /pin rows conflict/);
+    sidecar.ephemeralItems.push(sidecar.ephemeralItems[0]);
+    writeFileSync(paths.sidecar, JSON.stringify(sidecar));
+    assert.throws(() => captureReturnSweepHead(root, session.generation, views), /Invalid frozen pin/);
+    writeFileSync(paths.sidecar, original);
+    writeFileSync(paths.markdown, `${projection.text} changed`);
+    assert.throws(() => captureReturnSweepHead(root, session.generation, views), /conflicts with the main context/);
+    rmSync(paths.sidecar);
+    assert.throws(() => captureReturnSweepHead(root, session.generation, views), /unavailable/);
+    assert.throws(() => captureReturnSweepHead(root, "../bad", views), /Invalid return-sweep generation/);
+  } finally { await closeLiveSession(session); await cleanup(); }
 });
 
 test("return sweep captures each Pi context with its own head and edits", async () => {

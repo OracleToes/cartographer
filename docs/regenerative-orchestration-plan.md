@@ -208,8 +208,16 @@ result or to the corresponding item supplied from the verified frozen head.
 Unproven path aliases and transient F handles block rather than being resolved
 from the current tree. The lower-level mark planner does not perform these
 checks; the host must supply authentic frozen items and seal the sidecar, files
-and settings as well as Pi and Brain writers. The reads are not atomic or bound
-to the source seal, snapshot, head, or journal and do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
+and settings as well as Pi and Brain writers. A separate dormant source-head
+capture reads the generation's markdown and sidecar, compares the markdown to
+Pi's replayed main `carto-context`, checks visible pin rows and sidecar structure,
+and fingerprints both byte streams. A wrapper uses those captured items and Chat
+IDs in prospective reconciliation. This does not authenticate hidden sidecar IDs,
+Chat membership or pin call metadata: the projection does not contain them.
+A digest can detect later changes but cannot establish initial authenticity or
+seal writers. A future host must independently establish provenance and recheck
+all captured state; full record reconciliation, sealed reads and atomic journal
+binding remain open. These reads do not authorize deletion. A dormant source seal now hashes the logical contents and schema of a
 stopped Pi store in a single read-only SQLite snapshot, including committed WAL
 changes, using fixed primary-key ordering and rejecting unknown tables, key
 shapes, column types and schema versions. An optional, validated seal can be
