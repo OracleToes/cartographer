@@ -11,9 +11,9 @@ import type { Archive } from "../domain/archive.js";
 import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.js";
 import { ephemeralItemId, generationPaths, prepareCollapseFreshness, prepareCollapsePinRefresh, readStoredDelegation, readStoredMainCheckpoint } from "./collapse.js";
 import type { BrainStore } from "./brain-store.js";
-import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
+import { DelegateInputCheckpointDoc, findUnansweredInputs, parseInputCheckpoint } from "./delegate-inputs.js";
 import { verifyReturnedDelegateInputs } from "./delegate-control.js";
-import { delegateReturnChat, DelegateCaptureDoc, DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
+import { delegateReturnChat, DelegateCaptureDoc, DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
 import { prepareReturnSweepRecords } from "./delegate-sweep-records.js";
@@ -214,7 +214,8 @@ export async function prepareReturnSweepWithRecords(
  * Pi inspection rejects unfinished tasks and submissions before and after
  * capture, including background work and queued writes; it is not a lock. Pi's
  * unanswered-input scan is rechecked against the returned checkpoint for main
- * and the owned child, but cannot recover discarded input content.
+ * and the owned child; unanswered inputs in other captured conversations also
+ * block. Pi cannot recover content already discarded from an inbox.
  * The two source seals and head/Brain comparisons are not locks, cannot detect
  * every ABA change, and do not authenticate hidden sidecar data or arbitrary
  * project-file observations. This does not commit, journal, establish a deletion
@@ -289,6 +290,15 @@ export async function captureReturnSweepPlan(
   const main = await harness.conversation(ROOT_CONVERSATION_ID, context);
   if (main === undefined) throw new Error("Return-sweep Harness has no main conversation; the source was preserved.");
   await verifyReturnedDelegateInputs(main, storage, id, context);
+  const returned = parseReturnedDelegation(captured.handoff).active;
+  if (returned?.phase !== "returned") throw new Error("Return-sweep handoff is unavailable; the source was preserved.");
+  for (const { conversation } of views) {
+    if (conversation.id === ROOT_CONVERSATION_ID || conversation.id === returned.conversationId) continue;
+    const unanswered = await findUnansweredInputs(storage, conversation.id, context);
+    if (unanswered.length !== 0) {
+      throw new Error(`Another conversation has unanswered input ${unanswered[0]!.id}; its content may no longer be available. The source was preserved.`);
+    }
+  }
   await requireMatchingStorage();
   const after = { brain: await brain.read(), archive: await brain.readArchive() };
   if (!isDeepStrictEqual(expected, after)) throw new Error("Brain or archive changed during return-sweep capture; the source was preserved.");

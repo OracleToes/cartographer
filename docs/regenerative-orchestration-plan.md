@@ -344,7 +344,9 @@ rechecks projection and Brain/archive snapshots. Pi inspection rejects unfinishe
 tasks and queued or placed submissions before and after capture, including
 background work and queued writes. It also reuses the existing unanswered-input
 scan and checkpoint verification for main and the owned child; missing content
-or a scan failure blocks capture. Before fingerprinting, the wrapper writes a
+or a scan failure blocks capture. Every other captured conversation is also
+scanned, and any unanswered input there blocks: no checkpoint or delegate-input
+exception is assumed for an unrelated conversation. Before fingerprinting, the wrapper writes a
 fresh challenge into a Pi source document and compares it with the named store
 through a read-only SQLite connection. It also uses Pi's Storage document API
 to check the same identity and challenge before and after the submission scan,

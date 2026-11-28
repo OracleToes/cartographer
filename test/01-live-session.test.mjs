@@ -1869,14 +1869,24 @@ test("person-ended delegate stops its in-flight work without a final report", as
     } };
     await assert.rejects(captureReturnSweepPlan(root, racingBrain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /source changed during capture/);
     let taskArchiveReads = 0;
+    let backgroundTask;
     const taskRacingBrain = { ...brain, readArchive: async () => {
       if (++taskArchiveReads === 2) {
-        await main.commit((tx) => tx.createTask(SleepTask, { seconds: 600 }, { ownership: { kind: "conversation" }, background: true }), BACKGROUND_CONTEXT);
+        backgroundTask = await main.commit((tx) => tx.createTask(SleepTask, { seconds: 600 }, { ownership: { kind: "conversation" }, background: true }), BACKGROUND_CONTEXT);
       }
       return brain.readArchive();
     } };
     await assert.rejects(captureReturnSweepPlan(root, taskRacingBrain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
     assert.ok((await harness.inspect(BACKGROUND_CONTEXT)).tasks.some(({ record }) => record.kind === "carto.sleep" && record.background), "background work remains in the source");
+    await harness.abortTask(backgroundTask, BACKGROUND_CONTEXT);
+    await harness.waitForTask(backgroundTask, BACKGROUND_CONTEXT);
+    const other = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    await captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
+    // Model Pi's durable record after another conversation's queued input was
+    // withdrawn: the submission survives even when the inbox content does not.
+    const lost = await other.commit((tx) => tx.createSubmission({ type: "input", conversationId: other.id, status: "unanswered", reason: "aborted" }), BACKGROUND_CONTEXT);
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), new RegExp(`Another conversation has unanswered input ${lost.id}`));
+    assert.equal((await storage.submission(lost.id, BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal(await brain.readCollapseJournal(), undefined, "capture does not start a collapse or delete the source");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");

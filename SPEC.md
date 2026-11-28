@@ -830,7 +830,10 @@ for later commit; Pi inspection rejects unfinished source tasks or submissions,
 including background tasks and queued writes, before and after capture. The
 wrapper also reuses Pi's unanswered-submission scan to check the existing
 checkpoint for main and the owned child; an uncheckpointed unanswered input or
-a failed scan blocks capture. Before and after the scan, Pi's Storage document
+a failed scan blocks capture. It also scans every other captured conversation
+and refuses any unanswered input there, without assuming its content was saved
+or that it was the delegate's initial instruction. Before and after the scan,
+Pi's Storage document
 API must return the same fresh capture challenge and document identity as the
 named source; an accidentally unrelated scan storage is refused. The caller
 must still supply the Harness's actual storage: copies, replacement or relays
