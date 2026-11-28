@@ -5,7 +5,7 @@ import { ROOT_CONVERSATION_ID, type ConversationRecord, type ContextView, type C
 type Bounds = { conversation: ConversationRecord; tail: EntryId | undefined; head: EntryId | undefined };
 
 /** Capture every conversation and its context bounds on Pi's session line. */
-async function sweepBounds(tx: Tx): Promise<Bounds[]> {
+export async function captureReturnSweepBounds(tx: Tx): Promise<Bounds[]> {
   const conversations: ConversationRecord[] = [];
   let cursor: Cursor | undefined;
   do {
@@ -44,7 +44,7 @@ export type ReturnSweepView = { conversation: ConversationRecord; tail: EntryId 
  * input recovery and journal integration are complete.
  */
 export async function captureReturnSweepViews(harness: Harness, context: Context): Promise<ReturnSweepView[]> {
-  const before = await harness.commit(sweepBounds, context);
+  const before = await harness.commit(captureReturnSweepBounds, context);
   const result: ReturnSweepView[] = [];
   for (const bound of before) {
     const conversation = await harness.conversation(bound.conversation.id, context);
@@ -56,7 +56,7 @@ export async function captureReturnSweepViews(harness: Harness, context: Context
     }
     result.push({ conversation: bound.conversation, tail: bound.tail, view });
   }
-  const after = await harness.commit(sweepBounds, context);
+  const after = await harness.commit(captureReturnSweepBounds, context);
   if (JSON.stringify(before) !== JSON.stringify(after)) {
     throw new Error("Return-sweep conversations changed during capture; the source was preserved.");
   }

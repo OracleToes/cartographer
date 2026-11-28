@@ -189,7 +189,10 @@ pins from main, unproven pins, conflicting current main pins and image-bearing
 pins. Older main pins need identities checked against the source snapshot;
 deletions override pins. A dormant source-checkpoint inspection now resolves each
 saved submission on Pi's transaction line against the returned handoff, owned
-child, source barrier and captured view bounds. It checks placed entries and
+child, source barrier and captured view bounds. It also rescans the complete
+conversation set in the transaction, refusing omitted conversations and ones
+created after view capture. This does not authenticate supplied contributions
+or lock the source. It checks placed entries and
 active contributions without text-based identity guessing, and checks queued
 content while Pi still retains it. An already withdrawn queued input is explicitly
 reported as unverifiable against Pi because only the checkpoint retains its

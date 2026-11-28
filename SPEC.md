@@ -776,7 +776,10 @@ or change direct collapse. A dormant record planner now reuses ordinary
 collapse's Brain mark writes and archive restore logic to prepare archived or
 deleted records and a prospective Brain. It rejects conflicting archive IDs and
 record restores rather than overwriting existing data, and separately reports
-ephemeral restores that still need destinations. The composed prospective plan
+ephemeral restores that still need destinations. Input inspection rescans the
+complete Pi conversation set in its transaction and refuses a captured view
+that omits any conversation or was captured before another appeared. This is not
+a lock or proof of the supplied contributions. The composed prospective plan
 also prepares ordinary Atlas freshness writes before record marks and renders
 the next head with the ordinary projection, excluding checkpointed Chat IDs.
 It uses the original Brain as the expected commit snapshot and does not write

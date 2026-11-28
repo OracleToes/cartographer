@@ -5,7 +5,7 @@ import { DelegateChildIdentityDoc } from "./delegate-conversation.js";
 import { ownedHandoff } from "./delegate-control.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
 import { DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
-import type { ReturnSweepView } from "./delegate-sweep-view.js";
+import { captureReturnSweepBounds, type ReturnSweepView } from "./delegate-sweep-view.js";
 
 export type ReturnSweepInput = {
   submissionId: number;
@@ -61,6 +61,13 @@ export async function inspectReturnSweepInputs(
   }
   if (!byConversation.has(mainId) || (owned.childId !== null && !byConversation.has(owned.childId))) {
     throw new Error("Return input view is missing an owned conversation; the source was preserved.");
+  }
+  // Checking only the views the caller supplied does not show whether an
+  // entire other conversation was omitted or created after capture. Rescan
+  // Pi's complete conversation set on this transaction line before planning.
+  const bounds = await captureReturnSweepBounds(tx);
+  if (bounds.length !== byConversation.size || bounds.some(({ conversation }) => !byConversation.has(conversation.id))) {
+    throw new Error("Return input views do not cover every source conversation; the source was preserved.");
   }
   const result: ReturnSweepInput[] = [];
   const placedEntries = new Set<number>();

@@ -1759,6 +1759,12 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "checkpoint survives another restart");
     const reopenedViews = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
     assert.deepEqual(await main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, reopenedViews), BACKGROUND_CONTEXT), linked);
+    const extra = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    await extra.submit({ type: "write", entry: { kind: "test.extra", model: [{ role: "user", content: "separate source work", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    await assert.rejects(main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, reopenedViews), BACKGROUND_CONTEXT), /do not cover every source conversation/);
+    const allViews = await captureReturnSweepViews(harness, BACKGROUND_CONTEXT);
+    assert.deepEqual(await main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, allViews), BACKGROUND_CONTEXT), linked);
+    await assert.rejects(main.commit((tx) => inspectReturnSweepInputs(tx, main.id, active.input.id, allViews.filter((view) => view.conversation.id !== extra.id)), BACKGROUND_CONTEXT), /do not cover every source conversation/);
     await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);
   } finally {
     await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
