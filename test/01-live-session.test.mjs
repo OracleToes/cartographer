@@ -45,6 +45,7 @@ import { ensureDelegateConversation } from "../dist/runtime/delegate-conversatio
 import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
+import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -342,10 +343,11 @@ test("a selected delegate report commits once and cannot be forged or replaced",
     assert.equal(saved.conversationId, childId);
     const child = await harness.conversation(childId, BACKGROUND_CONTEXT);
     assert.deepEqual((await child.agent(BACKGROUND_CONTEXT)).tools.map((item) => item.name), ["delegate_report"]);
-    const api = { conversationId: childId, commit: (fn, context) => main.commit(fn, context) };
+    const taskId = await main.commit(async (tx) => (await tx.scanTasks({ conversationId: childId, kind: "pi.tool" }, 100)).items.find((task) => task.input.callId === "report").id, BACKGROUND_CONTEXT);
+    const api = { conversationId: childId, taskId, callId: "report", commit: (fn, context) => main.commit(fn, context) };
     await DelegateReportTool.execute(report, api, BACKGROUND_CONTEXT);
     await assert.rejects(DelegateReportTool.execute({ ...report, changes: "invented" }, api, BACKGROUND_CONTEXT), /different result/);
-    await assert.rejects(DelegateReportTool.execute(report, { ...api, conversationId: main.id }, BACKGROUND_CONTEXT), /task-owned/);
+    await assert.rejects(DelegateReportTool.execute(report, { ...api, conversationId: main.id }, BACKGROUND_CONTEXT), /model-issued/);
     assert.deepEqual((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active, saved);
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
@@ -387,6 +389,67 @@ test("the delegation tool runs a focused capture using Carto's existing scoped r
     assert.equal(faux.state.callCount, 3, "main does not run again before the host handles the return");
     const unsafe = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture], tools: [{ ...read, name: "bash" }] } } });
     await assert.rejects(unsafe.execute({ role: "capture", instruction: "Inspect", doneWhen: "Report" }, { agent: async () => ({ model: ref }) }, BACKGROUND_CONTEXT), /read\/search/);
+  } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("delegation round guard fails closed on nested, mismatched, or missing task identity", async () => {
+  const entry = { conversationId: 1, model: [fauxAssistantMessage([fauxToolCall("delegate", {}, { id: "call" })], { stopReason: "toolUse" })] };
+  let task = { kind: "pi.tool", conversationId: 1, input: { kind: "model", assistant: 5, callId: "call" } };
+  const tx = { task: async () => task, entry: async () => entry };
+  await requireSoleDelegateCall(tx, 1, 2, "call", "delegate");
+  task = { ...task, input: { kind: "nested", callId: "call" } };
+  await assert.rejects(requireSoleDelegateCall(tx, 1, 2, "call", "delegate"), /model-issued/);
+  task = { ...task, conversationId: 3, input: { kind: "model", assistant: 5, callId: "call" } };
+  await assert.rejects(requireSoleDelegateCall(tx, 1, 2, "call", "delegate"), /model-issued/);
+  task = undefined;
+  await assert.rejects(requireSoleDelegateCall(tx, 1, 2, "call", "delegate"), /model-issued/);
+});
+
+test("mixed delegation and report rounds cannot create or return a handoff", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  let markers = 0;
+  const marker = defineTool({ name: "marker", description: "Record a normal call", parameters: obj({}), execute: async () => {
+    markers++; return { output: [{ type: "text", text: "marked" }] };
+  } });
+  const delegate = createDelegateTool({ cwd: root, profiles: { implementation: { extensions: [defineExtension({ name: "marker", tools: [marker] })], tools: [marker] } } });
+  const markerExtension = defineExtension({ name: "marker", tools: [marker] });
+  const mainExtension = defineExtension({ name: "test-main", tools: [delegate, marker] });
+  const registry = createRegistry();
+  registry.install(mainExtension);
+  registry.install(markerExtension);
+  registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const args = { role: "implementation", instruction: "Do work", doneWhen: "Report" };
+  const report = { status: "done", findings: "found", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate", args, { id: "mixed-delegate" }), fauxToolCall("marker", {}, { id: "main-marker" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage("Retry later.")),
+    ]);
+    const first = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    assert.equal((await first.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT))?.active ?? null, null);
+    assert.equal(markers, 1);
+    assert.match(JSON.stringify(captured[1]), /must be the only tool call/);
+
+    faux.setResponses([
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate", args, { id: "sole-delegate" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "mixed-report" }), fauxToolCall("marker", {}, { id: "child-marker" })], { stopReason: "toolUse" })),
+      factory(() => fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "sole-report" })], { stopReason: "toolUse" })),
+    ]);
+    const second = await main.submit({ type: "input", content: "Retry" }, BACKGROUND_CONTEXT);
+    assert.equal((await second.wait(BACKGROUND_CONTEXT)).status, "done");
+    await main.waitForIdle(BACKGROUND_CONTEXT);
+    assert.equal(markers, 2);
+    assert.match(JSON.stringify(captured.at(-1)), /must be the only tool call/);
+    const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.deepEqual(handoff.result, { kind: "delegate", report });
   } finally {
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();

@@ -6,6 +6,7 @@
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
 import { DelegationDoc, returnDelegation, type DelegateReport } from "./delegation-record.js";
+import { requireSoleDelegateCall } from "./delegate-round.js";
 
 const fields = ["status", "findings", "changes", "checks", "uncertainty", "remaining", "mainMessage"] as const;
 
@@ -22,9 +23,11 @@ export const DelegateReportTool = defineTool({
     mainMessage: str({ minLength: 1 }),
   }),
   replay: "safe",
+  callers: ["model"],
   execute: async (args, api, context) => {
     const report: DelegateReport = { ...args };
     await api.commit(async (tx) => {
+      await requireSoleDelegateCall(tx, api.conversationId, api.taskId, api.callId, "delegate_report");
       const child = await tx.conversation(api.conversationId);
       if (child?.owner === undefined) throw new Error("A delegate report requires a task-owned conversation.");
       const owner = await tx.task(child.owner.taskId);

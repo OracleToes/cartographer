@@ -1,13 +1,14 @@
 /**
  * A dormant Pi tool that drives a single task-owned child. The host must
- * enforce a sole-call round, collapse main on return, and provide controls and
- * recovery before installing it in an orchestration session.
+ * collapse main on return and provide controls and recovery before installing
+ * it in an orchestration session.
  */
 import { defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
 import { ensureDelegateConversation } from "./delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "./delegate-report.js";
 import { DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
+import { requireSoleDelegateCall } from "./delegate-round.js";
 
 type Profile = { extensions: readonly Extension[]; tools: readonly ToolRegistration[] };
 
@@ -22,6 +23,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
       doneWhen: str({ minLength: 1 }),
     }),
     replay: "safe",
+    callers: ["model"],
     executionMode: "sequential",
     execute: async (args, api, context) => {
       const model = (await api.agent(context)).model;
@@ -37,6 +39,7 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
       const id = `delegate:${api.taskId}`;
       const input = { id, role: args.role, instruction: args.instruction, doneWhen: args.doneWhen };
       const alreadyReturned = await api.commit(async (tx) => {
+        await requireSoleDelegateCall(tx, api.conversationId, api.taskId, api.callId, "delegate");
         const record = await tx.doc(DelegationDoc, api.conversationId);
         if (record.active === null) prepareDelegation(record, input);
         else if (record.active.input.id !== id || record.active.input.role !== input.role ||

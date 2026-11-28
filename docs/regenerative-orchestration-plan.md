@@ -53,10 +53,13 @@ to main, retaining the handoff until that input is answered and checked before
 clearing the slot. The caller must first perform the return collapse and must
 handle unanswered inputs. A dormant Pi delegation tool composes the child and
 report foundations, with request-ID replay and an explicit missing-report
-failure; a test reuses Carto's scoped read tool for capture. The host must
-still ensure a sole-call round, perform return collapse, and handle interrupts
-and recovery; Pi's terminate control alone does not stop a mixed tool round.
-These pieces reuse Pi's owned conversations, schema validation and commit
+failure; a test reuses Carto's scoped read tool for capture. Both delegation
+and report now fail closed unless their durable Pi tool task references a
+model-issued assistant entry with exactly that one call. Nested callers are
+disallowed. Other calls in a mixed round may still run normally; rejecting the
+delegation does not roll them back. The host must still perform return collapse
+and handle interrupts and recovery; Pi's terminate control alone does not stop
+a mixed tool round. These pieces reuse Pi's owned conversations, schema validation and commit
 semantics, but are not yet a complete delegate runtime or UI. Orchestration
 recovery, the parser pilot, capture workflow and controls remain to be built.
 
