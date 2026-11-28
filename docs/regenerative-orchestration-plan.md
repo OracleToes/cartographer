@@ -45,9 +45,11 @@ proposal text; unresolved details are not implicitly decided by them.
   part, while the old specification remains authoritative for parts not yet
   captured. Keep a mapping in project files linking old specification sections
   to their structured replacements so the authority boundary is visible, without
-  editing the old specification. Discrepancies still require discussion before
-  being written into the structured specification. This decision does not itself
-  transition Carto's `SPEC.md`.
+  editing the old specification. If Carto finds an external edit to an old
+  section that has already transferred, it flags the edit and asks the person
+  what to do rather than silently applying or ignoring it. Discrepancies still
+  require discussion before being written into the structured specification.
+  This decision does not itself transition Carto's `SPEC.md`.
 - **Separate authorship and work.** Main writes or updates the specification,
   then delegates implementation to a different context. When the person's
   request is clear, main updates the specification and delegates immediately,
@@ -157,9 +159,9 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** if the old specification changes externally
-while its sections are being captured, how should Carto handle an edit to a
-section that has already transferred to the structured specification?
+**Next unanswered question:** if idle capture finds code that conflicts with an
+accepted or dictated specification, should main ask the person before fixing
+it, or may it delegate a fix without being asked?
 
 ## 1. Recommendation in one sentence
 
