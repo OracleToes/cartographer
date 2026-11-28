@@ -65,9 +65,16 @@ ordinary Pi work, then records a person-ended return. A restart helper requires
 Pi scheduling to remain paused and aborts the owning main run before resuming;
 its unanswered inputs still require host handling. It preserves partial project
 work and does not cross background boundaries. The host must still route the
-control, gate main inference (including a queued input after termination),
-handle unanswered and queued inputs, and perform return collapse; Pi's terminate
-control alone does not stop a mixed tool round. These pieces reuse Pi's owned
+control, handle unanswered and queued inputs, and perform return collapse.
+A dormant main-only Pi generation hook now holds requests in the source while a
+handoff exists, including queued main input after termination. It fails closed
+on read errors and wakes only on abort. A source-generation marker prevents
+return admission there; after collapse a destination admission marker, the
+exact return input and its live submission identity allow main to reconcile.
+A later queued run is held until separately handled even if the return remains
+in its context. This hook is not a global model
+lease and the host must install it in main, abort blocked requests, and preserve
+their inputs. Pi's terminate control alone does not stop a mixed tool round. These pieces reuse Pi's owned
 conversations, schema validation and commit semantics, but are not yet a
 complete delegate runtime or UI. A dormant file-evidence helper fingerprints
 an explicit list of regular inputs and rechecks content and resolved target,

@@ -7,7 +7,7 @@ import { defineTool, type Extension, type ToolRegistration } from "@earendil-wor
 import { obj, oneOf, str } from "@earendil-works/pi-schema";
 import { admitDelegateInput, ensureDelegateConversation } from "./delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "./delegate-report.js";
-import { DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
+import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
 
 type Profile = { extensions: readonly Extension[]; tools: readonly ToolRegistration[] };
@@ -46,6 +46,11 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
                  record.active.input.instruction !== input.instruction || record.active.input.doneWhen !== input.doneWhen) {
           throw new Error("Another delegation is already recorded; it was preserved.");
         }
+        const barrier = await tx.doc(DelegateMainBarrierDoc, api.conversationId);
+        if ((barrier.sourceId !== null && barrier.sourceId !== id) || barrier.admittedId !== null || barrier.submissionId !== null) {
+          throw new Error("The main delegation barrier conflicts with this handoff; it was preserved.");
+        }
+        barrier.sourceId = id;
         return record.active?.phase === "returned" || record.active?.phase === "ending";
       }, context);
       if (!alreadyReturned) {

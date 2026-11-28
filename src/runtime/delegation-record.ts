@@ -70,6 +70,12 @@ export const DelegationDoc = defineDoc<DelegationRecord>({
   checkpointWhen: () => true,
 });
 
+/** This source/admission marker is conversation-local and is not transferred by collapse. */
+export const DelegateMainBarrierDoc = defineDoc<{ sourceId: string | null; admittedId: string | null; submissionId: number | null }>({
+  kind: "carto.delegate-main-barrier", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ sourceId: null, admittedId: null, submissionId: null }), checkpointWhen: () => true,
+});
+
 function nonempty(value: string, name: string): void {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} must not be blank.`);
 }

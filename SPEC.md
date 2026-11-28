@@ -762,11 +762,19 @@ has stopped; a report racing the ending intent cannot replace it. Recovery of
 an ending intent requires a paused Pi scheduler and aborts the owning main run
 before scheduling resumes, preserving its unanswered input for the host to
 handle. It does not roll back project changes or stop independent background
-jobs. This is not itself a main-inference barrier: in ordinary operation Pi
-may start a queued main input after the delegation tool terminates. The host
-must gate that inference, route controls, handle unanswered and queued inputs,
-perform return collapse and complete recovery before exposing this. Capture's selected tools
-are restricted to read/search names and the report tool; this is not a sandbox.
+jobs. A dormant main-conversation generation hook holds an old generation's
+model request while a handoff is active, including a queued main input after
+the delegate tool terminates. The block lasts until the request is aborted for
+collapse; it cannot be released by admitting the return in the source
+generation. After collapse, return admission records a checked marker in the
+new generation, and only the run containing that exact return submission may
+request the model while the handoff awaits acknowledgement. A subsequent queued
+run remains held even when its context contains the earlier return. A failed barrier read holds rather
+than silently sending a request. The host must install this hook only in main,
+abort blocked work, route controls, preserve unanswered and queued inputs,
+perform return collapse and complete recovery before exposing this. It is not
+a cross-process or deferred-provider lease. Capture's selected tools are
+restricted to read/search names and the report tool; this is not a sandbox.
 
 A dormant evidence helper can fingerprint an explicit list of regular files and
 recheck those fingerprints using Carto's file-scope rules. It distinguishes

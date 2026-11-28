@@ -41,11 +41,12 @@ import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera } fr
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
-import { DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
+import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
 import { admitDelegateInput, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
+import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 
@@ -436,6 +437,90 @@ test("the delegation tool runs a focused capture using Carto's existing scoped r
     const unsafe = createDelegateTool({ cwd: root, profiles: { capture: { extensions: [capture], tools: [{ ...read, name: "bash" }] } } });
     await assert.rejects(unsafe.execute({ role: "capture", instruction: "Inspect", doneWhen: "Report" }, { agent: async () => ({ model: ref }) }, BACKGROUND_CONTEXT), /read\/search/);
   } finally {
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("main barrier holds queued inference after a delegate returns and refuses source admission", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, factory } = fauxSetup();
+  let started, release, notifyBlocked;
+  const childStarted = new Promise((resolve) => { started = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  const blocked = new Promise((resolve) => { notifyBlocked = resolve; });
+  const barrier = createDelegateMainBarrier(notifyBlocked);
+  const mainExtension = defineExtension({ name: "barrier-main", tools: [createDelegateTool({ cwd: root })] });
+  const registry = createRegistry();
+  registry.install(barrier); registry.install(mainExtension); registry.install(DelegateReportExtension);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  const report = { status: "done", findings: "observed", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier, mainExtension], compaction: { enabled: false } } });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("delegate", { role: "capture", instruction: "Inspect", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
+      factory(async () => { started(); await hold; return fauxAssistantMessage([fauxToolCall("delegate_report", report, { id: "report" })], { stopReason: "toolUse" }); }),
+      fauxAssistantMessage("must not be called"),
+    ]);
+    const first = await main.submit({ type: "input", content: "Start" }, BACKGROUND_CONTEXT);
+    await childStarted;
+    const queued = await main.submit({ type: "input", content: "Queued request", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    release();
+    assert.equal((await first.wait(BACKGROUND_CONTEXT)).status, "done");
+    await blocked;
+    const handoff = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
+    assert.equal(handoff.phase, "returned");
+    assert.equal((await harness.snapshot(DelegateMainBarrierDoc, main.id, BACKGROUND_CONTEXT)).sourceId, handoff.input.id);
+    assert.equal(faux.state.callCount, 2);
+    await assert.rejects(admitDelegationReturn(main, handoff.input.id, BACKGROUND_CONTEXT), /source generation/);
+    await main.abort(BACKGROUND_CONTEXT);
+    assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    release();
+    await harness.close(BACKGROUND_CONTEXT);
+    await cleanup();
+  }
+});
+
+test("main barrier permits only the admitted return run and holds the next queued run", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, factory } = fauxSetup();
+  let started, release, notifyBlocked;
+  const running = new Promise((resolve) => { started = resolve; });
+  const hold = new Promise((resolve) => { release = resolve; });
+  const blocked = new Promise((resolve) => { notifyBlocked = resolve; });
+  const barrier = createDelegateMainBarrier(notifyBlocked);
+  const registry = createRegistry(); registry.install(barrier);
+  const harness = await Harness.open(new MemoryStorage(), { models, registry }, BACKGROUND_CONTEXT);
+  try {
+    const main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier], compaction: { enabled: false } } });
+    await main.commit(async (tx) => {
+      const record = await tx.doc(DelegationDoc, main.id);
+      prepareDelegation(record, { id: "transferred", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(record, "transferred", { kind: "person-ended", reason: "" });
+    }, BACKGROUND_CONTEXT);
+    faux.setResponses([
+      factory(async () => { started(); await hold; return fauxAssistantMessage("Return reconciled"); }),
+      fauxAssistantMessage("must wait for acknowledgement"),
+      fauxAssistantMessage("after acknowledgement"),
+    ]);
+    const id = await admitDelegationReturn(main, "transferred", BACKGROUND_CONTEXT);
+    await running;
+    const queued = await main.submit({ type: "input", content: "Queued after return", whenBusy: "followUp" }, BACKGROUND_CONTEXT);
+    release();
+    assert.equal((await (await harness.submission(id, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT)).status, "done");
+    await blocked;
+    assert.equal(faux.state.callCount, 1);
+    assert.equal(await acknowledgeDelegationReturn(main, "transferred", id, BACKGROUND_CONTEXT), true);
+    await main.abort(BACKGROUND_CONTEXT);
+    assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
+    assert.equal(faux.state.callCount, 1, "acknowledgement never releases an already held request");
+    const next = await main.submit({ type: "input", content: "Resubmit queued input" }, BACKGROUND_CONTEXT);
+    assert.equal((await next.wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    release();
     await harness.close(BACKGROUND_CONTEXT);
     await cleanup();
   }
