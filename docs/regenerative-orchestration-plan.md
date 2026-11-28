@@ -43,6 +43,12 @@ proposal text; unresolved details are not implicitly decided by them.
   may affect other aspects of the code, including callers, dependencies, shared
   state, side effects and tests. Capture reports evidence and unknowns; it does
   not claim a complete impact map. It does not justify rewriting existing code.
+- **Existing specification-like material.** If Carto encounters anything
+  resembling a specification, it asks the person what to do with it and
+  recommends capturing it with higher priority than the code. Discrepancies
+  are discussed with the person before they are written into the maintained
+  specification. Finding such material does not by itself establish that its
+  requirements were dictated or accepted by the person.
 - **Capture is a distinct delegate.** Main delegates capture to a focused,
   bespoke context, separate from implementation and verification, with limited
   tools. It receives the request, relevant specification and starting points,
@@ -102,9 +108,9 @@ proposal text; unresolved details are not implicitly decided by them.
   remains in the project. The person retains the normal ability to steer or
   interrupt a delegate.
 
-**Next unanswered question:** how should Carto classify a requirement in an
-existing project specification when it cannot establish whether the person
-explicitly requested or accepted it?
+**Next unanswered question:** when the person agrees to capture an existing
+specification, does that approval accept its undisputed requirements as a
+whole, or do they remain unaccepted until the person explicitly accepts them?
 
 ## 1. Recommendation in one sentence
 
