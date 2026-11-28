@@ -724,13 +724,19 @@ stopped writers to the generation; they are not a cross-process writer lock.
 The record is not wired to model execution or UI and does not imply isolation,
 report delivery, or recovery of external side effects.
 
-A session-local inference admission gate serializes Pi's `stream` and
-`streamSimple` requests across conversations in that session. A request aborted
-while waiting is not sent to the provider; errors release the next request.
-This is a building block, not yet the full orchestration lease: deferred model
-requests, other processes and other sessions are not covered. Orchestration
-must not be enabled until all its inference paths, including recovery, are
-covered and person-facing task controls are implemented.
+A session-local inference admission gate serializes Pi's `stream`,
+`streamSimple` and `streamDeferred` calls across conversations in that session;
+the corresponding `complete`, `completeSimple` and `fetchDeferred` convenience
+calls use the same gate. A request aborted while waiting is not sent to the
+provider; errors release the next request. Deferred cancellation remains
+available without waiting for the gate so it can stop a pending response.
+
+This is a building block, not yet the full orchestration lease: a provider may
+continue deferred inference between the submission and later polls, when this
+gate is not held. Other processes and other sessions are not covered either.
+Orchestration must not be enabled until all its inference paths, including
+recovery and any provider-side deferred work, are covered and person-facing
+task controls are implemented.
 
 ### 6.1 Read only mode and edit mode
 

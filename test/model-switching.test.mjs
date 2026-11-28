@@ -77,6 +77,48 @@ test("session inference admission serializes stream methods and cancels waiting 
   } finally { releaseFirst(); }
 });
 
+test("deferred polls and completion helpers share admission without blocking cancellation", async () => {
+  const faux = fauxProvider({ provider: "deferred-serial", models: [{ id: "one" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const admitted = createInferenceAdmission(models);
+  const model = models.getModel("deferred-serial", "one");
+  const context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+  let releasePoll;
+  let pollStarted;
+  const started = new Promise((resolve) => { pollStarted = resolve; });
+  const hold = new Promise((resolve) => { releasePoll = resolve; });
+  faux.setResponses([
+    async () => { pollStarted(); await hold; return fauxAssistantMessage("deferred answer"); },
+    () => fauxAssistantMessage("ordinary answer"),
+    () => fauxAssistantMessage("complete answer"),
+  ]);
+  try {
+    const deferred = await admitted.completeSimple(model, context, { deferred: true });
+    assert.equal(deferred.stopReason, "deferred");
+    const handle = deferred.deferred;
+    let observed = false;
+    const poll = admitted.fetchDeferred(model, handle, { onResponse: () => { observed = true; } });
+    await started;
+    const ordinary = admitted.complete(model, context);
+    const abort = new AbortController();
+    const waitingPoll = admitted.streamDeferred(model, handle, { signal: abort.signal });
+    abort.abort();
+    assert.equal((await waitingPoll.result()).stopReason, "aborted");
+    assert.equal(faux.state.deferredFetchCount, 1);
+    assert.equal(faux.state.callCount, 1, "completion waits for the poll");
+    // Best-effort provider cancellation must never wait behind a held poll.
+    await admitted.cancelDeferred(model, handle);
+    assert.equal(faux.state.cancelledDeferred.length, 1);
+    releasePoll();
+    assert.equal((await poll).stopReason, "stop");
+    assert.equal(observed, true, "poll options reach the provider");
+    assert.equal((await ordinary).stopReason, "stop");
+    assert.equal((await admitted.completeSimple(model, context)).stopReason, "stop");
+    assert.equal(faux.state.callCount, 3);
+  } finally { releasePoll(); }
+});
+
 test("loadGlobalConfig honors modelOverride in memory without touching config.json; updateConfigModel updates only model", async () => {
   const home = mkdtempSync(join(tmpdir(), "carto-config-model-"));
   try {

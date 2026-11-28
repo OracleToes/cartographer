@@ -1,6 +1,7 @@
 /**
- * One stream request at a time per live session. This does not coordinate
- * other processes or deferred requests, and does not itself schedule agents.
+ * One stream or deferred poll at a time per live session. Provider-side work
+ * between deferred polls, other sessions and processes are not coordinated;
+ * this does not itself schedule agents.
  */
 import type { Models } from "@earendil-works/pi-ai/models";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -48,7 +49,7 @@ export function createInferenceAdmission(models: Models): Models {
     drain();
   });
   const wrapped = Object.create(models) as Models;
-  for (const name of ["stream", "streamSimple"] as const) {
+  for (const name of ["stream", "streamSimple", "streamDeferred"] as const) {
     const inner = models[name].bind(models);
     Object.defineProperty(wrapped, name, {
       value: (model: Model<Api>, context: unknown, options: { signal?: AbortSignal } = {}) => {
@@ -78,6 +79,14 @@ export function createInferenceAdmission(models: Models): Models {
         })();
         return output;
       },
+    });
+  }
+  // Do not depend on a registry's convenience methods dynamically dispatching
+  // through `this`: every public chat completion path must use this same queue.
+  for (const [name, stream] of [["complete", "stream"], ["completeSimple", "streamSimple"], ["fetchDeferred", "streamDeferred"]] as const) {
+    Object.defineProperty(wrapped, name, {
+      value: (model: Model<Api>, input: unknown, options: { signal?: AbortSignal } = {}) =>
+        wrapped[stream](model as never, input as never, options as never).result(),
     });
   }
   return wrapped;

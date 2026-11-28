@@ -39,9 +39,10 @@ through a transfer record committed with the Brain sweep, verified before source
 deletion, and restored into the next conversation before acknowledgement.
 Unfinished or ambiguous records block collapse instead. This assumes generation
 writers have stopped and does not implement cross-process locking. Pi stream
-requests within one live session now pass through a single inference admission
-queue, including cancellation before dispatch; this does not yet cover deferred
-requests, other processes or other sessions. A test exercises a separate Pi
+requests and deferred polls within one live session now pass through a single
+inference admission queue, including cancellation before dispatch. Polls do not
+protect against provider-side inference between submission and polling; other
+processes and sessions are not covered. A test exercises a separate Pi
 conversation, but it is not a delegate runtime or UI. Report presentation and
 orchestration recovery are not yet implemented. The parser pilot, sequential
 delegation, capture and controls remain to be built.
