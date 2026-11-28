@@ -744,8 +744,14 @@ versioned source generation, conversation and entry provenance to each
 prospective archive item. Existing archive storage and editing retain that
 provenance if a prepared item is written. Legacy items have no provenance;
 a restore to main refuses a child source or malformed provenance, leaving it
-in the archive. This is not a child restore facility and cannot distinguish a
-legacy item from one whose provenance was lost. The conversion rejects
+in the archive. A dormant child-restore helper can place a committed pending
+child item in a separate ownerless passive Pi conversation, mapped durably by
+source generation and conversation. It reuses Pi request IDs and checks actual
+entries, active contributions, the mapping and the exact archive snapshot before
+acknowledging; retries after interrupted acknowledgement reuse the destination.
+It does not resume the original delegate, seal writers, or run automatically on
+startup. The multi-conversation collapse guard still applies to destinations, and
+legacy items cannot be distinguished from rows whose provenance was lost. The conversion rejects
 ambiguous calls and unsupported multi-message contributions. Image-only user
 inputs are prepared as a single person-message item with an `[image]` display
 label and their complete Pi message retained for restoration. The archive editor
@@ -765,8 +771,8 @@ classifies those parts using the Brain's existing collapse deletion writes:
 deletion wins over pins and Chat duplicates. It refuses to carry child pins into
 main or trust unknown pins; older main pins require identities verified against
 the source head, and current main pins must match their captured kind and text
-and cannot discard images. This is not a commit. Checkpoint reconciliation,
-pin refresh and child restoration remain unfinished. A dormant source-head
+and cannot discard images. This is not a commit. End-to-end checkpoint
+reconciliation, pin refresh and child-restore routing remain unfinished. A dormant source-head
 capture reads both projection files, compares the markdown to Pi's replayed
 main `carto-context` section, checks sidecar pin rows against the rendered
 pinned section, and returns a digest of both files. A prospective planner can

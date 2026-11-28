@@ -58,9 +58,11 @@ The foundations are still dormant and incomplete. An audit of the installed Pi
 - Shared ephemeral restoration checks Pi's actual written entries and derived
   contributions rather than trusting request-ID deduplication, and its Brain
   acknowledgement compares the restored archive snapshot before deletion. This
-  also protects direct mode. These cross-store checks are not a writer seal;
-  changed or omitted content remains for recovery, and child destinations are
-  still not implemented.
+  also protects direct mode. A dormant child-restore helper uses the same Pi
+  placement checks and a durable source-to-passive-conversation mapping, without
+  putting child content into main. These cross-store checks are not a writer seal;
+  changed or omitted content remains for recovery, and host routing is not yet
+  implemented.
 
 This audit does not prove every custom guard necessary or complete; future host
 integration must re-evaluate them against the then-installed Pi APIs rather than
@@ -351,7 +353,13 @@ idempotent. This detects later changes, not initial sidecar authenticity, and
 is not used by a host or a permit to bypass the multi-conversation guard. Hidden
 sidecar authentication and full sweep/journal integration remain necessary. The
 actual return path does not archive the prepared items or
-remove the return guard. Child restoration and crash-safe recovery remain unfinished.
+remove the return guard. A dormant child-restore helper can place a committed
+pending item into an ownerless passive Pi conversation, using a persistent map
+and source marker to reuse the same destination on retry. It verifies the Pi
+entries and derived contributions, then compares the archive snapshot before
+acknowledging. It cannot resume the original task, does not run on startup, and
+requires sealed writers. Its added conversation remains protected by the ordinary
+collapse guard. Host routing and end-to-end crash-safe recovery remain unfinished.
 The submission scan guards the immediate-end and restart-recovery aborts,
 but not other checkpoint callers; it does not reconstruct withdrawn content or
 provide a resolution workflow. Multi-conversation source deletion remains guarded.

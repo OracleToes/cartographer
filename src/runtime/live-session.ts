@@ -31,6 +31,7 @@ import {
   type ModelRef,
   type Cursor,
   type TaskId,
+  type Tx,
   type UserInput,
 } from "@earendil-works/pi-durable";
 import type { Message, Models } from "@earendil-works/pi-ai";
@@ -73,6 +74,7 @@ import { createStreamFreeze, type StreamFreeze } from "./stream-freeze.js";
 import { createInferenceAdmission } from "./inference-admission.js";
 import { RestDoc } from "./sleep-task.js";
 import { placeDelegationTransfer } from "./delegate-return.js";
+import { ensureDelegateRestoreDestination, requireDelegateRestoreDestination } from "./delegate-conversation.js";
 import { createModelTelemetry } from "./model-telemetry.js";
 import { COLLAPSE_WARNING_PERCENT, STATE_BLOCK_MARKER, splitContextMessages } from "../domain/state-block.js";
 import { estimateContextTokens } from "../domain/estimate.js";
@@ -1036,6 +1038,13 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
         value.conversationId !== ROOT_CONVERSATION_ID || typeof value.entryId !== "number" || !Number.isSafeInteger(value.entryId) || value.entryId < 1 ||
         typeof value.entryKind !== "string" || !value.entryKind || !item.id.startsWith(`${value.generation}:${value.entryId}:`)) return false;
   }
+  return restoreEphemeralToConversation(session.conversation, item);
+}
+
+/** Shared Pi placement and retry verification; the caller validates routing. */
+async function restoreEphemeralToConversation(conversation: Conversation, item: ArchivedItem, verify?: (tx: Tx) => Promise<void>): Promise<boolean> {
+  const ephemeral = item.ephemeral;
+  if (ephemeral === undefined) return false;
   let model: Message[];
   if (Array.isArray(ephemeral.model) && ephemeral.model.length > 0) {
     const saved = structuredClone(ephemeral.model) as Message[];
@@ -1084,7 +1093,7 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
     // Separate entries retain normal Context/sweep identity for the paired
     // call and result. Deterministic request ids make a partial retry safe.
     for (const [index, message] of model.entries()) {
-      const submission = await session.conversation.submit(
+      const submission = await conversation.submit(
         {
           type: "write",
           requestId: requestId(index),
@@ -1094,36 +1103,69 @@ export async function restoreEphemeral(session: LiveSession, item: ArchivedItem)
       );
       if ((await submission.wait(BACKGROUND_CONTEXT)).status !== "done") return false;
     }
-    const inspect = async (tx: import("@earendil-works/pi-durable").Tx) => {
+    const inspect = async (tx: Tx) => {
+      if (verify !== undefined) await verify(tx);
       const entries: EntryId[] = [];
       for (const [index, message] of model.entries()) {
-        const submission = await tx.submissionByRequest(session.conversation.id, requestId(index));
-        if (submission?.type !== "write" || submission.conversationId !== session.conversation.id || submission.status !== "done") {
+        const submission = await tx.submissionByRequest(conversation.id, requestId(index));
+        if (submission?.type !== "write" || submission.conversationId !== conversation.id || submission.status !== "done") {
           throw new Error("Restored submission conflicts with its archive item.");
         }
         const entry = await tx.entry(submission.entry);
-        if (entry?.conversationId !== session.conversation.id || entry.kind !== "carto.restored" ||
+        if (entry?.conversationId !== conversation.id || entry.kind !== "carto.restored" ||
             !isDeepStrictEqual(entry.data, { archiveId: item.id }) || entry.model?.length !== 1 || !matchesMessage(entry.model[0], message)) {
           throw new Error("Restored entry conflicts with its archive item.");
         }
         entries.push(entry.id);
       }
-      return { entries, tail: await tx.latestEntryId(session.conversation.id), head: (await tx.latestHeadMarker(session.conversation.id))?.id };
+      return { entries, tail: await tx.latestEntryId(conversation.id), head: (await tx.latestHeadMarker(conversation.id))?.id };
     };
-    const before = await session.conversation.commit(inspect, BACKGROUND_CONTEXT);
-    const view = await session.conversation.context(BACKGROUND_CONTEXT, before.tail === undefined ? undefined : { at: before.tail });
+    const before = await conversation.commit(inspect, BACKGROUND_CONTEXT);
+    const view = await conversation.context(BACKGROUND_CONTEXT, before.tail === undefined ? undefined : { at: before.tail });
     if (view.head?.id !== before.head || view.entries.length !== view.contributions.length) return false;
     for (const [index, entryId] of before.entries.entries()) {
       const positions = view.entries.flatMap((entry, position) => entry.id === entryId ? [position] : []);
       const messages = positions.length === 1 ? view.contributions[positions[0]!] : undefined;
       if (messages?.length !== 1 || !matchesMessage(messages[0], model[index]!)) return false;
     }
-    const after = await session.conversation.commit(inspect, BACKGROUND_CONTEXT);
+    const after = await conversation.commit(inspect, BACKGROUND_CONTEXT);
     return isDeepStrictEqual(before, after);
   } catch {
     // A conversation that will not take the write — it is closing, or busy in a
     // way that refuses one — leaves the item in the archive rather than losing
     // it, and the person is told by the caller.
+    return false;
+  }
+}
+
+/**
+ * Dormant child-archive restoration. Each proven source conversation gets a
+ * durable, ownerless passive destination; no child material enters main and
+ * no delegate is resumed. The archive remains until Pi placement and the exact
+ * pending archive snapshot are acknowledged. A retry reuses Pi's request IDs.
+ * The host must seal main and child admissions, context and Brain/archive
+ * writers across the entire operation; idle checks do not provide that lock.
+ */
+export async function restoreDelegateEphemeral(session: LiveSession, item: ArchivedItem): Promise<boolean> {
+  const source: unknown = item.ephemeral?.source;
+  if (item.layer !== "ephemeral" || item.record !== undefined || item.restorePending !== true || item.mark?.action !== "restore" ||
+      !Array.isArray(item.ephemeral?.model) || item.ephemeral.model.length === 0 ||
+      source === null || typeof source !== "object" || Array.isArray(source)) return false;
+  const value = source as { version?: unknown; generation?: unknown; conversationId?: unknown; entryId?: unknown; entryKind?: unknown };
+  if (value.version !== 1 || typeof value.generation !== "string" || !/^gen-[\w-]+$/.test(value.generation) ||
+      typeof value.conversationId !== "number" || !Number.isSafeInteger(value.conversationId) || value.conversationId <= ROOT_CONVERSATION_ID ||
+      typeof value.entryId !== "number" || !Number.isSafeInteger(value.entryId) || value.entryId < 1 ||
+      typeof value.entryKind !== "string" || !value.entryKind || !item.id.startsWith(`${value.generation}:${value.entryId}:`)) return false;
+  const origin = { generation: value.generation, conversationId: value.conversationId };
+  try {
+    const matches = (await session.brain.readArchive()).items.filter((candidate) => candidate.id === item.id);
+    if (matches.length !== 1 || !isDeepStrictEqual(matches[0], item)) return false;
+    const destination = await session.harness.commit((tx) => ensureDelegateRestoreDestination(tx, origin), BACKGROUND_CONTEXT);
+    const conversation = await session.harness.conversation(destination, BACKGROUND_CONTEXT);
+    if (conversation === undefined || !await restoreEphemeralToConversation(conversation, item, (tx) => requireDelegateRestoreDestination(tx, origin, destination))) return false;
+    const result = await session.brain.applyArchive({ kind: "restore-complete", id: item.id, expected: item });
+    return !result.refused && result.item !== undefined;
+  } catch {
     return false;
   }
 }

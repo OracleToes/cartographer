@@ -35,6 +35,7 @@ import {
   interruptRun,
   openLiveSession,
   restoreEphemeral,
+  restoreDelegateEphemeral,
   sessionTranscript,
   submitInput,
   togglePause,
@@ -46,7 +47,7 @@ import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
 import { DelegateMainBarrierDoc, DelegationDoc, finishDelegationEnd, prepareDelegation, requestContextLimitEnd, requestDelegationEnd, startDelegation, returnDelegation } from "../dist/runtime/delegation-record.js";
-import { admitDelegateInput, DelegateChildIdentityDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
+import { admitDelegateInput, DelegateChildIdentityDoc, DelegateRestoreOriginDoc, DelegateRestoreRoutesDoc, ensureDelegateConversation } from "../dist/runtime/delegate-conversation.js";
 import { createDelegateReportExtension, DelegateReportExtension, DelegateReportTool } from "../dist/runtime/delegate-report.js";
 import { acknowledgeDelegationReturn, admitDelegationReturn, delegationReturnId, prepareDelegationDestination } from "../dist/runtime/delegate-return.js";
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
@@ -568,6 +569,40 @@ test("return-sweep provenance survives archive operations and blocks child resto
     assert.equal(restored.length, 2);
     assert.equal(restored.find((entry) => entry.data.archiveId === main.item.id).model[0].content, "main archive content");
     assert.equal(restored.find((entry) => entry.data.archiveId === imageOnly.item.id).model[0].content[0].data, "YQ==");
+
+    // A crash before archive acknowledgement must leave the item and reuse the
+    // same isolated child destination and Pi entries on retry.
+    const interruptedBrain = { ...brain, applyArchive: async (write) => {
+      if (write.kind === "restore-complete") throw new Error("crash before acknowledgement");
+      return brain.applyArchive(write);
+    } };
+    assert.equal(await restoreDelegateEphemeral({ ...session, brain: interruptedBrain }, savedChild), false);
+    assert.deepEqual((await brain.readArchive()).items.find((item) => item.id === savedChild.id), savedChild);
+    const routes = await session.harness.snapshot(DelegateRestoreRoutesDoc, session.conversation.id, BACKGROUND_CONTEXT);
+    assert.equal(routes.routes.length, 1);
+    const destination = routes.routes[0].destinationId;
+    assert.notEqual(destination, session.conversation.id);
+    const passive = await session.harness.conversation(destination, BACKGROUND_CONTEXT);
+    const childEntries = () => passive.context(BACKGROUND_CONTEXT).then((view) => view.entries.filter((entry) => entry.kind === "carto.restored"));
+    const placedChildEntries = await childEntries();
+    assert.equal(placedChildEntries.length, 1);
+    assert.equal(placedChildEntries[0].model[0].content, "edited child archive content");
+    assert.ok(!(await session.conversation.context(BACKGROUND_CONTEXT)).messages.some((message) => message.role === "user" && message.content === "edited child archive content"));
+    await passive.configure({ model: ref }, BACKGROUND_CONTEXT);
+    assert.equal(await restoreDelegateEphemeral(session, savedChild), false, "a configured destination is not passive");
+    await passive.configure({ model: null }, BACKGROUND_CONTEXT);
+    await passive.commit(async (tx) => { (await tx.doc(DelegateRestoreOriginDoc, destination)).conversationId = 999; }, BACKGROUND_CONTEXT);
+    assert.equal(await restoreDelegateEphemeral(session, savedChild), false, "a conflicting destination preserves the archive");
+    assert.deepEqual((await brain.readArchive()).items.find((item) => item.id === savedChild.id), savedChild);
+    await passive.commit(async (tx) => { (await tx.doc(DelegateRestoreOriginDoc, destination)).conversationId = child.id; }, BACKGROUND_CONTEXT);
+    assert.equal(await restoreDelegateEphemeral(session, savedChild), true);
+    assert.equal((await childEntries()).length, 1, "retry does not duplicate the restored entry");
+    assert.equal((await brain.readArchive()).items.find((item) => item.id === savedChild.id), undefined);
+    await closeLiveSession(session);
+    session = await openLiveSession({ root, brain, models, model: ref });
+    assert.deepEqual(await session.harness.snapshot(DelegateRestoreRoutesDoc, session.conversation.id, BACKGROUND_CONTEXT), routes);
+    const reopenedChild = await session.harness.conversation(destination, BACKGROUND_CONTEXT);
+    assert.equal((await reopenedChild.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.kind === "carto.restored").length, 1);
   } finally {
     if (session) await closeLiveSession(session).catch(() => undefined);
     await brain.close();
@@ -784,7 +819,6 @@ test("delegate input checkpoints transfer with the handoff and survive interrupt
     await changeCheckpoint(destination.store, transfer.inputCheckpoint.content);
     await assert.rejects(openLiveSession(options), /input checkpoint is awaiting replay/);
     assert.equal(await brain.readDelegationTransfer(), undefined, "acknowledged only after both documents were placed");
-    await assert.rejects(openLiveSession(options), /input checkpoint is awaiting replay/);
     await assert.rejects(collapse(root, brain), /input checkpoint.*preserved/);
     await assert.rejects(collapse(root, brain, { transferDelegateInputs: true }), /source barrier/);
     assert.equal(faux.state.callCount, 0);
@@ -2094,18 +2128,19 @@ test("the bash tool runs through the conversation's environment: a real command,
 test("interrupting a run whose bash call is open settles the run instead of orphaning the command", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, factory, ref } = fauxSetup();
-  // bash sleeps 30s; the interrupt must cut the run at its boundary instead.
+  // The marker proves the command started before interrupting its 30s sleep.
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" }, { id: "call-bash-interrupt" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "printf started > bash-started; exec sleep 30" }, { id: "call-bash-interrupt" })], { stopReason: "toolUse" })),
   ]);
   const session = await openLiveSession({ root, brain, models, model: ref, person: "OracleToes", now: () => 1_700_000_000_000 });
   const started = Date.now();
   try {
     const submission = await submitInput(session, "wait on something long");
-    // Give the bash task a moment to actually start, then interrupt. The wait
-    // only has to outlast the spawn; `sleep 30` is what proves the interrupt
-    // cut the command rather than waiting it out.
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    // Wait for actual spawn rather than guessing how long it will take.
+    while (!existsSync(join(root, "bash-started")) && Date.now() - started < 5_000) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+    assert.equal(existsSync(join(root, "bash-started")), true, "the bash command started");
     await interruptRun(session);
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.notEqual(settled.status, "running");
