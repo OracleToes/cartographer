@@ -118,6 +118,25 @@ async function verifyCheckpointedInputs(
 }
 
 /**
+ * Recheck an existing returned checkpoint against Pi's unanswered submissions.
+ * This does not create a checkpoint or abort work. The supplied storage must
+ * belong to this Harness, and admissions and withdrawals must remain sealed.
+ */
+export async function verifyReturnedDelegateInputs(
+  main: Conversation, storage: Pick<Storage, "scanSubmissions">, id: string, context: Context,
+): Promise<void> {
+  if (main.id !== ROOT_CONVERSATION_ID) throw new Error("Return input verification requires main; the handoff was preserved.");
+  const expected = await main.commit(async (tx) => {
+    const active = (await tx.doc(DelegationDoc, main.id)).active;
+    if (active?.phase !== "returned" || active.input.id !== id) throw new Error("No matching returned handoff; it was preserved.");
+    const content = JSON.stringify({ active });
+    parseReturnedDelegation(content);
+    return content;
+  }, context);
+  await verifyCheckpointedInputs(main, storage, id, (active) => JSON.stringify({ active }) === expected, context);
+}
+
+/**
  * Checkpoint a normally returned handoff before the host aborts any held main
  * or child work. This also applies to failure returns. The child report's run
  * must already have settled; a still-running initial instruction is refused by

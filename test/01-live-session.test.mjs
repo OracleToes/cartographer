@@ -54,7 +54,7 @@ import { acknowledgeDelegationReturn, admitDelegationReturn, delegationReturnId,
 import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
-import { checkpointReturnedDelegateInputs, endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
+import { checkpointReturnedDelegateInputs, endDelegateAtContextLimit, endDelegateNow, recoverContextLimitDelegateEnd, recoverImmediateDelegateEnd, requestContextLimitDelegateEnd, requestImmediateDelegateEnd, verifyReturnedDelegateInputs } from "../dist/runtime/delegate-control.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc, findUnansweredDelegateInputs, findUnansweredInputs } from "../dist/runtime/delegate-inputs.js";
 import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 import { captureReturnSweepViews } from "../dist/runtime/delegate-sweep-view.js";
@@ -1484,6 +1484,7 @@ test("delegate barrier holds a queued child follow-up after its report", async (
     await child.abort(BACKGROUND_CONTEXT);
     assert.equal((await queued.wait(BACKGROUND_CONTEXT)).status, "unanswered");
     assert.equal((await mainInput.wait(BACKGROUND_CONTEXT)).status, "done");
+    await assert.rejects(verifyReturnedDelegateInputs(main, storage, active.input.id, BACKGROUND_CONTEXT), new RegExp(`Delegate input ${late.id} was unanswered before checkpoint`));
     assert.equal(faux.state.callCount, 2);
   } finally {
     unblockReport();
@@ -1527,6 +1528,7 @@ test("main barrier holds queued inference after a delegate returns and refuses s
     assert.equal(faux.state.callCount, 2);
     await assert.rejects(admitDelegationReturn(main, handoff.input.id, BACKGROUND_CONTEXT), /source generation/);
     await assert.rejects(checkpointReturnedDelegateInputs(main, storage, handoff.input.id, BACKGROUND_CONTEXT), new RegExp(`Main input ${withdrawn.id} was unanswered before checkpoint`));
+    await assert.rejects(verifyReturnedDelegateInputs(main, storage, handoff.input.id, BACKGROUND_CONTEXT), new RegExp(`Main input ${withdrawn.id} was unanswered before checkpoint`));
     const saved = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
     assert.ok(saved.inputs.some((input) => input.submissionId === queued.id));
     assert.equal((await queued.status(BACKGROUND_CONTEXT)).status, "placed", "a failed scan does not abort pending input");
@@ -1680,7 +1682,7 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const pending = await child.submit({ type: "input", content: "Keep my follow-up", whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:followup" } } }, BACKGROUND_CONTEXT);
     const pendingWrite = await child.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "unhandled write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
     assert.ok((await harness.inspect(BACKGROUND_CONTEXT)).submissions.some((item) => item.id === pendingWrite.id && item.status === "queued"));
-    await assert.rejects(captureReturnSweepPlan(root, brain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
     await assert.rejects(recoverImmediateDelegateEnd(harness, main, storage, BACKGROUND_CONTEXT), /paused scheduler/);
     await assert.rejects(endDelegateNow(harness, main, storage, active.input.id, "", BACKGROUND_CONTEXT), /queued context write/);
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
@@ -1828,7 +1830,7 @@ test("person-ended delegate stops its in-flight work without a final report", as
     await brain.apply({ kind: "chat.record", record: oldChat }, 1);
     await brain.applyRecordAction({ kind: "chat", id: oldChat.id, action: "archive", generation: "gen-old", now: 1 });
     await brain.applyArchive({ kind: "mark", id: "record:chat:restored", action: "restore", author: "user" });
-    const capturedPlan = await captureReturnSweepPlan(root, brain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
+    const capturedPlan = await captureReturnSweepPlan(root, brain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT);
     assert.equal(capturedPlan.sourceSeal.source, "gen-end");
     assert.deepEqual(JSON.parse(capturedPlan.stored.inputCheckpoint.content), saved);
     assert.deepEqual(capturedPlan.expected.brain, await brain.read());
@@ -1838,9 +1840,11 @@ test("person-ended delegate stops its in-flight work without a final report", as
     const unrelated = await Harness.open(new MemoryStorage(), { models, registry: createRegistry() }, BACKGROUND_CONTEXT);
     try {
       await unrelated.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root } });
-      await assert.rejects(captureReturnSweepPlan(root, brain, unrelated, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /Harness does not match the named source/);
+      await assert.rejects(captureReturnSweepPlan(root, brain, unrelated, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /Harness does not match the named source/);
       assert.deepEqual(await captureDelegateSourceSeal(generationPaths(root, "gen-end").store, "gen-end"), capturedPlan.sourceSeal);
     } finally { await unrelated.close(BACKGROUND_CONTEXT); }
+    await assert.rejects(captureReturnSweepPlan(root, brain, harness, { scanSubmissions: async () => { throw new Error("scan unavailable"); } }, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /scan unavailable/);
+    assert.equal(await brain.readCollapseJournal(), undefined, "a failed input scan cannot create a sweep journal");
     let archiveReads = 0;
     const racingBrain = { ...brain, readArchive: async () => {
       if (++archiveReads === 2) {
@@ -1849,7 +1853,7 @@ test("person-ended delegate stops its in-flight work without a final report", as
       }
       return brain.readArchive();
     } };
-    await assert.rejects(captureReturnSweepPlan(root, racingBrain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /source changed during capture/);
+    await assert.rejects(captureReturnSweepPlan(root, racingBrain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /source changed during capture/);
     let taskArchiveReads = 0;
     const taskRacingBrain = { ...brain, readArchive: async () => {
       if (++taskArchiveReads === 2) {
@@ -1857,7 +1861,7 @@ test("person-ended delegate stops its in-flight work without a final report", as
       }
       return brain.readArchive();
     } };
-    await assert.rejects(captureReturnSweepPlan(root, taskRacingBrain, harness, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
+    await assert.rejects(captureReturnSweepPlan(root, taskRacingBrain, harness, storage, "gen-end", active.input.id, 1, "Person", BACKGROUND_CONTEXT), /unfinished tasks or submissions/);
     assert.ok((await harness.inspect(BACKGROUND_CONTEXT)).tasks.some(({ record }) => record.kind === "carto.sleep" && record.background), "background work remains in the source");
     assert.equal(await brain.readCollapseJournal(), undefined, "capture does not start a collapse or delete the source");
     assert.equal(await endDelegateNow(harness, main, storage, active.input.id, "late", BACKGROUND_CONTEXT), false);
@@ -2508,9 +2512,10 @@ test("a message ends a rest early, and the rest does not then start a second tur
     session = await openLiveSession({ root, brain, models, model: ref, now: () => clock, setTimer });
     clock += 601_000;
     session.harness.resume();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(!(await session.harness.inspect(BACKGROUND_CONTEXT)).tasks.some((task) => task.record.kind === "carto.sleep"), "no rest survived the restart");
     for (const timer of timers.filter((candidate) => candidate.due <= clock)) timer.callback();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await session.harness.waitForIdle(BACKGROUND_CONTEXT);
+    assert.ok(!(await session.harness.inspect(BACKGROUND_CONTEXT)).tasks.some((task) => task.record.kind === "carto.sleep"), "no rest was rescheduled");
     assert.equal(captured.length, 2, "and the rest ended quietly, with no second start");
   } finally {
     await closeLiveSession(session);

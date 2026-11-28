@@ -39,6 +39,9 @@ const fixture = async () => {
   };
 };
 
+// Each case owns its project, model provider, and any HTTP server or child process.
+// Overlap independent cases instead of serializing the two restart integrations.
+test.describe("model switching", { concurrency: 2 }, () => {
 test("session inference admission serializes stream methods and cancels waiting requests", async () => {
   const faux = fauxProvider({ provider: "serial-test", models: [{ id: "one" }] });
   const models = createModels();
@@ -640,4 +643,5 @@ test("ModelPicker renders exact width, filters models, preserves query on refres
   picker.handleInput("\r");
   assert.equal(closed, 1);
   assert.deepEqual(picked.map((m) => `${m.provider}/${m.modelId}`), ["llama-swap/Qwen3-Coder"]);
+});
 });

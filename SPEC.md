@@ -827,9 +827,14 @@ whichever Harness received it even if capture fails. This is not proof against a
 or replaced store, a later path swap, or a relay. The host must still ensure the
 backing-store relationship and seal writers. The wrapper returns the snapshots
 for later commit; Pi inspection rejects unfinished source tasks or submissions,
-including background tasks and queued writes, before and after capture. These
-point-in-time checks do not stop scheduling, establish a lock, or authenticate
-hidden sidecar fields. Project-file observations and ABA changes remain unprotected. A caller may also
+including background tasks and queued writes, before and after capture. The
+wrapper also reuses Pi's unanswered-submission scan to check the existing
+checkpoint for main and the owned child; an uncheckpointed unanswered input or
+a failed scan blocks capture. The caller must supply that Harness's actual
+storage: the scan cannot prove its own backing-store identity or reconstruct
+withdrawn content. These point-in-time checks do not stop scheduling, establish
+a lock, or authenticate hidden sidecar fields. Project-file observations and
+ABA changes remain unprotected. A caller may also
 commit the captured projection digest with the source seal in the transfer and
 Brain journal. Committed recovery checks both projection files against that
 digest while the source store remains; missing or changed files preserve the

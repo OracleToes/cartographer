@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Context } from "@earendil-works/chord/context";
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { ROOT_CONVERSATION_ID, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type ConversationId, type Harness, type Storage, type Tx } from "@earendil-works/pi-durable";
 import { userText } from "../domain/chat-identity.js";
 import { applyWrite } from "../domain/brain.js";
 import { projectContext } from "../domain/projection.js";
@@ -12,6 +12,7 @@ import type { CartoBrain, ChatRecord, PinnedEphemeral } from "../domain/records.
 import { ephemeralItemId, generationPaths, prepareCollapseFreshness, prepareCollapsePinRefresh, readStoredDelegation, readStoredMainCheckpoint } from "./collapse.js";
 import type { BrainStore } from "./brain-store.js";
 import { DelegateInputCheckpointDoc, parseInputCheckpoint } from "./delegate-inputs.js";
+import { verifyReturnedDelegateInputs } from "./delegate-control.js";
 import { delegateReturnChat, DelegateCaptureDoc, DelegateMainBarrierDoc, DelegationDoc } from "./delegation-record.js";
 import { inspectReturnSweepInputs } from "./delegate-sweep-inputs.js";
 import { captureReturnSweepHead } from "./delegate-sweep-head.js";
@@ -203,20 +204,25 @@ export async function prepareReturnSweepWithRecords(
  * Capture a prospective return plan together with source and Brain snapshots.
  * The host must pass the Harness opened on this exact generation store, stop
  * its work and seal all admissions, withdrawals, context, Brain, archive,
- * projection, settings and project-file writers through eventual handling. A
+ * projection, settings and project-file writers through eventual handling. The
+ * supplied storage must be that Harness's actual backing storage: Pi's scan
+ * is not part of its transaction and an unrelated storage could omit inputs. A
  * fresh Pi document challenge is written before capture and checked through a
  * read-only connection to the named store. This detects an accidentally unrelated
  * Harness, but not a copied or replaced database, a malicious relay, or a later
  * path swap. The caller must still ensure the backing-store relationship.
  * Pi inspection rejects unfinished tasks and submissions before and after
- * capture, including background work and queued writes; it is not a lock.
+ * capture, including background work and queued writes; it is not a lock. Pi's
+ * unanswered-input scan is rechecked against the returned checkpoint for main
+ * and the owned child, but cannot recover discarded input content.
  * The two source seals and head/Brain comparisons are not locks, cannot detect
  * every ABA change, and do not authenticate hidden sidecar data or arbitrary
  * project-file observations. This does not commit, journal, establish a deletion
  * permit, or replace the multi-conversation guard. Recheck inputs at commit.
  */
 export async function captureReturnSweepPlan(
-  root: string, brain: BrainStore, harness: Harness, generation: string, id: string, now: number, person: string, context: Context,
+  root: string, brain: BrainStore, harness: Harness, storage: Pick<Storage, "scanSubmissions">,
+  generation: string, id: string, now: number, person: string, context: Context,
 ) {
   if (!/^gen-[\w-]+$/.test(generation)) throw new Error("Invalid return-sweep generation; the source was preserved.");
   const path = generationPaths(root, generation).store;
@@ -265,6 +271,9 @@ export async function captureReturnSweepPlan(
   }
   const head = captureReturnSweepHead(root, generation, views);
   if (head.digest !== captured.plan.sourceHeadDigest) throw new Error("Return-sweep projection changed during capture; the source was preserved.");
+  const main = await harness.conversation(ROOT_CONVERSATION_ID, context);
+  if (main === undefined) throw new Error("Return-sweep Harness has no main conversation; the source was preserved.");
+  await verifyReturnedDelegateInputs(main, storage, id, context);
   const after = { brain: await brain.read(), archive: await brain.readArchive() };
   if (!isDeepStrictEqual(expected, after)) throw new Error("Brain or archive changed during return-sweep capture; the source was preserved.");
   await requireReturnSweepQuiescence(harness, context);

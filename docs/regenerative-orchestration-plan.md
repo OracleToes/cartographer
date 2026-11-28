@@ -339,8 +339,12 @@ dormant wrapper now captures a plan between two such source fingerprints,
 compares the Pi handoff, checkpoint and barrier with stored revisions, and
 rechecks projection and Brain/archive snapshots. Pi inspection rejects unfinished
 tasks and queued or placed submissions before and after capture, including
-background work and queued writes. These are point-in-time checks, not a pause
-or writer lock. Before fingerprinting, the wrapper writes a fresh challenge into
+background work and queued writes. It also reuses the existing unanswered-input
+scan and checkpoint verification for main and the owned child; missing content
+or a scan failure blocks capture. The host must supply the Harness's actual
+storage, since an unrelated or incomplete scan can omit inputs and the scan
+cannot reconstruct withdrawn content. These are point-in-time checks, not a
+pause or writer lock. Before fingerprinting, the wrapper writes a fresh challenge into
 a Pi source document and compares it with the named store through a read-only
 SQLite connection. This catches an accidentally unrelated Harness; once written,
 the challenge remains even if later capture fails. It cannot rule out database
@@ -367,9 +371,11 @@ placed Pi entries; this requires the host to install its barrier and seal all
 destination and archive writers. It cannot resume the original task or run on
 startup. Its added conversation remains protected by the ordinary collapse
 guard. Host routing and end-to-end crash-safe recovery remain unfinished.
-The submission scan guards the immediate-end and restart-recovery aborts,
-but not other checkpoint callers; it does not reconstruct withdrawn content or
-provide a resolution workflow. Multi-conversation source deletion remains guarded.
+The submission scan guards immediate-end and restart-recovery aborts, normal
+return checkpointing, and the prospective capture wrapper. Lower-level checkpoint
+and planning helpers do not perform it; it does not reconstruct withdrawn
+content or provide a resolution workflow. Multi-conversation source deletion
+remains guarded.
 
 ## Decisions recorded during refinement
 
