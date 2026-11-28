@@ -31,6 +31,13 @@ The person asked that answers be recorded and committed as the discussion
 continues, rather than left only in conversation. These decisions refine earlier
 proposal text; unresolved details are not implicitly decided by them.
 
+- **Specification lives in the project.** The maintained project specification
+  is kept in project files alongside the code, not solely in the Brain, so it
+  can be versioned and shared and survives a Brain wipe. The Brain may hold
+  working context and cached evidence; externally changed project files must be
+  reassessed rather than trusting stale cached understanding. Do not silently
+  create a second authority when an existing specification is present. Exact
+  file layout and any transition of an existing spec remain to be decided.
 - **Separate authorship and work.** Main writes or updates the specification,
   then delegates implementation to a different context. When the person's
   request is clear, main updates the specification and delegates immediately,
@@ -140,9 +147,10 @@ proposal text; unresolved details are not implicitly decided by them.
   reporting turn, optional person-authored reason, preserved partial work and
   surviving background jobs.
 
-**Next unanswered question:** should the maintained project specification live
-in the project alongside its code, so it can be version-controlled and shared,
-or be kept only in Carto's project-local Brain?
+**Next unanswered question:** when an existing specification is captured into
+the new structured specification, should the existing document remain the
+specification of record, or should the new structured specification become
+that authority once the transition is agreed?
 
 ## 1. Recommendation in one sentence
 
@@ -592,9 +600,10 @@ it just in case.
 These are proposals/questions, not decisions attributed to the person:
 
 1. **Contract adoption:** approve a small ***plain feasibility pilot first?
-   Where should a project's contract live, and how is an existing `SPEC.md`
-   transitioned without two authorities? Should projects choose to use an
-   existing other standard instead? What happens when the parser is missing?
+   The contract lives in project files, as decided above; settle its layout and
+   how an existing `SPEC.md` is handled without two authorities. Should projects
+   choose to use an existing other standard instead? What happens when the parser
+   is missing?
 2. **Decision policy and behavior status:** how are observed, accepted and
    dictated behavior represented in the chosen format, promoted and used when
    work may change existing behavior? When must main ask about an ambiguity,
