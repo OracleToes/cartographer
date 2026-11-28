@@ -108,6 +108,32 @@ function unlinkIfExists(path: string): void {
 const activeCollapses = new Set<string>();
 
 /**
+ * Until a handoff can cross the collapse journal, preserve any generation
+ * containing one. Inspect Pi's document index rather than interpreting its
+ * revisions: even a retired or empty document is conservatively retained.
+ * The caller must stop generation writers; this is not a cross-process lock.
+ */
+export async function refuseDelegationStoreDeletion(storePath: string): Promise<void> {
+  if (!existsSync(storePath)) return;
+  const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
+  try {
+    const documents = await database.get<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
+    );
+    if (documents === undefined) return;
+    // Pi stores indexed strings as JSON to preserve lone UTF-16 surrogates.
+    const handoff = await database.get<{ id: number }>(
+      "SELECT id FROM live_documents WHERE kind = ? LIMIT 1", JSON.stringify("carto.delegation"),
+    );
+    if (handoff !== undefined) {
+      throw new Error("Collapse cannot remove a generation containing a delegation record; the store was preserved for recovery.");
+    }
+  } finally {
+    await database.close();
+  }
+}
+
+/**
  * Resolve an interrupted cross-database collapse before the ordinary generation
  * cleanup runs. The Brain journal is written before any destination file and is
  * committed atomically with the sweep. Never infer success from timestamps.
@@ -140,6 +166,9 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
     }
     const discardId = journal.committed ? journal.source : journal.destination;
     const discard = generationPaths(root, discardId);
+    // A committed source might contain a handoff not represented in the
+    // archive. Never delete it merely because the ordinary sweep committed.
+    if (journal.committed) await refuseDelegationStoreDeletion(discard.store);
     // A partially written destination is disposable only before the Brain commit;
     // after commit, the old source is disposable only because the archive owns it.
     unlinkIfExists(discard.store);
@@ -607,14 +636,14 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   if (await brain.readPendingEdit() !== undefined) throw new Error("A context edit is awaiting recovery; reopen the session before collapsing.");
   await recoverCollapse(root, brain, true);
   const now = options.now?.() ?? Date.now();
-  const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
-  const archive = await brain.readArchive();
-
   const discovered = discoverGenerations(root).filter((candidate) => candidate.hasStore);
   if (discovered.length > 1) throw new Error("Multiple unjournaled generation stores exist; all were preserved for recovery.");
   const live = discovered[0];
   if (live === undefined) throw new Error("No live generation exists to collapse.");
   if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
+  await refuseDelegationStoreDeletion(live.store);
+  const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
+  const archive = await brain.readArchive();
   const generation = newGenerationId(new Date(now));
 
   // What is leaving the Brain: every record carrying a mark, with its action.

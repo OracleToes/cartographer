@@ -2,7 +2,8 @@
  * Dormant sequential handoff record. Pi commits this document with the other
  * changes in the main conversation's generation store. It is not a scheduler:
  * no model, child conversation, report delivery or collapse is driven here.
- * A future caller must reconcile the record before that store is collapsed.
+ * Collapse refuses to delete a store containing this document until a future
+ * protocol can reconcile it with the cross-store collapse journal.
  */
 import { defineDoc } from "@earendil-works/pi-durable";
 

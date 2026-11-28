@@ -34,10 +34,13 @@ open a project whose settings request orchestration fails explicitly rather
 than silently using direct mode. A dormant Pi Durable conversation document
 can retain one handoff within a generation, with distinct delegate reports,
 person-ended reasons and missing-report failures; it is not a scheduler or an
-end-to-end recovery protocol. In particular, its generation store is removed by
-collapse, so it must be reconciled with the existing collapse journal before
-real use. The parser pilot, sequential delegation, capture, controls and
-cross-generation recovery remain to be built.
+end-to-end recovery protocol. Collapse and committed-collapse recovery now
+refuse to delete a store containing any such document, preserving it rather than
+silently losing it. This conservative guard assumes generation writers have
+stopped and does not implement cross-process locking or transfer the record.
+It must be reconciled with the existing collapse journal before real use. The
+parser pilot, sequential delegation, capture, controls and cross-generation
+recovery remain to be built.
 
 ## Decisions recorded during refinement
 

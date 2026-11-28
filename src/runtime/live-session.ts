@@ -49,6 +49,7 @@ import {
   newGenerationId,
   pinnedFileTexts,
   reconcileGenerations,
+  refuseDelegationStoreDeletion,
   removedPartKeys,
   editedPartValues,
   stablePartKeys,
@@ -1174,6 +1175,9 @@ export async function collapseLiveSession(
   ceremony: CollapseOptions = {},
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
+  // Refuse before interrupting or closing the live session. The lower-level
+  // collapse checks again after the caller has stopped generation writers.
+  await refuseDelegationStoreDeletion(generationPaths(session.root, session.generation).store);
   await recoverContextEdit(session);
   const automatic = follow.automatic === true;
   const trigger: CollapseTrigger = !automatic

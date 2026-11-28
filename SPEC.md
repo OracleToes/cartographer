@@ -715,8 +715,14 @@ invalid transition is refused without replacing the recorded task. The record
 survives reopening that generation. It is not wired to model execution or UI,
 and it does not survive generation collapse by itself: the future handoff
 protocol must reconcile it with the existing cross-store collapse journal before
-using it for real work. This record does not imply a model lease, isolation,
-report delivery, or recovery of external side effects.
+using it for real work. Until then, collapse refuses to remove a generation
+containing a delegation document, even a retired or empty one; it preserves the
+store for recovery. A live-session collapse checks before interrupting or closing
+the session, and committed collapse recovery checks the source before deleting
+it. These checks assume the existing collapse lifecycle: the caller has stopped
+writers to the generation; they are not a cross-process writer lock. This record
+does not imply a model lease, isolation, report delivery, or recovery of external
+side effects.
 
 ### 6.1 Read only mode and edit mode
 

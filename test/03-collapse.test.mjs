@@ -470,6 +470,37 @@ test("an interrupted collapse recovers on the correct side of the durable commit
   }
 });
 
+test("committed collapse recovery preserves a source with a delegation document", async () => {
+  const root = tempRoot();
+  const generation = "gen-20261116T020000Z-delegation";
+  let store;
+  try {
+    const source = await realGeneration(root, generation, 1_700_000_100, []);
+    store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    const interrupted = { ...store, applyCollapse: async (change) => {
+      await store.applyCollapse(change);
+      // Simulate a handoff appearing after the pre-sweep check and a crash
+      // before source cleanup; recovery must not guess it was archived.
+      const db = await openNodeSqliteDatabase(source.store);
+      try {
+        await db.exec("CREATE TABLE live_documents (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)");
+        await db.run("INSERT INTO live_documents (id, kind) VALUES (?, ?)", 1, JSON.stringify("carto.delegation"));
+      } finally { await db.close(); }
+      throw new Error("simulated crash");
+    } };
+    await assert.rejects(collapse(root, interrupted), /simulated crash/);
+    const journal = await store.readCollapseJournal();
+    assert.equal(journal.committed, true);
+    await assert.rejects(recoverCollapse(root, store), /delegation record/);
+    assert.equal(existsSync(source.store), true);
+    assert.equal(existsSync(generationPaths(root, journal.destination).store), true);
+    assert.deepEqual(await store.readCollapseJournal(), journal);
+  } finally {
+    if (store) await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("collapse refuses a snapshot made stale by concurrent Brain or archive changes", async () => {
   for (const changed of ["brain", "archive"]) {
     const root = tempRoot();

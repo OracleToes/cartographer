@@ -34,7 +34,7 @@ import {
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
+import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
@@ -89,6 +89,15 @@ test("delegation handoff is durable within a generation and preserves report pro
     const returned = (await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active;
     assert.deepEqual(returned.result, { kind: "person-ended", reason: "" });
     await assert.rejects(commit((record) => returnDelegation(record, "task-1", { kind: "failure", explanation: "late" })), /cannot return/);
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
+    const original = generationPaths(root, session.generation).store;
+    await assert.rejects(collapseLiveSession(session, options, "person collapse"), /delegation record/);
+    assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned, "refusal leaves the live session open");
+    await closeLiveSession(session);
+    await assert.rejects(collapse(root, brain), /delegation record/);
+    assert.equal(existsSync(original), true);
+    assert.equal(await brain.readCollapseJournal(), undefined);
+    session = await openLiveSession(options);
     assert.deepEqual((await session.harness.snapshot(DelegationDoc, session.conversation.id, BACKGROUND_CONTEXT)).active, returned);
   } finally {
     await closeLiveSession(session);
