@@ -762,7 +762,16 @@ has stopped; a report racing the ending intent cannot replace it. Recovery of
 an ending intent requires a paused Pi scheduler and aborts the owning main run
 before scheduling resumes, preserving its unanswered input for the host to
 handle. It does not roll back project changes or stop independent background
-jobs. A dormant main-conversation generation hook holds an old generation's
+jobs. Before restart recovery aborts that main run, a dormant Pi transaction
+records the active run inputs and queued inputs, including their submission
+identities, full input content and entry metadata, in a source-generation
+checkpoint. Repeating capture for the same handoff retains the original copy.
+A missing or inconsistent input, or a queued context write, stops capture rather
+than silently dropping it. The host must stop new input admission while capturing
+and keep it stopped through recovery; the checkpoint is not an admission lock.
+It is not yet transferred or replayed: collapse refuses to delete a generation
+containing one, preserving it for future recovery. A dormant main-conversation
+generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for
 collapse; it cannot be released by admitting the return in the source

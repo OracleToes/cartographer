@@ -3,6 +3,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { LiveDoc, type Conversation, type ConversationId, type Harness, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import { DelegationDoc, finishDelegationEnd, requestDelegationEnd, type Delegation } from "./delegation-record.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
+import { checkpointDelegateInputs } from "./delegate-inputs.js";
 
 /** Verify the actual Pi task and owned child, not just an ID in the document. */
 async function ownedHandoff(tx: Tx, mainId: ConversationId, active: Delegation): Promise<{ ownerId: TaskId; childId: ConversationId | null }> {
@@ -69,9 +70,11 @@ export async function endDelegateNow(harness: Harness, main: Conversation, id: s
 }
 
 /**
- * Recovery must run before any caller enables scheduling. Aborting main's run
- * cascades to its owned child and withdraws queued child input. The caller must
- * preserve main's unanswered inputs and collapse before allowing new inference.
+ * Recovery must run before any caller enables scheduling, with main input
+ * admission sealed. Checkpoint main's inputs before aborting its run; the
+ * checkpoint still needs transfer and replay. The abort cascades to the owned
+ * child and withdraws queued child input. The caller must handle main inputs
+ * and collapse before allowing new inference.
  */
 export async function recoverImmediateDelegateEnd(harness: Harness, main: Conversation, context: Context): Promise<boolean> {
   if ((await harness.inspect(context)).scheduling !== "paused") throw new Error("Delegate-end recovery requires a paused scheduler.");
@@ -85,6 +88,7 @@ export async function recoverImmediateDelegateEnd(harness: Harness, main: Conver
     const runId = live.run?.taskId;
     if (runId === undefined) {
       if (ownerTask.state.status !== "terminal") throw new Error("The owning main run is missing; the ending intent was preserved.");
+      await checkpointDelegateInputs(tx, main.id, active.input.id);
       return { id: active.input.id, runId: null };
     }
     let task = ownerTask;
@@ -96,6 +100,7 @@ export async function recoverImmediateDelegateEnd(harness: Harness, main: Conver
       if (parent === undefined || parent.conversationId !== main.id) throw new Error("The delegate ownership chain is incomplete; the ending intent was preserved.");
       task = parent;
     }
+    await checkpointDelegateInputs(tx, main.id, active.input.id);
     return { id: active.input.id, runId };
   }, context);
   if (state === null) return false;

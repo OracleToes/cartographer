@@ -63,9 +63,16 @@ new work after a return; replay uses the same request ID. A dormant immediate-en
 control now records the person's reason as an ending intent, aborts the child's
 ordinary Pi work, then records a person-ended return. A restart helper requires
 Pi scheduling to remain paused and aborts the owning main run before resuming;
-its unanswered inputs still require host handling. It preserves partial project
-work and does not cross background boundaries. The host must still route the
-control, handle unanswered and queued inputs, and perform return collapse.
+its unanswered inputs still require host handling. Before the recovery abort,
+a dormant transaction checkpoints the active run's and inbox's input content,
+submission identity and entry metadata in the source generation, with replay
+reuse and refusal of ambiguous input or queued context writes. The host must
+seal input admission during capture and recovery. Collapse refuses to delete a
+store with this checkpoint because transfer and replay are not yet implemented;
+it preserves data rather than pretending the return path is complete. It
+preserves partial project work and does not cross background boundaries. The
+host must still route the control, handle unanswered and queued inputs, and
+perform return collapse.
 A dormant main-only Pi generation hook now holds requests in the source while a
 handoff exists, including queued main input after termination. It fails closed
 on read errors and wakes only on abort. A source-generation marker prevents

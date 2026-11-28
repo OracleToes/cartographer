@@ -37,7 +37,7 @@ import {
   waitForRunEnd,
 } from "../dist/runtime/live-session.js";
 import { configuredModels } from "../dist/runtime/llama-swap-model.js";
-import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera } from "../dist/runtime/collapse.js";
+import { collapse, ephemeralItemId, generationPaths, readGenerationEphemera, readStoredDelegation } from "../dist/runtime/collapse.js";
 import { createTools } from "../dist/runtime/tools.js";
 import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 import { RestCallDoc, RestDoc, SleepTask } from "../dist/runtime/sleep-task.js";
@@ -49,6 +49,7 @@ import { createDelegateTool } from "../dist/runtime/delegate-tool.js";
 import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
+import { checkpointDelegateInputs, DelegateInputCheckpointDoc } from "../dist/runtime/delegate-inputs.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -650,19 +651,28 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
   const mainExtension = defineExtension({ name: "main-delegate", tools: [delegate] });
   const registry = createRegistry();
   registry.install(mainExtension); registry.install(worker); registry.install(DelegateReportExtension);
+  const barrier = createDelegateMainBarrier();
+  registry.install(barrier);
   const path = join(root, ".brain", "end-recovery.sqlite");
   let database = await openNodeSqliteDatabase(path);
-  let harness = await Harness.open(await SqliteStorage.open(database), { models, registry }, BACKGROUND_CONTEXT);
+  let harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
   try {
-    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension], compaction: { enabled: false } } });
+    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [mainExtension, barrier], compaction: { enabled: false } } });
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("delegate", { role: "implementation", instruction: "Work", doneWhen: "Report" }, { id: "delegate" })], { stopReason: "toolUse" }),
       fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })], { stopReason: "toolUse" }),
     ]);
-    const submission = await main.submit({ type: "input", content: "Keep this request" }, BACKGROUND_CONTEXT);
+    const submission = await main.submit({ type: "input", content: "Keep this request", entry: { kind: "carto.user", data: { chatRecordId: "chat:original" } } }, BACKGROUND_CONTEXT);
     await started;
+    const attachment = [{ type: "text", text: "Queued with image" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }];
+    const queued = await main.submit({ type: "input", content: attachment, whenBusy: "followUp", entry: { kind: "carto.user", data: { chatRecordId: "chat:queued" } } }, BACKGROUND_CONTEXT);
+    const steering = await main.submit({ type: "input", content: "A steer", whenBusy: "steer" }, BACKGROUND_CONTEXT);
+    const write = await main.submit({ type: "write", entry: { kind: "test.pending", model: [{ role: "user", content: "context write", timestamp: Date.now() }] } }, BACKGROUND_CONTEXT);
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
+    await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /queued context write/);
+    assert.equal(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), undefined);
+    assert.equal(await write.abort(BACKGROUND_CONTEXT), "aborted");
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(requestImmediateDelegateEnd(main, active.input.id, "different", BACKGROUND_CONTEXT), /different reason/);
     const lateReport = { status: "done", findings: "none", changes: "none", checks: "none", uncertainty: "none", remaining: "none", mainMessage: "done" };
@@ -670,7 +680,7 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     await harness.close(BACKGROUND_CONTEXT);
     await database.close();
     database = await openNodeSqliteDatabase(path);
-    harness = await Harness.open(await SqliteStorage.open(database), { models, registry }, BACKGROUND_CONTEXT);
+    harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
     main = await harness.root(BACKGROUND_CONTEXT);
     assert.equal((await harness.inspect(BACKGROUND_CONTEXT)).scheduling, "paused");
     assert.equal((await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active.phase, "ending");
@@ -678,8 +688,24 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     const returned = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.deepEqual(returned.result, { kind: "person-ended", reason: "stop now" });
     assert.equal((await (await harness.submission(submission.id, BACKGROUND_CONTEXT)).status(BACKGROUND_CONTEXT)).status, "unanswered");
+    const checkpoint = await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT);
+    assert.deepEqual(checkpoint, { handoffId: active.input.id, inputs: [
+      { submissionId: submission.id, placement: "placed", whenBusy: "followUp", content: "Keep this request", entry: { kind: "carto.user", data: { chatRecordId: "chat:original" } } },
+      { submissionId: queued.id, placement: "queued", whenBusy: "followUp", content: attachment, entry: { kind: "carto.user", data: { chatRecordId: "chat:queued" } } },
+      { submissionId: steering.id, placement: "queued", whenBusy: "steer", content: "A steer", entry: { kind: "pi.user" } },
+    ] });
+    await main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "replay never replaces the pre-abort snapshot");
+    await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);
     assert.equal(readFileSync(join(root, "partial-work"), "utf8"), "kept");
     assert.equal(faux.state.callCount, 2, "no model restarted during recovery");
+    await harness.close(BACKGROUND_CONTEXT);
+    await database.close();
+    database = await openNodeSqliteDatabase(path);
+    harness = await Harness.open(await SqliteStorage.open(database, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
+    main = await harness.root(BACKGROUND_CONTEXT);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint, "checkpoint survives another restart");
+    await assert.rejects(readStoredDelegation(path), /input checkpoint.*preserved/);
   } finally {
     await harness.close(BACKGROUND_CONTEXT).catch(() => undefined);
     await database.close().catch(() => undefined);

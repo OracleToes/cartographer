@@ -123,6 +123,12 @@ export async function readStoredDelegation(storePath: string): Promise<{ documen
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_documents'",
       );
       if (documents === undefined) return undefined;
+      // A source input checkpoint is not transferred yet, even when empty or
+      // retired. Never sweep its only durable copy as an ordinary handoff.
+      const inputCheckpoint = await tx.get<{ id: number }>(
+        "SELECT id FROM live_documents WHERE kind = ? LIMIT 1", JSON.stringify("carto.delegate-input-checkpoint"),
+      );
+      if (inputCheckpoint !== undefined) throw new Error("A delegate input checkpoint is awaiting transfer; the generation store was preserved.");
       // Pi JSON-encodes indexed strings, including document kinds and keys.
       const rows = await tx.all<{ id: number; scope_kind: string; owner_id: number; family: number; key_value: string; retired_at: number | null }>(
         "SELECT id, scope_kind, owner_id, family, key_value, retired_at FROM live_documents WHERE kind = ?", JSON.stringify("carto.delegation"),
