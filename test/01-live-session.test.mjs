@@ -559,6 +559,48 @@ test("return-sweep provenance survives archive operations and blocks child resto
   }
 });
 
+test("collapse preserves extra conversations even without a delegation record", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const { models, ref } = fauxSetup();
+  const options = { root, brain, models, model: ref };
+  const session = await openLiveSession(options);
+  let closed = false;
+  try {
+    const child = await session.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: ref, cwd: root } }, BACKGROUND_CONTEXT);
+    await child.submit({ type: "write", entry: { kind: "test.child", model: [{ role: "user", content: "must not disappear", timestamp: 1 }] } }, BACKGROUND_CONTEXT);
+    await assert.rejects(collapseLiveSession(session, options, "person requested"), /multiple conversations.*preserved/);
+    await session.conversation.submit({ type: "write", entry: { kind: "test.still-open" } }, BACKGROUND_CONTEXT);
+    const source = session.generation;
+    const sourcePaths = generationPaths(root, source);
+    await closeLiveSession(session); closed = true;
+    assert.equal(await readStoredDelegation(sourcePaths.store), undefined);
+    await assert.rejects(collapse(root, brain), /multiple conversations.*preserved/);
+    assert.equal(await brain.readCollapseJournal(), undefined);
+    assert.equal(existsSync(sourcePaths.store), true);
+
+    // An older committed ordinary sweep may have missed the extra conversation.
+    const destination = "gen-ordinary-recovery-guard";
+    const destinationPaths = generationPaths(root, destination);
+    await brain.beginCollapse(source, destination);
+    copyFileSync(sourcePaths.markdown, destinationPaths.markdown);
+    copyFileSync(sourcePaths.sidecar, destinationPaths.sidecar);
+    const db = await openNodeSqliteDatabase(destinationPaths.store); await db.close();
+    await brain.applyCollapse({ source, generation: destination, expected: { brain: await brain.read(), archive: await brain.readArchive() }, writes: [], incoming: [], now: 1 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(recoverCollapse(root, brain), /multiple conversations.*preserved/);
+      assert.equal((await brain.readCollapseJournal()).committed, true);
+      assert.equal(existsSync(sourcePaths.store), true);
+      assert.equal(existsSync(destinationPaths.store), true);
+    }
+    const sourceDb = await openNodeSqliteDatabase(sourcePaths.store, { mode: "read-only" });
+    try { assert.match(JSON.stringify(await sourceDb.all("SELECT record FROM live_entries")), /must not disappear/); }
+    finally { await sourceDb.close(); }
+  } finally {
+    if (!closed) await closeLiveSession(session).catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("return collapse and old committed recovery preserve a multi-conversation Pi source", async () => {
   const { root, brain, cleanup } = await fixture();
   const { models, ref } = fauxSetup();

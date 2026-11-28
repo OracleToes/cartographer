@@ -210,10 +210,12 @@ including writes, even when the Harness is read-only, so it cannot simply be
 opened over Carto's read-only source to derive contexts. Archive restoration
 currently targets main and needs provenance-aware handling; the current sweep's
 text-based Chat deduplication can suppress unrelated child input. Do not put the
-child's transcript in main's context. As an interim fail-closed measure, return
-collapse now rejects sources containing additional conversations, and recovery
-preserves an older committed return sweep's multi-conversation source and journal.
-This does not recover a source already deleted, or make a return sweep usable.
+child's transcript in main's context. As an interim fail-closed measure, ordinary
+collapse rejects any source with additional conversations, even if its handoff is
+missing or cleared; committed recovery likewise preserves such a source and its
+journal. Live-session collapse checks before interruption as well as after close,
+but the preflight is not a writer lock. This does not recover a source already
+deleted, or make a return sweep usable.
 A dormant capture helper now reads each conversation's active entries and
 contributions from the already-open Pi Harness, preserving Pi's own head and
 edit semantics, and checking bounds before and after capture. It rejects forks;

@@ -51,6 +51,7 @@ import {
   pinnedFileTexts,
   reconcileGenerations,
   readStoredDelegation,
+  requireSingleConversationCollapse,
   removedPartKeys,
   editedPartValues,
   stablePartKeys,
@@ -1199,9 +1200,12 @@ export async function collapseLiveSession(
   ceremony: CollapseOptions = {},
   follow: CollapseFollow = {},
 ): Promise<CollapseOutcome> {
-  // Refuse an unfinished or ambiguous handoff before interrupting or closing
-  // the session. Collapse checks the checkpoint again after writers have stopped.
-  await readStoredDelegation(generationPaths(session.root, session.generation).store);
+  // Refuse an unfinished handoff or unaccounted conversation before stopping
+  // the live session. These preflight checks are not locks: collapse checks
+  // them again after the session has stopped.
+  const sourceStore = generationPaths(session.root, session.generation).store;
+  await readStoredDelegation(sourceStore);
+  await requireSingleConversationCollapse(sourceStore);
   await recoverContextEdit(session);
   const automatic = follow.automatic === true;
   const trigger: CollapseTrigger = !automatic

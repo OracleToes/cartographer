@@ -31,6 +31,7 @@ function fakeGeneration(root, generation, mtimeSeconds) {
   const paths = generationPaths(root, generation);
   const database = new DatabaseSync(paths.store);
   database.exec("CREATE TABLE live_entries (id INTEGER, head INTEGER, record TEXT)");
+  database.exec("CREATE TABLE live_conversations (id INTEGER PRIMARY KEY); INSERT INTO live_conversations VALUES (1)");
   database.close();
   const brain = emptyBrain();
   writeSnapshot(root, generation, projectContext(brain), at(1));
@@ -412,6 +413,7 @@ async function realGeneration(root, generation, mtimeSeconds, rows, brain = empt
   await database.exec(
     "CREATE TABLE live_entries (id INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, head INTEGER, commit_seq INTEGER NOT NULL, record TEXT NOT NULL)",
   );
+  await database.exec("CREATE TABLE live_conversations (id INTEGER PRIMARY KEY); INSERT INTO live_conversations VALUES (1)");
   for (const [index, record] of rows.entries()) {
     await database.run(
       "INSERT INTO live_entries (id, conversation_id, commit_seq, record) VALUES (?, 1, ?, ?)",

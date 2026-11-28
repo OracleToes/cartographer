@@ -180,20 +180,28 @@ export async function readStoredDelegation(storePath: string, transferInputs = f
 }
 
 /**
- * A return sweep cannot yet archive several conversations safely. In particular,
- * the existing sweep has a global head and the restore path targets main. Keep
- * the source until conversation-aware archival and input recovery are available.
- * As with the handoff check, the caller must have stopped all source writers.
+ * The ordinary sweep has a global head and restoration targets main, regardless
+ * of whether a delegation document still exists. Never discard an unaccounted
+ * conversation. A newly created, not-yet-opened Pi store may be an empty SQLite
+ * database; other missing or malformed schemas fail closed. The caller must
+ * stop all writers through the actual sweep and cleanup. An earlier preflight
+ * while a session is live is only advisory and must be repeated after closing.
  */
-async function requireSingleConversationReturn(storePath: string): Promise<void> {
+export async function requireSingleConversationCollapse(storePath: string): Promise<void> {
   const database = await openNodeSqliteDatabase(storePath, { mode: "read-only" });
   try {
+    const table = await database.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'live_conversations'");
+    if (table === undefined) {
+      const other = await database.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1");
+      if (other !== undefined) throw new Error("The generation has an unrecognized conversation schema; the store was preserved.");
+      return;
+    }
     const extra = await database.get<{ id: number }>("SELECT id FROM live_conversations WHERE id <> 1 LIMIT 1");
     if (extra !== undefined) {
-      throw new Error("A return sweep with multiple conversations is not yet safe; the generation store was preserved.");
+      throw new Error("A collapse with multiple conversations is not yet safe; the generation store was preserved.");
     }
     const root = await database.get<{ id: number }>("SELECT id FROM live_conversations WHERE id = 1");
-    if (root === undefined) throw new Error("A return sweep has no root conversation; the generation store was preserved.");
+    if (root === undefined) throw new Error("A collapse has no root conversation; the generation store was preserved.");
   } finally {
     await database.close();
   }
@@ -257,9 +265,9 @@ export async function recoverCollapse(root: string, brain: BrainStore, finishing
             throw new Error("Delegate source changed after its seal; all generation files were preserved.");
           }
         }
-        // A journal committed by an older version may have swept the wrong
-        // range. Do not destroy its source, even though the Brain committed.
-        if (stored !== undefined) await requireSingleConversationReturn(discard.store);
+        // An older journal may have swept the wrong range, even when no
+        // handoff document survives. Never destroy an unaccounted conversation.
+        await requireSingleConversationCollapse(discard.store);
       }
     }
     // A partially written destination is disposable only before the Brain commit;
@@ -878,7 +886,7 @@ async function performCollapse(root: string, brain: BrainStore, options: Collaps
   if (live === undefined) throw new Error("No live generation exists to collapse.");
   if (!live.hasMarkdown || !live.hasSidecar) throw new Error("The live generation is missing its snapshot; all files were preserved.");
   const storedDelegation = await readStoredDelegation(live.store, options.transferDelegateInputs === true);
-  if (storedDelegation !== undefined) await requireSingleConversationReturn(live.store);
+  await requireSingleConversationCollapse(live.store);
   const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
   const archive = await brain.readArchive();
   const generation = newGenerationId(new Date(now));

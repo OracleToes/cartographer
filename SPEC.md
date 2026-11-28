@@ -720,11 +720,13 @@ A returned handoff crosses a full collapse: its exact source document is copied
 into a temporary Brain transfer record in the same transaction as the collapse
 sweep, verified against the source before deletion, then restored to the new
 main conversation before the transfer is acknowledged. Until conversation-aware
-sweep and recovery are implemented, a returned handoff with any additional Pi
-conversation refuses collapse before the sweep; recovery also refuses to delete
-a multi-conversation source of an older committed return sweep. The source and
-journal remain available for recovery. This guard requires stopped source writers
-and does not repair a source already deleted by an older version. A dormant
+sweep and recovery are implemented, any source with an additional Pi conversation
+refuses ordinary collapse, even without a delegation record; committed recovery
+also refuses to delete such a source from an older sweep. A live-session preflight
+refuses before interrupting it, and collapse checks again after closing it. The
+source and any journal remain available for recovery. The final guard requires
+stopped source writers and does not repair a source already deleted by an older
+version. A dormant
 capture helper can obtain each non-forked conversation's active entries and
 edited contributions from Pi's own context view, checking conversation bounds
 before and after the reads. It retains conversation and entry identities and
