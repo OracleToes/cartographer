@@ -59,6 +59,7 @@ import {
 } from "./collapse.js";
 import { snapshotPaths, writeSnapshot } from "./projection-files.js";
 import { DelegateInputCheckpointDoc, validateInputTransfer } from "./delegate-inputs.js";
+import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc } from "./delegate-input-replay.js";
 import {
   appendCollapseLog,
   brainCountsOf,
@@ -276,6 +277,8 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         validateInputTransfer(transfer.inputCheckpoint, expected.active!.input.id);
       const existing = await harness.snapshot(DelegationDoc, conversation.id, BACKGROUND_CONTEXT);
       const existingInputs = await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT);
+      const existingReplay = await harness.snapshot(DelegateInputReplayDoc, conversation.id, BACKGROUND_CONTEXT);
+      if (!clearedInputReplay(existingReplay)) throw new Error("Destination delegate input staging conflicts with the transfer; both were preserved.");
       if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(expected)) {
         throw new Error("Destination delegation record conflicts with the transfer; both were preserved.");
       }
@@ -299,7 +302,9 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       }, BACKGROUND_CONTEXT);
       await options.brain.acknowledgeDelegationTransfer(transfer);
     }
-    if (await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT) !== undefined) {
+    const pendingInputs = await harness.snapshot(DelegateInputCheckpointDoc, conversation.id, BACKGROUND_CONTEXT);
+    const pendingReplay = await harness.snapshot(DelegateInputReplayDoc, conversation.id, BACKGROUND_CONTEXT);
+    if (!clearedInputCheckpoint(pendingInputs) || !clearedInputReplay(pendingReplay)) {
       throw new Error("A delegate input checkpoint is awaiting replay; the session and inputs were preserved.");
     }
     // `harness.root` skips `configure` when reopening an existing generation

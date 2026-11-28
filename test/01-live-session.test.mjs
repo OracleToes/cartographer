@@ -50,6 +50,7 @@ import { createDelegateMainBarrier } from "../dist/runtime/delegate-barrier.js";
 import { requireSoleDelegateCall } from "../dist/runtime/delegate-round.js";
 import { endDelegateNow, recoverImmediateDelegateEnd, requestImmediateDelegateEnd } from "../dist/runtime/delegate-control.js";
 import { checkpointDelegateInputs, DelegateInputCheckpointDoc } from "../dist/runtime/delegate-inputs.js";
+import { DelegateInputReplayDoc, stageNextDelegateInput } from "../dist/runtime/delegate-input-replay.js";
 
 const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
@@ -236,6 +237,64 @@ test("delegate input checkpoints transfer with the handoff and survive interrupt
   } finally {
     await closeLiveSession(session).catch(() => undefined);
     await cleanup();
+  }
+});
+
+test("checkpoint staging is resumable, ordered, and cleared only after the return is answered", async () => {
+  const { root, cleanup } = await fixture();
+  const { faux, models, ref, captured, factory } = fauxSetup();
+  const barrier = createDelegateMainBarrier();
+  const registry = createRegistry(); registry.install(barrier);
+  const path = join(root, ".brain", "staging.sqlite");
+  let db = await openNodeSqliteDatabase(path);
+  let harness = await Harness.open(await SqliteStorage.open(db, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
+  let release = () => {};
+  try {
+    let main = await harness.root(BACKGROUND_CONTEXT, { agent: { model: ref, cwd: root, extensions: [barrier], compaction: { enabled: false } } });
+    const image = [{ type: "text", text: "second" }, { type: "image", data: "aGVsbG8=", mimeType: "image/png" }];
+    const checkpoint = { handoffId: "handoff", inputs: [
+      { submissionId: 4, placement: "placed", whenBusy: "followUp", content: "first", entry: { kind: "carto.user", data: { chatRecordId: "person:first" } } },
+      { submissionId: 9, placement: "queued", whenBusy: "steer", content: image, entry: { kind: "pi.user" } },
+    ] };
+    await main.commit(async (tx) => {
+      const handoff = await tx.doc(DelegationDoc, main.id);
+      prepareDelegation(handoff, { id: "handoff", role: "capture", instruction: "Inspect", doneWhen: "Report" });
+      returnDelegation(handoff, "handoff", { kind: "person-ended", reason: "" });
+      const saved = await tx.doc(DelegateInputCheckpointDoc, main.id);
+      saved.handoffId = checkpoint.handoffId; saved.inputs = checkpoint.inputs;
+    }, BACKGROUND_CONTEXT);
+    await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /staging receipt/);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), true);
+    await assert.rejects(admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT), /staging is incomplete/);
+    assert.equal(faux.state.callCount, 0, "staging entries do not start inference");
+    await harness.close(BACKGROUND_CONTEXT); await db.close();
+    db = await openNodeSqliteDatabase(path);
+    harness = await Harness.open(await SqliteStorage.open(db, { prefix: "live_" }), { models, registry }, BACKGROUND_CONTEXT);
+    main = await harness.root(BACKGROUND_CONTEXT);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), true);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), false);
+    assert.equal(await stageNextDelegateInput(main, "handoff", BACKGROUND_CONTEXT), false);
+    const users = (await main.context(BACKGROUND_CONTEXT)).entries.filter((entry) => entry.model?.[0]?.role === "user");
+    assert.deepEqual(users.map((entry) => entry.model[0].content), ["first", image]);
+    assert.deepEqual(users[0].data, { chatRecordId: "person:first" });
+    assert.equal((await harness.snapshot(DelegateInputReplayDoc, main.id, BACKGROUND_CONTEXT)).submissions.length, 2);
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    const hold = new Promise((resolve) => { release = resolve; });
+    faux.setResponses([factory(async () => { markStarted(); await hold; return fauxAssistantMessage("reconciled"); })]);
+    const id = await admitDelegationReturn(main, "handoff", BACKGROUND_CONTEXT);
+    await started;
+    await assert.rejects(acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), /not been answered/);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), checkpoint);
+    release();
+    assert.equal((await (await harness.submission(id, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT)).status, "done");
+    assert.deepEqual(captured[0].filter((message) => message.role === "user").slice(0, 2).map((message) => message.content), ["first", image]);
+    assert.equal(await acknowledgeDelegationReturn(main, "handoff", id, BACKGROUND_CONTEXT), true);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), { handoffId: null, inputs: [] });
+    assert.deepEqual(await harness.snapshot(DelegateInputReplayDoc, main.id, BACKGROUND_CONTEXT), { handoffId: null, digest: null, submissions: [] });
+    assert.equal(await readStoredDelegation(path), undefined, "a reconciled checkpoint does not prevent later collapse");
+  } finally {
+    release(); await harness.close(BACKGROUND_CONTEXT).catch(() => undefined); await db.close().catch(() => undefined); await cleanup();
   }
 });
 
@@ -738,7 +797,7 @@ test("ending intent recovers before scheduler resumes and preserves unanswered m
     const active = (await harness.snapshot(DelegationDoc, main.id, BACKGROUND_CONTEXT)).active;
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(main.commit((tx) => checkpointDelegateInputs(tx, main.id, active.input.id), BACKGROUND_CONTEXT), /queued context write/);
-    assert.equal(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), undefined);
+    assert.deepEqual(await harness.snapshot(DelegateInputCheckpointDoc, main.id, BACKGROUND_CONTEXT), { handoffId: null, inputs: [] });
     assert.equal(await write.abort(BACKGROUND_CONTEXT), "aborted");
     assert.equal(await requestImmediateDelegateEnd(main, active.input.id, "stop now", BACKGROUND_CONTEXT), true);
     await assert.rejects(requestImmediateDelegateEnd(main, active.input.id, "different", BACKGROUND_CONTEXT), /different reason/);

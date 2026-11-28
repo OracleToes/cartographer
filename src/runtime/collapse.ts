@@ -38,6 +38,7 @@ import { assertFileScope, isImageFile, lexicalProjectPath, readProjectSettings, 
 import { contextDirectory, removeSnapshot, snapshotPaths, writeSnapshot } from "./projection-files.js";
 import { parseReturnedDelegation, type DelegationTransfer, type StoredCheckpoint } from "./delegation-record.js";
 import { validateInputTransfer } from "./delegate-inputs.js";
+import { clearedInputCheckpoint, clearedInputReplay } from "./delegate-input-replay.js";
 
 export interface GenerationFiles {
   generation: string;
@@ -145,7 +146,12 @@ export async function readStoredDelegation(storePath: string, transferInputs = f
         }
         return { documentId: doc.id, revision: revision.seq, content: revision.content };
       };
-      const checkpoint = await readDoc("carto.delegate-input-checkpoint", "delegate input checkpoint");
+      let checkpoint = await readDoc("carto.delegate-input-checkpoint", "delegate input checkpoint");
+      const replay = await readDoc("carto.delegate-input-replay", "delegate input staging");
+      if (replay !== undefined && !clearedInputReplay(JSON.parse(replay.content))) {
+        throw new Error("Delegate input staging is awaiting reconciliation; the generation store was preserved.");
+      }
+      if (checkpoint !== undefined && clearedInputCheckpoint(JSON.parse(checkpoint.content))) checkpoint = undefined;
       if (checkpoint !== undefined && !transferInputs) throw new Error("A delegate input checkpoint is awaiting transfer; the generation store was preserved.");
       const handoff = await readDoc("carto.delegation", "delegation");
       if (handoff === undefined) {

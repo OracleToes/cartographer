@@ -9,6 +9,8 @@ import { admitDelegateInput, ensureDelegateConversation } from "./delegate-conve
 import { DelegateReportExtension, DelegateReportTool } from "./delegate-report.js";
 import { DelegateMainBarrierDoc, DelegationDoc, prepareDelegation, returnDelegation, type DelegateRole } from "./delegation-record.js";
 import { requireSoleDelegateCall } from "./delegate-round.js";
+import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
+import { clearedInputCheckpoint, clearedInputReplay, DelegateInputReplayDoc } from "./delegate-input-replay.js";
 
 type Profile = { extensions: readonly Extension[]; tools: readonly ToolRegistration[] };
 
@@ -41,8 +43,14 @@ export function createDelegateTool(options: { cwd: string; profiles?: Partial<Re
       const alreadyReturned = await api.commit(async (tx) => {
         await requireSoleDelegateCall(tx, api.conversationId, api.taskId, api.callId, "delegate");
         const record = await tx.doc(DelegationDoc, api.conversationId);
-        if (record.active === null) prepareDelegation(record, input);
-        else if (record.active.input.id !== id || record.active.input.role !== input.role ||
+        if (record.active === null) {
+          const checkpoint = await tx.doc(DelegateInputCheckpointDoc, api.conversationId);
+          const replay = await tx.doc(DelegateInputReplayDoc, api.conversationId);
+          if (!clearedInputCheckpoint(checkpoint) || !clearedInputReplay(replay)) {
+            throw new Error("Delegate inputs are still awaiting reconciliation; they were preserved.");
+          }
+          prepareDelegation(record, input);
+        } else if (record.active.input.id !== id || record.active.input.role !== input.role ||
                  record.active.input.instruction !== input.instruction || record.active.input.doneWhen !== input.doneWhen) {
           throw new Error("Another delegation is already recorded; it was preserved.");
         }

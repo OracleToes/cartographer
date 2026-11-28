@@ -79,8 +79,10 @@ export async function checkpointDelegateInputs(tx: Tx, mainId: ConversationId, i
   }
   if (saved.handoffId !== null) {
     if (saved.handoffId !== id) throw new Error("Another input checkpoint exists; it was preserved.");
+    parseInputCheckpoint(JSON.stringify(saved), id);
     return;
   }
+  if (!Array.isArray(saved.inputs) || saved.inputs.length !== 0) throw new Error("Invalid empty input checkpoint; it was preserved.");
   const live = await tx.doc(LiveDoc, mainId);
   const inbox = await tx.doc(InboxDoc, mainId);
   if (live.run === undefined && (live.runFailure?.inputs.length ?? 0) > 0) {

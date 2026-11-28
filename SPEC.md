@@ -775,10 +775,17 @@ source handoff, checkpoint and source barrier before deleting the old store,
 and places the handoff and checkpoint together in the destination before
 acknowledging the transfer. Conflicts and interrupted transfers preserve the
 remaining copies. The source must have no concurrent writers. An ordinary
-collapse still refuses a checkpoint, and Carto refuses to open a generation
-containing one because replay is not yet implemented. The host must eventually
-replay it in order, preserving provenance, and decide how it interacts with
-return admission before enabling orchestration. A dormant main-conversation
+collapse still refuses an outstanding checkpoint, and ordinary session opening
+refuses one. A dormant staging helper can place the checkpointed inputs in
+submission order as separate user-context entries in the idle destination before
+admitting the delegate return. It preserves their content, including images,
+and entry kinds and data; the saved queue modes remain checkpoint provenance,
+not new Pi steering submissions. It uses transactional Pi write admissions and
+request identities, so retries do not duplicate entries. Return admission refuses
+an incomplete or inconsistent staging; only an answered return clears the
+checkpoint and staging receipt together. The host must seal other admissions
+while staging and integrate the ordering with person controls before exposing
+orchestration. A dormant main-conversation
 generation hook holds an old generation's
 model request while a handoff is active, including a queued main input after
 the delegate tool terminates. The block lasts until the request is aborted for

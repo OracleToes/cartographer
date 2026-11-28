@@ -71,9 +71,14 @@ seal input admission during capture and recovery. An explicit, dormant collapse
 path now transfers the checkpoint with its matching handoff using the existing
 Brain journal and verifies the source barrier and both documents. Placement is
 atomic in the destination; conflicts preserve both copies. Ordinary collapse
-still refuses a checkpoint, and session opening refuses one after placement:
-replay and ordering with return admission remain unimplemented. This preserves
-data rather than pretending the return path is complete. Recovery preserves
+still refuses an outstanding checkpoint, and ordinary session opening refuses
+one after placement. A dormant staging helper places the preserved inputs as
+ordered user-context entries before return admission using Pi transactional
+writes; it preserves content and entry metadata but does not reproduce Pi's
+original steer/follow-up submissions. Checked receipt and checkpoint clear only
+after the return is answered. Host admission sealing, control routing, and
+end-to-end ordering still need integration. This preserves data rather than
+pretending the return path is complete. Recovery preserves
 partial project work and does not cross background boundaries. The
 host must still route the control, handle unanswered and queued inputs, and
 perform return collapse.

@@ -7,6 +7,8 @@ import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
 import type { Conversation, SubmissionId } from "@earendil-works/pi-durable";
 import { DelegateMainBarrierDoc, DelegationDoc, parseReturnedDelegation, type Delegation } from "./delegation-record.js";
+import { DelegateInputCheckpointDoc } from "./delegate-inputs.js";
+import { DelegateInputReplayDoc, requireStagedDelegateInputs } from "./delegate-input-replay.js";
 
 type Returned = Extract<Delegation, { phase: "returned" }>;
 
@@ -37,6 +39,7 @@ export async function admitDelegationReturn(conversation: Conversation, id: stri
     if (marker.sourceId !== null || (marker.admittedId !== null && marker.admittedId !== returnId)) {
       throw new Error("Delegation return cannot be admitted in its source generation or over a conflicting admission.");
     }
+    await requireStagedDelegateInputs(tx, conversation.id, id);
     const submission = await conversation.submit(tx, {
       type: "input", content: renderDelegationReturn(active), requestId: returnId, whenBusy: "reject",
       entry: { kind: "carto.delegate-return", data: { delegationId: active.input.id, provenance: active.result.kind } },
@@ -65,6 +68,15 @@ export async function acknowledgeDelegationReturn(
         submission.conversationId !== conversation.id || submission.type !== "input" ||
         submission.requestId !== returnId || submission.status !== "done") {
       throw new Error("The matching delegation return has not been answered; the handoff was preserved.");
+    }
+    if (await requireStagedDelegateInputs(tx, conversation.id, id)) {
+      const checkpoint = await tx.doc(DelegateInputCheckpointDoc, conversation.id);
+      const receipt = await tx.doc(DelegateInputReplayDoc, conversation.id);
+      checkpoint.handoffId = null;
+      checkpoint.inputs = [];
+      receipt.handoffId = null;
+      receipt.digest = null;
+      receipt.submissions = [];
     }
     record.active = null;
     marker.admittedId = null;
