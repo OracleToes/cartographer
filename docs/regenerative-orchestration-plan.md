@@ -124,10 +124,13 @@ proposal text; unresolved details are not implicitly decided by them.
   running when the delegate returns, so main can manage it; Carto does not stop
   it merely because the task ended. Job ownership and handoff mechanics still
   need design, including making the job and its status available to main.
+- **Mode switch while a delegate is active.** When the person requests a switch
+  from orchestration to direct mode during an active delegation, show a warning
+  with yes/no choices, operable by click or keyboard; the keyboard defaults to
+  no. The consequence of accepting the warning remains to be clarified.
 
-**Next unanswered question:** if the person switches from orchestration mode to
-  direct mode while a delegate is active, should Carto end the delegation
-  immediately or wait for it to return first?
+**Next unanswered question:** does accepting that warning end the delegate
+immediately and switch modes, or wait for it to return before switching?
 
 ## 1. Recommendation in one sentence
 
